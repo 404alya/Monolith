@@ -1,0 +1,205 @@
+/* forward.frag -- Fragment shader used for forward shading
+ *
+ * Copyright (c) 2025-2026 Le Juez Victor
+ *
+ * This software is provided 'as-is', without any express or implied warranty.
+ * For conditions of distribution and use, see accompanying LICENSE file.
+ */
+
+#version 330 core
+
+// ================================
+// Extensions
+// ================================
+
+#extension GL_ARB_texture_cube_map_array : enable
+
+// ================================
+// Includes
+// ================================
+
+#include <ubo/frame.glsl>
+#include <lib/math.glsl>
+#include <lib/pbr.glsl>
+
+// ================================
+// In - Varyings
+// ================================
+
+smooth in vec3 vPosition;
+smooth in vec2 vTexCoord;
+flat   in vec3 vEmission;
+smooth in vec4 vColor;
+smooth in mat3 vTBN;
+
+smooth in float vLinearDepth;
+
+// ================================
+// Out - Fragments
+// ================================
+
+layout(location = 0) out vec4 FragColor;
+
+// ================================
+// Samplers & Uniforms
+// ================================
+
+uniform sampler2D uAlbedoMap;
+uniform sampler2D uEmissionMap;
+uniform sampler2D uNormalMap;
+uniform sampler2D uOrmMap;
+
+uniform sampler2DArrayShadow uShadowDirTex;
+uniform sampler2DArrayShadow uShadowSpotTex;
+uniform samplerCubeArrayShadow uShadowOmniTex;
+
+uniform samplerCubeArray uIrradianceTex;
+uniform samplerCubeArray uPrefilterTex;
+uniform sampler2D uBrdfLutTex;
+
+uniform float uAlphaCutoff;
+uniform float uCutoffSign;
+uniform float uNormalScale;
+uniform float uOcclusion;
+uniform float uRoughness;
+uniform float uMetalness;
+uniform float uSpecular;
+
+uniform vec3 uViewPosition;
+
+#if defined(PROBE)
+uniform bool uProbeInterior;
+#endif // PROBE
+
+// ================================
+// Herlper Includes
+// ================================
+
+#include <wrap/light.glsl>
+#include <wrap/env.glsl>
+#include <wrap/fog.glsl>
+
+// ================================
+// User Override
+// ================================
+
+#include <user/scene.frag>
+
+// ================================
+// Main Function
+// ================================
+
+void main()
+{
+    /* Sample material maps */
+
+    SceneFragment(vTexCoord, vTBN, uAlphaCutoff, uCutoffSign);
+
+    vec3 ORM = vec3(OCCLUSION, ROUGHNESS, METALNESS);
+    mat3 TBN = mat3(TANGENT, BITANGENT, NORMAL);
+    float dielectric = (1.0 - METALNESS);
+
+    /* Compute F0 (reflectance at normal incidence) and diffuse coefficient */
+
+    vec3 F0 = PBR_F0(METALNESS, SPECULAR, ALBEDO);
+    vec3 kD = dielectric * ALBEDO;
+
+    /* Sample normal map and compute final normal */
+
+    vec3 N = normalize(TBN * M_NormalScale(texture(uNormalMap, vTexCoord).rgb * 2.0 - 1.0, uNormalScale));
+    if (!gl_FrontFacing) N = -N; // Flip for back facing triangles with double sided meshes
+
+    /* Compute view direction and the dot product of the normal and view direction */
+
+    vec3 V = normalize(uViewPosition - vPosition);
+    float NoV = max(dot(N, V), 1e-4);
+
+    /* Loop through all light sources accumulating diffuse and specular light */
+
+    mat2 diskRot  = L_ShadowDebandingMatrix(gl_FragCoord.xy);
+
+    vec3 diff = vec3(0.0);
+    vec3 spec = vec3(0.0);
+
+    for (int i = 0; i < uNumLights; i++)
+    {
+        Light light = uLights[i];
+
+        /* Compute light direction and the dot product of the normal and light direction */
+
+        vec3 Ldelta = light.position - vPosition;
+        float Ldist = length(Ldelta);
+
+        vec3 L = (light.type == LIGHT_DIR) ? -light.direction : Ldelta / max(Ldist, 1e-4);
+        float NoL = dot(N, L);
+
+        if (NoL <= 0.0) continue;
+
+        /* Compute the halfway vector between the view and light directions */
+
+        vec3 H = normalize(V + L);
+
+        float LoH = max(dot(L, H), 0.0);
+        float NoH = max(dot(N, H), 0.0);
+
+        /* Compute light color energy */
+
+        vec3 lightColE = light.color * light.energy;
+
+        /* Compute diffuse lighting */
+
+        vec3 diffLight = L_Diffuse(ORM.g, NoV, NoL, LoH);
+        diffLight *= lightColE * dielectric;
+
+        /* Compute specular lighting */
+
+        vec3 specLight =  L_Specular(F0, ORM.g, NoV, NoL, NoH, LoH);
+        specLight *= lightColE * light.specular;
+
+        /* Compute shadow factor */
+
+        float shadow = 1.0;
+
+        if (light.type != LIGHT_DIR)
+        {
+            float atten = pow(1.0 - clamp(Ldist / light.range, 0.0, 1.0), light.falloff);
+            shadow *= atten;
+        }
+
+        if (light.type == LIGHT_SPOT)
+        {
+            float theta = dot(L, -light.direction);
+            float epsilon = (light.innerCutOff - light.outerCutOff);
+            shadow *= smoothstep(0.0, 1.0, (theta - light.outerCutOff) / epsilon);
+        }
+
+        if (light.shadowLayer >= 0 && light.shadowOpacity != 0.0 && shadow > 1e-4)
+        {
+            switch (light.type)
+            {
+            case LIGHT_DIR:  shadow *= L_SampleShadowDir(light, vPosition, vLinearDepth, NoL, diskRot); break;
+            case LIGHT_SPOT: shadow *= L_SampleShadowSpot(light, vPosition, NoL, diskRot); break;
+            case LIGHT_OMNI: shadow *= L_SampleShadowOmni(light, vPosition, NoL, diskRot); break;
+            }
+        }
+
+        /* Accumulate the diffuse and specular lighting contributions */
+
+        diff += diffLight * shadow;
+        spec += specLight * shadow;
+    }
+
+    /* Compute ambient */
+
+#if defined(PROBE)
+    if (uProbeInterior) E_ComputeAmbientColor(diff, kD, OCCLUSION);
+    else E_ComputeAmbientOnly(diff, spec, kD, ORM.rgb, F0, vPosition, N, V, NoV);
+#else
+    E_ComputeAmbientAndProbes(diff, spec, kD, ORM.rgb, F0, vPosition, N, V, NoV);
+#endif
+
+    /* Compute the final fragment color */
+
+    FragColor = vec4(ALBEDO * diff + spec + EMISSION, ALPHA);
+    FragColor = FogColorMix(FragColor, vLinearDepth);
+}

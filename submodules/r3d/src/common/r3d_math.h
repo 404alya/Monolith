@@ -1,0 +1,364 @@
+/* r3d_math.h -- Common R3D Math
+ *
+ * Copyright (c) 2025-2026 Le Juez Victor
+ *
+ * This software is provided 'as-is', without any express or implied warranty.
+ * For conditions of distribution and use, see accompanying LICENSE file.
+ */
+
+#ifndef R3D_COMMON_MATH_H
+#define R3D_COMMON_MATH_H
+
+#include <r3d/r3d_core.h>
+#include <raymath.h>
+#include <string.h>
+#include <math.h>
+
+#include "./r3d_helper.h"
+
+// ========================================
+// DEFINITIONS AND CONSTANTS
+// ========================================
+
+#ifndef R3D_RESTRICT
+#   if defined(_MSC_VER)
+#       define R3D_RESTRICT __restrict
+#   else
+#       define R3D_RESTRICT restrict
+#   endif
+#endif
+
+#define R3D_LOG2     0.6931471805599453f
+#define R3D_LOG018  -1.7147984280919266f
+
+#define R3D_MATRIX_IDENTITY             \
+    (Matrix) {                          \
+        1.0f, 0.0f, 0.0f, 0.0f,         \
+        0.0f, 1.0f, 0.0f, 0.0f,         \
+        0.0f, 0.0f, 1.0f, 0.0f,         \
+        0.0f, 0.0f, 0.0f, 1.0f,         \
+    }
+
+#define R3D_AABB_UNIT                   \
+    (BoundingBox) {                     \
+        .min = {-0.5f, -0.5f, -0.5f},   \
+        .max = {+0.5f, +0.5f, +0.5f},   \
+    }
+
+// ========================================
+// HELPER TYPES
+// ========================================
+
+typedef struct {
+    int x, y;
+    int w, h;
+} r3d_rect_t;
+
+// ========================================
+// SCALAR FUNCTIONS
+// ========================================
+
+//static inline int32_t r3d_log2i(uint32_t v)
+//{
+//    int r = 0;
+//    while (v >>= 1) r++;
+//    return r;
+//}
+
+static inline int32_t r3d_log2i_fast(uint32_t value)
+{
+    R3D_ASSERT(value > 0 && (value & (value - 1)) == 0 && "value must be a power of two");
+
+    return r3d_lsb_index(value);
+}
+
+// ========================================
+// COLOR FUNCTIONS
+// ========================================
+
+static inline Vector3 r3d_color_srgb_to_linear_vec3(Color color)
+{
+    Vector4 linear = ColorNormalize(color);
+
+    linear.x = (linear.x < 0.04045f) ? linear.x * (1.0f / 12.92f) : powf((linear.x + 0.055f) * (1.0f / 1.055f), 2.4f);
+    linear.y = (linear.y < 0.04045f) ? linear.y * (1.0f / 12.92f) : powf((linear.y + 0.055f) * (1.0f / 1.055f), 2.4f);
+    linear.z = (linear.z < 0.04045f) ? linear.z * (1.0f / 12.92f) : powf((linear.z + 0.055f) * (1.0f / 1.055f), 2.4f);
+
+    return (Vector3) {linear.x, linear.y, linear.z};
+}
+
+static inline Vector4 r3d_color_srgb_to_linear_vec4(Color color)
+{
+    Vector4 linear = ColorNormalize(color);
+
+    linear.x = (linear.x < 0.04045f) ? linear.x * (1.0f / 12.92f) : powf((linear.x + 0.055f) * (1.0f / 1.055f), 2.4f);
+    linear.y = (linear.y < 0.04045f) ? linear.y * (1.0f / 12.92f) : powf((linear.y + 0.055f) * (1.0f / 1.055f), 2.4f);
+    linear.z = (linear.z < 0.04045f) ? linear.z * (1.0f / 12.92f) : powf((linear.z + 0.055f) * (1.0f / 1.055f), 2.4f);
+
+    return linear;
+}
+
+static inline Color r3d_color_linear_to_srgb_vec3(Vector3 linear)
+{
+    linear.x = (linear.x < 0.0031308f) ? 12.92f * linear.x : (1.0f + 0.055f) * powf(linear.x, 1.0f / 2.4f) - 0.055f;
+    linear.y = (linear.y < 0.0031308f) ? 12.92f * linear.y : (1.0f + 0.055f) * powf(linear.y, 1.0f / 2.4f) - 0.055f;
+    linear.z = (linear.z < 0.0031308f) ? 12.92f * linear.z : (1.0f + 0.055f) * powf(linear.z, 1.0f / 2.4f) - 0.055f;
+
+    return ColorFromNormalized((Vector4) {linear.x, linear.y, linear.z, 1.0f});
+}
+
+static inline Color r3d_color_linear_to_srgb_vec4(Vector4 linear)
+{
+    linear.x = (linear.x < 0.0031308f) ? 12.92f * linear.x : (1.0f + 0.055f) * powf(linear.x, 1.0f / 2.4f) - 0.055f;
+    linear.y = (linear.y < 0.0031308f) ? 12.92f * linear.y : (1.0f + 0.055f) * powf(linear.y, 1.0f / 2.4f) - 0.055f;
+    linear.z = (linear.z < 0.0031308f) ? 12.92f * linear.z : (1.0f + 0.055f) * powf(linear.z, 1.0f / 2.4f) - 0.055f;
+
+    return ColorFromNormalized(linear);
+}
+
+// ========================================
+// VECTOR FUNCTIONS
+// ========================================
+
+static inline float r3d_vector3_len_sq(Vector3 v)
+{
+    return v.x*v.x + v.y*v.y + v.z*v.z;
+}
+
+static inline Vector3 r3d_vector3_normalize_or(Vector3 v, Vector3 fallback)
+{
+    float len_sqr = v.x*v.x + v.y*v.y + v.z*v.z;
+
+    if (len_sqr <= 1e-12f)
+    {
+        return fallback;
+    }
+
+    float inv_len = 1.0f / sqrtf(len_sqr);
+
+    return (Vector3) {
+        v.x * inv_len,
+        v.y * inv_len,
+        v.z * inv_len,
+    };
+}
+
+static inline Vector3 r3d_vector3_transform(Vector3 v, const Matrix* m)
+{
+    float x = v.x, y = v.y, z = v.z;
+    return (Vector3) {
+        m->m0 * x + m->m4 * y + m->m8  * z + m->m12,
+        m->m1 * x + m->m5 * y + m->m9  * z + m->m13,
+        m->m2 * x + m->m6 * y + m->m10 * z + m->m14
+    };
+}
+
+static inline Vector3 r3d_vector3_transform_normal(Vector3 v, const Matrix* m)
+{
+    float x = v.x, y = v.y, z = v.z;
+    return (Vector3) {
+        m->m0 * x + m->m4 * y + m->m8  * z,
+        m->m1 * x + m->m5 * y + m->m9  * z,
+        m->m2 * x + m->m6 * y + m->m10 * z
+    };
+}
+
+static inline Vector3 r3d_vector3_transform_linear(Vector3 v, const Matrix* m)
+{
+    float x = v.x, y = v.y, z = v.z;
+    return (Vector3) {
+        m->m0 * x + m->m4 * y + m->m8 * z,
+        m->m1 * x + m->m5 * y + m->m9 * z,
+        m->m2 * x + m->m6 * y + m->m10 * z
+    };
+}
+
+static inline Vector4 r3d_vector4_transform(Vector4 v, const Matrix* m)
+{
+    float x = v.x, y = v.y, z = v.z, w = v.w;
+    return (Vector4) {
+        m->m0 * x + m->m4 * y + m->m8 * z + m->m12 * w,
+        m->m1 * x + m->m5 * y + m->m9 * z + m->m13 * w,
+        m->m2 * x + m->m6 * y + m->m10 * z + m->m14 * w,
+        m->m3 * x + m->m7 * y + m->m11 * z + m->m15 * w
+    };
+}
+
+static inline Quaternion r3d_quaternion_normalize_or_id(Quaternion q)
+{
+    float len_sqr = q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w;
+
+    if (len_sqr <= 1e-12f)
+    {
+        return (Quaternion) {0, 0, 0, 1};
+    }
+
+    float inv_len = 1.0f / sqrtf(len_sqr);
+
+    return (Quaternion) {
+        q.x * inv_len,
+        q.y * inv_len,
+        q.z * inv_len,
+        q.w * inv_len,
+    };
+}
+
+static inline Quaternion r3d_quaternion_from_axes(Vector3 right, Vector3 up, Vector3 back)
+{
+    // Matrix columns are the world-space directions of local +X, +Y, +Z.
+    Matrix m = {
+        right.x, right.y, right.z, 0.0f,
+        up.x,    up.y,    up.z,    0.0f,
+        back.x,  back.y,  back.z,  0.0f,
+        0.0f,    0.0f,    0.0f,    1.0f
+    };
+
+    return r3d_quaternion_normalize_or_id(QuaternionFromMatrix(m));
+}
+
+// ========================================
+// MATRIX FUNCTIONS
+// ========================================
+
+static inline bool r3d_matrix_is_identity(Matrix matrix)
+{
+    return (0 == memcmp(&matrix, &R3D_MATRIX_IDENTITY, sizeof(Matrix)));
+}
+
+static inline Matrix r3d_matrix_st(Vector3 scale, Vector3 translate)
+{
+    return (Matrix) {
+        scale.x, 0.0f,    0.0f,    translate.x,
+        0.0f,    scale.y, 0.0f,    translate.y,
+        0.0f,    0.0f,    scale.z, translate.z,
+        0.0f,    0.0f,    0.0f,    1.0f
+    };
+}
+
+static inline Matrix r3d_matrix_srt_axis(Vector3 scale, Vector4 axis, Vector3 translate)
+{
+    float axisLen = sqrtf(axis.x*axis.x + axis.y*axis.y + axis.z*axis.z);
+    if (axisLen < 1e-6f)
+    {
+        return r3d_matrix_st(scale, translate);
+    }
+
+    float invLen = 1.0f / axisLen;
+    float x = axis.x * invLen;
+    float y = axis.y * invLen; 
+    float z = axis.z * invLen;
+    float angle = axis.w;
+
+    float c = cosf(angle);
+    float s = sinf(angle);
+    float oneMinusC = 1.0f - c;
+
+    float xx = x * x, yy = y * y, zz = z * z;
+    float xy = x * y, xz = x * z, yz = y * z;
+    float xs = x * s, ys = y * s, zs = z * s;
+
+    return (Matrix) {
+        scale.x * (c + xx * oneMinusC),  scale.x * (xy * oneMinusC - zs), scale.x * (xz * oneMinusC + ys), translate.x,
+        scale.y * (xy * oneMinusC + zs), scale.y * (c + yy * oneMinusC),  scale.y * (yz * oneMinusC - xs), translate.y,
+        scale.z * (xz * oneMinusC - ys), scale.z * (yz * oneMinusC + xs), scale.z * (c + zz * oneMinusC),  translate.z,
+        0,0,0,1
+    };
+}
+
+static inline Matrix r3d_matrix_srt_euler(Vector3 scale, Vector3 euler, Vector3 translate)
+{
+    float cx = cosf(euler.x), sx = sinf(euler.x);
+    float cy = cosf(euler.y), sy = sinf(euler.y);
+    float cz = cosf(euler.z), sz = sinf(euler.z);
+
+    float sycz = sy * cz;
+    float sysz = sy * sz;
+
+    return (Matrix) {
+        scale.x * (cy * cz),              scale.x * (-cy * sz),             scale.x * sy,       translate.x,
+        scale.y * (sx * sycz + cx * sz),  scale.y * (-sx * sysz + cx * cz), scale.y * (-sx*cy), translate.y,
+        scale.z * (-cx * sycz + sx * sz), scale.z * (cx * sysz + sx * cz),  scale.z * (cx*cy), translate.z,
+        0, 0, 0, 1
+    };
+}
+
+static inline Matrix r3d_matrix_srt_quat(Vector3 scale, Quaternion quat, Vector3 translate)
+{
+    float qlen = sqrtf(quat.x*quat.x + quat.y*quat.y + quat.z*quat.z + quat.w*quat.w);
+    if (qlen < 1e-6f)
+    {
+        return r3d_matrix_st(scale, translate);
+    }
+
+    float invLen = 1.0f / qlen;
+    float qx = quat.x * invLen;
+    float qy = quat.y * invLen;
+    float qz = quat.z * invLen;
+    float qw = quat.w * invLen;
+
+    float qx2  = qx * qx, qy2  = qy * qy, qz2  = qz * qz;
+    float qxqy = qx * qy, qxqz = qx * qz, qxqw = qx * qw;
+    float qyqz = qy * qz, qyqw = qy * qw, qzqw = qz * qw;
+
+    float r00 = 1.0f - 2.0f * (qy2 + qz2);
+    float r01 = 2.0f * (qxqy - qzqw);
+    float r02 = 2.0f * (qxqz + qyqw);
+    
+    float r10 = 2.0f * (qxqy + qzqw);
+    float r11 = 1.0f - 2.0f * (qx2 + qz2);
+    float r12 = 2.0f * (qyqz - qxqw);
+    
+    float r20 = 2.0f * (qxqz - qyqw);
+    float r21 = 2.0f * (qyqz + qxqw);
+    float r22 = 1.0f - 2.0f * (qx2 + qy2);
+
+    return (Matrix) {
+        r00 * scale.x, r01 * scale.y, r02 * scale.z, translate.x,
+        r10 * scale.x, r11 * scale.y, r12 * scale.z, translate.y,
+        r20 * scale.x, r21 * scale.y, r22 * scale.z, translate.z,
+        0, 0, 0, 1
+    };
+}
+
+static inline Matrix r3d_matrix_normal(const Matrix* transform)
+{
+    Matrix result = {0};
+
+    float a00 = transform->m0,  a01 = transform->m1,  a02 = transform->m2,  a03 = transform->m3;
+    float a10 = transform->m4,  a11 = transform->m5,  a12 = transform->m6,  a13 = transform->m7;
+    float a20 = transform->m8,  a21 = transform->m9,  a22 = transform->m10, a23 = transform->m11;
+    float a30 = transform->m12, a31 = transform->m13, a32 = transform->m14, a33 = transform->m15;
+
+    float b00 = a00*a11 - a01*a10;
+    float b01 = a00*a12 - a02*a10;
+    float b02 = a00*a13 - a03*a10;
+    float b03 = a01*a12 - a02*a11;
+    float b04 = a01*a13 - a03*a11;
+    float b05 = a02*a13 - a03*a12;
+    float b06 = a20*a31 - a21*a30;
+    float b07 = a20*a32 - a22*a30;
+    float b08 = a20*a33 - a23*a30;
+    float b09 = a21*a32 - a22*a31;
+    float b10 = a21*a33 - a23*a31;
+    float b11 = a22*a33 - a23*a32;
+
+    float invDet = 1.0f/(b00*b11 - b01*b10 + b02*b09 + b03*b08 - b04*b07 + b05*b06);
+
+    result.m0 = (a11*b11 - a12*b10 + a13*b09)*invDet;
+    result.m1 = (-a10*b11 + a12*b08 - a13*b07)*invDet;
+    result.m2 = (a10*b10 - a11*b08 + a13*b06)*invDet;
+
+    result.m4 = (-a01*b11 + a02*b10 - a03*b09)*invDet;
+    result.m5 = (a00*b11 - a02*b08 + a03*b07)*invDet;
+    result.m6 = (-a00*b10 + a01*b08 - a03*b06)*invDet;
+
+    result.m8 = (a31*b05 - a32*b04 + a33*b03)*invDet;
+    result.m9 = (-a30*b05 + a32*b02 - a33*b01)*invDet;
+    result.m10 = (a30*b04 - a31*b02 + a33*b00)*invDet;
+
+    result.m15 = 1.0f;
+
+    return result;
+}
+
+#endif // R3D_COMMON_MATH_H

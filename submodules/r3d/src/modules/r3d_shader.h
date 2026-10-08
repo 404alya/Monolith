@@ -1,0 +1,1635 @@
+/* r3d_shader.h -- Internal R3D shader module.
+ *
+ * Copyright (c) 2025-2026 Le Juez Victor
+ *
+ * This software is provided 'as-is', without any express or implied warranty.
+ * For conditions of distribution and use, see accompanying LICENSE file.
+ */
+
+#ifndef R3D_MODULE_SHADER_H
+#define R3D_MODULE_SHADER_H
+
+#include <r3d/r3d_core.h>
+#include <r3d_config.h>
+#include <stdalign.h>
+#include <raylib.h>
+#include <stdint.h>
+#include <glad.h>
+
+#include "../common/r3d_rshade.h"
+#include "../common/r3d_helper.h"
+#include "../common/r3d_math.h"
+
+// ========================================
+// SHADER MANAGEMENT MACROS
+// ========================================
+
+// ----------------------------------------
+// Shader getter macros
+// ----------------------------------------
+
+#define R3D_SHADER_BASE(shader_name)           (&R3D_MOD_SHADER.shader_name)
+#define R3D_SHADER_CUSTOM(custom, shader_name) (&(custom)->program->shader_name)
+#define R3D_SHADER_SELECT(shader_name, custom) (((custom) != NULL) ? R3D_SHADER_CUSTOM(custom, shader_name) : R3D_SHADER_BASE(shader_name))
+
+// ----------------------------------------
+// Shader usage macros
+// ----------------------------------------
+
+#define R3D_SHADER__USE_IMPL(target, custom, shader_name)                       \
+do {                                                                            \
+    if ((target)->id == 0)                                                      \
+    {                                                                           \
+        bool ok = R3D_MOD_SHADER_LOADER.shader_name(custom);                    \
+        R3D_ASSERT(ok);                                                         \
+    }                                                                           \
+    if (R3D_MOD_SHADER.currentProgram != (target)->id)                          \
+    {                                                                           \
+        R3D_MOD_SHADER.currentProgram = (target)->id;                           \
+        glUseProgram((target)->id);                                             \
+    }                                                                           \
+    if ((custom) != NULL)                                                       \
+    {                                                                           \
+        r3d_shader_custom_bind_samplers(custom);                                \
+        r3d_shader_custom_bind_uniforms(custom);                                \
+    }                                                                           \
+} while (0)
+
+#define R3D_SHADER_USE(shader_name)                                             \
+    R3D_SHADER__USE_IMPL(R3D_SHADER_BASE(shader_name), NULL, shader_name)
+
+#define R3D_SHADER_USE_CUSTOM(custom, shader_name)                              \
+do {                                                                            \
+    R3D_ASSERT((custom) != NULL);                                               \
+    R3D_SHADER__USE_IMPL(R3D_SHADER_CUSTOM(custom, shader_name), custom, shader_name); \
+} while (0)
+
+#define R3D_SHADER_USE_SELECT(shader_name, custom) \
+    R3D_SHADER__USE_IMPL(R3D_SHADER_SELECT(shader_name, custom), custom, shader_name)
+
+// ----------------------------------------
+// Shader sampler binding macros
+// ----------------------------------------
+
+#define R3D_SHADER__BIND_SAMPLER_IMPL(target, uniform, texId) \
+    r3d_shader_bind_sampler((target)->uniform.slot, (texId))
+
+#define R3D_SHADER_BIND_SAMPLER(shader_name, uniform, texId) \
+    R3D_SHADER__BIND_SAMPLER_IMPL(R3D_SHADER_BASE(shader_name), uniform, texId)
+
+#define R3D_SHADER_BIND_SAMPLER_CUSTOM(custom, shader_name, uniform, texId) \
+    R3D_SHADER__BIND_SAMPLER_IMPL(R3D_SHADER_CUSTOM(custom, shader_name), uniform, texId)
+
+#define R3D_SHADER_BIND_SAMPLER_SELECT(shader_name, custom, uniform, texId) \
+    R3D_SHADER__BIND_SAMPLER_IMPL(R3D_SHADER_SELECT(shader_name, custom), uniform, texId)
+
+// ----------------------------------------
+// Shader uniform setter macros impl
+// ----------------------------------------
+
+#define R3D_SHADER__SET_INT_IMPL(target, uniform, value)                        \
+do {                                                                            \
+    if ((target)->uniform.val != (int)(value))                                  \
+    {                                                                           \
+        (target)->uniform.val = (int)(value);                                   \
+        glUniform1i((target)->uniform.loc, (value));                            \
+    }                                                                           \
+} while (0)
+
+#define R3D_SHADER__SET_FLOAT_IMPL(target, uniform, value)                      \
+do {                                                                            \
+    if ((target)->uniform.val != (value))                                       \
+    {                                                                           \
+        (target)->uniform.val = (value);                                        \
+        glUniform1f((target)->uniform.loc, (value));                            \
+    }                                                                           \
+} while (0)
+
+#define R3D_SHADER__SET_VEC2_IMPL(target, uniform, ...)                         \
+do {                                                                            \
+    const Vector2 r3d__tmp = (__VA_ARGS__);                                     \
+    if (!Vector2Equals((target)->uniform.val, r3d__tmp))                        \
+    {                                                                           \
+        (target)->uniform.val = r3d__tmp;                                       \
+        glUniform2fv((target)->uniform.loc, 1, (float*)&r3d__tmp);              \
+    }                                                                           \
+} while (0)
+
+#define R3D_SHADER__SET_VEC3_IMPL(target, uniform, ...)                         \
+do {                                                                            \
+    const Vector3 r3d__tmp = (__VA_ARGS__);                                     \
+    if (!Vector3Equals((target)->uniform.val, r3d__tmp))                        \
+    {                                                                           \
+        (target)->uniform.val = r3d__tmp;                                       \
+        glUniform3fv((target)->uniform.loc, 1, (float*)&r3d__tmp);              \
+    }                                                                           \
+} while (0)
+
+#define R3D_SHADER__SET_VEC4_IMPL(target, uniform, ...)                         \
+do {                                                                            \
+    const Vector4 r3d__tmp = (__VA_ARGS__);                                     \
+    if (!Vector4Equals((target)->uniform.val, r3d__tmp))                        \
+    {                                                                           \
+        (target)->uniform.val = r3d__tmp;                                       \
+        glUniform4fv((target)->uniform.loc, 1, (float*)&r3d__tmp);              \
+    }                                                                           \
+} while (0)
+
+#define R3D_SHADER__SET_COL3_IMPL(target, uniform, ...)                         \
+do {                                                                            \
+    const Color r3d__tmp = (__VA_ARGS__);                                       \
+    if (!ColorIsEqual((target)->uniform.val, r3d__tmp))                         \
+    {                                                                           \
+        Vector3 r3d__v = r3d_color_srgb_to_linear_vec3(r3d__tmp);               \
+        (target)->uniform.val = r3d__tmp;                                       \
+        glUniform3fv((target)->uniform.loc, 1, (float*)&r3d__v);                \
+    }                                                                           \
+} while (0)
+
+#define R3D_SHADER__SET_COL4_IMPL(target, uniform, ...)                         \
+do {                                                                            \
+    const Color r3d__tmp = (__VA_ARGS__);                                       \
+    if (!ColorIsEqual((target)->uniform.val, r3d__tmp))                         \
+    {                                                                           \
+        Vector4 r3d__v = r3d_color_srgb_to_linear_vec4(r3d__tmp);               \
+        (target)->uniform.val = r3d__tmp;                                       \
+        glUniform4fv((target)->uniform.loc, 1, (float*)&r3d__v);                \
+    }                                                                           \
+} while (0)
+
+#define R3D_SHADER__SET_MAT4_IMPL(target, uniform, value)                       \
+do {                                                                            \
+    glUniformMatrix4fv((target)->uniform.loc, 1, GL_TRUE, (float*)&(value));    \
+} while (0)
+
+// ----------------------------------------
+// Shader uniform setter macros (INT)
+// ----------------------------------------
+
+#define R3D_SHADER_SET_INT(shader_name, uniform, value) \
+    R3D_SHADER__SET_INT_IMPL(R3D_SHADER_BASE(shader_name), uniform, value)
+
+#define R3D_SHADER_SET_INT_CUSTOM(custom, shader_name, uniform, value) \
+    R3D_SHADER__SET_INT_IMPL(R3D_SHADER_CUSTOM(custom, shader_name), uniform, value)
+
+#define R3D_SHADER_SET_INT_SELECT(shader_name, custom, uniform, value) \
+    R3D_SHADER__SET_INT_IMPL(R3D_SHADER_SELECT(shader_name, custom), uniform, value)
+
+// ----------------------------------------
+// Shader uniform setter macros (FLOAT)
+// ----------------------------------------
+
+#define R3D_SHADER_SET_FLOAT(shader_name, uniform, value) \
+    R3D_SHADER__SET_FLOAT_IMPL(R3D_SHADER_BASE(shader_name), uniform, value)
+
+#define R3D_SHADER_SET_FLOAT_CUSTOM(custom, shader_name, uniform, value) \
+    R3D_SHADER__SET_FLOAT_IMPL(R3D_SHADER_CUSTOM(custom, shader_name), uniform, value)
+
+#define R3D_SHADER_SET_FLOAT_SELECT(shader_name, custom, uniform, value) \
+    R3D_SHADER__SET_FLOAT_IMPL(R3D_SHADER_SELECT(shader_name, custom), uniform, value)
+
+// ----------------------------------------
+// Shader uniform setter macros (VEC2)
+// ----------------------------------------
+
+#define R3D_SHADER_SET_VEC2(shader_name, uniform, ...) \
+    R3D_SHADER__SET_VEC2_IMPL(R3D_SHADER_BASE(shader_name), uniform, __VA_ARGS__)
+
+#define R3D_SHADER_SET_VEC2_CUSTOM(custom, shader_name, uniform, ...) \
+    R3D_SHADER__SET_VEC2_IMPL(R3D_SHADER_CUSTOM(custom, shader_name), uniform, __VA_ARGS__)
+
+#define R3D_SHADER_SET_VEC2_SELECT(shader_name, custom, uniform, ...) \
+    R3D_SHADER__SET_VEC2_IMPL(R3D_SHADER_SELECT(shader_name, custom), uniform, __VA_ARGS__)
+
+// ----------------------------------------
+// Shader uniform setter macros (VEC3)
+// ----------------------------------------
+
+#define R3D_SHADER_SET_VEC3(shader_name, uniform, ...) \
+    R3D_SHADER__SET_VEC3_IMPL(R3D_SHADER_BASE(shader_name), uniform, __VA_ARGS__)
+
+#define R3D_SHADER_SET_VEC3_CUSTOM(custom, shader_name, uniform, ...) \
+    R3D_SHADER__SET_VEC3_IMPL(R3D_SHADER_CUSTOM(custom, shader_name), uniform, __VA_ARGS__)
+
+#define R3D_SHADER_SET_VEC3_SELECT(shader_name, custom, uniform, ...) \
+    R3D_SHADER__SET_VEC3_IMPL(R3D_SHADER_SELECT(shader_name, custom), uniform, __VA_ARGS__)
+
+// ----------------------------------------
+// Shader uniform setter macros (VEC4)
+// ----------------------------------------
+
+#define R3D_SHADER_SET_VEC4(shader_name, uniform, ...) \
+    R3D_SHADER__SET_VEC4_IMPL(R3D_SHADER_BASE(shader_name), uniform, __VA_ARGS__)
+
+#define R3D_SHADER_SET_VEC4_CUSTOM(custom, shader_name, uniform, ...) \
+    R3D_SHADER__SET_VEC4_IMPL(R3D_SHADER_CUSTOM(custom, shader_name), uniform, __VA_ARGS__)
+
+#define R3D_SHADER_SET_VEC4_SELECT(shader_name, custom, uniform, ...) \
+    R3D_SHADER__SET_VEC4_IMPL(R3D_SHADER_SELECT(shader_name, custom), uniform, __VA_ARGS__)
+
+// ----------------------------------------
+// Shader uniform setter macros (COL3)
+// ----------------------------------------
+
+#define R3D_SHADER_SET_COL3(shader_name, uniform, ...) \
+    R3D_SHADER__SET_COL3_IMPL(R3D_SHADER_BASE(shader_name), uniform, __VA_ARGS__)
+
+#define R3D_SHADER_SET_COL3_CUSTOM(custom, shader_name, uniform, ...) \
+    R3D_SHADER__SET_COL3_IMPL(R3D_SHADER_CUSTOM(custom, shader_name), uniform, __VA_ARGS__)
+
+#define R3D_SHADER_SET_COL3_SELECT(shader_name, custom, uniform, ...) \
+    R3D_SHADER__SET_COL3_IMPL(R3D_SHADER_SELECT(shader_name, custom), uniform, __VA_ARGS__)
+
+// ----------------------------------------
+// Shader uniform setter macros (COL4)
+// ----------------------------------------
+
+#define R3D_SHADER_SET_COL4(shader_name, uniform, ...) \
+    R3D_SHADER__SET_COL4_IMPL(R3D_SHADER_BASE(shader_name), uniform, __VA_ARGS__)
+
+#define R3D_SHADER_SET_COL4_CUSTOM(custom, shader_name, uniform, ...) \
+    R3D_SHADER__SET_COL4_IMPL(R3D_SHADER_CUSTOM(custom, shader_name), uniform, __VA_ARGS__)
+
+#define R3D_SHADER_SET_COL4_SELECT(shader_name, custom, uniform, ...) \
+    R3D_SHADER__SET_COL4_IMPL(R3D_SHADER_SELECT(shader_name, custom), uniform, __VA_ARGS__)
+
+// ----------------------------------------
+// Shader uniform setter macros (MAT4)
+// ----------------------------------------
+
+#define R3D_SHADER_SET_MAT4(shader_name, uniform, value) \
+    R3D_SHADER__SET_MAT4_IMPL(R3D_SHADER_BASE(shader_name), uniform, value)
+
+#define R3D_SHADER_SET_MAT4_CUSTOM(custom, shader_name, uniform, value) \
+    R3D_SHADER__SET_MAT4_IMPL(R3D_SHADER_CUSTOM(custom, shader_name), uniform, value)
+
+#define R3D_SHADER_SET_MAT4_SELECT(shader_name, custom, uniform, value) \
+    R3D_SHADER__SET_MAT4_IMPL(R3D_SHADER_SELECT(shader_name, custom), uniform, value)
+
+// ========================================
+// SAMPLER ENUMS
+// ========================================
+
+/*
+ * Slot '0' is reserved for texture operations exclusively on the client side.
+ * Note that the specification guarantees at least 80 binding slots for textures.
+ * See: https://registry.khronos.org/OpenGL-Refpages/gl4/html/glActiveTexture.xhtml
+ */
+typedef enum {
+
+    // Material maps
+    R3D_SHADER_SAMPLER_MAP_ALBEDO           = 1,
+    R3D_SHADER_SAMPLER_MAP_EMISSION         = 2,
+    R3D_SHADER_SAMPLER_MAP_NORMAL           = 3,
+    R3D_SHADER_SAMPLER_MAP_ORM              = 4,
+
+    // Shadow maps
+    R3D_SHADER_SAMPLER_SHADOW_DIR           = 10,
+    R3D_SHADER_SAMPLER_SHADOW_SPOT          = 11,
+    R3D_SHADER_SAMPLER_SHADOW_OMNI          = 12,
+
+    // IBL maps
+    R3D_SHADER_SAMPLER_IBL_IRRADIANCE       = 13,
+    R3D_SHADER_SAMPLER_IBL_PREFILTER        = 14,
+    R3D_SHADER_SAMPLER_IBL_BRDF_LUT         = 15,
+
+    // Scene miscs
+    R3D_SHADER_SAMPLER_BONE_MATRICES        = 16,
+
+    // Buffers
+    R3D_SHADER_SAMPLER_BUFFER_SCENE         = 20,
+    R3D_SHADER_SAMPLER_BUFFER_ALBEDO        = 21,
+    R3D_SHADER_SAMPLER_BUFFER_NORMAL        = 22,
+    R3D_SHADER_SAMPLER_BUFFER_GEOM_NORMAL   = 23,
+    R3D_SHADER_SAMPLER_BUFFER_ORM           = 24,
+    R3D_SHADER_SAMPLER_BUFFER_DEPTH         = 25,
+    R3D_SHADER_SAMPLER_BUFFER_SELECTOR      = 26,
+    R3D_SHADER_SAMPLER_BUFFER_RADIANCE      = 27,
+    R3D_SHADER_SAMPLER_BUFFER_SPECULAR      = 28,
+    R3D_SHADER_SAMPLER_BUFFER_VFOG_RAD      = 29,
+    R3D_SHADER_SAMPLER_BUFFER_SSAO          = 30,
+    R3D_SHADER_SAMPLER_BUFFER_SSIL          = 31,
+    R3D_SHADER_SAMPLER_BUFFER_SSGI          = 32,
+    R3D_SHADER_SAMPLER_BUFFER_SSR           = 33,
+    R3D_SHADER_SAMPLER_BUFFER_DOF_COC       = 34,
+    R3D_SHADER_SAMPLER_BUFFER_DOF           = 35,
+    R3D_SHADER_SAMPLER_BUFFER_BLOOM         = 36,
+    R3D_SHADER_SAMPLER_BUFFER_LUMINANCE     = 37,
+    R3D_SHADER_SAMPLER_BUFFER_EXPOSURE      = 38,
+    R3D_SHADER_SAMPLER_BUFFER_SMAA_EDGES    = 39,
+    R3D_SHADER_SAMPLER_BUFFER_SMAA_BLEND    = 40,
+
+    // Unamed for special passes
+    R3D_SHADER_SAMPLER_SOURCE_1D_0          = 41,
+    R3D_SHADER_SAMPLER_SOURCE_2D_0          = 42,
+    R3D_SHADER_SAMPLER_SOURCE_2D_1          = 43,
+    R3D_SHADER_SAMPLER_SOURCE_CUBE_0        = 44,
+
+    // Custom samplers
+    R3D_SHADER_SAMPLER_CUSTOM_1D            = 45,
+    R3D_SHADER_SAMPLER_CUSTOM_2D            = R3D_SHADER_SAMPLER_CUSTOM_1D + R3D_MAX_SHADER_SAMPLERS,
+    R3D_SHADER_SAMPLER_CUSTOM_3D            = R3D_SHADER_SAMPLER_CUSTOM_2D + R3D_MAX_SHADER_SAMPLERS,
+    R3D_SHADER_SAMPLER_CUSTOM_CUBE          = R3D_SHADER_SAMPLER_CUSTOM_3D + R3D_MAX_SHADER_SAMPLERS,
+    R3D_SHADER_SAMPLER_CUSTOM_SENTINEL      = R3D_SHADER_SAMPLER_CUSTOM_CUBE + R3D_MAX_SHADER_SAMPLERS,
+
+    // Sentinel
+    R3D_SHADER_SAMPLER_COUNT = R3D_SHADER_SAMPLER_CUSTOM_SENTINEL
+
+} r3d_shader_sampler_t;
+
+// ========================================
+// SAMPLER TYPES
+// ========================================
+
+static const GLenum R3D_MOD_SHADER_SAMPLER_TYPES[R3D_SHADER_SAMPLER_COUNT] =
+{
+    [R3D_SHADER_SAMPLER_MAP_ALBEDO]             = GL_TEXTURE_2D,
+    [R3D_SHADER_SAMPLER_MAP_EMISSION]           = GL_TEXTURE_2D,
+    [R3D_SHADER_SAMPLER_MAP_NORMAL]             = GL_TEXTURE_2D,
+    [R3D_SHADER_SAMPLER_MAP_ORM]                = GL_TEXTURE_2D,
+    [R3D_SHADER_SAMPLER_SHADOW_DIR]             = GL_TEXTURE_2D_ARRAY,
+    [R3D_SHADER_SAMPLER_SHADOW_SPOT]            = GL_TEXTURE_2D_ARRAY,
+    [R3D_SHADER_SAMPLER_SHADOW_OMNI]            = GL_TEXTURE_CUBE_MAP_ARRAY,
+    [R3D_SHADER_SAMPLER_IBL_IRRADIANCE]         = GL_TEXTURE_CUBE_MAP_ARRAY,
+    [R3D_SHADER_SAMPLER_IBL_PREFILTER]          = GL_TEXTURE_CUBE_MAP_ARRAY,
+    [R3D_SHADER_SAMPLER_IBL_BRDF_LUT]           = GL_TEXTURE_2D,
+    [R3D_SHADER_SAMPLER_BONE_MATRICES]          = GL_TEXTURE_1D,
+    [R3D_SHADER_SAMPLER_BUFFER_SCENE]           = GL_TEXTURE_2D,
+    [R3D_SHADER_SAMPLER_BUFFER_ALBEDO]          = GL_TEXTURE_2D,
+    [R3D_SHADER_SAMPLER_BUFFER_NORMAL]          = GL_TEXTURE_2D,
+    [R3D_SHADER_SAMPLER_BUFFER_GEOM_NORMAL]     = GL_TEXTURE_2D,
+    [R3D_SHADER_SAMPLER_BUFFER_ORM]             = GL_TEXTURE_2D,
+    [R3D_SHADER_SAMPLER_BUFFER_DEPTH]           = GL_TEXTURE_2D,
+    [R3D_SHADER_SAMPLER_BUFFER_SELECTOR]        = GL_TEXTURE_2D,
+    [R3D_SHADER_SAMPLER_BUFFER_RADIANCE]        = GL_TEXTURE_2D,
+    [R3D_SHADER_SAMPLER_BUFFER_SPECULAR]        = GL_TEXTURE_2D,
+    [R3D_SHADER_SAMPLER_BUFFER_VFOG_RAD]        = GL_TEXTURE_2D,
+    [R3D_SHADER_SAMPLER_BUFFER_SSAO]            = GL_TEXTURE_2D,
+    [R3D_SHADER_SAMPLER_BUFFER_SSIL]            = GL_TEXTURE_2D,
+    [R3D_SHADER_SAMPLER_BUFFER_SSGI]            = GL_TEXTURE_2D,
+    [R3D_SHADER_SAMPLER_BUFFER_SSR]             = GL_TEXTURE_2D,
+    [R3D_SHADER_SAMPLER_BUFFER_DOF_COC]         = GL_TEXTURE_2D,
+    [R3D_SHADER_SAMPLER_BUFFER_DOF]             = GL_TEXTURE_2D,
+    [R3D_SHADER_SAMPLER_BUFFER_BLOOM]           = GL_TEXTURE_2D,
+    [R3D_SHADER_SAMPLER_BUFFER_LUMINANCE]       = GL_TEXTURE_2D,
+    [R3D_SHADER_SAMPLER_BUFFER_EXPOSURE]        = GL_TEXTURE_2D,
+    [R3D_SHADER_SAMPLER_BUFFER_SMAA_EDGES]      = GL_TEXTURE_2D,
+    [R3D_SHADER_SAMPLER_BUFFER_SMAA_BLEND]      = GL_TEXTURE_2D,
+    [R3D_SHADER_SAMPLER_SOURCE_1D_0]            = GL_TEXTURE_1D,
+    [R3D_SHADER_SAMPLER_SOURCE_2D_0]            = GL_TEXTURE_2D,
+    [R3D_SHADER_SAMPLER_SOURCE_2D_1]            = GL_TEXTURE_2D,
+    [R3D_SHADER_SAMPLER_SOURCE_CUBE_0]          = GL_TEXTURE_CUBE_MAP,
+
+    // NOTE: Custom samplers are defined at initialization
+    //       time in `R3D_MOD_SHADER.samplerTargets`
+};
+
+// ========================================
+// UNIFORMS TYPES
+// ========================================
+
+/* Represents any sampler type, stores only the corresponding texture slot */
+typedef struct { int slot; } r3d_shader_uniform_sampler_t;
+
+/* Represents scalars (bool/int and float), stores the value and uniform location */
+typedef struct { int val; int loc; } r3d_shader_uniform_int_t;
+typedef struct { float val; int loc; } r3d_shader_uniform_float_t;
+
+/* Represents vectors, stores the value and uniform location */
+typedef struct { Vector2 val; int loc; } r3d_shader_uniform_vec2_t;
+typedef struct { Vector3 val; int loc; } r3d_shader_uniform_vec3_t;
+typedef struct { Vector4 val; int loc; } r3d_shader_uniform_vec4_t;
+
+/* Represents sRGB color vectors that needs to be converted to linear space */
+typedef struct { Color val; int loc; } r3d_shader_uniform_col3_t;
+typedef struct { Color val; int loc; } r3d_shader_uniform_col4_t;
+
+/* Represents matrices, stores only the uniform location for efficiency */
+typedef struct { int loc; } r3d_shader_uniform_mat4_t;
+
+// ========================================
+// UNIFORM BLOCK ENUM / SLOTS
+// ========================================
+
+typedef enum {
+    R3D_SHADER_BLOCK_FRAME,
+    R3D_SHADER_BLOCK_VIEW,
+    R3D_SHADER_BLOCK_ENV,
+    R3D_SHADER_BLOCK_FX,
+    R3D_SHADER_BLOCK_LIGHT,
+    R3D_SHADER_BLOCK_LIGHT_ARRAY,
+    R3D_SHADER_BLOCK_COUNT,
+    R3D_SHADER_BLOCK_USER = R3D_SHADER_BLOCK_COUNT,
+    R3D_SHADER_BLOCK_SLOT_COUNT,
+} r3d_shader_block_t;
+
+#define R3D_SHADER_BLOCK_SLOT_FRAME         0
+#define R3D_SHADER_BLOCK_SLOT_VIEW          1
+#define R3D_SHADER_BLOCK_SLOT_ENV           2
+#define R3D_SHADER_BLOCK_SLOT_FX            3
+#define R3D_SHADER_BLOCK_SLOT_LIGHT         4
+#define R3D_SHADER_BLOCK_SLOT_LIGHT_ARRAY   5
+#define R3D_SHADER_BLOCK_SLOT_USER          6
+
+// ========================================
+// UNIFORM BLOCK STRUCTS
+// ========================================
+
+typedef struct {
+    alignas(8) Vector2 screenSize;
+    alignas(8) Vector2 texelSize;
+    alignas(4) float time;
+    alignas(4) int32_t index;
+    alignas(4) int32_t pad0;
+} r3d_shader_block_frame_t;
+
+typedef struct {
+    alignas(16) Vector3 position;
+    alignas(16) Matrix view;
+    alignas(16) Matrix invView;
+    alignas(16) Matrix proj;
+    alignas(16) Matrix invProj;
+    alignas(16) Matrix viewProj;
+    alignas(4) int32_t projMode;
+    alignas(4) float aspect;
+    alignas(4) float near;
+    alignas(4) float far;
+} r3d_shader_block_view_t;
+
+typedef struct {
+    alignas(16) Vector3 position;
+    alignas(4) float falloff;
+    alignas(4) float range;
+    alignas(4) int32_t layer;
+} r3d_shader_block_env_probe_t;
+
+typedef struct {
+    alignas(16) Vector4 rotation;
+    alignas(16) Vector4 color;
+    alignas(4) float energy;
+    alignas(4) int32_t irradiance;
+    alignas(4) int32_t prefilter;
+} r3d_shader_block_env_ambient_t;
+
+typedef struct {
+    alignas(16) r3d_shader_block_env_probe_t
+        uIlluminationProbes[R3D_SHADER_PROBE_ILLUMINATION_UBO_CAP];
+    alignas(16) r3d_shader_block_env_probe_t
+        uReflectionProbes[R3D_SHADER_PROBE_REFLECTION_UBO_CAP];
+    alignas(16) r3d_shader_block_env_ambient_t uAmbient;
+    alignas(4) int32_t uNumIlluminationProbes;
+    alignas(4) int32_t uNumReflectionProbes;
+    alignas(4) int32_t uNumPrefilterLevels;
+} r3d_shader_block_env_t;
+
+typedef struct {
+
+    struct r3d_shader_block_fx_ssao {
+        alignas(4) int32_t sampleCount;
+        alignas(4) float intensity;
+        alignas(4) float power;
+        alignas(4) float radius;
+        alignas(4) float bias;
+        alignas(4) int32_t enabled;
+        uint8_t _pad[8];
+    } uSsao;
+
+    struct r3d_shader_block_fx_ssil {
+        alignas(4) int32_t sampleCount;
+        alignas(4) float giIntensity;
+        alignas(4) float aoIntensity;
+        alignas(4) float aoPower;
+        alignas(4) float radius;
+        alignas(4) float bias;
+        alignas(4) int32_t enabled;
+        uint8_t _pad[4];
+    } uSsil;
+
+    struct r3d_shader_block_fx_ssgi {
+        alignas(4) int32_t sliceCount;
+        alignas(4) float edgeFade;
+        alignas(4) float distanceFalloff;
+        alignas(4) float normalRejection;
+        alignas(4) float intensity;
+        alignas(4) int32_t enabled;
+        uint8_t _pad[8];
+    } uSsgi;
+
+    struct r3d_shader_block_fx_ssr {
+        alignas(4) int32_t maxLevel;
+        alignas(4) int32_t maxIterations;
+        alignas(4) float thickness;
+        alignas(4) float edgeFade;
+        alignas(4) int32_t enabled;
+        uint8_t _pad[12];
+    } uSsr;
+
+    struct r3d_shader_block_fx_fog {
+        alignas(16) Vector4 color;
+        alignas(4) float start;
+        alignas(4) float end;
+        alignas(4) float density;
+        alignas(4) float skyAffect;
+        alignas(4) int32_t mode;
+        uint8_t _pad[12];
+    } uFog;
+
+    struct r3d_shader_block_fx_vfog {
+        alignas(16) Vector4 scatteringColor;
+        alignas(16) Vector4 emissionColor;
+        alignas(4) float scatteringDensity;
+        alignas(4) float absortionDensity;
+        alignas(4) float anisotropy;
+        alignas(4) float emissionEnergy;
+        alignas(4) float skyAffect;
+        alignas(4) float maxDistance;
+        alignas(4) float stepSize;
+        alignas(4) int32_t enabled;
+    } uVFog;
+
+    struct r3d_shader_block_fx_dof {
+        alignas(4) float focusPoint;
+        alignas(4) float focusScale;
+        alignas(4) float nearScale;
+        alignas(4) float maxBlurSize;
+        alignas(4) int32_t mode;
+        uint8_t _pad[12];
+    } uDof;
+
+    struct r3d_shader_block_fx_bloom {
+        alignas(16) Vector4 prefilter;
+        alignas(4) float intensity;
+        alignas(4) int32_t mode;
+    } uBloom;
+
+    struct r3d_shader_block_fx_tonemap {
+        alignas(4) float exposure;
+        alignas(4) float white;
+        alignas(4) int32_t mode;
+        uint8_t _pad[4];
+    } uTonemap;
+
+    struct r3d_shader_block_fx_bcs {
+        alignas(4) float brightness;
+        alignas(4) float contrast;
+        alignas(4) float saturation;
+        uint8_t _pad[4];
+    } uBcs;
+
+} r3d_shader_block_fx_t;
+
+typedef struct {
+    alignas(16) Matrix  viewProj;
+    alignas(16) Vector3 color;
+    alignas(16) Vector3 position;
+    alignas(16) Vector3 direction;
+    alignas(4)  float   energy;
+    alignas(4)  float   specular;
+    alignas(4)  float   range;
+    alignas(4)  float   falloff;
+    alignas(4)  float   innerCutOff;
+    alignas(4)  float   outerCutOff;
+    alignas(4)  float   fogEnergy;
+    alignas(4)  float   shadowSoftness;
+    alignas(4)  float   shadowOpacity;
+    alignas(4)  float   shadowDepthBias;
+    alignas(4)  float   shadowSlopeBias;
+    alignas(4)  float   shadowFar;
+    alignas(4)  int32_t shadowLayer;
+    alignas(4)  int32_t type;
+} r3d_shader_block_light_t;
+
+typedef struct {
+    alignas(16) r3d_shader_block_light_t uLights[R3D_SHADER_LIGHT_FORWARD_UBO_CAP];
+    alignas(4) int32_t uNumLights;
+} r3d_shader_block_light_array_t;
+
+// ========================================
+// UNIFORM BLOCK SIZES AND SLOTS
+// ========================================
+
+static const int R3D_SHADER_BLOCK_SIZES[R3D_SHADER_BLOCK_COUNT] = {
+    [R3D_SHADER_BLOCK_FRAME]       = sizeof(r3d_shader_block_frame_t),
+    [R3D_SHADER_BLOCK_VIEW]        = sizeof(r3d_shader_block_view_t),
+    [R3D_SHADER_BLOCK_ENV]         = sizeof(r3d_shader_block_env_t),
+    [R3D_SHADER_BLOCK_FX]          = sizeof(r3d_shader_block_fx_t),
+    [R3D_SHADER_BLOCK_LIGHT]       = sizeof(r3d_shader_block_light_t),
+    [R3D_SHADER_BLOCK_LIGHT_ARRAY] = sizeof(r3d_shader_block_light_array_t),
+};
+
+static const int R3D_SHADER_BLOCK_SLOTS[R3D_SHADER_BLOCK_COUNT] = {
+    [R3D_SHADER_BLOCK_FRAME]       = R3D_SHADER_BLOCK_SLOT_FRAME,
+    [R3D_SHADER_BLOCK_VIEW]        = R3D_SHADER_BLOCK_SLOT_VIEW,
+    [R3D_SHADER_BLOCK_ENV]         = R3D_SHADER_BLOCK_SLOT_ENV,
+    [R3D_SHADER_BLOCK_FX]          = R3D_SHADER_BLOCK_SLOT_FX,
+    [R3D_SHADER_BLOCK_LIGHT]       = R3D_SHADER_BLOCK_SLOT_LIGHT,
+    [R3D_SHADER_BLOCK_LIGHT_ARRAY] = R3D_SHADER_BLOCK_SLOT_LIGHT_ARRAY,
+};
+
+// ========================================
+// BUILT-IN SHADERS STRUCTURES
+// ========================================
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uSourceTex;
+    r3d_shader_uniform_sampler_t uNormalTex;
+    r3d_shader_uniform_sampler_t uDepthTex;
+    r3d_shader_uniform_float_t uNormalSharpness;
+    r3d_shader_uniform_float_t uDepthSharpness;
+    r3d_shader_uniform_float_t uInvStepWidth2;
+    r3d_shader_uniform_int_t uStepWidth;
+} r3d_shader_prepare_denoiser_atrous_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uSourceTex;
+    r3d_shader_uniform_sampler_t uNormalTex;
+    r3d_shader_uniform_sampler_t uDepthTex;
+    r3d_shader_uniform_float_t uNormalSharpness;
+    r3d_shader_uniform_float_t uDepthSharpness;
+    r3d_shader_uniform_float_t uInvBlurRadius2;
+    r3d_shader_uniform_float_t uBlurRadius;
+} r3d_shader_prepare_denoiser_sparse_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uSourceTex;
+} r3d_shader_prepare_blur_down_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uSourceTex;
+} r3d_shader_prepare_blur_up_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uDepthTex;
+} r3d_shader_prepare_pyramid_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uSelectorTex;
+    r3d_shader_uniform_sampler_t uSourceTex;
+} r3d_shader_prepare_downsample_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uNormalTex;
+    r3d_shader_uniform_sampler_t uDepthTex;
+} r3d_shader_prepare_ssao_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uRadianceTex;
+    r3d_shader_uniform_sampler_t uNormalTex;
+    r3d_shader_uniform_sampler_t uDepthTex;
+} r3d_shader_prepare_ssil_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uRadianceTex;
+    r3d_shader_uniform_sampler_t uNormalTex;
+    r3d_shader_uniform_sampler_t uDepthTex;
+} r3d_shader_prepare_ssgi_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uRadianceTex;
+    r3d_shader_uniform_sampler_t uSpecularTex;
+    r3d_shader_uniform_sampler_t uNormalTex;
+    r3d_shader_uniform_sampler_t uDepthTex;
+} r3d_shader_prepare_ssr_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uDepthTex;
+} r3d_shader_prepare_dof_coc_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uSceneTex;
+    r3d_shader_uniform_sampler_t uCoCTex;
+} r3d_shader_prepare_dof_down_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uSceneTex;
+    r3d_shader_uniform_sampler_t uDepthTex;
+} r3d_shader_prepare_dof_blur_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uTexture;
+    r3d_shader_uniform_vec2_t uTexelSize;
+    r3d_shader_uniform_int_t uFirstPass;
+} r3d_shader_prepare_bloom_down_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uTexture;
+    r3d_shader_uniform_vec2_t uFilterRadius;
+} r3d_shader_prepare_bloom_up_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uSourceTex;
+} r3d_shader_prepare_luminance_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uMeasuredLogLumTex;
+    r3d_shader_uniform_sampler_t uPrevAutoExposureTex;
+    r3d_shader_uniform_float_t uDeltaTime;
+    r3d_shader_uniform_float_t uMinLogLum;
+    r3d_shader_uniform_float_t uMaxLogLum;
+    r3d_shader_uniform_float_t uSpeedUp;
+    r3d_shader_uniform_float_t uSpeedDown;
+    r3d_shader_uniform_float_t uExposureCompLog;
+} r3d_shader_prepare_exposure_adapt_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uSceneTex;
+} r3d_shader_prepare_smaa_edge_detection_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uEdgesTex;
+    r3d_shader_uniform_sampler_t uAreaTex;
+    r3d_shader_uniform_sampler_t uSearchTex;
+} r3d_shader_prepare_smaa_blending_weights_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_mat4_t uMatProj;
+    r3d_shader_uniform_mat4_t uMatView;
+    r3d_shader_uniform_sampler_t uPanoramaTex;
+} r3d_shader_prepare_cubemap_from_equirectangular_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_mat4_t uMatProj;
+    r3d_shader_uniform_mat4_t uMatView;
+    r3d_shader_uniform_sampler_t uSourceTex;
+} r3d_shader_prepare_cubemap_irradiance_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_mat4_t uMatProj;
+    r3d_shader_uniform_mat4_t uMatView;
+    r3d_shader_uniform_sampler_t uSourceTex;
+    r3d_shader_uniform_float_t uSourceNumLevels;
+    r3d_shader_uniform_float_t uSourceFaceSize;
+    r3d_shader_uniform_float_t uRoughness;
+} r3d_shader_prepare_cubemap_prefilter_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_mat4_t uMatProj;
+    r3d_shader_uniform_mat4_t uMatView;
+    r3d_shader_uniform_col3_t uSkyTopColor;
+    r3d_shader_uniform_col3_t uSkyHorizonColor;
+    r3d_shader_uniform_float_t uSkyHorizonCurve;
+    r3d_shader_uniform_float_t uSkyEnergy;
+    r3d_shader_uniform_col3_t uGroundBottomColor;
+    r3d_shader_uniform_col3_t uGroundHorizonColor;
+    r3d_shader_uniform_float_t uGroundHorizonCurve;
+    r3d_shader_uniform_float_t uGroundEnergy;
+    r3d_shader_uniform_vec3_t uSunDirection;
+    r3d_shader_uniform_col3_t uSunColor;
+    r3d_shader_uniform_float_t uSunSize;
+    r3d_shader_uniform_float_t uSunCurve;
+    r3d_shader_uniform_float_t uSunEnergy;
+} r3d_shader_prepare_cubemap_procedural_sky_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_mat4_t uMatProj;
+    r3d_shader_uniform_mat4_t uMatView;
+} r3d_shader_prepare_cubemap_custom_sky_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uBoneMatricesTex;
+    r3d_shader_uniform_mat4_t uMatNormal;
+    r3d_shader_uniform_mat4_t uMatModel;
+    r3d_shader_uniform_col4_t uAlbedoColor;
+    r3d_shader_uniform_float_t uEmissionEnergy;
+    r3d_shader_uniform_col3_t uEmissionColor;
+    r3d_shader_uniform_vec2_t uTexCoordOffset;
+    r3d_shader_uniform_vec2_t uTexCoordScale;
+    r3d_shader_uniform_int_t uInstancing;
+    r3d_shader_uniform_int_t uSkinning;
+    r3d_shader_uniform_int_t uBillboard;
+    r3d_shader_uniform_sampler_t uAlbedoMap;
+    r3d_shader_uniform_sampler_t uNormalMap;
+    r3d_shader_uniform_sampler_t uEmissionMap;
+    r3d_shader_uniform_sampler_t uOrmMap;
+    r3d_shader_uniform_float_t uAlphaCutoff;
+    r3d_shader_uniform_float_t uNormalScale;
+    r3d_shader_uniform_float_t uOcclusion;
+    r3d_shader_uniform_float_t uRoughness;
+    r3d_shader_uniform_float_t uMetalness;
+    r3d_shader_uniform_float_t uSpecular;
+} r3d_shader_scene_geometry_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uBoneMatricesTex;
+    r3d_shader_uniform_mat4_t uMatNormal;
+    r3d_shader_uniform_mat4_t uMatModel;
+    r3d_shader_uniform_col4_t uAlbedoColor;
+    r3d_shader_uniform_col3_t uEmissionColor;
+    r3d_shader_uniform_float_t uEmissionEnergy;
+    r3d_shader_uniform_vec2_t uTexCoordOffset;
+    r3d_shader_uniform_vec2_t uTexCoordScale;
+    r3d_shader_uniform_int_t uInstancing;
+    r3d_shader_uniform_int_t uSkinning;
+    r3d_shader_uniform_int_t uBillboard;
+    r3d_shader_uniform_sampler_t uAlbedoMap;
+    r3d_shader_uniform_sampler_t uEmissionMap;
+    r3d_shader_uniform_sampler_t uNormalMap;
+    r3d_shader_uniform_sampler_t uOrmMap;
+    r3d_shader_uniform_sampler_t uShadowDirTex;
+    r3d_shader_uniform_sampler_t uShadowSpotTex;
+    r3d_shader_uniform_sampler_t uShadowOmniTex;
+    r3d_shader_uniform_sampler_t uIrradianceTex;
+    r3d_shader_uniform_sampler_t uPrefilterTex;
+    r3d_shader_uniform_sampler_t uBrdfLutTex;
+    r3d_shader_uniform_float_t uAlphaCutoff;
+    r3d_shader_uniform_float_t uCutoffSign;
+    r3d_shader_uniform_float_t uNormalScale;
+    r3d_shader_uniform_float_t uOcclusion;
+    r3d_shader_uniform_float_t uRoughness;
+    r3d_shader_uniform_float_t uMetalness;
+    r3d_shader_uniform_float_t uSpecular;
+    r3d_shader_uniform_vec3_t uViewPosition;
+} r3d_shader_scene_forward_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uBoneMatricesTex;
+    r3d_shader_uniform_mat4_t uMatModel;
+    r3d_shader_uniform_mat4_t uMatNormal;
+    r3d_shader_uniform_col4_t uAlbedoColor;
+    r3d_shader_uniform_vec2_t uTexCoordOffset;
+    r3d_shader_uniform_vec2_t uTexCoordScale;
+    r3d_shader_uniform_int_t uInstancing;
+    r3d_shader_uniform_int_t uSkinning;
+    r3d_shader_uniform_int_t uBillboard;
+    r3d_shader_uniform_sampler_t uAlbedoMap;
+    r3d_shader_uniform_float_t uAlphaCutoff;
+    r3d_shader_uniform_float_t uCutoffSign;
+} r3d_shader_scene_unlit_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uBoneMatricesTex;
+    r3d_shader_uniform_mat4_t uMatModel;
+    r3d_shader_uniform_mat4_t uMatInvView;
+    r3d_shader_uniform_mat4_t uMatViewProj;
+    r3d_shader_uniform_col4_t uAlbedoColor;
+    r3d_shader_uniform_vec2_t uTexCoordOffset;
+    r3d_shader_uniform_vec2_t uTexCoordScale;
+    r3d_shader_uniform_int_t uInstancing;
+    r3d_shader_uniform_int_t uSkinning;
+    r3d_shader_uniform_int_t uBillboard;
+    r3d_shader_uniform_sampler_t uAlbedoMap;
+    r3d_shader_uniform_float_t uAlphaCutoff;
+} r3d_shader_scene_depth_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uBoneMatricesTex;
+    r3d_shader_uniform_mat4_t uMatModel;
+    r3d_shader_uniform_mat4_t uMatInvView;
+    r3d_shader_uniform_mat4_t uMatViewProj;
+    r3d_shader_uniform_col4_t uAlbedoColor;
+    r3d_shader_uniform_vec2_t uTexCoordOffset;
+    r3d_shader_uniform_vec2_t uTexCoordScale;
+    r3d_shader_uniform_int_t uInstancing;
+    r3d_shader_uniform_int_t uSkinning;
+    r3d_shader_uniform_int_t uBillboard;
+    r3d_shader_uniform_sampler_t uAlbedoMap;
+    r3d_shader_uniform_float_t uAlphaCutoff;
+    r3d_shader_uniform_vec3_t uViewPosition;
+    r3d_shader_uniform_float_t uFar;
+} r3d_shader_scene_depth_cube_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uBoneMatricesTex;
+    r3d_shader_uniform_mat4_t uMatNormal;
+    r3d_shader_uniform_mat4_t uMatModel;
+    r3d_shader_uniform_mat4_t uMatView;
+    r3d_shader_uniform_mat4_t uMatInvView;
+    r3d_shader_uniform_mat4_t uMatViewProj;
+    r3d_shader_uniform_col4_t uAlbedoColor;
+    r3d_shader_uniform_col3_t uEmissionColor;
+    r3d_shader_uniform_float_t uEmissionEnergy;
+    r3d_shader_uniform_vec2_t uTexCoordOffset;
+    r3d_shader_uniform_vec2_t uTexCoordScale;
+    r3d_shader_uniform_int_t uInstancing;
+    r3d_shader_uniform_int_t uSkinning;
+    r3d_shader_uniform_int_t uBillboard;
+    r3d_shader_uniform_sampler_t uAlbedoMap;
+    r3d_shader_uniform_sampler_t uEmissionMap;
+    r3d_shader_uniform_sampler_t uNormalMap;
+    r3d_shader_uniform_sampler_t uOrmMap;
+    r3d_shader_uniform_sampler_t uShadowDirTex;
+    r3d_shader_uniform_sampler_t uShadowSpotTex;
+    r3d_shader_uniform_sampler_t uShadowOmniTex;
+    r3d_shader_uniform_sampler_t uIrradianceTex;
+    r3d_shader_uniform_sampler_t uPrefilterTex;
+    r3d_shader_uniform_sampler_t uBrdfLutTex;
+    r3d_shader_uniform_float_t uAlphaCutoff;
+    r3d_shader_uniform_float_t uCutoffSign;
+    r3d_shader_uniform_float_t uNormalScale;
+    r3d_shader_uniform_float_t uOcclusion;
+    r3d_shader_uniform_float_t uRoughness;
+    r3d_shader_uniform_float_t uMetalness;
+    r3d_shader_uniform_float_t uSpecular;
+    r3d_shader_uniform_vec3_t uViewPosition;
+    r3d_shader_uniform_int_t uProbeInterior;
+} r3d_shader_scene_probe_forward_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uBoneMatricesTex;
+    r3d_shader_uniform_mat4_t uMatModel;
+    r3d_shader_uniform_mat4_t uMatNormal;
+    r3d_shader_uniform_mat4_t uMatView;
+    r3d_shader_uniform_mat4_t uMatInvView;
+    r3d_shader_uniform_mat4_t uMatViewProj;
+    r3d_shader_uniform_col4_t uAlbedoColor;
+    r3d_shader_uniform_vec2_t uTexCoordOffset;
+    r3d_shader_uniform_vec2_t uTexCoordScale;
+    r3d_shader_uniform_int_t uInstancing;
+    r3d_shader_uniform_int_t uSkinning;
+    r3d_shader_uniform_int_t uBillboard;
+    r3d_shader_uniform_sampler_t uAlbedoMap;
+    r3d_shader_uniform_float_t uAlphaCutoff;
+    r3d_shader_uniform_float_t uCutoffSign;
+} r3d_shader_scene_probe_unlit_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_mat4_t uMatNormal;
+    r3d_shader_uniform_mat4_t uMatModel;
+    r3d_shader_uniform_col4_t uAlbedoColor;
+    r3d_shader_uniform_float_t uEmissionEnergy;
+    r3d_shader_uniform_col3_t uEmissionColor;
+    r3d_shader_uniform_vec2_t uTexCoordOffset;
+    r3d_shader_uniform_vec2_t uTexCoordScale;
+    r3d_shader_uniform_int_t uInstancing;
+    r3d_shader_uniform_sampler_t uAlbedoMap;
+    r3d_shader_uniform_sampler_t uNormalMap;
+    r3d_shader_uniform_sampler_t uEmissionMap;
+    r3d_shader_uniform_sampler_t uOrmMap;
+    r3d_shader_uniform_sampler_t uDepthTex;
+    r3d_shader_uniform_sampler_t uGeomNormalTex;
+    r3d_shader_uniform_float_t uAlphaCutoff;
+    r3d_shader_uniform_float_t uNormalScale;
+    r3d_shader_uniform_float_t uOcclusion;
+    r3d_shader_uniform_float_t uRoughness;
+    r3d_shader_uniform_float_t uMetalness;
+    r3d_shader_uniform_float_t uSpecular;
+    r3d_shader_uniform_float_t uNormalThreshold;
+    r3d_shader_uniform_float_t uFadeWidth;
+    r3d_shader_uniform_int_t uApplyColor;
+} r3d_shader_scene_decal_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_vec4_t uColor;
+} r3d_shader_scene_background_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_mat4_t uMatInvView;
+    r3d_shader_uniform_mat4_t uMatInvProj;
+    r3d_shader_uniform_sampler_t uSkyMap;
+    r3d_shader_uniform_vec4_t uRotation;
+    r3d_shader_uniform_float_t uEnergy;
+    r3d_shader_uniform_float_t uLod;
+} r3d_shader_scene_skybox_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uAlbedoTex;
+    r3d_shader_uniform_sampler_t uNormalTex;
+    r3d_shader_uniform_sampler_t uDepthTex;
+    r3d_shader_uniform_sampler_t uSsaoTex;
+    r3d_shader_uniform_sampler_t uSsilTex;
+    r3d_shader_uniform_sampler_t uSsgiTex;
+    r3d_shader_uniform_sampler_t uOrmTex;
+    r3d_shader_uniform_sampler_t uIrradianceTex;
+    r3d_shader_uniform_sampler_t uPrefilterTex;
+    r3d_shader_uniform_sampler_t uBrdfLutTex;
+} r3d_shader_deferred_ambient_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uAlbedoTex;
+    r3d_shader_uniform_sampler_t uNormalTex;
+    r3d_shader_uniform_sampler_t uDepthTex;
+    r3d_shader_uniform_sampler_t uOrmTex;
+    r3d_shader_uniform_sampler_t uShadowDirTex;
+    r3d_shader_uniform_sampler_t uShadowSpotTex;
+    r3d_shader_uniform_sampler_t uShadowOmniTex;
+} r3d_shader_deferred_lighting_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uAlbedoTex;
+    r3d_shader_uniform_sampler_t uRadianceTex;
+    r3d_shader_uniform_sampler_t uSpecularTex;
+    r3d_shader_uniform_sampler_t uOrmTex;
+    r3d_shader_uniform_sampler_t uSsrTex;
+    r3d_shader_uniform_float_t uSsrNumLevels;
+} r3d_shader_deferred_compose_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uDepthTex;
+} r3d_shader_deferred_fog_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uDepthTex;
+} r3d_shader_deferred_vfog_transmittance_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uDepthTex;
+    r3d_shader_uniform_sampler_t uShadowDirTex;
+    r3d_shader_uniform_sampler_t uShadowSpotTex;
+    r3d_shader_uniform_sampler_t uShadowOmniTex;
+} r3d_shader_deferred_vfog_radiance_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uRadianceTex;
+    r3d_shader_uniform_sampler_t uDepthTex;
+} r3d_shader_deferred_vfog_compose_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uSceneTex;
+    r3d_shader_uniform_sampler_t uBlurTex;
+} r3d_shader_post_dof_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uSceneTex;
+    r3d_shader_uniform_sampler_t uBloomTex;
+} r3d_shader_post_bloom_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uSceneTex;
+    r3d_shader_uniform_sampler_t uExposureTex;
+} r3d_shader_post_auto_exposure_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uSceneTex;
+    r3d_shader_uniform_sampler_t uNormalTex;
+    r3d_shader_uniform_sampler_t uDepthTex;
+} r3d_shader_post_screen_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uSceneTex;
+} r3d_shader_post_output_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uSceneTex;
+} r3d_shader_post_fxaa_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uSceneTex;
+    r3d_shader_uniform_sampler_t uBlendTex;
+} r3d_shader_post_smaa_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uSourceTex;
+    r3d_shader_uniform_int_t uOutputMode;
+} r3d_shader_post_visualizer_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uSourceTex;
+    r3d_shader_uniform_sampler_t uDepthTex;
+} r3d_shader_blit_common_copy_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uSourceTex;
+    r3d_shader_uniform_sampler_t uDepthTex;
+} r3d_shader_blit_common_nearest_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uSourceTex;
+    r3d_shader_uniform_sampler_t uDepthTex;
+} r3d_shader_blit_common_linear_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uSourceTex;
+    r3d_shader_uniform_sampler_t uDepthTex;
+} r3d_shader_blit_up_bicubic_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uSourceTex;
+    r3d_shader_uniform_sampler_t uDepthTex;
+} r3d_shader_blit_up_lanczos_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uSourceTex;
+    r3d_shader_uniform_sampler_t uDepthTex;
+    r3d_shader_uniform_vec2_t uDestTexel;
+} r3d_shader_blit_down_rgss_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uSourceTex;
+    r3d_shader_uniform_sampler_t uDepthTex;
+    r3d_shader_uniform_vec2_t uDestTexel;
+} r3d_shader_blit_down_pdss_t;
+
+// ========================================
+// CUSTOM SHADERS STRUCTURES
+// ========================================
+
+typedef struct {
+    union {
+        // Must follow the same naming pattern as `r3d_shader_loader`
+        struct {
+            r3d_shader_prepare_cubemap_custom_sky_t cubemapCustomSky;
+        } prepare;
+        // Must follow the same naming pattern as `r3d_mod_shader`
+        struct {
+            r3d_shader_scene_geometry_t geometry;
+            r3d_shader_scene_forward_t forward;
+            r3d_shader_scene_unlit_t unlit;
+            r3d_shader_scene_depth_t depth;
+            r3d_shader_scene_depth_cube_t depthCube;
+            r3d_shader_scene_probe_forward_t probeForward;
+            r3d_shader_scene_probe_unlit_t probeUnlit;
+            r3d_shader_scene_decal_t decal;
+        } scene;
+        // Must follow the same naming pattern as `r3d_shader_loader`
+        struct {
+            r3d_shader_post_screen_t screen;
+        } post;
+    };
+    char userCode[R3D_MAX_SHADER_CODE_LENGTH];
+} r3d_shader_custom_program_t;
+
+typedef struct {
+    r3d_rshade_sampler_t samplers[R3D_MAX_SHADER_SAMPLERS];
+    r3d_rshade_uniform_buffer_t uniforms;
+} r3d_shader_custom_data_t;
+
+typedef struct R3D_ShaderCustom {
+    r3d_shader_custom_program_t* program;
+    r3d_shader_custom_data_t data;
+    bool programOwner;
+} r3d_shader_custom_t;
+
+// ========================================
+// MODULE STATE
+// ========================================
+
+extern struct r3d_mod_shader {
+
+    // Program state
+    GLuint currentProgram;
+
+    // Samplers state
+    GLenum samplerTargets[R3D_SHADER_SAMPLER_COUNT];
+    GLuint samplerBindings[R3D_SHADER_SAMPLER_COUNT];
+
+    // Uniform buffers
+    GLuint uniformBuffers[R3D_SHADER_BLOCK_COUNT];
+    GLuint uniformBindings[R3D_SHADER_BLOCK_SLOT_COUNT];
+
+    // Prepare shaders
+    struct {
+        r3d_shader_prepare_denoiser_atrous_t denoiserAtrous;
+        r3d_shader_prepare_denoiser_sparse_t denoiserSparse;
+        r3d_shader_prepare_blur_down_t blurDown;
+        r3d_shader_prepare_blur_up_t blurUp;
+        r3d_shader_prepare_pyramid_t pyramid;
+        r3d_shader_prepare_downsample_t downsample;
+        r3d_shader_prepare_ssao_t ssao;
+        r3d_shader_prepare_ssil_t ssil;
+        r3d_shader_prepare_ssgi_t ssgi;
+        r3d_shader_prepare_ssr_t ssr;
+        r3d_shader_prepare_dof_coc_t dofCoc;
+        r3d_shader_prepare_dof_down_t dofDown;
+        r3d_shader_prepare_dof_blur_t dofBlur;
+        r3d_shader_prepare_bloom_down_t bloomDown;
+        r3d_shader_prepare_bloom_up_t bloomUp;
+        r3d_shader_prepare_luminance_t luminance;
+        r3d_shader_prepare_exposure_adapt_t exposureAdapt;
+        r3d_shader_prepare_smaa_edge_detection_t smaaEdgeDetection[R3D_ANTI_ALIASING_PRESET_COUNT];
+        r3d_shader_prepare_smaa_blending_weights_t smaaBlendingWeights[R3D_ANTI_ALIASING_PRESET_COUNT];
+        r3d_shader_prepare_cubemap_from_equirectangular_t cubemapFromEquirectangular;
+        r3d_shader_prepare_cubemap_irradiance_t cubemapIrradiance;
+        r3d_shader_prepare_cubemap_prefilter_t cubemapPrefilter;
+        r3d_shader_prepare_cubemap_procedural_sky_t cubemapProceduralSky;
+    } prepare;
+
+    // Scene shaders
+    struct {
+        r3d_shader_scene_geometry_t geometry;
+        r3d_shader_scene_forward_t forward;
+        r3d_shader_scene_unlit_t unlit;
+        r3d_shader_scene_background_t background;
+        r3d_shader_scene_skybox_t skybox;
+        r3d_shader_scene_depth_t depth;
+        r3d_shader_scene_depth_cube_t depthCube;
+        r3d_shader_scene_probe_forward_t probeForward;
+        r3d_shader_scene_probe_unlit_t probeUnlit;
+        r3d_shader_scene_decal_t decal;
+    } scene;
+
+    // Deferred shaders
+    struct {
+        r3d_shader_deferred_ambient_t ambient;
+        r3d_shader_deferred_lighting_t lighting;
+        r3d_shader_deferred_compose_t compose;
+        r3d_shader_deferred_fog_t fog;
+        r3d_shader_deferred_vfog_transmittance_t vfogTransmittance;
+        r3d_shader_deferred_vfog_radiance_t vfogRadiance;
+        r3d_shader_deferred_vfog_compose_t vfogCompose;
+    } deferred;
+
+    // Post shaders
+    struct {
+        r3d_shader_post_dof_t dof;
+        r3d_shader_post_bloom_t bloom;
+        r3d_shader_post_auto_exposure_t autoExposure;
+        r3d_shader_post_output_t output;
+        r3d_shader_post_fxaa_t fxaa[R3D_ANTI_ALIASING_PRESET_COUNT];
+        r3d_shader_post_smaa_t smaa[R3D_ANTI_ALIASING_PRESET_COUNT];
+        r3d_shader_post_visualizer_t visualizer;
+    } post;
+
+    // Blit shaders
+    struct {
+        r3d_shader_blit_common_copy_t commonCopy;
+        r3d_shader_blit_common_nearest_t commonNearest;
+        r3d_shader_blit_common_linear_t commonLinear;
+        r3d_shader_blit_up_bicubic_t upBicubic;
+        r3d_shader_blit_up_lanczos_t upLanczos;
+        r3d_shader_blit_down_rgss_t downRgss;
+        r3d_shader_blit_down_pdss_t downPdss;
+    } blit;
+
+} R3D_MOD_SHADER;
+
+// ========================================
+// BUILT-IN SHADER LOADER
+// ========================================
+
+typedef bool (*r3d_shader_loader_func)(r3d_shader_custom_t* custom);
+
+bool r3d_shader_load_prepare_denoiser_atrous(r3d_shader_custom_t* custom);
+bool r3d_shader_load_prepare_denoiser_sparse(r3d_shader_custom_t* custom);
+bool r3d_shader_load_prepare_blur_down(r3d_shader_custom_t* custom);
+bool r3d_shader_load_prepare_blur_up(r3d_shader_custom_t* custom);
+bool r3d_shader_load_prepare_pyramid(r3d_shader_custom_t* custom);
+bool r3d_shader_load_prepare_downsample(r3d_shader_custom_t* custom);
+bool r3d_shader_load_prepare_ssao(r3d_shader_custom_t* custom);
+bool r3d_shader_load_prepare_ssil(r3d_shader_custom_t* custom);
+bool r3d_shader_load_prepare_ssgi(r3d_shader_custom_t* custom);
+bool r3d_shader_load_prepare_ssr(r3d_shader_custom_t* custom);
+bool r3d_shader_load_prepare_dof_coc(r3d_shader_custom_t* custom);
+bool r3d_shader_load_prepare_dof_down(r3d_shader_custom_t* custom);
+bool r3d_shader_load_prepare_dof_blur(r3d_shader_custom_t* custom);
+bool r3d_shader_load_prepare_bloom_down(r3d_shader_custom_t* custom);
+bool r3d_shader_load_prepare_bloom_up(r3d_shader_custom_t* custom);
+bool r3d_shader_load_prepare_luminance(r3d_shader_custom_t* custom);
+bool r3d_shader_load_prepare_exposure_adapt(r3d_shader_custom_t* custom);
+bool r3d_shader_load_prepare_smaa_edge_detection_low(r3d_shader_custom_t* custom);
+bool r3d_shader_load_prepare_smaa_edge_detection_medium(r3d_shader_custom_t* custom);
+bool r3d_shader_load_prepare_smaa_edge_detection_high(r3d_shader_custom_t* custom);
+bool r3d_shader_load_prepare_smaa_edge_detection_ultra(r3d_shader_custom_t* custom);
+bool r3d_shader_load_prepare_smaa_blending_weights_low(r3d_shader_custom_t* custom);
+bool r3d_shader_load_prepare_smaa_blending_weights_medium(r3d_shader_custom_t* custom);
+bool r3d_shader_load_prepare_smaa_blending_weights_high(r3d_shader_custom_t* custom);
+bool r3d_shader_load_prepare_smaa_blending_weights_ultra(r3d_shader_custom_t* custom);
+bool r3d_shader_load_prepare_cubemap_from_equirectangular(r3d_shader_custom_t* custom);
+bool r3d_shader_load_prepare_cubemap_irradiance(r3d_shader_custom_t* custom);
+bool r3d_shader_load_prepare_cubemap_prefilter(r3d_shader_custom_t* custom);
+bool r3d_shader_load_prepare_cubemap_procedural_sky(r3d_shader_custom_t* custom);
+bool r3d_shader_load_prepare_cubemap_custom_sky(r3d_shader_custom_t* custom);
+bool r3d_shader_load_scene_geometry(r3d_shader_custom_t* custom);
+bool r3d_shader_load_scene_forward(r3d_shader_custom_t* custom);
+bool r3d_shader_load_scene_unlit(r3d_shader_custom_t* custom);
+bool r3d_shader_load_scene_background(r3d_shader_custom_t* custom);
+bool r3d_shader_load_scene_skybox(r3d_shader_custom_t* custom);
+bool r3d_shader_load_scene_depth(r3d_shader_custom_t* custom);
+bool r3d_shader_load_scene_depth_cube(r3d_shader_custom_t* custom);
+bool r3d_shader_load_scene_probe_forward(r3d_shader_custom_t* custom);
+bool r3d_shader_load_scene_probe_unlit(r3d_shader_custom_t* custom);
+bool r3d_shader_load_scene_decal(r3d_shader_custom_t* custom);
+bool r3d_shader_load_deferred_ambient(r3d_shader_custom_t* custom);
+bool r3d_shader_load_deferred_lighting(r3d_shader_custom_t* custom);
+bool r3d_shader_load_deferred_compose(r3d_shader_custom_t* custom);
+bool r3d_shader_load_deferred_fog(r3d_shader_custom_t* custom);
+bool r3d_shader_load_deferred_vfog_transmittance(r3d_shader_custom_t* custom);
+bool r3d_shader_load_deferred_vfog_radiance(r3d_shader_custom_t* custom);
+bool r3d_shader_load_deferred_vfog_compose(r3d_shader_custom_t* custom);
+bool r3d_shader_load_post_dof(r3d_shader_custom_t* custom);
+bool r3d_shader_load_post_bloom(r3d_shader_custom_t* custom);
+bool r3d_shader_load_post_auto_exposure(r3d_shader_custom_t* custom);
+bool r3d_shader_load_post_screen(r3d_shader_custom_t* custom);
+bool r3d_shader_load_post_output(r3d_shader_custom_t* custom);
+bool r3d_shader_load_post_fxaa_low(r3d_shader_custom_t* custom);
+bool r3d_shader_load_post_fxaa_medium(r3d_shader_custom_t* custom);
+bool r3d_shader_load_post_fxaa_high(r3d_shader_custom_t* custom);
+bool r3d_shader_load_post_fxaa_ultra(r3d_shader_custom_t* custom);
+bool r3d_shader_load_post_smaa_low(r3d_shader_custom_t* custom);
+bool r3d_shader_load_post_smaa_medium(r3d_shader_custom_t* custom);
+bool r3d_shader_load_post_smaa_high(r3d_shader_custom_t* custom);
+bool r3d_shader_load_post_smaa_ultra(r3d_shader_custom_t* custom);
+bool r3d_shader_load_post_visualizer(r3d_shader_custom_t* custom);
+bool r3d_shader_load_blit_common_copy(r3d_shader_custom_t* custom);
+bool r3d_shader_load_blit_common_nearest(r3d_shader_custom_t* custom);
+bool r3d_shader_load_blit_common_linear(r3d_shader_custom_t* custom);
+bool r3d_shader_load_blit_up_bicubic(r3d_shader_custom_t* custom);
+bool r3d_shader_load_blit_up_lanczos(r3d_shader_custom_t* custom);
+bool r3d_shader_load_blit_down_rgss(r3d_shader_custom_t* custom);
+bool r3d_shader_load_blit_down_pdss(r3d_shader_custom_t* custom);
+
+static const struct r3d_shader_loader {
+
+    // Prepare shaders
+    struct {
+        r3d_shader_loader_func denoiserAtrous;
+        r3d_shader_loader_func denoiserSparse;
+        r3d_shader_loader_func blurDown;
+        r3d_shader_loader_func blurUp;
+        r3d_shader_loader_func pyramid;
+        r3d_shader_loader_func downsample;
+        r3d_shader_loader_func ssao;
+        r3d_shader_loader_func ssaoBlur;
+        r3d_shader_loader_func ssil;
+        r3d_shader_loader_func ssgi;
+        r3d_shader_loader_func ssr;
+        r3d_shader_loader_func dofCoc;
+        r3d_shader_loader_func dofDown;
+        r3d_shader_loader_func dofBlur;
+        r3d_shader_loader_func bloomDown;
+        r3d_shader_loader_func bloomUp;
+        r3d_shader_loader_func luminance;
+        r3d_shader_loader_func exposureAdapt;
+        r3d_shader_loader_func smaaEdgeDetection[R3D_ANTI_ALIASING_PRESET_COUNT];
+        r3d_shader_loader_func smaaBlendingWeights[R3D_ANTI_ALIASING_PRESET_COUNT];
+        r3d_shader_loader_func cubemapFromEquirectangular;
+        r3d_shader_loader_func cubemapIrradiance;
+        r3d_shader_loader_func cubemapPrefilter;
+        r3d_shader_loader_func cubemapProceduralSky;
+        r3d_shader_loader_func cubemapCustomSky;
+    } prepare;
+
+    // Scene shaders
+    struct {
+        r3d_shader_loader_func geometry;
+        r3d_shader_loader_func forward;
+        r3d_shader_loader_func unlit;
+        r3d_shader_loader_func background;
+        r3d_shader_loader_func skybox;
+        r3d_shader_loader_func depth;
+        r3d_shader_loader_func depthCube;
+        r3d_shader_loader_func probeForward;
+        r3d_shader_loader_func probeUnlit;
+        r3d_shader_loader_func decal;
+    } scene;
+
+    // Deferred shaders
+    struct {
+        r3d_shader_loader_func ambient;
+        r3d_shader_loader_func lighting;
+        r3d_shader_loader_func compose;
+        r3d_shader_loader_func fog;
+        r3d_shader_loader_func vfogTransmittance;
+        r3d_shader_loader_func vfogRadiance;
+        r3d_shader_loader_func vfogCompose;
+     } deferred;
+
+    // Post shaders
+    struct {
+        r3d_shader_loader_func dof;
+        r3d_shader_loader_func bloom;
+        r3d_shader_loader_func autoExposure;
+        r3d_shader_loader_func screen;
+        r3d_shader_loader_func output;
+        r3d_shader_loader_func fxaa[R3D_ANTI_ALIASING_PRESET_COUNT];
+        r3d_shader_loader_func smaa[R3D_ANTI_ALIASING_PRESET_COUNT];
+        r3d_shader_loader_func visualizer;
+    } post;
+
+    // Blit shaders
+    struct {
+        r3d_shader_loader_func commonCopy;
+        r3d_shader_loader_func commonNearest;
+        r3d_shader_loader_func commonLinear;
+        r3d_shader_loader_func upBicubic;
+        r3d_shader_loader_func upLanczos;
+        r3d_shader_loader_func downRgss;
+        r3d_shader_loader_func downPdss;
+    } blit;
+
+} R3D_MOD_SHADER_LOADER = {
+
+    .prepare = {
+        .denoiserAtrous = r3d_shader_load_prepare_denoiser_atrous,
+        .denoiserSparse = r3d_shader_load_prepare_denoiser_sparse,
+        .blurDown = r3d_shader_load_prepare_blur_down,
+        .blurUp = r3d_shader_load_prepare_blur_up,
+        .pyramid = r3d_shader_load_prepare_pyramid,
+        .downsample = r3d_shader_load_prepare_downsample,
+        .ssao = r3d_shader_load_prepare_ssao,
+        .ssil = r3d_shader_load_prepare_ssil,
+        .ssgi = r3d_shader_load_prepare_ssgi,
+        .ssr = r3d_shader_load_prepare_ssr,
+        .dofCoc = r3d_shader_load_prepare_dof_coc,
+        .dofDown = r3d_shader_load_prepare_dof_down,
+        .dofBlur = r3d_shader_load_prepare_dof_blur,
+        .bloomDown = r3d_shader_load_prepare_bloom_down,
+        .bloomUp = r3d_shader_load_prepare_bloom_up,
+        .luminance = r3d_shader_load_prepare_luminance,
+        .exposureAdapt = r3d_shader_load_prepare_exposure_adapt,
+        .smaaEdgeDetection[0] = r3d_shader_load_prepare_smaa_edge_detection_low,
+        .smaaEdgeDetection[1] = r3d_shader_load_prepare_smaa_edge_detection_medium,
+        .smaaEdgeDetection[2] = r3d_shader_load_prepare_smaa_edge_detection_high,
+        .smaaEdgeDetection[3] = r3d_shader_load_prepare_smaa_edge_detection_ultra,
+        .smaaBlendingWeights[0] = r3d_shader_load_prepare_smaa_blending_weights_low,
+        .smaaBlendingWeights[1] = r3d_shader_load_prepare_smaa_blending_weights_medium,
+        .smaaBlendingWeights[2] = r3d_shader_load_prepare_smaa_blending_weights_high,
+        .smaaBlendingWeights[3] = r3d_shader_load_prepare_smaa_blending_weights_ultra,
+        .cubemapFromEquirectangular = r3d_shader_load_prepare_cubemap_from_equirectangular,
+        .cubemapIrradiance = r3d_shader_load_prepare_cubemap_irradiance,
+        .cubemapPrefilter = r3d_shader_load_prepare_cubemap_prefilter,
+        .cubemapProceduralSky = r3d_shader_load_prepare_cubemap_procedural_sky,
+        .cubemapCustomSky = r3d_shader_load_prepare_cubemap_custom_sky,
+    },
+
+    .scene = {
+        .geometry = r3d_shader_load_scene_geometry,
+        .forward = r3d_shader_load_scene_forward,
+        .unlit = r3d_shader_load_scene_unlit,
+        .background = r3d_shader_load_scene_background,
+        .skybox = r3d_shader_load_scene_skybox,
+        .depth = r3d_shader_load_scene_depth,
+        .depthCube = r3d_shader_load_scene_depth_cube,
+        .probeForward = r3d_shader_load_scene_probe_forward,
+        .probeUnlit = r3d_shader_load_scene_probe_unlit,
+        .decal = r3d_shader_load_scene_decal,
+    },
+
+    .deferred = {
+        .ambient = r3d_shader_load_deferred_ambient,
+        .lighting = r3d_shader_load_deferred_lighting,
+        .compose = r3d_shader_load_deferred_compose,
+        .fog = r3d_shader_load_deferred_fog,
+        .vfogTransmittance = r3d_shader_load_deferred_vfog_transmittance,
+        .vfogRadiance = r3d_shader_load_deferred_vfog_radiance,
+        .vfogCompose = r3d_shader_load_deferred_vfog_compose,
+    },
+
+    .post = {
+        .dof = r3d_shader_load_post_dof,
+        .bloom = r3d_shader_load_post_bloom,
+        .autoExposure = r3d_shader_load_post_auto_exposure,
+        .screen = r3d_shader_load_post_screen,
+        .output = r3d_shader_load_post_output,
+        .fxaa[0] = r3d_shader_load_post_fxaa_low,
+        .fxaa[1] = r3d_shader_load_post_fxaa_medium,
+        .fxaa[2] = r3d_shader_load_post_fxaa_high,
+        .fxaa[3] = r3d_shader_load_post_fxaa_ultra,
+        .smaa[0] = r3d_shader_load_post_smaa_low,
+        .smaa[1] = r3d_shader_load_post_smaa_medium,
+        .smaa[2] = r3d_shader_load_post_smaa_high,
+        .smaa[3] = r3d_shader_load_post_smaa_ultra,
+        .visualizer = r3d_shader_load_post_visualizer,
+    },
+
+    .blit = {
+        .commonCopy = r3d_shader_load_blit_common_copy,
+        .commonNearest = r3d_shader_load_blit_common_nearest,
+        .commonLinear = r3d_shader_load_blit_common_linear,
+        .upBicubic = r3d_shader_load_blit_up_bicubic,
+        .upLanczos = r3d_shader_load_blit_up_lanczos,
+        .downRgss = r3d_shader_load_blit_down_rgss,
+        .downPdss = r3d_shader_load_blit_down_pdss,
+    },
+
+};
+
+// ========================================
+// MODULE FUNCTIONS
+// ========================================
+
+/*
+ * Module initialization function.
+ * Called once during `R3D_Init()`
+ */
+bool r3d_shader_init(void);
+
+/*
+ * Module deinitialization function.
+ * Called once during `R3D_Close()`
+ */
+void r3d_shader_quit(void);
+
+/*
+ * Binds the texture to the specified sampler.
+ * Called by `R3D_SHADER_BIND_SAMPLER`, no need to call it manually.
+ */
+void r3d_shader_bind_sampler(r3d_shader_sampler_t sampler, GLuint texture);
+
+/*
+ * Upload and bind the specified uniform block with the provided data.
+ */
+void r3d_shader_set_uniform_block(r3d_shader_block_t block, const void* data, bool orphan);
+
+/*
+ * Only bind the specified uniform block without change its data.
+ */
+void r3d_shader_bind_uniform_block(r3d_shader_block_t block);
+
+/*
+ * Allocates a new custom shader with its program in a single contiguous block.
+ * The shader is marked as the program owner and is responsible for freeing it.
+ * Returns NULL on allocation failure.
+ */
+r3d_shader_custom_t* r3d_shader_custom_alloc(void);
+
+/*
+ * Creates a shallow clone of an existing custom shader.
+ * The clone shares the same program pointer but is not its owner.
+ * Sampler slots are copied without their texture bindings.
+ * If the source has a uniform buffer, a new GPU buffer is allocated
+ * with the same layout but zeroed data.
+ * Returns NULL on allocation failure.
+ */
+r3d_shader_custom_t* r3d_shader_custom_clone(r3d_shader_custom_t* custom);
+
+/*
+ * Releases the GPU and CPU resources of a custom shader.
+ * Always frees the uniform buffer if present.
+ * Only deletes the GL programs if the shader owns them.
+ * Safe to call with NULL.
+ */
+void r3d_shader_custom_free(r3d_shader_custom_t* custom);
+
+/*
+ * Finalizes the uniform buffer layout and allocates the GPU buffer.
+ * Must be called after all uniform entries have been registered,
+ * passing the current accumulated byte offset as `currentOffset`.
+ * Does nothing if no uniform entries are defined.
+ */
+void r3d_shader_custom_init_uniforms(r3d_shader_custom_t* custom, int currentOffset);
+
+/*
+ * Sets the value of a client-side uniform, marks its state as dirty, and flags it for upload.
+ */
+bool r3d_shader_custom_set_uniform(r3d_shader_custom_t* shader, const char* name, const void* value);
+
+/*
+ * Assigns a texture to a sampler; it must be bound afterwards.
+ */
+bool r3d_shader_custom_set_sampler(r3d_shader_custom_t* shader, const char* name, Texture texture);
+
+/*
+ * Checks if any uniforms are dirty and need to be uploaded then bind it.
+ * Automatically called when `R3D_SHADER_USE` (OVR/OPT) is invoked with a custom shader.
+ */
+void r3d_shader_custom_bind_uniforms(r3d_shader_custom_t* shader);
+
+/*
+ * Binds the textures of a custom shader and verifies the state of its samplers then bind them.
+ * Automatically called when `R3D_SHADER_USE` (OVR/OPT) is invoked with a custom shader.
+ */
+void r3d_shader_custom_bind_samplers(r3d_shader_custom_t* shader);
+
+/*
+ * Invalidate the internal state cache.
+ * Use program zero, and unbind all textures.
+ */
+void r3d_shader_invalidate_cache(void);
+
+#endif // R3D_MODULE_SHADER_H

@@ -1,0 +1,142 @@
+/* r3d_animation.c -- R3D Animation Module.
+ *
+ * Copyright (c) 2025-2026 Le Juez Victor
+ *
+ * This software is provided 'as-is', without any express or implied warranty.
+ * For conditions of distribution and use, see accompanying LICENSE file.
+ */
+
+#include <r3d/r3d_animation.h>
+#include <r3d_config.h>
+#include <raymath.h>
+#include <string.h>
+#include <glad.h>
+
+#include "./common/r3d_helper.h"
+
+#ifdef R3D_SUPPORT_ASSIMP
+#   include "./importer/r3d_importer_internal.h"
+#endif
+
+// ========================================
+// PUBLIC API
+// ========================================
+
+R3D_AnimationLib R3D_LoadAnimationLib(const char* filePath)
+{
+    R3D_AnimationLib animLib = {0};
+
+#ifdef R3D_SUPPORT_ASSIMP
+    R3D_Importer* importer = R3D_LoadImporter(filePath, 0);
+    if (importer == NULL) return (R3D_AnimationLib) {0};
+
+    animLib = R3D_LoadAnimationLibFromImporter(importer);
+    R3D_UnloadImporter(importer);
+
+#else
+    R3D_TRACELOG(LOG_WARNING, "Cannot load '%s': built without Assimp support", filePath);
+
+#endif // R3D_SUPPORT_ASSIMP
+
+    return animLib;
+}
+
+R3D_AnimationLib R3D_LoadAnimationLibFromMemory(const void* data, unsigned int size, const char* hint)
+{
+    R3D_AnimationLib animLib = {0};
+
+#ifdef R3D_SUPPORT_ASSIMP
+    R3D_Importer* importer = R3D_LoadImporterFromMemory(data, size, hint, 0);
+    if (importer == NULL) return (R3D_AnimationLib) {0};
+
+    animLib = R3D_LoadAnimationLibFromImporter(importer);
+    R3D_UnloadImporter(importer);
+
+#else
+    if (hint && hint[0] != '\0') {
+        R3D_TRACELOG(LOG_WARNING, "Cannot load '%s' from memory: built without Assimp support", hint);
+    }
+    else {
+        R3D_TRACELOG(LOG_WARNING, "Cannot load asset from memory: built without Assimp support");
+    }
+
+#endif // R3D_SUPPORT_ASSIMP
+
+    return animLib;
+}
+
+R3D_AnimationLib R3D_LoadAnimationLibFromImporter(const R3D_Importer* importer)
+{
+    R3D_AnimationLib animLib = {0};
+
+#ifdef R3D_SUPPORT_ASSIMP
+    if (!importer)
+    {
+        R3D_TRACELOG(LOG_WARNING, "Cannot load animation library from importer: NULL importer");
+        return animLib;
+    }
+
+    if (r3d_importer_load_animations(importer, &animLib))
+    {
+        R3D_TRACELOG(LOG_INFO, "Animation library loaded successfully (%d animations): '%s'", animLib.count, importer->name);
+    }
+    else
+    {
+        R3D_TRACELOG(LOG_WARNING, "Failed to load animation library: '%s'", importer->name);
+    }
+
+#else
+    R3D_TRACELOG(LOG_WARNING, "Cannot load animation library from importer: built without Assimp support");
+
+#endif // R3D_SUPPORT_ASSIMP
+
+    return animLib;
+}
+
+void R3D_UnloadAnimationLib(R3D_AnimationLib animLib)
+{
+    if (!animLib.animations) return;
+
+    for (int i = 0; i < animLib.count; ++i)
+    {
+        R3D_Animation* anim = &animLib.animations[i];
+
+        for (int j = 0; j < anim->channelCount; ++j)
+        {
+            R3D_AnimationChannel* channel = &anim->channels[j];
+
+            r3d_free((void*)channel->translation.times);
+            r3d_free((void*)channel->translation.values);
+
+            r3d_free((void*)channel->rotation.times);
+            r3d_free((void*)channel->rotation.values);
+
+            r3d_free((void*)channel->scale.times);
+            r3d_free((void*)channel->scale.values);
+        }
+
+        r3d_free(anim->channels);
+    }
+
+    r3d_free(animLib.animations);
+}
+
+int R3D_GetAnimationIndex(R3D_AnimationLib animLib, const char* name)
+{
+    for (int i = 0; i < animLib.count; i++)
+    {
+        if (strcmp(animLib.animations[i].name, name) == 0)
+        {
+            return i;
+        }
+    }
+    return -1;
+}
+
+R3D_Animation* R3D_GetAnimation(R3D_AnimationLib animLib, const char* name)
+{
+    int index = R3D_GetAnimationIndex(animLib, name);
+    if (index < 0) return NULL;
+
+    return &animLib.animations[index];
+}

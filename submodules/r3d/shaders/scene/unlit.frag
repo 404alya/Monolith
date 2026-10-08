@@ -1,0 +1,58 @@
+/* unlit.frag -- Fragment shader used for unlit objects
+ *
+ * Copyright (c) 2025-2026 Le Juez Victor
+ *
+ * This software is provided 'as-is', without any express or implied warranty.
+ * For conditions of distribution and use, see accompanying LICENSE file.
+ */
+
+#version 330 core
+
+// ================================
+// Includes
+// ================================
+
+#include <ubo/frame.glsl>
+#include <wrap/fog.glsl>
+
+// ================================
+// In - Varyings
+// ================================
+
+smooth in vec3 vPosition;       //< For custom shaders
+smooth in vec2 vTexCoord;
+smooth in vec4 vColor;
+
+smooth in float vLinearDepth;
+
+// ================================
+// Out - Fragments
+// ================================
+
+layout(location = 0) out vec4 FragColor;
+
+// ================================
+// Samplers & Uniforms
+// ================================
+
+uniform sampler2D uAlbedoMap;
+uniform float uAlphaCutoff;
+uniform float uCutoffSign;
+
+// ================================
+// User Override
+// ================================
+
+#include <user/scene.frag>
+
+// ================================
+// Main Function
+// ================================
+
+void main()
+{
+    SceneFragment(vTexCoord, mat3(1.0), uAlphaCutoff, uCutoffSign);
+
+    FragColor = vec4(ALBEDO, ALPHA);
+    FragColor = FogColorMix(FragColor, vLinearDepth);
+}

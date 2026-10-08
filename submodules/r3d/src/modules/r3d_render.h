@@ -1,0 +1,497 @@
+/* r3d_render.h -- Internal R3D render module.
+ *
+ * Copyright (c) 2025-2026 Le Juez Victor
+ *
+ * This software is provided 'as-is', without any express or implied warranty.
+ * For conditions of distribution and use, see accompanying LICENSE file.
+ */
+
+#ifndef R3D_MODULE_RENDER_H
+#define R3D_MODULE_RENDER_H
+
+#include <r3d/r3d_animation.h>
+#include <r3d/r3d_instance.h>
+#include <r3d/r3d_material.h>
+#include <r3d/r3d_skeleton.h>
+#include <r3d/r3d_frustum.h>
+#include <r3d/r3d_decal.h>
+#include <r3d/r3d_mesh.h>
+#include <glad.h>
+
+#include "../common/r3d_list.h"
+
+// ========================================
+// HELPER MACROS
+// ========================================
+
+/*
+ * Iterate over multiple render lists in the order specified by the variadic arguments,
+ * yielding a pointer to each r3d_render_call_t.
+ *
+ * The optional 'cond' expression filters calls before culling (use `true` if unused).
+ * The optional 'frustum' pointer enables frustum culling; pass NULL to disable it.
+ *
+ * Intended for internal rendering passes only.
+ */
+#define R3D_RENDER_FOR_EACH(call, cond, frustum, ...)                                               \
+    for (int _lists[] = {__VA_ARGS__}, _list_idx = 0, _i = 0, _keep = 1;                            \
+         _list_idx < (int)(sizeof(_lists)/sizeof(_lists[0]));                                       \
+         ((size_t)_i >= R3D_LIST_LENGTH(R3D_MOD_RENDER.list[_lists[_list_idx]]) ?                   \
+          (_list_idx++, _i = 0) : 0))                                                               \
+        for (; _list_idx < (int)(sizeof(_lists)/sizeof(_lists[0])) &&                               \
+               (size_t)_i < R3D_LIST_LENGTH(R3D_MOD_RENDER.list[_lists[_list_idx]]);                \
+             _i++, _keep = 1)                                                                       \
+            for (const r3d_render_call_t* call =                                                    \
+                 &R3D_LIST_GET(R3D_MOD_RENDER.calls, r3d_render_call_t,                             \
+                     R3D_LIST_GET(R3D_MOD_RENDER.list[_lists[_list_idx]], int, _i));                \
+                 _keep && (cond) && (!(frustum) || r3d_render_call_is_visible(call, (frustum)));    \
+                 _keep = 0)
+
+/*
+ * glDrawArrays call on the 3-vertcies dummy VAO for screen-space rendering.
+ */
+#define R3D_RENDER_SCREEN() do {                    \
+    r3d_render_draw_shape(R3D_RENDER_SHAPE_DUMMY);  \
+} while(0)
+
+/*
+ * Draw a centered quad of dimensions 1.0
+ */
+#define R3D_RENDER_QUAD() do {                      \
+    r3d_render_draw_shape(R3D_RENDER_SHAPE_QUAD);   \
+} while(0)
+
+/*
+ * Draw a centered cube with dimensions 1.0
+ */
+#define R3D_RENDER_CUBE() do {                      \
+    r3d_render_draw_shape(R3D_RENDER_SHAPE_CUBE);   \
+} while(0)
+
+// ========================================
+// DRAW MODULE ENUMS
+// ========================================
+
+/*
+ * Enum listing all built-in shapes that can be rendered.
+ */
+typedef enum {
+    R3D_RENDER_SHAPE_DUMMY,   //< Calls glDrawArrays with 3 vertices without an attached VBO/EBO
+    R3D_RENDER_SHAPE_QUAD,    //< Draws a quad with dimensions 1.0 (-0.5 .. +0.5)
+    R3D_RENDER_SHAPE_CUBE,    //< Draws a cube with dimensions 1.0 (-0.5 .. +0.5)
+    R3D_RENDER_SHAPE_COUNT
+} r3d_render_shape_enum_t;
+
+/*
+ * Defines the type of a draw call, used for tagged-union.
+ */
+typedef enum {
+    R3D_RENDER_CALL_MESH,
+    R3D_RENDER_CALL_DECAL
+} r3d_render_call_enum_t;
+
+/*
+ * Visibility state for a group or cluster.
+ * Used by culling passes to indicate whether drawing is required.
+ */
+typedef enum {
+    R3D_RENDER_VISBILITY_UNKNOWN = -1,    //< Visibility has not been evaluated yet
+    R3D_RENDER_VISBILITY_FALSE = 0,       //< Determined to be not visible (culled)
+    R3D_RENDER_VISBILITY_TRUE = 1,        //< Determined to be visible
+} r3d_render_visibility_enum_t;
+
+/*
+ * Sorting modes applied to render lists.
+ * Used to control draw order for depth testing efficiency or visual correctness.
+ */
+typedef enum {
+    R3D_RENDER_SORT_FRONT_TO_BACK,    //< Sort first by materials, then front to back, used for simple opaque geometry
+    R3D_RENDER_SORT_BACK_TO_FRONT,    //< Sort back to front only, used for simple transparent geometry
+    R3D_RENDER_SORT_MATERIAL_ONLY     //< Sort only by materials, used for instanced and decals
+} r3d_render_sort_enum_t;
+
+/*
+ * Enumeration of internal render lists.
+ * Lists are separated by rendering path and instancing mode.
+ */
+typedef enum {
+    R3D_RENDER_LIST_OPAQUE,
+    R3D_RENDER_LIST_BLEND,
+    R3D_RENDER_LIST_DECAL,
+    R3D_RENDER_LIST_OPAQUE_INST,
+    R3D_RENDER_LIST_BLEND_INST,
+    R3D_RENDER_LIST_DECAL_INST,
+    R3D_RENDER_LIST_COUNT,
+} r3d_render_list_enum_t;
+
+// ========================================
+// DRAW MODULE STRUCTS
+// ========================================
+
+/*
+ * Cached state of the per-instance vertex attribute bindings.
+ * Compared before each instanced draw call to avoid redundant
+ * GL attribute reconfiguration when consecutive draw calls share
+ * the same instance group.
+ */
+typedef struct r3d_render_instance_state_t {
+    GLuint buffers[R3D_INSTANCE_ATTRIBUTE_COUNT];
+    R3D_InstanceLayout layout;
+    int offset;
+} r3d_render_instance_state_t;
+
+/*
+ * Interval [offset, offset+count) into the global VBO or EBO.
+ */
+typedef struct {
+    int offset;
+    int count;
+} r3d_render_range_t;
+
+/*
+ * Internal structure for storing built-in shapes.
+ */
+typedef struct {
+    r3d_render_range_t vertices;
+    r3d_render_range_t elements;
+} r3d_render_shape_t;
+
+/*
+ * Cluster that may contain multiple render groups.
+ * Stores bounds and the evaluated visibility state.
+ */
+typedef struct {
+    BoundingBox aabb;
+    r3d_render_visibility_enum_t visible;
+} r3d_render_cluster_t;
+
+/*
+ * Visibility metadata for a render group.
+ * Holds its cluster index (if assigned) and its own visibility state.
+ * Note: a group is effectively visible only when its cluster is visible.
+ */
+typedef struct {
+    int clusterIndex;
+    r3d_render_visibility_enum_t visible;
+} r3d_render_group_visibility_t;
+
+/*
+ * Mapping structure linking render groups to their associated draw calls.
+ * Stores the range of draw calls belonging to a specific group.
+ * One entry is stored per render group.
+ */
+typedef struct {
+    int firstCall;      //< Index of the first draw call in this group
+    int numCall;        //< Number of draw calls in this group
+} r3d_render_indices_t;
+
+/*
+ * Draw group containing shared state for multiple draw calls.
+ * All draw calls pushed after a group inherit its transform, skeleton, and instancing data.
+ */
+typedef struct {
+    Matrix transform;               //< Model transformation matrix
+    R3D_OrientedBox obb;            //< Oriented bounding box of all drawables contained in the group
+    GLuint skinTexture;             //< Texture that contains the bone matrices (can be 0 for non-skinned)
+    R3D_InstanceBuffer instances;   //< Instance buffer to use
+    int instanceOffset;             //< Offset to the first instance
+    int instanceCount;              //< Number of instances
+} r3d_render_group_t;
+
+/*
+ * Represents a draw call for a mesh in `r3d_render_call_t`
+ */
+typedef struct {
+    R3D_Material material;
+    R3D_Mesh instance;
+} r3d_render_call_mesh_t;
+
+/*
+ * Represents a draw call for a decal in `r3d_render_call_t`
+ */
+typedef struct {
+    R3D_Decal instance;
+} r3d_render_call_decal_t;
+
+/*
+ * Internal representation of a single draw call.
+ * Contains all data required to issue a draw, like a mesh or decal.
+ * Transform and animation data are stored in the parent render group.
+ */
+typedef struct {
+    r3d_render_call_enum_t type;
+    union {
+        r3d_render_call_mesh_t mesh;
+        r3d_render_call_decal_t decal;
+    };
+} r3d_render_call_t;
+
+/*
+ * Sort key derived from a rendering state.
+ * Fields are declared in priority order: the first differing field
+ * encountered during comparison determines the sort result.
+ */
+typedef struct {
+    int32_t priority;       ///< User-defined render order (signed, lower = first)
+    uintptr_t shader;       ///< Shader program pointer
+    uint32_t shading;       ///< Shading mode (lit/unlit)
+    uint32_t albedo;        ///< Albedo texture ID
+    uint32_t normal;        ///< Normal map texture ID
+    uint32_t orm;           ///< ORM texture ID
+    uint32_t emission;      ///< Emission texture ID
+    uint32_t stencil;       ///< Hashed stencil state
+    uint32_t depth;         ///< Hashed depth state
+    uint8_t blend;          ///< Blend mode
+    uint8_t cull;           ///< Cull mode
+    uint8_t transparency;   ///< Transparency mode
+    uint8_t billboard;      ///< Billboard mode
+} r3d_render_sort_state_t;
+
+/*
+ * Data stored per draw call in the sort cache.
+ */
+typedef struct {
+    r3d_render_sort_state_t state;
+    float distance;
+} r3d_render_sort_t;
+
+// ========================================
+// MODULE STATE
+// ========================================
+
+/*
+ * Global internal state of the render module.
+ * Owns the draw call storage and per-pass render lists.
+ */
+extern struct r3d_mod_render {
+
+    GLuint globalVao;                                   //< Single VAO shared by all mesh and shape draw calls
+    GLuint globalVbo;                                   //< Global vertex buffer holding all mesh and shape vertices
+    GLuint globalEbo;                                   //< Global index buffer holding all mesh and shape indices
+    int globalVertexCapacity;                           //< Number of vertex slots allocated in the VBO
+    int globalElementCapacity;                          //< Number of index slots allocated in the EBO
+    int globalVertexCount;                              //< High-water mark: first never-allocated vertex offset
+    int globalElementCount;                             //< High-water mark: first never-allocated index offset
+
+    r3d_list_t* freeVertices;                           //< Free list of released vertex ranges available for reuse (list<r3d_render_range_t>)
+    r3d_list_t* freeElements;                           //< Free list of released index ranges available for reuse (list<r3d_render_range_t>)
+
+    r3d_render_instance_state_t instanceState;          //< Cached instance binding configuration
+    r3d_render_shape_t shapes[R3D_RENDER_SHAPE_COUNT];  //< Array of built-in shapes buffers
+
+    r3d_list_t* clusters;                               //< Array of render clusters (list<r3d_render_cluster_t>)
+    int activeCluster;                                  //< Index of the active cluster for new render groups (-1 if no active clusters)
+
+    r3d_list_t* groupVisibility;                        //< Array containing visibility info for each render group (list<r3d_render_group_visibility_t>, generated during group culling)
+    r3d_list_t* callIndices;                            //< Array of draw call index ranges for each render group (list<r3d_render_indices_t>, automatically managed)
+    r3d_list_t* groups;                                 //< Array of render groups (list<r3d_render_group_t>, shared data across draw calls)
+
+    r3d_list_t* list[R3D_RENDER_LIST_COUNT];            //< List of draw call indices per render pass (list<int>)
+    r3d_list_t* sortCache;                              //< Draw call sorting data cache array (list<r3d_render_sort_t>)
+    r3d_list_t* calls;                                  //< Array of draw calls (list<r3d_render_call_t>)
+    r3d_list_t* groupIndices;                           //< Array of group indices for each draw call (list<int>, automatically managed)
+
+    bool groupCulled;                                   //< Indicates if groups already culled (controls visibility reset)
+
+} R3D_MOD_RENDER;
+
+// ========================================
+// MODULE FUNCTIONS
+// ========================================
+
+/*
+ * Module initialization function.
+ * Called once during `R3D_Init()`
+ */
+bool r3d_render_init(void);
+
+/*
+ * Module deinitialization function.
+ * Called once during `R3D_Close()`
+ */
+void r3d_render_quit(void);
+
+/*
+ * Allocates 'count' vertex slots from the global VBO; returns their offset via 'outOffset'.
+ * Reuses a free block when possible, otherwise extends the buffer (growing it if needed).
+ */
+bool r3d_render_alloc_vertices(int count, int* outOffset);
+
+/*
+ * Allocates 'count' index slots from the global EBO; returns their offset via 'outOffset'.
+ * Reuses a free block when possible, otherwise extends the buffer (growing it if needed).
+ */
+bool r3d_render_alloc_elements(int count, int* outOffset);
+
+/*
+ * Resizes an existing vertex allocation to 'newCount' slots, updating '*offset' and '*count'.
+ * Shrinking always succeeds in-place. Growing tries to extend in-place before relocating;
+ * if relocated and 'keepData' is true, existing GPU data is copied to the new location.
+ */
+bool r3d_render_realloc_vertices(int* offset, int* count, int newCount, bool keepData);
+
+/*
+ * Resizes an existing element allocation to 'newCount' slots, updating '*offset' and '*count'.
+ * Shrinking always succeeds in-place. Growing tries to extend in-place before relocating;
+ * if relocated and 'keepData' is true, existing GPU data is copied to the new location.
+ */
+bool r3d_render_realloc_elements(int* offset, int* count, int newCount, bool keepData);
+
+/*
+ * Returns 'count' vertex slots starting at 'offset' to the free list.
+ * Adjacent free blocks are merged immediately to limit fragmentation.
+ */
+void r3d_render_free_vertices(int offset, int count);
+
+/*
+ * Returns 'count' index slots starting at 'offset' to the free list.
+ * Adjacent free blocks are merged immediately to limit fragmentation.
+ */
+void r3d_render_free_elements(int offset, int count);
+
+/*
+ * Uploads 'count' vertices to the global VBO at 'offset'. Does not allocate; caller must
+ * hold a valid allocation covering [offset, offset+count).
+ */
+void r3d_render_upload_vertices(int offset, const R3D_Vertex* verts, int count);
+
+/*
+ * Uploads 'count' indices to the global EBO at 'offset'. Does not allocate; caller must
+ * hold a valid allocation covering [offset, offset+count).
+ */
+void r3d_render_upload_elements(int offset, const GLuint* indices, int count);
+
+/*
+ * Clear all render lists and reset the draw call buffer for the next frame.
+ */
+void r3d_render_clear(void);
+
+/*
+ * Begins a new render cluster with the given bounds.
+ * All subsequent render group pushes will belong to this cluster.
+ * Returns false if a cluster is already active or allocation fails.
+ */
+bool r3d_render_cluster_begin(BoundingBox aabb);
+
+/*
+ * Ends the currently active render cluster.
+ * Returns false if no cluster is currently active.
+ */
+bool r3d_render_cluster_end(void);
+
+/*
+ * Push a new render group. All subsequent draw calls will belong to this group
+ * until a new group is pushed.
+ */
+void r3d_render_group_push(const r3d_render_group_t* group);
+
+/*
+ * Push a new draw call to the appropriate render list.
+ * The draw call data is copied internally.
+ * Inherits the group previously pushed.
+ */
+void r3d_render_call_push(const r3d_render_call_t* call);
+
+/*
+ * Retrieve the render group associated with a given draw call.
+ * Returns a pointer to the parent group containing shared transform and instancing data.
+ */
+r3d_render_group_t* r3d_render_get_call_group(const r3d_render_call_t* call);
+
+/*
+ * Builds the list of groups that are visible inside the given frustum.
+ * Must be called before issuing visibility tests with the same frustum.
+ */
+void r3d_render_cull_groups(const R3D_Frustum* frustum);
+
+/*
+ * Returns true if the draw call is visible within the given frustum.
+ * Uses both per-call culling and the results produced by `r3d_render_cull_groups()`
+ * Make sure to compute visible groups with the same frustum before calling this function.
+ */
+bool r3d_render_call_is_visible(const r3d_render_call_t* call, const R3D_Frustum* frustum);
+
+/*
+ * Sort a render list according to the given mode and camera position.
+ */
+void r3d_render_sort_list(r3d_render_list_enum_t list, Vector3 viewPosition, r3d_render_sort_enum_t mode);
+
+/*
+ * Binds the global VAO, making it active for all subsequent draw calls.
+ * Must be called once before any r3d_render_draw* calls in a rendering pass.
+ */
+void r3d_render_prepare_drawing(void);
+
+/*
+ * Issue a non-instanced draw call.
+ */
+void r3d_render_draw(const r3d_render_call_t* call);
+
+/*
+ * Issue an instanced draw call.
+ * Instance data is bound internally.
+ */
+void r3d_render_draw_instanced(const r3d_render_call_t* call);
+
+/*
+ * Bind, draws the shape, and unbind the VAO of the shape.
+ */
+void r3d_render_draw_shape(r3d_render_shape_enum_t shape);
+
+// ----------------------------------------
+// INLINE QUERIES
+// ----------------------------------------
+
+/*
+ * Check whether a render group has valid instancing data.
+ * Returns true if the draw call contains a non-null instance transform array
+ * and a positive instance count.
+ */
+static inline bool r3d_render_has_instances(const r3d_render_group_t* group)
+{
+    return (group->instances.capacity > 0) && (group->instanceCount > 0);
+}
+
+/*
+ * Check whether there are any opaque draw calls queued for the current frame.
+ * Includes both instanced and non-instanced variants.
+ */
+static inline bool r3d_render_has_opaque(void)
+{
+    return
+        (!R3D_LIST_EMPTY(R3D_MOD_RENDER.list[R3D_RENDER_LIST_OPAQUE])) ||
+        (!R3D_LIST_EMPTY(R3D_MOD_RENDER.list[R3D_RENDER_LIST_OPAQUE_INST]));
+}
+
+/*
+ * Check whether there are any blended draw calls queued for the current frame.
+ * Includes both instanced and non-instanced variants.
+ */
+static inline bool r3d_render_has_blended(void)
+{
+    return
+        (!R3D_LIST_EMPTY(R3D_MOD_RENDER.list[R3D_RENDER_LIST_BLEND])) ||
+        (!R3D_LIST_EMPTY(R3D_MOD_RENDER.list[R3D_RENDER_LIST_BLEND_INST]));
+}
+
+/*
+ * Check whether there are any decal draw calls queued for the current frame.
+ * Includes both instanced and non-instanced variants.
+ */
+static inline bool r3d_render_has_decals(void)
+{
+    return
+        (!R3D_LIST_EMPTY(R3D_MOD_RENDER.list[R3D_RENDER_LIST_DECAL])) ||
+        (!R3D_LIST_EMPTY(R3D_MOD_RENDER.list[R3D_RENDER_LIST_DECAL_INST]));
+}
+
+/*
+ * Indicates whether a draw call corresponds to an object that should be rendered in a shadow map.
+ */
+static inline bool r3d_render_should_cast_shadow(const r3d_render_call_t* call)
+{
+    return (call->mesh.material.transparencyMode == R3D_TRANSPARENCY_OPAQUE) ||
+           (call->mesh.material.transparencyMode == R3D_TRANSPARENCY_HYBRID);
+}
+
+#endif // R3D_MODULE_RENDER_H

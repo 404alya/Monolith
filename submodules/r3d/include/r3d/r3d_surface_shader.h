@@ -1,0 +1,135 @@
+/* r3d_surface_shader.h -- R3D Surface Shader Module.
+ *
+ * Copyright (c) 2025-2026 Le Juez Victor
+ *
+ * This software is provided 'as-is', without any express or implied warranty.
+ * For conditions of distribution and use, see accompanying LICENSE file.
+ */
+
+#ifndef R3D_SURFACE_SHADER_H
+#define R3D_SURFACE_SHADER_H
+
+#include "./r3d_platform.h"
+#include <raylib.h>
+
+/**
+ * @defgroup SurfaceShader
+ * @{
+ */
+
+// ========================================
+// OPAQUE TYPES
+// ========================================
+
+typedef struct R3D_ShaderCustom R3D_SurfaceShader;
+
+// ========================================
+// PUBLIC API
+// ========================================
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/**
+ * @brief Loads a surface shader from a file.
+ *
+ * The shader must define at least one entry point: `void vertex()` or `void fragment()`.
+ * It can define either one or both.
+ *
+ * @param filePath Path to the shader source file.
+ * @return Pointer to the loaded surface shader, or NULL on failure.
+ */
+R3DAPI R3D_SurfaceShader* R3D_LoadSurfaceShader(const char* filePath);
+
+/**
+ * @brief Loads a surface shader from a source code string in memory.
+ *
+ * The shader must define at least one entry point: `void vertex()` or `void fragment()`.
+ * It can define either one or both.
+ *
+ * @param code Null-terminated shader source code.
+ * @return Pointer to the loaded surface shader, or NULL on failure.
+ */
+R3DAPI R3D_SurfaceShader* R3D_LoadSurfaceShaderFromMemory(const char* code);
+
+/**
+ * @brief Creates an alias of an existing surface shader.
+ *
+ * The alias shares the same compiled program as the original but holds its own
+ * independent uniform and sampler state, allowing the same shader to be used
+ * multiple times within a single frame with different values.
+ *
+ * Uniform and sampler state is copied from the original at the moment this
+ * function is called, not from the shader source defaults. Any values set
+ * on the original after compilation but before this call will be reflected
+ * in the alias; values set afterward will not.
+ *
+ * @note The alias does not own the program. Always unload all aliases before
+ *       unloading the original, or the alias program references become dangling.
+ *
+ * @param shader The original surface shader to alias.
+ * @return Pointer to the alias, or NULL on failure.
+ */
+R3DAPI R3D_SurfaceShader* R3D_LoadSurfaceShaderAlias(R3D_SurfaceShader* shader);
+
+/**
+ * @brief Unloads and destroys a surface shader.
+ *
+ * If the shader owns its program shaders (i.e. it was created with @ref R3D_LoadSurfaceShader
+ * or @ref R3D_LoadSurfaceShaderFromMemory), they are deleted. Aliases created from this
+ * shader via @ref R3D_LoadSurfaceShaderAlias must be unloaded beforehand, as they
+ * share the same programs and will be left with dangling references.
+ *
+ * @param shader Surface shader to unload.
+ */
+R3DAPI void R3D_UnloadSurfaceShader(R3D_SurfaceShader* shader);
+
+/**
+ * @brief Sets a uniform value for the current frame.
+ *
+ * Once a uniform is set, it remains valid for the all frames.
+ * If an uniform is set multiple times during the same frame,
+ * the last value defined before R3D_End() is used.
+ *
+ * Supported types:
+ * bool, int, float,
+ * ivec2, ivec3, ivec4,
+ * vec2, vec3, vec4,
+ * mat2, mat3, mat4
+ *
+ * @warning Boolean values are read as 4 bytes.
+ *
+ * @param shader Target surface shader.
+ *               May be NULL. In that case, the call is ignored
+ *               and a warning is logged.
+ * @param name   Name of the uniform. Must not be NULL.
+ * @param value  Pointer to the uniform value. Must not be NULL.
+ */
+R3DAPI void R3D_SetSurfaceShaderUniform(R3D_SurfaceShader* shader, const char* name, const void* value);
+
+/**
+ * @brief Sets a texture sampler for the current frame.
+ *
+ * Once a sampler is set, it remains valid for all frames.
+ * If a sampler is set multiple times during the same frame,
+ * the last value defined before R3D_End() is used.
+ *
+ * Supported samplers:
+ * sampler1D, sampler2D, sampler3D, samplerCube
+ *
+ * @param shader  Target surface shader.
+ *                May be NULL. In that case, the call is ignored
+ *                and a warning is logged.
+ * @param name    Name of the sampler uniform. Must not be NULL.
+ * @param texture Texture to bind to the sampler.
+ */
+R3DAPI void R3D_SetSurfaceShaderSampler(R3D_SurfaceShader* shader, const char* name, Texture texture);
+
+#ifdef __cplusplus
+} // extern "C"
+#endif
+
+/** @} */ // end of SurfaceShader
+
+#endif // R3D_SURFACE_SHADER_H

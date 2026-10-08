@@ -1,0 +1,15 @@
+build/
+build-linux/
+build-mingw/
+screenshot*.png
+
+# Benchmark reports written by --bench (local results)
+benchmark/
+
+# Local editor config (machine-specific absolute paths)
+.clangd
+
+# Vendored R3D: parts not used by the monolith build (examples/tests are OFF)
+submodules/r3d/examples/
+submodules/r3d/external/assimp/test/
+submodules/r3d/external/raylib/examples/

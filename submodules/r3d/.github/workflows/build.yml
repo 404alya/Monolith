@@ -1,0 +1,181 @@
+name: Multi-Platform Build
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'scripts/**'
+      - 'shaders/**'
+      - 'CMakeLists.txt'
+      - '**/CMakeLists.txt'
+      - '.github/workflows/**'
+  pull_request:
+    branches: [master]
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'scripts/**'
+      - 'shaders/**'
+      - 'CMakeLists.txt'
+      - '**/CMakeLists.txt'
+      - '.github/workflows/**'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-2022, macos-latest] # TODO: revert to windows-latest when VS2026 is stable on GitHub (cl.exe compiler bug)
+        build_type: [Release]
+        c_compiler: [gcc, clang, cl]
+        include:
+          - { os: windows-2022,  c_compiler: cl,    cpp_compiler: cl,      cache_tool: sccache }
+          - { os: windows-2022,  c_compiler: gcc,   cpp_compiler: g++,     cache_tool: ccache  }
+          - { os: ubuntu-latest,  c_compiler: gcc,   cpp_compiler: g++,     cache_tool: ccache  }
+          - { os: ubuntu-latest,  c_compiler: clang, cpp_compiler: clang++, cache_tool: ccache  }
+          - { os: macos-latest,   c_compiler: gcc,   cpp_compiler: g++,     cache_tool: ccache  }
+          - { os: macos-latest,   c_compiler: clang, cpp_compiler: clang++, cache_tool: ccache  }
+        exclude:
+          - { os: windows-2022,   c_compiler: clang }
+          - { os: ubuntu-latest,  c_compiler: cl    }
+          - { os: macos-latest,   c_compiler: cl    }
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # === Cache =========================================================
+
+      - name: Setup build cache (${{ matrix.cache_tool }})
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          variant: ${{ matrix.cache_tool }}
+          key: ${{ matrix.os }}-${{ matrix.c_compiler }}-${{ matrix.build_type }}
+          max-size: 500M
+
+      # === Toolchain =====================================================
+
+      - name: Setup MSVC
+        if: runner.os == 'Windows' && matrix.c_compiler == 'cl'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Setup MinGW-w64
+        if: runner.os == 'Windows' && matrix.c_compiler == 'gcc'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-python
+            mingw-w64-x86_64-ccache
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build \
+            libglfw3 libglfw3-dev \
+            libx11-dev libxcursor-dev libxrandr-dev \
+            libxinerama-dev libxi-dev libxext-dev libxfixes-dev \
+            libwayland-dev libwayland-bin libxkbcommon-dev
+
+      # === Configure =====================================================
+
+      - name: Configure CMake (MinGW)
+        if: runner.os == 'Windows' && matrix.c_compiler == 'gcc'
+        shell: msys2 {0}
+        run: |
+          cmake -B build -G "Ninja" \
+            -DCMAKE_C_COMPILER=${{ matrix.c_compiler }} \
+            -DCMAKE_CXX_COMPILER=${{ matrix.cpp_compiler }} \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DR3D_RAYLIB_VENDORED=ON \
+            -DR3D_ASSIMP_VENDORED=ON \
+            -DR3D_BUILD_EXAMPLES=ON \
+            -DR3D_BUILD_DOCS=OFF
+
+      - name: Configure CMake (MSVC)
+        if: runner.os == 'Windows' && matrix.c_compiler == 'cl'
+        run: |
+          cmake -B build -G "Ninja" `
+            -DCMAKE_C_COMPILER=cl `
+            -DCMAKE_CXX_COMPILER=cl `
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} `
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache `
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache `
+            "-DCMAKE_CXX_FLAGS_INIT=/Brepro /Zc:inline" `
+            "-DCMAKE_C_FLAGS_INIT=/Brepro /Zc:inline" `
+            -DBUILD_SHARED_LIBS=OFF `
+            -DASSIMP_INSTALL_PDB=OFF `
+            -DR3D_RAYLIB_VENDORED=ON `
+            -DR3D_ASSIMP_VENDORED=ON `
+            -DR3D_BUILD_EXAMPLES=ON `
+            -DR3D_BUILD_DOCS=OFF
+
+      - name: Configure CMake (Linux / macOS)
+        if: runner.os == 'Linux' || runner.os == 'macOS'
+        run: |
+          cmake -B build -G "Ninja" \
+            -DCMAKE_C_COMPILER=${{ matrix.c_compiler }} \
+            -DCMAKE_CXX_COMPILER=${{ matrix.cpp_compiler }} \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DR3D_RAYLIB_VENDORED=ON \
+            -DR3D_ASSIMP_VENDORED=ON \
+            -DR3D_BUILD_EXAMPLES=ON \
+            -DR3D_BUILD_DOCS=OFF
+
+      # === Build =========================================================
+
+      - name: Build (MinGW)
+        if: runner.os == 'Windows' && matrix.c_compiler == 'gcc'
+        shell: msys2 {0}
+        run: cmake --build build --config ${{ matrix.build_type }} --parallel
+
+      - name: Build (MSVC / Linux / macOS)
+        if: runner.os != 'Windows' || matrix.c_compiler == 'cl'
+        run: cmake --build build --config ${{ matrix.build_type }} --parallel
+
+      # === Tests =========================================================
+
+      - name: Run tests (MinGW)
+        if: runner.os == 'Windows' && matrix.c_compiler == 'gcc'
+        shell: msys2 {0}
+        working-directory: build
+        run: ctest --build-config ${{ matrix.build_type }}
+
+      - name: Run tests (MSVC / Linux / macOS)
+        if: runner.os != 'Windows' || matrix.c_compiler == 'cl'
+        working-directory: build
+        run: ctest --build-config ${{ matrix.build_type }}
+
+      # === Artifacts =====================================================
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: r3d-${{ matrix.os }}-${{ matrix.build_type }}-${{ matrix.c_compiler }}
+          path: |
+            build/**/*.dll
+            build/**/*.so
+            build/**/*.a
+            build/**/*.lib
+            build/**/*.dylib
+          retention-days: 14
