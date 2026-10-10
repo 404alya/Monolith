@@ -35,6 +35,7 @@ option(R3D_ASSIMP_VENDORED "Use vendored assimp from submodule" OFF)
 option(R3D_SUPPORT_ASSIMP "Build with Assimp importer support" ON)
 option(R3D_BUILD_EXAMPLES "Build the examples" ${R3D_IS_MAIN})
 option(R3D_BUILD_DOCS "Build the doxygen documentation" OFF)
+option(R3D_GPU_PROFILER "Compile in the per-pass GPU timer queries (local patch, see patches.md)" OFF)
 
 # ========================================
 # Output Directories
@@ -318,6 +319,8 @@ embed_shaders(${PROJECT_NAME}
     "${R3D_ROOT_PATH}/shaders/prepare/luminance.frag"
     "${R3D_ROOT_PATH}/shaders/prepare/exposure_adapt.frag"
     "${R3D_ROOT_PATH}/shaders/prepare/pyramid.frag"
+    "${R3D_ROOT_PATH}/shaders/prepare/shadow_minmax.frag"
+    "${R3D_ROOT_PATH}/shaders/prepare/fog_sunvol.frag"
     "${R3D_ROOT_PATH}/shaders/prepare/ssao.frag"
     "${R3D_ROOT_PATH}/shaders/prepare/ssil.frag"
     "${R3D_ROOT_PATH}/shaders/prepare/ssgi.frag"
@@ -424,6 +427,11 @@ endif()
 
 if(CMAKE_VERSION VERSION_GREATER 3.12)
     set_property(TARGET ${PROJECT_NAME} PROPERTY C_STANDARD 11)
+endif()
+
+# Local patch (see patches.md): per-pass GPU profiler, see include/r3d/r3d_profiler.h
+if(R3D_GPU_PROFILER)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE R3D_GPU_PROFILER)
 endif()
 
 if(MSVC)

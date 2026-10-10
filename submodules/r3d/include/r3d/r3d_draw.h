@@ -155,6 +155,48 @@ R3DAPI void R3D_PushLight(R3D_Light light);
 R3DAPI void R3D_PushLightEx(R3D_Light light, R3D_ShadowMap map, bool updateShadow);
 
 /**
+ * @brief Like R3D_PushLightEx() for a directional light, but the caller fits the shadow map.
+ *
+ * Local monolith patch (see patches.md). R3D normally fits a directional shadow map to
+ * the camera frustum, so its coverage moves whenever the camera moves or turns. Here
+ * the map is rendered with lightViewProj instead (an orthographic light-space matrix,
+ * e.g. a world-fixed tile), and sampled with the matrix it was last rendered with, so
+ * a static scene can render it once and only sample it afterwards.
+ *
+ * The map is rendered when updateShadow is true or when it has never been rendered;
+ * otherwise lightViewProj is ignored. Shadows fade by distance from the eye over
+ * 75..100% of light.range, as usual, and over the outer 1% of the map.
+ * For other light types this is R3D_PushLightEx() (lightViewProj ignored).
+ */
+R3DAPI void R3D_PushLightFixedShadow(R3D_Light light, R3D_ShadowMap map, Matrix lightViewProj, bool updateShadow);
+
+/**
+ * @brief Bakes the sun visibility the volumetric fog samples into a 3D texture.
+ *
+ * Local monolith patch (see patches.md). For a static directional light over static
+ * geometry, the fog march's shadow lookups are a fixed function of the world position.
+ * Call this between R3D_Begin() and R3D_End(), after the frame's draws (they are the
+ * shadow casters): during R3D_End() 'map' is rendered with lightViewProj (which must
+ * cover 'region' in light space), then every voxel of 'region' stores the mean shadow
+ * visibility over subsamples^3 points inside it (GL_R8, trilinear). From then on the
+ * fog's march takes one fetch per step for directional lights inside the region and
+ * falls back to the shadow map outside it. Bias and softness: the map's depthBias;
+ * the PCF softness is replaced by the voxel box filter.
+ *
+ * The baked layer keeps lightViewProj as its matrix (re-render it before using it as a
+ * normal shadow map again). The volume stays until the next bake or
+ * R3D_ClearFogSunVisibility(); re-bake whenever the geometry or the light changes.
+ * VRAM: one byte per voxel.
+ */
+R3DAPI void R3D_BakeFogSunVisibility(R3D_ShadowMap map, Matrix lightViewProj, BoundingBox region, float voxelSize, int subsamples);
+
+/** @brief Drops the baked fog sun visibility: the fog samples the shadow map again everywhere. */
+R3DAPI void R3D_ClearFogSunVisibility(void);
+
+/** @brief GPU time of the last fog sun-visibility bake in ms (0 = none yet), measured with glFinish. */
+R3DAPI float R3D_GetFogSunVisibilityBakeTime(void);
+
+/**
  * @brief Queues a probe to be rendered for the current frame.
  *
  * The probe is submitted for rendering during R3D_End(), and must be pushed

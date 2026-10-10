@@ -10,6 +10,7 @@
 
 #include <ubo/view.glsl>
 #include <wrap/fog.glsl>
+#include <wrap/view.glsl>
 
 noperspective in vec2 vTexCoord;
 uniform sampler2D uDepthTex;
@@ -18,5 +19,9 @@ out vec4 FragColor;
 void main()
 {
     float depth = texelFetch(uDepthTex, ivec2(gl_FragCoord.xy), 0).r;
-    FragColor = FogColorAlpha(depth, uView.far);
+
+    // Fog by distance from the eye, not view depth: view depth changes when the
+    // camera only turns (local patch 4, see patches.md)
+    float dist = length(V_GetViewPosition(vTexCoord, depth));
+    FragColor = vec4(uFog.color.rgb, (depth >= uView.far) ? uFog.skyAffect : FogFactor(dist));
 }

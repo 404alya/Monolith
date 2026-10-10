@@ -296,6 +296,12 @@ typedef enum {
     // Scene miscs
     R3D_SHADER_SAMPLER_BONE_MATRICES        = 16,
 
+    // Min/max depth tiles of the directional shadow map (local patch, see patches.md)
+    R3D_SHADER_SAMPLER_SHADOW_DIR_MINMAX    = 17,
+
+    // Sun-visibility volume of the volumetric fog (local patch, see patches.md)
+    R3D_SHADER_SAMPLER_FOG_SUNVOL           = 18,
+
     // Buffers
     R3D_SHADER_SAMPLER_BUFFER_SCENE         = 20,
     R3D_SHADER_SAMPLER_BUFFER_ALBEDO        = 21,
@@ -354,6 +360,8 @@ static const GLenum R3D_MOD_SHADER_SAMPLER_TYPES[R3D_SHADER_SAMPLER_COUNT] =
     [R3D_SHADER_SAMPLER_IBL_PREFILTER]          = GL_TEXTURE_CUBE_MAP_ARRAY,
     [R3D_SHADER_SAMPLER_IBL_BRDF_LUT]           = GL_TEXTURE_2D,
     [R3D_SHADER_SAMPLER_BONE_MATRICES]          = GL_TEXTURE_1D,
+    [R3D_SHADER_SAMPLER_SHADOW_DIR_MINMAX]      = GL_TEXTURE_2D_ARRAY,
+    [R3D_SHADER_SAMPLER_FOG_SUNVOL]             = GL_TEXTURE_3D,
     [R3D_SHADER_SAMPLER_BUFFER_SCENE]           = GL_TEXTURE_2D,
     [R3D_SHADER_SAMPLER_BUFFER_ALBEDO]          = GL_TEXTURE_2D,
     [R3D_SHADER_SAMPLER_BUFFER_NORMAL]          = GL_TEXTURE_2D,
@@ -669,6 +677,26 @@ typedef struct {
 
 typedef struct {
     GLuint id;
+    r3d_shader_uniform_sampler_t uShadowTex;
+    r3d_shader_uniform_sampler_t uSourceTex;
+    r3d_shader_uniform_int_t uLayer;
+    r3d_shader_uniform_int_t uPass;
+} r3d_shader_prepare_shadow_minmax_t;
+
+typedef struct {
+    GLuint id;
+    r3d_shader_uniform_sampler_t uShadowTex;
+    r3d_shader_uniform_mat4_t uLightViewProj;
+    r3d_shader_uniform_int_t uLayer;
+    r3d_shader_uniform_vec3_t uVolMin;
+    r3d_shader_uniform_vec3_t uVoxel;
+    r3d_shader_uniform_int_t uSlice;
+    r3d_shader_uniform_int_t uSub;
+    r3d_shader_uniform_float_t uBias;
+} r3d_shader_prepare_fog_sunvol_t;
+
+typedef struct {
+    GLuint id;
     r3d_shader_uniform_sampler_t uSelectorTex;
     r3d_shader_uniform_sampler_t uSourceTex;
 } r3d_shader_prepare_downsample_t;
@@ -832,6 +860,7 @@ typedef struct {
     r3d_shader_uniform_float_t uRoughness;
     r3d_shader_uniform_float_t uMetalness;
     r3d_shader_uniform_float_t uSpecular;
+    r3d_shader_uniform_int_t uDepthOnly;
 } r3d_shader_scene_geometry_t;
 
 typedef struct {
@@ -1066,6 +1095,12 @@ typedef struct {
     r3d_shader_uniform_sampler_t uShadowDirTex;
     r3d_shader_uniform_sampler_t uShadowSpotTex;
     r3d_shader_uniform_sampler_t uShadowOmniTex;
+    r3d_shader_uniform_sampler_t uShadowDirMinMaxTex;
+    r3d_shader_uniform_sampler_t uFogSunVolTex;
+    r3d_shader_uniform_int_t uFogSunVolEnabled;
+    r3d_shader_uniform_vec3_t uFogSunVolMin;
+    r3d_shader_uniform_vec3_t uFogSunVolInvExtent;
+    r3d_shader_uniform_vec3_t uFogSunVolHalfTexel;
 } r3d_shader_deferred_vfog_radiance_t;
 
 typedef struct {
@@ -1178,6 +1213,7 @@ typedef struct {
         // Must follow the same naming pattern as `r3d_mod_shader`
         struct {
             r3d_shader_scene_geometry_t geometry;
+            r3d_shader_scene_geometry_t geometryPrepass;
             r3d_shader_scene_forward_t forward;
             r3d_shader_scene_unlit_t unlit;
             r3d_shader_scene_depth_t depth;
@@ -1229,6 +1265,8 @@ extern struct r3d_mod_shader {
         r3d_shader_prepare_blur_down_t blurDown;
         r3d_shader_prepare_blur_up_t blurUp;
         r3d_shader_prepare_pyramid_t pyramid;
+        r3d_shader_prepare_shadow_minmax_t shadowMinMax;
+        r3d_shader_prepare_fog_sunvol_t fogSunVol;
         r3d_shader_prepare_downsample_t downsample;
         r3d_shader_prepare_ssao_t ssao;
         r3d_shader_prepare_ssil_t ssil;
@@ -1252,6 +1290,7 @@ extern struct r3d_mod_shader {
     // Scene shaders
     struct {
         r3d_shader_scene_geometry_t geometry;
+        r3d_shader_scene_geometry_t geometryPrepass;
         r3d_shader_scene_forward_t forward;
         r3d_shader_scene_unlit_t unlit;
         r3d_shader_scene_background_t background;
@@ -1309,6 +1348,8 @@ bool r3d_shader_load_prepare_denoiser_sparse(r3d_shader_custom_t* custom);
 bool r3d_shader_load_prepare_blur_down(r3d_shader_custom_t* custom);
 bool r3d_shader_load_prepare_blur_up(r3d_shader_custom_t* custom);
 bool r3d_shader_load_prepare_pyramid(r3d_shader_custom_t* custom);
+bool r3d_shader_load_prepare_shadow_minmax(r3d_shader_custom_t* custom);
+bool r3d_shader_load_prepare_fog_sunvol(r3d_shader_custom_t* custom);
 bool r3d_shader_load_prepare_downsample(r3d_shader_custom_t* custom);
 bool r3d_shader_load_prepare_ssao(r3d_shader_custom_t* custom);
 bool r3d_shader_load_prepare_ssil(r3d_shader_custom_t* custom);
@@ -1335,6 +1376,7 @@ bool r3d_shader_load_prepare_cubemap_prefilter(r3d_shader_custom_t* custom);
 bool r3d_shader_load_prepare_cubemap_procedural_sky(r3d_shader_custom_t* custom);
 bool r3d_shader_load_prepare_cubemap_custom_sky(r3d_shader_custom_t* custom);
 bool r3d_shader_load_scene_geometry(r3d_shader_custom_t* custom);
+bool r3d_shader_load_scene_geometry_prepass(r3d_shader_custom_t* custom);
 bool r3d_shader_load_scene_forward(r3d_shader_custom_t* custom);
 bool r3d_shader_load_scene_unlit(r3d_shader_custom_t* custom);
 bool r3d_shader_load_scene_background(r3d_shader_custom_t* custom);
@@ -1382,6 +1424,8 @@ static const struct r3d_shader_loader {
         r3d_shader_loader_func blurDown;
         r3d_shader_loader_func blurUp;
         r3d_shader_loader_func pyramid;
+        r3d_shader_loader_func shadowMinMax;
+        r3d_shader_loader_func fogSunVol;
         r3d_shader_loader_func downsample;
         r3d_shader_loader_func ssao;
         r3d_shader_loader_func ssaoBlur;
@@ -1407,6 +1451,7 @@ static const struct r3d_shader_loader {
     // Scene shaders
     struct {
         r3d_shader_loader_func geometry;
+        r3d_shader_loader_func geometryPrepass;
         r3d_shader_loader_func forward;
         r3d_shader_loader_func unlit;
         r3d_shader_loader_func background;
@@ -1460,6 +1505,8 @@ static const struct r3d_shader_loader {
         .blurDown = r3d_shader_load_prepare_blur_down,
         .blurUp = r3d_shader_load_prepare_blur_up,
         .pyramid = r3d_shader_load_prepare_pyramid,
+        .shadowMinMax = r3d_shader_load_prepare_shadow_minmax,
+        .fogSunVol = r3d_shader_load_prepare_fog_sunvol,
         .downsample = r3d_shader_load_prepare_downsample,
         .ssao = r3d_shader_load_prepare_ssao,
         .ssil = r3d_shader_load_prepare_ssil,
@@ -1489,6 +1536,7 @@ static const struct r3d_shader_loader {
 
     .scene = {
         .geometry = r3d_shader_load_scene_geometry,
+        .geometryPrepass = r3d_shader_load_scene_geometry_prepass,
         .forward = r3d_shader_load_scene_forward,
         .unlit = r3d_shader_load_scene_unlit,
         .background = r3d_shader_load_scene_background,

@@ -311,6 +311,16 @@ void R3D_SetOutputMode(R3D_OutputMode mode)
     R3D.outputMode = mode;
 }
 
+bool R3D_GetDepthPrepass(void)
+{
+    return R3D.depthPrepass;
+}
+
+void R3D_SetDepthPrepass(bool enabled)
+{
+    R3D.depthPrepass = enabled;
+}
+
 void R3D_SetTextureFilter(TextureFilter filter)
 {
     R3D.textureFilter = filter;

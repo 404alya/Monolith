@@ -7,9 +7,11 @@
  */
 
 #include <r3d/r3d_draw.h>
+#include <r3d/r3d_profiler.h>
 #include <r3d_config.h>
 #include <raymath.h>
 #include <stddef.h>
+#include <string.h>
 #include <float.h>
 #include <rlgl.h>
 #include <glad.h>
@@ -53,6 +55,155 @@
     ((R3D_SHADOW_CAST_ONLY_MASK & (1 << (mode))) != 0)
 
 // ========================================
+// GPU PROFILER (local patch, see patches.md)
+// ========================================
+
+// Per-pass GL_TIME_ELAPSED queries around the passes of R3D_End(), plus GL_TIMESTAMP
+// queries at its start and end. Each frame records into one slot of a ring; a slot is
+// read back only once its last query is available, and before the ring wraps around,
+// so the CPU doesn't wait on the GPU. Compiled in with -DR3D_GPU_PROFILER; without it
+// PROF_* expand to nothing and the public functions are stubs.
+
+#ifdef R3D_GPU_PROFILER
+
+#define PROF_RING  4    //< frames in flight; drivers queue at most ~3, so a full ring never stalls
+#define PROF_QUEUE 16   //< finished results waiting for R3D_PopProfilerFrame()
+
+typedef struct {
+    GLuint pass[R3D_PROFILER_PASS_COUNT];
+    GLuint tsBegin, tsEnd;
+    bool used[R3D_PROFILER_PASS_COUNT];
+    bool pending;                       //< recorded, not read back yet
+    uint64_t id;
+    int tag;
+} prof_slot_t;
+
+static struct {
+    bool enabled;
+    bool created;
+    bool recording;                     //< inside R3D_End() of a profiled frame
+    int active;                         //< open pass or -1 (TIME_ELAPSED queries can't nest)
+    int slot;                           //< slot of the current / last recorded frame
+    int tag;
+    uint64_t nextId;
+    prof_slot_t slots[PROF_RING];
+    R3D_ProfilerFrame queue[PROF_QUEUE];
+    int queueHead, queueCount, dropped;
+} PROF = { .active = -1, .tag = -1 };
+
+static void prof_read_slot(prof_slot_t* s)
+{
+    R3D_ProfilerFrame f = { .id = s->id, .tag = s->tag };
+
+    GLuint64 t0 = 0, t1 = 0;
+    glGetQueryObjectui64v(s->tsBegin, GL_QUERY_RESULT, &t0);
+    glGetQueryObjectui64v(s->tsEnd, GL_QUERY_RESULT, &t1);
+    f.totalMs = (float)((double)(t1 - t0) * 1e-6);
+
+    for (int i = 0; i < R3D_PROFILER_PASS_COUNT; i++) {
+        if (!s->used[i]) continue;
+        GLuint64 ns = 0;
+        glGetQueryObjectui64v(s->pass[i], GL_QUERY_RESULT, &ns);
+        f.passMs[i] = (float)((double)ns * 1e-6);
+        f.ran[i] = true;
+    }
+    s->pending = false;
+
+    if (PROF.queueCount == PROF_QUEUE) {
+        PROF.queueHead = (PROF.queueHead + 1) % PROF_QUEUE;
+        PROF.queueCount--;
+        PROF.dropped++;
+    }
+    PROF.queue[(PROF.queueHead + PROF.queueCount) % PROF_QUEUE] = f;
+    PROF.queueCount++;
+}
+
+// Reads back finished slots, oldest first; stops at the first unfinished one so results
+// stay in order. Non-blocking unless 'wait' is set.
+static void prof_collect(bool wait)
+{
+    for (int k = 1; k <= PROF_RING; k++) {
+        prof_slot_t* s = &PROF.slots[(PROF.slot + k) % PROF_RING];
+        if (!s->pending) continue;
+        if (!wait) {
+            GLuint available = GL_FALSE;
+            glGetQueryObjectuiv(s->tsEnd, GL_QUERY_RESULT_AVAILABLE, &available);
+            if (!available) break;
+        }
+        prof_read_slot(s);
+    }
+}
+
+static void prof_frame_begin(void)
+{
+    if (!PROF.enabled) return;
+
+    if (!PROF.created) {
+        for (int i = 0; i < PROF_RING; i++) {
+            glGenQueries(R3D_PROFILER_PASS_COUNT, PROF.slots[i].pass);
+            glGenQueries(1, &PROF.slots[i].tsBegin);
+            glGenQueries(1, &PROF.slots[i].tsEnd);
+        }
+        PROF.created = true;
+    }
+
+    prof_collect(false);
+
+    PROF.slot = (PROF.slot + 1) % PROF_RING;
+    prof_slot_t* s = &PROF.slots[PROF.slot];
+    if (s->pending) prof_read_slot(s);  //< ring full: only if the GPU is > PROF_RING frames behind
+
+    memset(s->used, 0, sizeof(s->used));
+    s->id = PROF.nextId++;
+    s->tag = PROF.tag;
+    glQueryCounter(s->tsBegin, GL_TIMESTAMP);
+    PROF.recording = true;
+}
+
+static void prof_frame_end(void)
+{
+    if (!PROF.recording) return;
+    prof_slot_t* s = &PROF.slots[PROF.slot];
+    glQueryCounter(s->tsEnd, GL_TIMESTAMP);
+    s->pending = true;
+    PROF.recording = false;
+}
+
+static void prof_begin(R3D_ProfilerPass pass)
+{
+    if (!PROF.recording) return;
+    prof_slot_t* s = &PROF.slots[PROF.slot];
+    if (PROF.active >= 0 || s->used[pass]) return;  //< no nesting, one query per pass and frame
+    glBeginQuery(GL_TIME_ELAPSED, s->pass[pass]);
+    s->used[pass] = true;
+    PROF.active = (int)pass;
+}
+
+static void prof_end(void)
+{
+    if (PROF.active < 0) return;
+    glEndQuery(GL_TIME_ELAPSED);
+    PROF.active = -1;
+}
+
+#define PROF_FRAME_BEGIN()  prof_frame_begin()
+#define PROF_FRAME_END()    prof_frame_end()
+#define PROF_BEGIN(pass)    prof_begin(pass)
+#define PROF_END()          prof_end()
+
+#else
+
+#define PROF_FRAME_BEGIN()  ((void)0)
+#define PROF_FRAME_END()    ((void)0)
+#define PROF_BEGIN(pass)    ((void)0)
+#define PROF_END()          ((void)0)
+
+#endif // R3D_GPU_PROFILER
+
+// Times one pass call: PROF_PASS(R3D_PROFILER_SSAO, ssaoSource = pass_prepare_ssao());
+#define PROF_PASS(pass, ...) do { PROF_BEGIN(pass); __VA_ARGS__; PROF_END(); } while (0)
+
+// ========================================
 // INTERNAL FUNCTIONS
 // ========================================
 
@@ -67,12 +218,22 @@ static void raster_depth(const r3d_render_call_t* call, const Matrix* viewProj, 
 static void raster_depth_cube(const r3d_render_call_t* call, const Matrix* viewProj, const r3d_light_shadow_job_t* shadowJob);
 static void raster_probe_forward(const r3d_render_call_t* call, const r3d_env_probe_job_t* job, int face, bool opaque);
 static void raster_probe_unlit(const r3d_render_call_t* call, const r3d_env_probe_job_t* job, int face, bool opaque);
-static void raster_geometry(const r3d_render_call_t* call);
+// How a geometry-pass draw is rasterized (monolith patch: depth pre-pass)
+typedef enum {
+    GEOMETRY_RASTER_FULL,       //< Material depth state, full shading (upstream behaviour)
+    GEOMETRY_RASTER_DEPTH_ONLY, //< Pre-pass: depth only, the fragment shader returns at once
+    GEOMETRY_RASTER_EQUAL,      //< After the pre-pass: shade only the fragment that won the depth test
+} geometry_raster_mode_t;
+
+static bool geometry_call_prepassable(const r3d_render_call_t* call);
+static void raster_geometry(const r3d_render_call_t* call, geometry_raster_mode_t mode);
 static void raster_decal(const r3d_render_call_t* call);
 static void raster_forward(const r3d_render_call_t* call);
 static void raster_unlit(const r3d_render_call_t* call, bool opaque);
 
 static void pass_scene_shadows(void);
+static void pass_scene_shadow_minmax(void);
+static void pass_scene_fog_sunvol(void);
 static void pass_scene_probes(void);
 static void pass_scene_geometry(void);
 static void pass_scene_decals(void);
@@ -139,6 +300,8 @@ void R3D_BeginPro(R3D_View view)
 
 void R3D_End(void)
 {
+    PROF_FRAME_BEGIN();
+
     r3d_render_prepare_drawing(); // bind global VAO
 
     /* --- Invalidates OpenGL cache and save some infos --- */
@@ -157,7 +320,14 @@ void R3D_End(void)
 
     if (r3d_light_has_shadow_job())
     {
-        pass_scene_shadows();
+        PROF_PASS(R3D_PROFILER_SHADOWS, pass_scene_shadows());
+    }
+
+    PROF_PASS(R3D_PROFILER_SHADOW_MINMAX, pass_scene_shadow_minmax());
+
+    if (R3D_MOD_LIGHT.fogSunVol.request.pending)
+    {
+        pass_scene_fog_sunvol();
     }
 
     r3d_shader_bind_sampler(R3D_SHADER_SAMPLER_SHADOW_DIR, r3d_light_shadow_map(R3D_LIGHT_DIR));
@@ -174,7 +344,7 @@ void R3D_End(void)
 
         if (r3d_env_has_any_probe_jobs())
         {
-            pass_scene_probes();
+            PROF_PASS(R3D_PROFILER_PROBES, pass_scene_probes());
         }
     }
 
@@ -207,10 +377,10 @@ void R3D_End(void)
 
     if (r3d_render_has_opaque())
     {
-        pass_scene_geometry();
+        PROF_PASS(R3D_PROFILER_GEOMETRY, pass_scene_geometry());
 
-        if (r3d_render_has_decals()) pass_scene_decals();
-        if (r3d_light_has_visible()) pass_deferred_lights();
+        if (r3d_render_has_decals()) PROF_PASS(R3D_PROFILER_DECALS, pass_scene_decals());
+        if (r3d_light_has_visible()) PROF_PASS(R3D_PROFILER_LIGHTS, pass_deferred_lights());
 
         bool ssao = R3D.environment.ssao.enabled;
         bool ssil = R3D.environment.ssil.enabled;
@@ -221,20 +391,22 @@ void R3D_End(void)
 
         if (ssao || ssil || ssgi || ssr || vfog || dof)
         {
+            PROF_BEGIN(R3D_PROFILER_PYRAMID);
             pass_prepare_pyramid();
 
             if (ssao || ssil || ssgi || ssr) pass_prepare_downsample(R3D_TARGET_NORMAL, 1);
             // skip ssr check for radiance, we re-downsample during ssr for the full ambient reflection
             if (ssil || ssgi) pass_prepare_downsample(R3D_TARGET_RADIANCE, 1);
+            PROF_END();
         }
 
-        if (ssao) ssaoSource = pass_prepare_ssao();
-        if (ssil) ssilSource = pass_prepare_ssil();
-        if (ssgi) ssgiSource = pass_prepare_ssgi();
-        pass_deferred_ambient(ssaoSource, ssilSource, ssgiSource);
+        if (ssao) PROF_PASS(R3D_PROFILER_SSAO, ssaoSource = pass_prepare_ssao());
+        if (ssil) PROF_PASS(R3D_PROFILER_SSIL, ssilSource = pass_prepare_ssil());
+        if (ssgi) PROF_PASS(R3D_PROFILER_SSGI, ssgiSource = pass_prepare_ssgi());
+        PROF_PASS(R3D_PROFILER_AMBIENT, pass_deferred_ambient(ssaoSource, ssilSource, ssgiSource));
 
-        if (ssr) ssrSource = pass_prepare_ssr();
-        pass_deferred_compose(sceneTarget, ssrSource);
+        if (ssr) PROF_PASS(R3D_PROFILER_SSR, ssrSource = pass_prepare_ssr());
+        PROF_PASS(R3D_PROFILER_COMPOSE, pass_deferred_compose(sceneTarget, ssrSource));
     }
     else
     {
@@ -248,11 +420,11 @@ void R3D_End(void)
 
     /* --- Then background/fog and forward rendering --- */
 
-    pass_scene_background(sceneTarget);
+    PROF_PASS(R3D_PROFILER_BACKGROUND, pass_scene_background(sceneTarget));
 
     if (R3D.environment.fog.mode != R3D_FOG_DISABLED)
     {
-        pass_deferred_fog(sceneTarget);
+        PROF_PASS(R3D_PROFILER_FOG, pass_deferred_fog(sceneTarget));
     }
 
     if (R3D.environment.volumetricFog.enabled)
@@ -260,7 +432,7 @@ void R3D_End(void)
         pass_deferred_volumetric_fog(sceneTarget);
     }
 
-    pass_scene_forward(sceneTarget);
+    PROF_PASS(R3D_PROFILER_FORWARD, pass_scene_forward(sceneTarget));
 
     /* --- Applying effects over the scene and final blit --- */
 
@@ -269,31 +441,31 @@ void R3D_End(void)
 
     if (R3D.environment.dof.mode != R3D_DOF_DISABLED)
     {
-        sceneTarget = pass_post_dof(sceneTarget);
+        PROF_PASS(R3D_PROFILER_DOF, sceneTarget = pass_post_dof(sceneTarget));
     }
 
     if (R3D.environment.bloom.mode != R3D_BLOOM_DISABLED)
     {
-        sceneTarget = pass_post_bloom(sceneTarget);
+        PROF_PASS(R3D_PROFILER_BLOOM, sceneTarget = pass_post_bloom(sceneTarget));
     }
 
     if (R3D.environment.autoExposure.enabled)
     {
-        sceneTarget = pass_post_auto_exposure(sceneTarget);
+        PROF_PASS(R3D_PROFILER_AUTO_EXPOSURE, sceneTarget = pass_post_auto_exposure(sceneTarget));
     }
 
     sceneTarget = pass_post_screen(R3D_SCREEN_SHADER_STAGE_POST, sceneTarget);
-    sceneTarget = pass_post_output(sceneTarget);
+    PROF_PASS(R3D_PROFILER_OUTPUT, sceneTarget = pass_post_output(sceneTarget));
 
     sceneTarget = pass_post_screen(R3D_SCREEN_SHADER_STAGE_OUTPUT, sceneTarget);
 
     switch (R3D.aaMode)
     {
     case R3D_ANTI_ALIASING_MODE_FXAA:
-        sceneTarget = pass_post_fxaa(sceneTarget);
+        PROF_PASS(R3D_PROFILER_AA, sceneTarget = pass_post_fxaa(sceneTarget));
         break;
     case R3D_ANTI_ALIASING_MODE_SMAA:
-        sceneTarget = pass_post_smaa(sceneTarget);
+        PROF_PASS(R3D_PROFILER_AA, sceneTarget = pass_post_smaa(sceneTarget));
         break;
     default:
         break;
@@ -301,6 +473,7 @@ void R3D_End(void)
 
     sceneTarget = pass_post_screen(R3D_SCREEN_SHADER_STAGE_FINAL, sceneTarget);
 
+    PROF_BEGIN(R3D_PROFILER_BLIT);
     switch (R3D.outputMode)
     {
     case R3D_OUTPUT_SCENE:    blit_to_screen(r3d_target_swap_scene(sceneTarget)); break;
@@ -316,11 +489,14 @@ void R3D_End(void)
     case R3D_OUTPUT_BLOOM:    visualize_to_screen(R3D_TARGET_BLOOM); break;
     case R3D_OUTPUT_DOF:      visualize_to_screen(R3D_TARGET_DOF_COC); break;
     }
+    PROF_END();
 
     /* --- Reset internal stuff and states changed by R3D --- */
 
     r3d_stack_reset(R3D.stack);
     cleanup_after_render();
+
+    PROF_FRAME_END();
 }
 
 void R3D_BeginCluster(BoundingBox aabb)
@@ -341,12 +517,34 @@ void R3D_EndCluster(void)
 
 void R3D_PushLight(R3D_Light light)
 {
-    r3d_light_push(&light, NULL, false);
+    r3d_light_push(&light, NULL, false, NULL);
 }
 
 void R3D_PushLightEx(R3D_Light light, R3D_ShadowMap map, bool updateShadow)
 {
-    r3d_light_push(&light, &map, updateShadow);
+    r3d_light_push(&light, &map, updateShadow, NULL);
+}
+
+void R3D_PushLightFixedShadow(R3D_Light light, R3D_ShadowMap map, Matrix lightViewProj, bool updateShadow)
+{
+    r3d_light_push(&light, &map, updateShadow, &lightViewProj);
+}
+
+static float fogSunVolBakeMs;   //< local patch, see pass_scene_fog_sunvol()
+
+void R3D_BakeFogSunVisibility(R3D_ShadowMap map, Matrix lightViewProj, BoundingBox region, float voxelSize, int subsamples)
+{
+    r3d_light_request_fog_sunvol(&map, lightViewProj, region, voxelSize, subsamples);
+}
+
+void R3D_ClearFogSunVisibility(void)
+{
+    r3d_light_clear_fog_sunvol();
+}
+
+float R3D_GetFogSunVisibilityBakeTime(void)
+{
+    return fogSunVolBakeMs;
 }
 
 void R3D_PushProbe(R3D_Probe probe, bool updateProbe)
@@ -1290,7 +1488,27 @@ void raster_probe_unlit(const r3d_render_call_t* call, const r3d_env_probe_job_t
     }
 }
 
-void raster_geometry(const r3d_render_call_t* call)
+// Stencil bit that marks "this pixel has been shaded" in the GL_EQUAL pass, cleared after it
+#define GEOMETRY_PREPASS_STENCIL_BIT 0x80
+
+bool geometry_call_prepassable(const r3d_render_call_t* call)
+{
+    // A pre-passed draw must produce exactly the depth the shading pass will produce:
+    // no discard (alpha test off) and an ordinary "nearest wins" depth test. The stencil
+    // state must leave the top bit free for the tie-break (see raster_geometry()) and
+    // must not depend on depth-failing fragments, which the EQUAL pass doesn't replay.
+    const R3D_Material* material = &call->mesh.material;
+    R3D_CompareMode depthMode = material->depth.mode;
+    R3D_StencilState stencil = material->stencil;
+    return material->alphaCutoff <= 0.0f
+        && (depthMode == R3D_COMPARE_LESS || depthMode == R3D_COMPARE_LEQUAL)
+        && stencil.mode == R3D_COMPARE_ALWAYS
+        && stencil.opZFail == R3D_STENCIL_KEEP
+        && (stencil.opPass == R3D_STENCIL_KEEP || stencil.opPass == R3D_STENCIL_REPLACE)
+        && (stencil.ref & GEOMETRY_PREPASS_STENCIL_BIT) == 0;
+}
+
+void raster_geometry(const r3d_render_call_t* call, geometry_raster_mode_t mode)
 {
     R3D_ASSERT(call->type == R3D_RENDER_CALL_MESH); //< Paranoid assert, should be fine
 
@@ -1299,58 +1517,70 @@ void raster_geometry(const r3d_render_call_t* call)
 
     /* --- Use shader --- */
 
+    // Pre-passed draws use the pre-pass variant in both passes (same vertex transform,
+    // no alpha test); everything else uses the regular geometry program.
     R3D_SurfaceShader* shader = call->mesh.material.shader;
-    R3D_SHADER_USE_SELECT(scene.geometry, shader);
+    r3d_shader_scene_geometry_t* program = NULL;
+    if (mode == GEOMETRY_RASTER_FULL)
+    {
+        R3D_SHADER_USE_SELECT(scene.geometry, shader);
+        program = R3D_SHADER_SELECT(scene.geometry, shader);
+    }
+    else
+    {
+        R3D_SHADER_USE_SELECT(scene.geometryPrepass, shader);
+        program = R3D_SHADER_SELECT(scene.geometryPrepass, shader);
+    }
 
     /* --- Send matrices --- */
 
     Matrix matNormal = r3d_matrix_normal(&group->transform);
 
-    R3D_SHADER_SET_MAT4_SELECT(scene.geometry, shader, uMatModel, group->transform);
-    R3D_SHADER_SET_MAT4_SELECT(scene.geometry, shader, uMatNormal, matNormal);
+    R3D_SHADER__SET_MAT4_IMPL(program, uMatModel, group->transform);
+    R3D_SHADER__SET_MAT4_IMPL(program, uMatNormal, matNormal);
 
     /* --- Send skinning related data --- */
 
     if (group->skinTexture > 0)
     {
-        R3D_SHADER_BIND_SAMPLER_SELECT(scene.geometry, shader, uBoneMatricesTex, group->skinTexture);
-        R3D_SHADER_SET_INT_SELECT(scene.geometry, shader, uSkinning, true);
+        R3D_SHADER__BIND_SAMPLER_IMPL(program, uBoneMatricesTex, group->skinTexture);
+        R3D_SHADER__SET_INT_IMPL(program, uSkinning, true);
     }
     else
     {
-        R3D_SHADER_SET_INT_SELECT(scene.geometry, shader, uSkinning, false);
+        R3D_SHADER__SET_INT_IMPL(program, uSkinning, false);
     }
 
     /* --- Send billboard related data --- */
 
-    R3D_SHADER_SET_INT_SELECT(scene.geometry, shader, uBillboard, material->billboardMode);
+    R3D_SHADER__SET_INT_IMPL(program, uBillboard, material->billboardMode);
 
     /* --- Set factor material maps --- */
 
-    R3D_SHADER_SET_FLOAT_SELECT(scene.geometry, shader, uEmissionEnergy, material->emission.energy);
-    R3D_SHADER_SET_FLOAT_SELECT(scene.geometry, shader, uAlphaCutoff, material->alphaCutoff);
-    R3D_SHADER_SET_FLOAT_SELECT(scene.geometry, shader, uNormalScale, material->normal.scale);
-    R3D_SHADER_SET_FLOAT_SELECT(scene.geometry, shader, uOcclusion, Clamp(material->orm.occlusion, 0.0f, 1.0f));
-    R3D_SHADER_SET_FLOAT_SELECT(scene.geometry, shader, uRoughness, Clamp(material->orm.roughness, 0.0f, 1.0f));
-    R3D_SHADER_SET_FLOAT_SELECT(scene.geometry, shader, uMetalness, Clamp(material->orm.metalness, 0.0f, 1.0f));
-    R3D_SHADER_SET_FLOAT_SELECT(scene.geometry, shader, uSpecular, Clamp(material->orm.specular, 0.0f, 1.0f));
+    R3D_SHADER__SET_FLOAT_IMPL(program, uEmissionEnergy, material->emission.energy);
+    R3D_SHADER__SET_FLOAT_IMPL(program, uAlphaCutoff, material->alphaCutoff);
+    R3D_SHADER__SET_FLOAT_IMPL(program, uNormalScale, material->normal.scale);
+    R3D_SHADER__SET_FLOAT_IMPL(program, uOcclusion, Clamp(material->orm.occlusion, 0.0f, 1.0f));
+    R3D_SHADER__SET_FLOAT_IMPL(program, uRoughness, Clamp(material->orm.roughness, 0.0f, 1.0f));
+    R3D_SHADER__SET_FLOAT_IMPL(program, uMetalness, Clamp(material->orm.metalness, 0.0f, 1.0f));
+    R3D_SHADER__SET_FLOAT_IMPL(program, uSpecular, Clamp(material->orm.specular, 0.0f, 1.0f));
 
     /* --- Set texcoord offset/scale --- */
 
-    R3D_SHADER_SET_VEC2_SELECT(scene.geometry, shader, uTexCoordOffset, material->uvOffset);
-    R3D_SHADER_SET_VEC2_SELECT(scene.geometry, shader, uTexCoordScale, material->uvScale);
+    R3D_SHADER__SET_VEC2_IMPL(program, uTexCoordOffset, material->uvOffset);
+    R3D_SHADER__SET_VEC2_IMPL(program, uTexCoordScale, material->uvScale);
 
     /* --- Set color material maps --- */
 
-    R3D_SHADER_SET_COL4_SELECT(scene.geometry, shader, uAlbedoColor, material->albedo.color);
-    R3D_SHADER_SET_COL3_SELECT(scene.geometry, shader, uEmissionColor, material->emission.color);
+    R3D_SHADER__SET_COL4_IMPL(program, uAlbedoColor, material->albedo.color);
+    R3D_SHADER__SET_COL3_IMPL(program, uEmissionColor, material->emission.color);
 
     /* --- Bind active texture maps --- */
 
-    R3D_SHADER_BIND_SAMPLER_SELECT(scene.geometry, shader, uAlbedoMap, R3D_TEXTURE_SELECT(material->albedo.texture.id, WHITE));
-    R3D_SHADER_BIND_SAMPLER_SELECT(scene.geometry, shader, uNormalMap, R3D_TEXTURE_SELECT(material->normal.texture.id, NORMAL));
-    R3D_SHADER_BIND_SAMPLER_SELECT(scene.geometry, shader, uEmissionMap, R3D_TEXTURE_SELECT(material->emission.texture.id, WHITE));
-    R3D_SHADER_BIND_SAMPLER_SELECT(scene.geometry, shader, uOrmMap, R3D_TEXTURE_SELECT(material->orm.texture.id, WHITE));
+    R3D_SHADER__BIND_SAMPLER_IMPL(program, uAlbedoMap, R3D_TEXTURE_SELECT(material->albedo.texture.id, WHITE));
+    R3D_SHADER__BIND_SAMPLER_IMPL(program, uNormalMap, R3D_TEXTURE_SELECT(material->normal.texture.id, NORMAL));
+    R3D_SHADER__BIND_SAMPLER_IMPL(program, uEmissionMap, R3D_TEXTURE_SELECT(material->emission.texture.id, WHITE));
+    R3D_SHADER__BIND_SAMPLER_IMPL(program, uOrmMap, R3D_TEXTURE_SELECT(material->orm.texture.id, WHITE));
 
     /* --- Applying material parameters that are independent of shaders --- */
 
@@ -1358,16 +1588,49 @@ void raster_geometry(const r3d_render_call_t* call)
     r3d_driver_set_depth_state(material->depth);
     r3d_driver_set_stencil_state(material->stencil);
 
+    /* --- Depth pre-pass handling (monolith patch) --- */
+
+    if (mode != GEOMETRY_RASTER_FULL)
+    {
+        R3D_SHADER__SET_INT_IMPL(program, uDepthOnly, mode == GEOMETRY_RASTER_DEPTH_ONLY);
+    }
+
+    if (mode == GEOMETRY_RASTER_DEPTH_ONLY)
+    {
+        // Stencil is written by the shading pass, where only the visible fragment passes
+        r3d_driver_set_stencil_mask(0x00);
+        r3d_driver_set_depth_mask(GL_TRUE);
+    }
+    else if (mode == GEOMETRY_RASTER_EQUAL)
+    {
+        // Coplanar faces can produce bit-identical depths. Without the pre-pass the
+        // first one drawn wins (GL_LESS); with GL_EQUAL all of them would pass and the
+        // last one would win. So the first fragment that passes sets the top stencil bit
+        // and later ones at the same pixel fail the stencil test: same winner as before.
+        uint8_t ref = material->stencil.ref | GEOMETRY_PREPASS_STENCIL_BIT;
+        bool replace = (material->stencil.opPass == R3D_STENCIL_REPLACE);
+        r3d_driver_set_stencil_func(GL_NOTEQUAL, ref, GEOMETRY_PREPASS_STENCIL_BIT);
+        r3d_driver_set_stencil_op(GL_KEEP, GL_KEEP, GL_REPLACE);
+        r3d_driver_set_stencil_mask(replace ? 0xFF : GEOMETRY_PREPASS_STENCIL_BIT);
+        r3d_driver_set_depth_func(GL_EQUAL);
+        r3d_driver_set_depth_mask(GL_FALSE);
+    }
+    else
+    {
+        r3d_driver_set_stencil_mask(0xFF);
+        r3d_driver_set_depth_mask(GL_TRUE);
+    }
+
     /* --- Rendering the object corresponding to the draw call --- */
 
     if (r3d_render_has_instances(group))
     {
-        R3D_SHADER_SET_INT_SELECT(scene.geometry, shader, uInstancing, true);
+        R3D_SHADER__SET_INT_IMPL(program, uInstancing, true);
         r3d_render_draw_instanced(call);
     }
     else
     {
-        R3D_SHADER_SET_INT_SELECT(scene.geometry, shader, uInstancing, false);
+        R3D_SHADER__SET_INT_IMPL(program, uInstancing, false);
         r3d_render_draw(call);
     }
 }
@@ -1646,6 +1909,115 @@ void pass_scene_shadows(void)
     #undef COND
 }
 
+// Local patch (see patches.md): rebuilds the min/max depth tiles of the directional
+// shadow layers rendered this frame (or all of them after a reallocation). The
+// volumetric fog uses them to skip the PCF taps of fully lit / fully shadowed steps.
+void pass_scene_shadow_minmax(void)
+{
+    // Only the volumetric fog reads the tiles: while it's off, just remember that
+    // every layer has to be rebuilt once it comes back on
+    static bool pendingAll = false;
+    bool all = r3d_light_shadow_minmax_take_stale() || pendingAll;
+    uint32_t layerCount = r3d_light_shadow_layer_count(R3D_LIGHT_DIR);
+    if (r3d_light_shadow_minmax_map() == 0 || layerCount == 0) return;
+
+    bool any = all;
+    R3D_LIGHT_FOR_EACH_SHADOW_JOB(job) {
+        if (job->type == R3D_LIGHT_DIR) any = true;
+    }
+    if (!any) return;
+
+    pendingAll = !R3D.environment.volumetricFog.enabled;
+    if (pendingAll) return;
+
+    r3d_driver_disable(GL_STENCIL_TEST);
+    r3d_driver_disable(GL_DEPTH_TEST);
+    r3d_driver_disable(GL_CULL_FACE);
+    r3d_driver_disable(GL_BLEND);
+    r3d_driver_disable(GL_SCISSOR_TEST);
+
+    R3D_SHADER_USE(prepare.shadowMinMax);
+
+    // Read raw depth: the shadow array has compare mode on, which a plain sampler2DArray
+    // must not see (undefined results), so switch it off for this pass only
+    r3d_shader_bind_sampler(R3D_SHADER_SAMPLER_SHADOW_DIR, r3d_light_shadow_map(R3D_LIGHT_DIR));
+    glActiveTexture(GL_TEXTURE0 + R3D_SHADER_SAMPLER_SHADOW_DIR);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_COMPARE_MODE, GL_NONE);
+
+    for (int layer = 0; layer < (int)layerCount; layer++)
+    {
+        bool rendered = all;
+        R3D_LIGHT_FOR_EACH_SHADOW_JOB(job) {
+            if (job->type == R3D_LIGHT_DIR && job->shadowLayer == layer) rendered = true;
+        }
+        if (!rendered) continue;
+
+        R3D_SHADER_BIND_SAMPLER(prepare.shadowMinMax, uSourceTex, 0); //< No feedback loop with the mid target
+        r3d_light_bind_shadow_minmax_mid_fbo();
+        R3D_SHADER_SET_INT(prepare.shadowMinMax, uPass, 0);
+        R3D_SHADER_SET_INT(prepare.shadowMinMax, uLayer, layer);
+        R3D_RENDER_SCREEN();
+
+        r3d_light_bind_shadow_minmax_fbo(layer);
+        R3D_SHADER_SET_INT(prepare.shadowMinMax, uPass, 1);
+        R3D_SHADER_BIND_SAMPLER(prepare.shadowMinMax, uSourceTex, r3d_light_shadow_minmax_mid_map());
+        R3D_RENDER_SCREEN();
+    }
+
+    // r3d_shader_bind_sampler() resets the active unit, so select the shadow map again
+    glActiveTexture(GL_TEXTURE0 + R3D_SHADER_SAMPLER_SHADOW_DIR);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE);
+    glActiveTexture(GL_TEXTURE0);
+
+    r3d_target_invalidate_cache(); //< We bound our own framebuffer
+}
+
+// Local patch (see patches.md): bakes the fog's sun-visibility volume from the shadow
+// layer the request rendered this frame (pass_scene_shadows), one draw per z slice.
+// Runs once per bake (map load), so it may block: glFinish around it for the bake time.
+void pass_scene_fog_sunvol(void)
+{
+    r3d_light_fog_sunvol_t* vol = &R3D_MOD_LIGHT.fogSunVol;
+    r3d_light_fog_sunvol_request_t req = vol->request;
+    vol->request.pending = false;
+
+    glFinish();
+    double t0 = GetTime();
+
+    if (!r3d_light_prepare_fog_sunvol()) return;
+
+    r3d_driver_disable(GL_STENCIL_TEST);
+    r3d_driver_disable(GL_DEPTH_TEST);
+    r3d_driver_disable(GL_CULL_FACE);
+    r3d_driver_disable(GL_BLEND);
+    r3d_driver_disable(GL_SCISSOR_TEST);
+
+    R3D_SHADER_USE(prepare.fogSunVol);
+    r3d_shader_bind_sampler(R3D_SHADER_SAMPLER_SHADOW_DIR, r3d_light_shadow_map(R3D_LIGHT_DIR));
+    R3D_SHADER_SET_MAT4(prepare.fogSunVol, uLightViewProj, req.viewProj);
+    R3D_SHADER_SET_INT(prepare.fogSunVol, uLayer, req.layer);
+    R3D_SHADER_SET_VEC3(prepare.fogSunVol, uVolMin, req.min);
+    R3D_SHADER_SET_VEC3(prepare.fogSunVol, uVoxel, req.voxel);
+    R3D_SHADER_SET_INT(prepare.fogSunVol, uSub, req.sub);
+    R3D_SHADER_SET_FLOAT(prepare.fogSunVol, uBias, req.bias);
+
+    for (int z = 0; z < req.dims[2]; z++)
+    {
+        r3d_light_bind_fog_sunvol_slice(z);
+        R3D_SHADER_SET_INT(prepare.fogSunVol, uSlice, z);
+        R3D_RENDER_SCREEN();
+    }
+
+    r3d_target_invalidate_cache(); //< We bound our own framebuffer
+    vol->valid = true;
+
+    glFinish();
+    fogSunVolBakeMs = (float)((GetTime() - t0) * 1000.0);
+    R3D_TRACELOG(LOG_INFO, "Fog sun volume baked: %dx%dx%d voxels (%.2f MB), %.1f ms",
+                 req.dims[0], req.dims[1], req.dims[2],
+                 (double)req.dims[0] * req.dims[1] * req.dims[2] / (1024.0 * 1024.0), fogSunVolBakeMs);
+}
+
 void pass_scene_probes(void)
 {
     #define RASTER_PROBE(opaque)                                    \
@@ -1774,12 +2146,40 @@ void pass_scene_geometry(void)
     R3D_TARGET_BIND_LOAD(0, true, R3D_TARGET_GBUFFER);
 
     #define COND (IS_MESH_VISIBLE_CAMERA(call->mesh.instance) && (!call->mesh.material.unlit))
+
+    if (R3D.depthPrepass)
+    {
+        // Monolith patch: depth pre-pass. With one big instanced draw there is no
+        // front-to-back order, so the (expensive) surface shader would otherwise run
+        // for every overdrawn fragment. Lay down the depth first, then shade with
+        // GL_EQUAL so only the visible fragment of each pixel runs the shader.
+        glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+        R3D_RENDER_FOR_EACH(call, COND && geometry_call_prepassable(call), &R3D.viewState.frustum, R3D_RENDER_LIST_OPAQUE_INST, R3D_RENDER_LIST_OPAQUE)
+        {
+            raster_geometry(call, GEOMETRY_RASTER_DEPTH_ONLY);
+        }
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    }
+
+    bool anyPrepassed = false;
     R3D_RENDER_FOR_EACH(call, COND, &R3D.viewState.frustum, R3D_RENDER_LIST_OPAQUE_INST, R3D_RENDER_LIST_OPAQUE)
     {
-        raster_geometry(call);
+        bool prepassed = R3D.depthPrepass && geometry_call_prepassable(call);
+        raster_geometry(call, prepassed ? GEOMETRY_RASTER_EQUAL : GEOMETRY_RASTER_FULL);
+        anyPrepassed |= prepassed;
     }
     #undef COND
 
+    if (anyPrepassed)
+    {
+        // Clear the tie-break bit again (the clear only touches the bits in the write mask)
+        const GLint zero = 0;
+        r3d_driver_set_stencil_mask(GEOMETRY_PREPASS_STENCIL_BIT);
+        glClearBufferiv(GL_STENCIL, 0, &zero);
+    }
+
+    r3d_driver_set_depth_mask(GL_TRUE);
+    r3d_driver_set_stencil_mask(0xFF);
     r3d_driver_set_depth_offset(0.0f, 0.0f);
     r3d_driver_set_depth_range(0.0f, 1.0f);
 }
@@ -2254,13 +2654,16 @@ void pass_deferred_volumetric_fog(r3d_target_t sceneTarget)
 
     R3D_TARGET_BIND_LOAD(0, false, sceneTarget);
 
+    PROF_BEGIN(R3D_PROFILER_VFOG_TRANSMITTANCE);
     R3D_SHADER_USE(deferred.vfogTransmittance);
     R3D_SHADER_BIND_SAMPLER(deferred.vfogTransmittance, uDepthTex, r3d_target_get_level(R3D_TARGET_DEPTH, 0));
 
     R3D_RENDER_SCREEN();
+    PROF_END();
 
     /* --- Accumulate radiance in half resolution --- */
 
+    PROF_BEGIN(R3D_PROFILER_VFOG_RADIANCE);
     R3D_TARGET_BIND_CLEAR(1, false, R3D_TARGET_VFOG_RAD);
 
     r3d_driver_enable(GL_SCISSOR_TEST);
@@ -2270,6 +2673,20 @@ void pass_deferred_volumetric_fog(r3d_target_t sceneTarget)
 
     R3D_SHADER_USE(deferred.vfogRadiance);
     R3D_SHADER_BIND_SAMPLER(deferred.vfogRadiance, uDepthTex, r3d_target_get_level(R3D_TARGET_DEPTH, 1));
+    R3D_SHADER_BIND_SAMPLER(deferred.vfogRadiance, uShadowDirMinMaxTex, r3d_light_shadow_minmax_map());
+
+    // Baked sun visibility (local patch, see pass_scene_fog_sunvol)
+    const r3d_light_fog_sunvol_t* sunVol = &R3D_MOD_LIGHT.fogSunVol;
+    R3D_SHADER_SET_INT(deferred.vfogRadiance, uFogSunVolEnabled, sunVol->valid ? 1 : 0);
+    if (sunVol->valid)
+    {
+        R3D_SHADER_BIND_SAMPLER(deferred.vfogRadiance, uFogSunVolTex, sunVol->texture);
+        R3D_SHADER_SET_VEC3(deferred.vfogRadiance, uFogSunVolMin, sunVol->min);
+        R3D_SHADER_SET_VEC3(deferred.vfogRadiance, uFogSunVolInvExtent,
+            (Vector3){ 1.0f / sunVol->extent.x, 1.0f / sunVol->extent.y, 1.0f / sunVol->extent.z });
+        R3D_SHADER_SET_VEC3(deferred.vfogRadiance, uFogSunVolHalfTexel,
+            (Vector3){ 0.5f / sunVol->dims[0], 0.5f / sunVol->dims[1], 0.5f / sunVol->dims[2] });
+    }
 
     R3D_LIGHT_FOR_EACH_VISIBLE(light)
     {
@@ -2305,9 +2722,11 @@ void pass_deferred_volumetric_fog(r3d_target_t sceneTarget)
 
     r3d_driver_set_scissor(0, 0, R3D_TARGET_SIZE_W, R3D_TARGET_SIZE_H);
     r3d_driver_disable(GL_SCISSOR_TEST);
+    PROF_END();
 
     /* --- Compose radiance to the scene --- */
 
+    PROF_BEGIN(R3D_PROFILER_VFOG_COMPOSE);
     R3D_TARGET_BIND_LOAD(0, false, sceneTarget);
     R3D_SHADER_USE(deferred.vfogCompose);
 
@@ -2318,6 +2737,7 @@ void pass_deferred_volumetric_fog(r3d_target_t sceneTarget)
     R3D_SHADER_BIND_SAMPLER(deferred.vfogCompose, uDepthTex, r3d_target_get_levels(R3D_TARGET_DEPTH, 0, 1));
 
     R3D_RENDER_SCREEN();
+    PROF_END();
 }
 
 void pass_scene_forward(r3d_target_t sceneTarget)
@@ -2921,3 +3341,106 @@ void cleanup_after_render(void)
     }
 #endif
 }
+
+// ========================================
+// GPU PROFILER API (local patch, see patches.md)
+// ========================================
+
+static const char* PROF_PASS_NAMES[R3D_PROFILER_PASS_COUNT] = {
+    [R3D_PROFILER_SHADOWS]            = "shadow maps",
+    [R3D_PROFILER_SHADOW_MINMAX]      = "shadow min/max",
+    [R3D_PROFILER_PROBES]             = "probes",
+    [R3D_PROFILER_GEOMETRY]           = "geometry",
+    [R3D_PROFILER_DECALS]             = "decals",
+    [R3D_PROFILER_LIGHTS]             = "lights",
+    [R3D_PROFILER_PYRAMID]            = "depth pyramid",
+    [R3D_PROFILER_SSAO]               = "SSAO",
+    [R3D_PROFILER_SSIL]               = "SSIL",
+    [R3D_PROFILER_SSGI]               = "SSGI",
+    [R3D_PROFILER_SSR]                = "SSR",
+    [R3D_PROFILER_AMBIENT]            = "ambient",
+    [R3D_PROFILER_COMPOSE]            = "compose",
+    [R3D_PROFILER_BACKGROUND]         = "background",
+    [R3D_PROFILER_FOG]                = "fog",
+    [R3D_PROFILER_VFOG_TRANSMITTANCE] = "vfog transmit",
+    [R3D_PROFILER_VFOG_RADIANCE]      = "vfog radiance",
+    [R3D_PROFILER_VFOG_COMPOSE]       = "vfog upsample",
+    [R3D_PROFILER_FORWARD]            = "forward",
+    [R3D_PROFILER_DOF]                = "DoF",
+    [R3D_PROFILER_BLOOM]              = "bloom",
+    [R3D_PROFILER_AUTO_EXPOSURE]      = "auto exposure",
+    [R3D_PROFILER_OUTPUT]             = "tonemap",
+    [R3D_PROFILER_AA]                 = "FXAA/SMAA",
+    [R3D_PROFILER_BLIT]               = "blit",
+};
+
+const char* R3D_GetProfilerPassName(R3D_ProfilerPass pass)
+{
+    if ((int)pass < 0 || pass >= R3D_PROFILER_PASS_COUNT) return "?";
+    return PROF_PASS_NAMES[pass];
+}
+
+#ifdef R3D_GPU_PROFILER
+
+bool R3D_IsProfilerAvailable(void)
+{
+    return true;
+}
+
+void R3D_SetProfilerEnabled(bool enabled)
+{
+    if (enabled == PROF.enabled) return;
+    if (!enabled && PROF.created) {
+        for (int i = 0; i < PROF_RING; i++) {
+            glDeleteQueries(R3D_PROFILER_PASS_COUNT, PROF.slots[i].pass);
+            glDeleteQueries(1, &PROF.slots[i].tsBegin);
+            glDeleteQueries(1, &PROF.slots[i].tsEnd);
+        }
+        memset(PROF.slots, 0, sizeof(PROF.slots));
+        PROF.created = false;
+        PROF.queueHead = PROF.queueCount = 0;
+    }
+    PROF.enabled = enabled;
+}
+
+bool R3D_IsProfilerEnabled(void)
+{
+    return PROF.enabled;
+}
+
+void R3D_SetProfilerTag(int tag)
+{
+    PROF.tag = tag;
+}
+
+bool R3D_PopProfilerFrame(R3D_ProfilerFrame* frame)
+{
+    if (PROF.enabled) prof_collect(false);
+    if (PROF.queueCount == 0) return false;
+    *frame = PROF.queue[PROF.queueHead];
+    PROF.queueHead = (PROF.queueHead + 1) % PROF_QUEUE;
+    PROF.queueCount--;
+    return true;
+}
+
+void R3D_FlushProfiler(void)
+{
+    if (PROF.enabled && PROF.created) prof_collect(true);
+}
+
+int R3D_GetProfilerDroppedCount(void)
+{
+    return PROF.dropped;
+}
+
+#else
+
+bool R3D_IsProfilerAvailable(void) { return false; }
+void R3D_SetProfilerEnabled(bool enabled) { (void)enabled; }
+bool R3D_IsProfilerEnabled(void) { return false; }
+void R3D_SetProfilerTag(int tag) { (void)tag; }
+bool R3D_PopProfilerFrame(R3D_ProfilerFrame* frame) { (void)frame; return false; }
+void R3D_FlushProfiler(void) { }
+int R3D_GetProfilerDroppedCount(void) { return 0; }
+
+#endif // R3D_GPU_PROFILER

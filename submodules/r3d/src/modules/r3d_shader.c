@@ -27,6 +27,8 @@
 #include <shaders/blur_down.frag.h>
 #include <shaders/blur_up.frag.h>
 #include <shaders/pyramid.frag.h>
+#include <shaders/shadow_minmax.frag.h>
+#include <shaders/fog_sunvol.frag.h>
 #include <shaders/ssao.frag.h>
 #include <shaders/ssil.frag.h>
 #include <shaders/ssgi.frag.h>
@@ -387,6 +389,44 @@ bool r3d_shader_load_prepare_pyramid(r3d_shader_custom_t* custom)
 
     USE_SHADER(pyramid);
     SET_SAMPLER(pyramid, uDepthTex, R3D_SHADER_SAMPLER_BUFFER_DEPTH);
+
+    return true;
+}
+
+bool r3d_shader_load_prepare_shadow_minmax(r3d_shader_custom_t* custom)
+{
+    R3D_UNUSED(custom);
+
+    DECL_SHADER(r3d_shader_prepare_shadow_minmax_t, prepare, shadowMinMax);
+    LOAD_SHADER(shadowMinMax, SCREEN_VERT, SHADOW_MINMAX_FRAG);
+
+    GET_LOCATION(shadowMinMax, uLayer);
+    GET_LOCATION(shadowMinMax, uPass);
+
+    USE_SHADER(shadowMinMax);
+    SET_SAMPLER(shadowMinMax, uShadowTex, R3D_SHADER_SAMPLER_SHADOW_DIR);
+    SET_SAMPLER(shadowMinMax, uSourceTex, R3D_SHADER_SAMPLER_SOURCE_2D_0);
+
+    return true;
+}
+
+bool r3d_shader_load_prepare_fog_sunvol(r3d_shader_custom_t* custom)
+{
+    R3D_UNUSED(custom);
+
+    DECL_SHADER(r3d_shader_prepare_fog_sunvol_t, prepare, fogSunVol);
+    LOAD_SHADER(fogSunVol, SCREEN_VERT, FOG_SUNVOL_FRAG);
+
+    GET_LOCATION(fogSunVol, uLightViewProj);
+    GET_LOCATION(fogSunVol, uLayer);
+    GET_LOCATION(fogSunVol, uVolMin);
+    GET_LOCATION(fogSunVol, uVoxel);
+    GET_LOCATION(fogSunVol, uSlice);
+    GET_LOCATION(fogSunVol, uSub);
+    GET_LOCATION(fogSunVol, uBias);
+
+    USE_SHADER(fogSunVol);
+    SET_SAMPLER(fogSunVol, uShadowTex, R3D_SHADER_SAMPLER_SHADOW_DIR);
 
     return true;
 }
@@ -821,10 +861,12 @@ bool r3d_shader_load_prepare_cubemap_custom_sky(r3d_shader_custom_t* custom)
     return true;
 }
 
-bool r3d_shader_load_scene_geometry(r3d_shader_custom_t* custom)
+// Monolith patch: `prepass` builds the depth pre-pass variant (see geometry.frag).
+// Its vertex shader is the same source with the same defines as the base variant.
+static bool load_scene_geometry(r3d_shader_custom_t* custom, bool prepass)
 {
     const char* VS_DEFINES[] = {"STAGE_VERT", "GEOMETRY"};
-    const char* FS_DEFINES[] = {"STAGE_FRAG", "GEOMETRY"};
+    const char* FS_DEFINES[] = {"STAGE_FRAG", "GEOMETRY", "GEOMETRY_PREPASS", "R3D_NO_ALPHA_TEST"};
 
     const char* userCode = custom ? custom->program->userCode : NULL;
 
@@ -834,11 +876,13 @@ bool r3d_shader_load_scene_geometry(r3d_shader_custom_t* custom)
         .vsDefineCount = R3D_ARRAY_SIZE(VS_DEFINES),
         .fsTemplate    = GEOMETRY_FRAG,
         .fsDefines     = FS_DEFINES,
-        .fsDefineCount = R3D_ARRAY_SIZE(FS_DEFINES),
+        .fsDefineCount = prepass ? R3D_ARRAY_SIZE(FS_DEFINES) : 2,
         .userCode      = userCode,
     };
 
-    DECL_SHADER_SELECT(r3d_shader_scene_geometry_t, scene, geometry, custom);
+    r3d_shader_scene_geometry_t* geometry = (custom == NULL)
+        ? (prepass ? &R3D_MOD_SHADER.scene.geometryPrepass : &R3D_MOD_SHADER.scene.geometry)
+        : (prepass ? &custom->program->scene.geometryPrepass : &custom->program->scene.geometry);
     LOAD_SHADER_EX(geometry, desc);
 
     SET_UNIFORM_BUFFER(geometry, FrameBlock, R3D_SHADER_BLOCK_SLOT_FRAME);
@@ -865,6 +909,7 @@ bool r3d_shader_load_scene_geometry(r3d_shader_custom_t* custom)
     GET_LOCATION(geometry, uRoughness);
     GET_LOCATION(geometry, uMetalness);
     GET_LOCATION(geometry, uSpecular);
+    GET_LOCATION(geometry, uDepthOnly);
 
     USE_SHADER(geometry);
 
@@ -880,6 +925,16 @@ bool r3d_shader_load_scene_geometry(r3d_shader_custom_t* custom)
     }
 
     return true;
+}
+
+bool r3d_shader_load_scene_geometry(r3d_shader_custom_t* custom)
+{
+    return load_scene_geometry(custom, false);
+}
+
+bool r3d_shader_load_scene_geometry_prepass(r3d_shader_custom_t* custom)
+{
+    return load_scene_geometry(custom, true);
 }
 
 bool r3d_shader_load_scene_forward(r3d_shader_custom_t* custom)
@@ -1487,6 +1542,13 @@ bool r3d_shader_load_deferred_vfog_radiance(r3d_shader_custom_t* custom)
     SET_SAMPLER(vfogRadiance, uShadowDirTex, R3D_SHADER_SAMPLER_SHADOW_DIR);
     SET_SAMPLER(vfogRadiance, uShadowSpotTex, R3D_SHADER_SAMPLER_SHADOW_SPOT);
     SET_SAMPLER(vfogRadiance, uShadowOmniTex, R3D_SHADER_SAMPLER_SHADOW_OMNI);
+    SET_SAMPLER(vfogRadiance, uShadowDirMinMaxTex, R3D_SHADER_SAMPLER_SHADOW_DIR_MINMAX);
+    SET_SAMPLER(vfogRadiance, uFogSunVolTex, R3D_SHADER_SAMPLER_FOG_SUNVOL);
+
+    GET_LOCATION(vfogRadiance, uFogSunVolEnabled);
+    GET_LOCATION(vfogRadiance, uFogSunVolMin);
+    GET_LOCATION(vfogRadiance, uFogSunVolInvExtent);
+    GET_LOCATION(vfogRadiance, uFogSunVolHalfTexel);
 
     return true;
 }
@@ -1852,6 +1914,8 @@ void r3d_shader_quit(void)
     UNLOAD_SHADER(prepare.blurDown);
     UNLOAD_SHADER(prepare.blurUp);
     UNLOAD_SHADER(prepare.pyramid);
+    UNLOAD_SHADER(prepare.shadowMinMax);
+    UNLOAD_SHADER(prepare.fogSunVol);
     UNLOAD_SHADER(prepare.downsample);
     UNLOAD_SHADER(prepare.ssao);
     UNLOAD_SHADER(prepare.ssil);
@@ -1870,6 +1934,7 @@ void r3d_shader_quit(void)
     UNLOAD_SHADER(prepare.cubemapProceduralSky);
 
     UNLOAD_SHADER(scene.geometry);
+    UNLOAD_SHADER(scene.geometryPrepass);
     UNLOAD_SHADER(scene.forward);
     UNLOAD_SHADER(scene.unlit);
     UNLOAD_SHADER(scene.background);
@@ -2008,6 +2073,7 @@ void r3d_shader_custom_free(r3d_shader_custom_t* custom)
     {
         DELETE_PROGRAM(custom->program->prepare.cubemapCustomSky.id);
         DELETE_PROGRAM(custom->program->scene.geometry.id);
+        DELETE_PROGRAM(custom->program->scene.geometryPrepass.id);
         DELETE_PROGRAM(custom->program->scene.forward.id);
         DELETE_PROGRAM(custom->program->scene.unlit.id);
         DELETE_PROGRAM(custom->program->scene.depth.id);

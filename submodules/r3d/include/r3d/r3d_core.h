@@ -271,6 +271,25 @@ R3DAPI R3D_OutputMode R3D_GetOutputMode(void);
 R3DAPI void R3D_SetOutputMode(R3D_OutputMode mode);
 
 /**
+ * @brief Returns whether the depth pre-pass of the deferred geometry pass is enabled.
+ */
+R3DAPI bool R3D_GetDepthPrepass(void);
+
+/**
+ * @brief Enables or disables a depth-only pre-pass before the deferred geometry pass.
+ *
+ * When enabled, opaque draws whose material has `alphaCutoff <= 0` and a LESS or
+ * LEQUAL depth test are first rendered depth-only, then shaded with an EQUAL depth
+ * test and depth writes off, so the material/surface shader runs about once per
+ * visible pixel instead of once per rasterized (overdrawn) fragment. Worth it when
+ * the surface shader is expensive and the scene has depth complexity; the output is
+ * unchanged (both passes run the same program, so depths match exactly).
+ * Draws with alpha cutoff > 0 are rendered as before (they may discard).
+ * Disabled by default.
+ */
+R3DAPI void R3D_SetDepthPrepass(bool enabled);
+
+/**
  * @brief Sets the default texture filtering mode.
  * 
  * This function defines the default texture filter that will be applied to all subsequently 

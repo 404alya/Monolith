@@ -88,7 +88,36 @@ typedef struct {
     uint32_t    layerCount;     // total number of allocated layers (GL side)
     int         size;           // shadow map resolution
     int         growth;         // number of layers added per expand
+    // Min/max depth per R3D_SHADOW_MINMAX_TILE^2 texels, one layer per shadow layer.
+    // Only for directional lights (local patch, see patches.md).
+    bool        hasMinMax;
+    bool        minMaxStale;    // reallocated: every layer must be reduced again
+    GLuint      minMaxFramebuffer;
+    GLuint      minMaxTexture;  // GL_TEXTURE_2D_ARRAY, GL_RG32F
+    GLuint      minMaxMidTexture;   // GL_TEXTURE_2D, GL_RG32F: 8x8 texel step of the reduction
 } r3d_light_shadow_array_t;
+
+// Sun-visibility volume of the volumetric fog (local patch, see patches.md)
+typedef struct {
+    bool        pending;        // a bake was requested this frame (its shadow job is queued)
+    int         layer;          // directional shadow layer the bake reads
+    Matrix      viewProj;       // matrix that layer is rendered with
+    Vector3     min;            // world-space minimum corner of the volume
+    Vector3     voxel;          // voxel size per axis
+    int         dims[3];        // voxel counts
+    int         sub;            // subsamples per axis
+    float       bias;           // depth bias of the shadow map
+} r3d_light_fog_sunvol_request_t;
+
+typedef struct {
+    GLuint      texture;        // GL_TEXTURE_3D, GL_R8, 0 = none
+    GLuint      framebuffer;
+    bool        valid;          // baked and usable by the fog
+    int         dims[3];
+    Vector3     min;
+    Vector3     extent;         // dims * voxel
+    r3d_light_fog_sunvol_request_t request;
+} r3d_light_fog_sunvol_t;
 
 // ========================================
 // MODULE STATE
@@ -98,6 +127,7 @@ extern struct r3d_light {
     r3d_light_shadow_array_t shadowArrays[R3D_LIGHT_TYPE_COUNT];
     r3d_list_t* listShadowJobs;
     r3d_list_t* listLightData;
+    r3d_light_fog_sunvol_t fogSunVol;   // local patch, see patches.md
 } R3D_MOD_LIGHT;
 
 // ========================================
@@ -110,8 +140,9 @@ bool r3d_light_init(void);
 /* Deinitialize module (called once during R3D_Close) */
 void r3d_light_quit(void);
 
-/**/
-void r3d_light_push(const R3D_Light* light, const R3D_ShadowMap* map, bool updateShadow);
+/* fixedViewProj: directional lights only, caller-fitted shadow matrix (local patch, see
+ * patches.md), NULL = R3D's camera-fitted map */
+void r3d_light_push(const R3D_Light* light, const R3D_ShadowMap* map, bool updateShadow, const Matrix* fixedViewProj);
 
 /**/
 r3d_light_data_t* r3d_light_get(int lightIndex);
@@ -143,8 +174,33 @@ int r3d_light_shadow_map_size(R3D_LightType type);
 /* Get a shadow map array texture ID */
 GLuint r3d_light_shadow_map(R3D_LightType type);
 
+/*
+ * Min/max depth map of the directional shadow layers (local patch, see patches.md).
+ * Tiles are R3D_SHADOW_MINMAX_TILE texels wide (must match shadow_minmax.frag).
+ */
+#define R3D_SHADOW_MINMAX_TILE 16
+GLuint r3d_light_shadow_minmax_map(void);
+int r3d_light_shadow_minmax_size(void);
+uint32_t r3d_light_shadow_layer_count(R3D_LightType type);
+void r3d_light_bind_shadow_minmax_fbo(int layer);
+void r3d_light_bind_shadow_minmax_mid_fbo(void);
+GLuint r3d_light_shadow_minmax_mid_map(void);
+bool r3d_light_shadow_minmax_take_stale(void);
+
 /**/
 r3d_light_shadow_cache_t* r3d_light_shadow_cache(R3D_LightType type, int layer);
+
+/*
+ * Sun-visibility volume of the volumetric fog (local patch, see patches.md).
+ * request: queues a shadow job rendering 'map' with 'viewProj' this frame and a bake of
+ * 'region' from it after the shadow passes. Returns false on invalid arguments.
+ */
+bool r3d_light_request_fog_sunvol(const R3D_ShadowMap* map, Matrix viewProj, BoundingBox region, float voxelSize, int subsamples);
+void r3d_light_clear_fog_sunvol(void);
+/* (Re)allocates the 3D texture for the pending request; false if it can't be allocated */
+bool r3d_light_prepare_fog_sunvol(void);
+/* Attaches z slice 'slice' of the volume as the colour target, viewport = one slice */
+void r3d_light_bind_fog_sunvol_slice(int slice);
 
 // ========================================
 // INLINE QUERIES

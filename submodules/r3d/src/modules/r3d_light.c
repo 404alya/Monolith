@@ -16,6 +16,7 @@
 #include <float.h>
 
 #include "../common/r3d_helper.h"
+#include "./r3d_driver.h"
 #include "../r3d_core_state.h"
 
 // ========================================
@@ -81,6 +82,9 @@ static void shadow_array_destroy(r3d_light_shadow_array_t* arr)
 {
     if (arr->texture != 0)     glDeleteTextures(1, &arr->texture);
     if (arr->framebuffer != 0) glDeleteFramebuffers(1, &arr->framebuffer);
+    if (arr->minMaxTexture != 0)     glDeleteTextures(1, &arr->minMaxTexture);
+    if (arr->minMaxFramebuffer != 0) glDeleteFramebuffers(1, &arr->minMaxFramebuffer);
+    if (arr->minMaxMidTexture != 0)  glDeleteTextures(1, &arr->minMaxMidTexture);
 
     R3D_LIST_DESTROY(arr->cache);
     R3D_LIST_DESTROY(arr->freeList);
@@ -122,6 +126,34 @@ static bool shadow_array_expand(r3d_light_shadow_array_t* arr, uint32_t growth)
         glDeleteTextures(1, &arr->texture);
     }
     arr->texture = newTexture;
+
+    // Min/max map (local patch): reallocate with the new layer count; its content is
+    // rebuilt from the copied shadow layers by the next frame's reduction pass
+    if (arr->hasMinMax)
+    {
+        int mmSize = (arr->size + R3D_SHADOW_MINMAX_TILE - 1) / R3D_SHADOW_MINMAX_TILE;
+        if (arr->minMaxTexture == 0) glGenTextures(1, &arr->minMaxTexture);
+        if (arr->minMaxFramebuffer == 0) glGenFramebuffers(1, &arr->minMaxFramebuffer);
+        glBindTexture(GL_TEXTURE_2D_ARRAY, arr->minMaxTexture);
+        glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RG32F, mmSize, mmSize, (GLsizei)newLayerCount, 0, GL_RG, GL_FLOAT, NULL);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+        arr->minMaxStale = true;
+
+        if (arr->minMaxMidTexture == 0)
+        {
+            int midSize = (arr->size + 7) / 8;
+            glGenTextures(1, &arr->minMaxMidTexture);
+            glBindTexture(GL_TEXTURE_2D, arr->minMaxMidTexture);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RG32F, midSize, midSize, 0, GL_RG, GL_FLOAT, NULL);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glBindTexture(GL_TEXTURE_2D, 0);
+        }
+    }
 
     // Resize the cache (new entries zero-initialized => valid = false)
     R3D_LIST_RESIZE(arr->cache, newLayerCount);
@@ -360,7 +392,8 @@ static bool light_volume_screen_ndc(const r3d_light_volume_t* volume, Vector2* m
     return true;
 }
 
-static void light_dir_push(const R3D_Light* light, const R3D_ShadowMap* map, R3D_Camera camera, double aspect, bool updateShadow)
+static void light_dir_push(const R3D_Light* light, const R3D_ShadowMap* map, R3D_Camera camera, double aspect, bool updateShadow,
+                           const Matrix* fixedViewProj)
 {
     r3d_light_data_t data = {
         .volume      = {.center = {0}, .radius = FLT_MAX},
@@ -383,7 +416,8 @@ static void light_dir_push(const R3D_Light* light, const R3D_ShadowMap* map, R3D
 
         if (!cache->rendered || updateShadow)
         {
-            cache->viewProj = light_dir_view_proj(data.direction, data.range, camera, aspect);
+            // Caller-fitted map (local patch, see patches.md): render with the given matrix
+            cache->viewProj = fixedViewProj ? *fixedViewProj : light_dir_view_proj(data.direction, data.range, camera, aspect);
             cache->rendered = true; // Assume it will be rendered in advance
 
             r3d_light_shadow_job_t job = {
@@ -608,6 +642,7 @@ bool r3d_light_init(void)
     memset(&R3D_MOD_LIGHT, 0, sizeof(R3D_MOD_LIGHT));
 
     R3D_MOD_LIGHT.shadowArrays[R3D_LIGHT_DIR]  = shadow_array_create(GL_TEXTURE_2D_ARRAY, R3D_HINT(R3D_HINT_SHADOW_DIR_SIZE), SHADOW_DIR_LAYER_GROWTH);
+    R3D_MOD_LIGHT.shadowArrays[R3D_LIGHT_DIR].hasMinMax = true;
     R3D_MOD_LIGHT.shadowArrays[R3D_LIGHT_SPOT] = shadow_array_create(GL_TEXTURE_2D_ARRAY, R3D_HINT(R3D_HINT_SHADOW_SPOT_SIZE), SHADOW_SPOT_LAYER_GROWTH);
     R3D_MOD_LIGHT.shadowArrays[R3D_LIGHT_OMNI] = shadow_array_create(GL_TEXTURE_CUBE_MAP_ARRAY, R3D_HINT(R3D_HINT_SHADOW_OMNI_SIZE), SHADOW_OMNI_LAYER_GROWTH);
 
@@ -624,11 +659,15 @@ void r3d_light_quit(void)
         shadow_array_destroy(&R3D_MOD_LIGHT.shadowArrays[i]);
     }
 
+    r3d_light_fog_sunvol_t* vol = &R3D_MOD_LIGHT.fogSunVol;
+    if (vol->texture != 0)     glDeleteTextures(1, &vol->texture);
+    if (vol->framebuffer != 0) glDeleteFramebuffers(1, &vol->framebuffer);
+
     R3D_LIST_DESTROY(R3D_MOD_LIGHT.listShadowJobs);
     R3D_LIST_DESTROY(R3D_MOD_LIGHT.listLightData);
 }
 
-void r3d_light_push(const R3D_Light* light, const R3D_ShadowMap* map, bool updateShadow)
+void r3d_light_push(const R3D_Light* light, const R3D_ShadowMap* map, bool updateShadow, const Matrix* fixedViewProj)
 {
     if (map && !light_check_shadow_validity(light, map))
     {
@@ -638,7 +677,7 @@ void r3d_light_push(const R3D_Light* light, const R3D_ShadowMap* map, bool updat
     switch (light->type)
     {
     case R3D_LIGHT_DIR:
-        light_dir_push(light, map, R3D.viewState.camera, R3D.viewState.aspect, updateShadow);
+        light_dir_push(light, map, R3D.viewState.camera, R3D.viewState.aspect, updateShadow, fixedViewProj);
         break;
 
     case R3D_LIGHT_SPOT:
@@ -735,8 +774,166 @@ GLuint r3d_light_shadow_map(R3D_LightType type)
     return R3D_MOD_LIGHT.shadowArrays[type].texture;
 }
 
+GLuint r3d_light_shadow_minmax_map(void)
+{
+    return R3D_MOD_LIGHT.shadowArrays[R3D_LIGHT_DIR].minMaxTexture;
+}
+
+int r3d_light_shadow_minmax_size(void)
+{
+    int size = R3D_MOD_LIGHT.shadowArrays[R3D_LIGHT_DIR].size;
+    return (size + R3D_SHADOW_MINMAX_TILE - 1) / R3D_SHADOW_MINMAX_TILE;
+}
+
+uint32_t r3d_light_shadow_layer_count(R3D_LightType type)
+{
+    return R3D_MOD_LIGHT.shadowArrays[type].layerCount;
+}
+
+void r3d_light_bind_shadow_minmax_fbo(int layer)
+{
+    r3d_light_shadow_array_t* arr = &R3D_MOD_LIGHT.shadowArrays[R3D_LIGHT_DIR];
+    int size = r3d_light_shadow_minmax_size();
+
+    glBindFramebuffer(GL_FRAMEBUFFER, arr->minMaxFramebuffer);
+    glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, arr->minMaxTexture, 0, layer);
+    glViewport(0, 0, size, size);
+}
+
+void r3d_light_bind_shadow_minmax_mid_fbo(void)
+{
+    r3d_light_shadow_array_t* arr = &R3D_MOD_LIGHT.shadowArrays[R3D_LIGHT_DIR];
+    int size = (arr->size + 7) / 8;
+
+    glBindFramebuffer(GL_FRAMEBUFFER, arr->minMaxFramebuffer);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, arr->minMaxMidTexture, 0);
+    glViewport(0, 0, size, size);
+}
+
+GLuint r3d_light_shadow_minmax_mid_map(void)
+{
+    return R3D_MOD_LIGHT.shadowArrays[R3D_LIGHT_DIR].minMaxMidTexture;
+}
+
+bool r3d_light_shadow_minmax_take_stale(void)
+{
+    r3d_light_shadow_array_t* arr = &R3D_MOD_LIGHT.shadowArrays[R3D_LIGHT_DIR];
+    bool stale = arr->minMaxStale;
+    arr->minMaxStale = false;
+    return stale;
+}
+
 r3d_light_shadow_cache_t* r3d_light_shadow_cache(R3D_LightType type, int layer)
 {
     R3D_ASSERT(layer >= 0);
     return &R3D_LIST_GET(R3D_MOD_LIGHT.shadowArrays[type].cache, r3d_light_shadow_cache_t, layer);
+}
+
+// ========================================
+// FOG SUN-VISIBILITY VOLUME (local patch, see patches.md)
+// ========================================
+
+bool r3d_light_request_fog_sunvol(const R3D_ShadowMap* map, Matrix viewProj, BoundingBox region, float voxelSize, int subsamples)
+{
+    if (map->type != R3D_LIGHT_DIR || !r3d_light_shadow_layer_is_valid(R3D_LIGHT_DIR, (int)map->handle - 1))
+    {
+        R3D_TRACELOG(LOG_WARNING, "Fog sun volume -> needs a valid directional shadow map");
+        return false;
+    }
+
+    Vector3 size = Vector3Subtract(region.max, region.min);
+    if (voxelSize <= 0.0f || size.x <= 0.0f || size.y <= 0.0f || size.z <= 0.0f)
+    {
+        R3D_TRACELOG(LOG_WARNING, "Fog sun volume -> invalid region or voxel size");
+        return false;
+    }
+
+    GLint max3D = 0;
+    glGetIntegerv(GL_MAX_3D_TEXTURE_SIZE, &max3D);
+
+    r3d_light_fog_sunvol_request_t req = {
+        .pending  = true,
+        .layer    = (int)map->handle - 1,
+        .viewProj = viewProj,
+        .min      = region.min,
+        .sub      = R3D_CLAMP(subsamples, 1, 8),
+        .bias     = map->depthBias,
+    };
+    float axis[3] = { size.x, size.y, size.z };
+    for (int i = 0; i < 3; i++)
+    {
+        req.dims[i] = (int)ceilf(axis[i] / voxelSize);
+        if (req.dims[i] < 2 || req.dims[i] > max3D)
+        {
+            R3D_TRACELOG(LOG_WARNING, "Fog sun volume -> %d voxels on an axis (limit %d)", req.dims[i], max3D);
+            return false;
+        }
+    }
+    req.voxel = (Vector3){ size.x / req.dims[0], size.y / req.dims[1], size.z / req.dims[2] };
+
+    // Render the layer with the bake's matrix this frame; it is then sampled consistently
+    // if the caller keeps pushing it without updates
+    r3d_light_shadow_cache_t* cache = r3d_light_shadow_cache(R3D_LIGHT_DIR, req.layer);
+    cache->viewProj = viewProj;
+    cache->rendered = true;
+
+    r3d_light_shadow_job_t job = {
+        .frustum     = R3D_ComputeFrustum(viewProj),
+        .viewProj    = viewProj,
+        .cullMask    = map->cullMask,
+        .type        = R3D_LIGHT_DIR,
+        .shadowLayer = req.layer,
+    };
+    R3D_LIST_PUSH(R3D_MOD_LIGHT.listShadowJobs, job);
+
+    R3D_MOD_LIGHT.fogSunVol.request = req;
+    return true;
+}
+
+void r3d_light_clear_fog_sunvol(void)
+{
+    R3D_MOD_LIGHT.fogSunVol.valid = false;
+    R3D_MOD_LIGHT.fogSunVol.request.pending = false;
+}
+
+bool r3d_light_prepare_fog_sunvol(void)
+{
+    r3d_light_fog_sunvol_t* vol = &R3D_MOD_LIGHT.fogSunVol;
+    const r3d_light_fog_sunvol_request_t* req = &vol->request;
+
+    if (vol->texture == 0 || memcmp(vol->dims, req->dims, sizeof(vol->dims)) != 0)
+    {
+        if (vol->texture == 0) glGenTextures(1, &vol->texture);
+        if (vol->framebuffer == 0) glGenFramebuffers(1, &vol->framebuffer);
+
+        glBindTexture(GL_TEXTURE_3D, vol->texture);
+        r3d_driver_clear_errors();
+        glTexImage3D(GL_TEXTURE_3D, 0, GL_R8, req->dims[0], req->dims[1], req->dims[2], 0, GL_RED, GL_UNSIGNED_BYTE, NULL);
+        if (r3d_driver_check_error("Fog sun volume -> texture allocation"))
+        {
+            glBindTexture(GL_TEXTURE_3D, 0);
+            memset(vol->dims, 0, sizeof(vol->dims));
+            vol->valid = false;
+            return false;
+        }
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+        glBindTexture(GL_TEXTURE_3D, 0);
+        memcpy(vol->dims, req->dims, sizeof(vol->dims));
+    }
+
+    vol->min = req->min;
+    vol->extent = (Vector3){ req->voxel.x * req->dims[0], req->voxel.y * req->dims[1], req->voxel.z * req->dims[2] };
+    return true;
+}
+
+void r3d_light_bind_fog_sunvol_slice(int slice)
+{
+    r3d_light_fog_sunvol_t* vol = &R3D_MOD_LIGHT.fogSunVol;
+    glBindFramebuffer(GL_FRAMEBUFFER, vol->framebuffer);
+    glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, vol->texture, 0, slice);
+    glViewport(0, 0, vol->dims[0], vol->dims[1]);
 }

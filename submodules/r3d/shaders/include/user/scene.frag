@@ -111,7 +111,12 @@ void SceneFragment(vec2 texCoord, mat3 tbn, float alphaCutoff, float cutoffSign)
     //  -> -1.0 : Inverted test for hybrid blended
     //  ->  0.0 : Disables alpha test
 
-#define ALPHA_TEST(alpha) if (cutoffSign * (alpha - alphaCutoff) < 0.0) discard;
+#if defined(R3D_NO_ALPHA_TEST)
+    // Monolith patch: variants for draws that never alpha test contain no `discard`
+#   define ALPHA_TEST(alpha)
+#else
+#   define ALPHA_TEST(alpha) if (cutoffSign * (alpha - alphaCutoff) < 0.0) discard;
+#endif
 
     /* --- Fill input variables --- */
 

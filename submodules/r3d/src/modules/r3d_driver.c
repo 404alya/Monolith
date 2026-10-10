@@ -99,7 +99,8 @@ typedef struct {
     pipeline_entry_t depthFactor;
     pipeline_entry_t stencilFunc;
     pipeline_entry_t stencilRef;
-    pipeline_entry_t stencilMask;
+    pipeline_entry_t stencilFuncMask;   //< glStencilFunc's compare mask (monolith patch: was shared with the write mask)
+    pipeline_entry_t stencilMask;       //< glStencilMask's write mask
     pipeline_entry_t stencilOpFail;
     pipeline_entry_t stencilOpZFail;
     pipeline_entry_t stencilOpZPass;
@@ -341,10 +342,10 @@ void r3d_driver_set_depth_offset(float units, float factor)
 
 void r3d_driver_set_stencil_func(GLenum func, uint8_t ref, uint8_t mask)
 {
-    if (CHECK_PIPE(stencilFunc, enum, func) || CHECK_PIPE(stencilRef, byte, ref) || CHECK_PIPE(stencilMask, byte, mask))
+    if (CHECK_PIPE(stencilFunc, enum, func) || CHECK_PIPE(stencilRef, byte, ref) || CHECK_PIPE(stencilFuncMask, byte, mask))
     {
         SET_PIPE(stencilFunc, enum, func);
-        SET_PIPE(stencilMask, byte, mask);
+        SET_PIPE(stencilFuncMask, byte, mask);
         SET_PIPE(stencilRef, byte, ref);
         glStencilFunc(func, ref, mask);
     }

@@ -1,0 +1,170 @@
+# monolith: AI-assisted map designer
+
+Instructions for the AI side (Claude Code) of the map designer. Engine and rendering details are in `PROMPT-INSTRUCTIONS.md`.
+
+## 1. What this is
+
+monolith is an **AI-assisted map designer** for brutalist concrete levels:
+
+- **The game** (`build/linux/monolith`) is the editor and viewer. The developer flies through the level in spectator mode, points the crosshair at a spot, optionally selects boxes, types a request ("make this wall twice as tall", "add a row of pillars here") and submits it.
+- **The level** is a plain-text file, `maps/monolith.map` (`maps/*.map`). Every object is an axis-aligned concrete box. No textures or models.
+- **Claude Code** gets each request in a new terminal window, started by the game in the repo root. It edits the map file. The running game hot-reloads the map, so the change shows up in place without a restart.
+
+You are that Claude Code session. Your job is to change the map (rarely the engine) so it does what the user asked, check the result visually, and report back.
+
+## 2. Request workflow
+
+1. In spectator mode the developer aims, selects and presses **Enter**, types the request and presses **Enter** again.
+2. The game writes a bundle folder, **`requests/<YYYY-MM-DD_HHMMSS>_<slug>/`**, in the repo root (`requests/` is gitignored). The slug is made from the prompt's first words.
+3. The game opens a terminal running `claude "Map edit request: read requests/<id>/request.md and carry it out."` in the repo root. The user's text is never put on a command line. It is only in the bundle.
+4. You read `request.md`, look at the images, edit the map, verify the edit, and write **`requests/<id>/result.md`**.
+5. The game polls the bundle twice a second. When `result.md` appears, the HUD shows `[done] <slug>: <first line of result.md>`. The map change is already visible through hot reload. **R** flies the developer's camera back to where the request was made.
+
+Several requests can run at the same time, and two of them may edit the same map. That is why you check the map hash first (§7, step 1).
+
+**Bundle files**
+
+| File | Content |
+|---|---|
+| `request.md` | **Read this first.** The prompt (verbatim, fenced), the camera, the crosshair hit, the selection, nearby groups, a reproduction `--shot` command, and the map path + hash at submit time. |
+| `request.json` | The same data in machine-readable form (`format: 1`). The keys are `prompt`, `camera` (eye, yawDeg, pitchDeg, forward, right, fovyDeg, aspect, width, height), `hit` (point, normal, distance, box, min, max, group, line, lineText) or `null`, `selection` (per map line: line, lineText, group, boxes with min/max/center/size), `nearby`, `reproduce` (command + argv), `map` (path, hash, mtime, version, boxes, groups) and `mapReloadedSinceSnapshot`. |
+| `view.png` | The frame exactly as the developer saw it, **without the HUD**, at the window's resolution. |
+| `view-marked.png` | The same frame with the **selected boxes** tinted and outlined in orange, the **crosshair hit** shown as a small cyan square with a normal tick, and the crosshair drawn at the centre. |
+| `result.md` | **Written by you**, last. See §8. |
+
+Details of `request.md`:
+- **Camera**: the eye position (not the feet), yaw/pitch in degrees, forward and right vectors, fovy 70° (vertical), aspect and resolution.
+- **Crosshair hit**: the world point at the screen centre, its face normal (axis-aligned, pointing out of the face), the distance from the eye, box index + min/max, group, and the map line, quoted. If the crosshair pointed at the sky it says "Nothing" and `hit` is `null`.
+- **Selection**: the selected boxes, grouped by source line. Each line's text is quoted once and is followed by a table of the boxes it made (box index, min, max, centre, size). One `repeat` line can make dozens of boxes. When the selection is only some of them, the user means those copies, not the whole line.
+- **Nearby**: the groups that have a box within 30 m of the hit point (of the eye if there was no hit), nearest first, with the range of map lines each group covers.
+- **Box indices** (`#46`) are positions in the box list of the map that was loaded at submit time. They shift when lines are inserted above. The map line and its text are the stable reference.
+- A **Warning** line (`mapReloadedSinceSnapshot: true`) means the map reloaded between the selection and the submit, so the indices may not match what the user saw. Locate the target by the coordinates and the quoted line text instead.
+
+## 3. Locating what the user means
+
+Work through these sources in this order:
+
+1. **Crosshair hit and selection.** Together they are the strongest signal. "This", "it" and "here" usually mean the hit box or the hit point. When boxes are selected, "these" or "this" means the selection. Many requests are about a **spot** rather than an object ("put a door here", "open a slit above this"): use the hit point and the face normal. The new geometry goes on that face, on the side the normal points to.
+2. **Directions relative to the camera.** With yaw *y* and pitch *p*:
+   - forward = `(cos p · sin y, sin p, cos p · cos y)`. Yaw 0 looks toward +Z, yaw 90 toward +X, yaw 180 toward −Z.
+   - camera right = `(−cos y, 0, sin y)` and up = +Y.
+   - "Left" is −right, "behind" is −forward (horizontally: the forward vector with its y set to 0), "in front of / beyond" is +forward. "Higher" is +Y. `request.md` gives both vectors already computed.
+3. **Group names and nearby context.** "The hall roof" or "the canyon walls" refer to groups (§6.3). The Nearby table tells you what surrounds the spot.
+4. **The images.** Look at `view-marked.png` (Read it as an image) to see what the user saw and what was marked. `view.png` shows the same frame without the marks.
+5. **If it is still ambiguous**, for example "this" when there is no hit and no selection, or two plausible targets, **ask in the terminal**. Don't guess. The developer is watching that terminal.
+
+## 4. Coordinates and scale
+
+- Units are **metres**. **+Y is up**. The world is right-handed and all geometry is axis-aligned.
+- The ground slab is 800 × 800 m with its **top at y = 0** (group `ground`: `box -400 -1 -400 400 0 400`).
+- The player starts at feet `(0, 0, 90)` in the entry canyon, looking toward −Z. Their AABB is radius 0.3 m and height 1.75 m (~1.8 m), with the **eye at 1.62 m** above the feet.
+- **Walkability.** Walkways need **≥ 2.2 m headroom**. Stairs can rise **≤ 0.45 m per step** (`STEP_HEIGHT`: higher steps can't be climbed). A jump reaches about 0.9 m. Openings must be at least 0.6 m wide for the player to fit through; for comfort make them ≥ 1 m.
+- **Reference sizes in the default map:** hall pillars 2.2 × 2.2 × 20 m on a 9 m grid; canyon walls 34 m tall; the terrace at y = 12; the tower up to y = 96; megastructures 120–260 m tall, 120–300 m out; the bridge at y 120–128. Buildings are 50–260 m.
+- **Visibility.** Sun shadows reach about 100 m from the eye (`--shadow` range), fading out from 75 m. Distance fog turns anything beyond ~150 m into a silhouette.
+- **Feet vs. eye.** This is a common source of off-by-1.62 m errors.
+  - `--pos x y z` takes the **feet** (eye − 1.62). The **P** key in the game prints `--pos` (feet).
+  - `--eye x y z` takes the **eye**. `request.md`, `request.json`, the `VIEWPOINTS[]` table and the reproduction command all use the eye.
+  - Without `--view`, `--pos`/`--eye` place the walking player (the shot renders that player's camera). With `--view n`, `--eye` moves the spectator camera instead and `--look` overrides the viewpoint's angles.
+
+## 5. Map format reference
+
+Each statement takes one line, so a line number identifies an object. The parser is in `src/map.c`, and the header comment there is authoritative.
+
+```
+# comment                      '#' starts a comment anywhere outside "quotes"
+group "name"                   every following primitive belongs to this group, until the next group
+```
+
+**Primitives.** Numbers are plain decimals (`12`, `-4.5`, `0.75`). Corners can be given in any order.
+
+| Primitive | Arguments | Makes |
+|---|---|---|
+| `box` | `x0 y0 z0 x1 y1 z1` | 1 box between two opposite corners |
+| `block` | `cx y0 cz sx sy sz` | 1 box centred on (cx, cz), from y0 up to y0 + sy, size sx × sy × sz |
+| `stairs` | `cx baseY startZ width steps rise run` | `steps` boxes (integer) climbing toward **−Z**. Step *i* (0-based) spans z from `startZ − i·run` to `startZ − (i+1)·run`, x `cx ± width/2`, y from `baseY` up to `baseY + (i+1)·rise`. The steps are solid down to baseY. |
+| `waffle` | `x0 x1 y0 y1 z depth bayW floorH` | A facade facing **+Z**: a back wall (x0..x1, y0..y1, z−1..z), 0.6 m vertical fins centred at x = x0, x0+bayW, … while ≤ x1, and 0.5 m ledges with their tops at y0+floorH, y0+2·floorH, … while ≤ y1. Fins and ledges stick out from z to z + depth. bayW and floorH must be > 0. |
+
+Examples from the default map:
+
+```
+box -4.5 0 40 -3 34 95                  # canyon wall: 1.5 m thick, 34 m tall, 55 m long
+block 18 12 -82 1.2 6 1.2               # 1.2 x 6 x 1.2 m pillar standing on the terrace (y 12)
+stairs 0 0 -40 22 40 0.3 0.75           # 40 steps 22 m wide, 0.3 m rise, 0.75 m run: z -40 -> -70, up to y 12
+waffle -30 30 12 92 -100 2 4 4          # tower facade: fins every 4 m, ledges every 4 m, 2 m deep
+```
+
+**Placement prefixes** go in front of a primitive on the same line.
+
+- `repeat n dx dy dz` makes n copies (n ≥ 0). Copy *i* (0-based) is shifted by `i · (dx, dy, dz)`. Up to **3** repeats on one line make a grid. The first repeat is the outer loop, so it decides the box order.
+- `at x y z` shifts the primitive by (x, y, z), so its own coordinates become relative to that point. Only one `at` is allowed per line.
+- Shifts move **position arguments only** (box: all six numbers; block: `cx y0 cz`; stairs: `cx baseY startZ`; waffle: `x0 x1 y0 y1 z`). Sizes, `steps`, `rise`, `run`, `depth`, `bayW` and `floorH` are never shifted.
+
+```
+repeat 6 0 0 9 at 0 0 40 box -4.5 34 0 4.5 36 8.4          # 6 roof segments, 8.4 m long, every 9 m from z 40
+repeat 4 9 0 0 repeat 8 0 0 9 block -36 0 -32 2.2 20 2.2   # 4 x 8 pillar grid: x -36..-9, z -32..31
+repeat 11 6 0 0 block -200 0 -84 1 180 2                   # 11 fins 6 m apart
+```
+
+**Why `at` exists.** Each position is computed as `(at + i·d) + value` in float. `at` reproduces the original C loops, which computed `(start + i·step) + 2.6`, bit for bit (needed for identical box lists). With whole or half numbers the order doesn't matter. **For new content, don't use `at`**: write the first copy's real coordinates and a `repeat`.
+
+**Groups.** A primitive belongs to the most recent `group` above it. Each `group` statement creates a new group, even when the name repeats, so **don't reuse a group name** in a second place: add the lines to the existing block instead. In-game Ctrl+click selects one group statement's boxes. Group names can be up to 63 characters and can't contain `"`.
+
+The **groups of the default map**, in file order: `ground`, `entry canyon: walls`, `entry canyon: roof`, `entry canyon: back wall`, `hypostyle hall: pillars`, `hypostyle hall: roof`, `hypostyle hall: cantilever`, `monumental stairs`, `upper terrace`, `tower`, `terrace pillar`, `megastructures`, `bridge`.
+
+**Limits.** At most 8192 boxes in total (`MAX_BOXES`; the default map has 279), 256 groups, 1024 characters and 64 words per line, and a 4 MB file. **Errors** (unknown keyword, wrong argument count, bad number, too many boxes, a map with no boxes) are reported as `file:line: message`.
+
+## 6. Editing rules
+
+- **Change the smallest set of lines** that does what was asked. Don't reformat, renumber, reorder or "tidy" other lines, and don't move unrelated geometry.
+- **Changing one copy of a `repeat` line:** split the line so that the changed copy gets its own line. Example: a selected pillar is copy 3 of an 8-copy z-row. Write the row as copies 0–2, then the changed one, then copies 4–7, with adjusted start values and counts. Check that the other copies keep exactly their old coordinates (`--dump-boxes`, §7).
+- **New geometry goes into a well-named group.** Either extend the matching existing group block or add a new `group "area: what"` in the same style (e.g. `group "hypostyle hall: north door"`). Keep or add short `#` comments that say what the lines are. Names are how the developer and later requests refer to things.
+- **Stay axis-aligned**: no rotation exists. Diagonal or curved shapes have to be built as steps of boxes.
+- **Solid steps in another direction** (stairs only climb toward −Z): repeat a box whose bottom stays buried in the floor below. For example, `repeat 10 0.75 0.3 0 box 0 -3 0 0.75 0.3 4` makes 10 steps climbing toward +X, each 0.3 m higher.
+- **Faces:** exactly coplanar overlapping faces are harmless here, because the concrete shader is computed from world position and both faces shade identically. Faces that are *nearly* coplanar (a few mm to cm apart) can flicker, so either align them exactly or separate them clearly.
+- **Keep the box count under `MAX_BOXES`** (8192), and watch what a `repeat` grid multiplies to.
+- **Real scale.** Think in metres (§4). Keep walkways ≥ 2.2 m high and steps ≤ 0.45 m. New boxes should rest on something (ground y = 0, terrace y = 12, a roof) unless the request wants them floating.
+- **Engine changes are allowed when a request needs them**: a new primitive type in `src/map.c`, lighting or atmosphere in `SetupEnvironment()` (`src/atmosphere.c`), the sun in `src/main.c`, shader work. They must follow `PROMPT-INSTRUCTIONS.md` (§7 pitfalls, R3D changes recorded in `submodules/r3d/patches.md`), keep the look unless the request is about the look, and build with **zero warnings on both targets** (`./build.sh` and `./build.sh --win`). If you add a primitive, document it in the `map.c` header comment and in §5 here.
+
+## 7. Verification
+
+Run every command from the repo root. The binary is `./build/linux/monolith`, and the reproduction command in `request.md` uses its absolute path. **Never open a visible window on the developer's screen.** Use only `--shot` (it renders in a hidden window that is never mapped) and `--dump-boxes` (no window at all).
+
+1. **Check the map hash** before editing. Compare with the hash in `request.md` ("at submit: FNV-1a 64 hash …"), using the command printed there:
+   ```sh
+   python3 -c "import sys,functools as f;print('%016x'%f.reduce(lambda h,b:((h^b)*0x100000001b3)&(2**64-1),open(sys.argv[1],'rb').read(),0xcbf29ce484222325))" maps/monolith.map
+   ```
+   If the hash differs, the file changed after the submit, maybe because of another request. Re-read it and re-locate your targets by coordinates and line text, because the line numbers and box indices in `request.md` may be stale.
+2. **Before image.** Run the bundle's reproduction command, with the output put into the bundle folder:
+   ```sh
+   ./build/linux/monolith --shot requests/<id>/before.png --shot-size W H --eye X Y Z --look YAW PITCH --map maps/monolith.map
+   ```
+   (`--shot` with a relative path writes into the current directory, so always give the bundle path.) `--shot` renders 30 frames and exits; the bundle's command passes `--shot-size W H` with the size of `view.png`, so the image matches `view.png` (pixel-identical in tests; without `--shot-size` shots are 1600 × 900). Add `--pick` to print what the screen centre hits (box, group, map line, point, normal, distance).
+   Also save the box list: `./build/linux/monolith --dump-boxes requests/<id>/boxes-before.txt` (one box per line as hex floats).
+3. **Edit the map.** For multi-line edits, prefer one write: the game reloads on every save, so intermediate states flash on the developer's screen. A broken save keeps the old map loaded and shows a red `file:line: message` in the HUD.
+4. **Check that it parses.** A broken map never crashes the game, but it also doesn't load, so the developer keeps seeing the old one. To check the file, load it explicitly:
+   ```sh
+   ./build/linux/monolith --dump-boxes requests/<id>/boxes-after.txt --map maps/monolith.map   # no window
+   ```
+   A parse error prints `file:line: message` and exits with status 1. Any `--shot … --map <file>` also refuses to start on a broken map. `--map` is also how to try a draft copy before writing it over the real map. `diff` the two box dumps to confirm that only the intended boxes changed (with inserted lines, the unchanged boxes move as a block).
+5. **After image** from the same camera: `--shot requests/<id>/after.png` with the same `--eye`/`--look`. Then **look at both images** (Read them). Add extra views where the reproduction view can't show the change, e.g. from the other side, from above, or walking height `--eye x 1.62 z`. The 7 presets are `--view 1..7`. Use `--off <digits>` to isolate effects (1 volumetric fog, 2 distance fog, 3 SSAO, 4 SSIL, 5 bloom, 6 sun).
+6. **Check:**
+   - the request is visibly done, at the right spot, at a sensible scale;
+   - no **floating boxes**: each new box rests on or is attached to something, unless intended. Compare y0 with the top of the support;
+   - no **z-fighting** or flickering near-coplanar faces;
+   - walkways not blocked: **headroom ≥ 2.2 m**, stairs **rise ≤ 0.45 m** per step, openings ≥ 0.6 m (better ≥ 1 m), and a route from the start through canyon → hall → stairs → terrace still exists;
+   - no unrelated geometry moved (the box diff), and the box count is < 8192.
+7. **Write `requests/<id>/result.md`** (§8).
+
+**Hot reload vs. rebuild.** The game polls the map file about twice a second and reloads it when its content changes. The HUD then shows `map reloaded (N boxes)`. **A map-only edit needs no rebuild and no restart.** A **code edit** (C or R3D) needs `./build.sh` (and `./build.sh --win` for the warning check), and **the developer restarts the game**. Say so in `result.md`. Edits to `resources/shaders/concrete.glsl` need no rebuild, but they need a restart (the shader loads at start-up).
+
+## 8. result.md
+
+Write it **last**, in one go. The game picks it up as soon as it has a complete first line.
+
+- **Line 1: a one-line summary.** It appears in the game's HUD as `[done] <slug>: <line 1>`. Leading `#` and spaces are stripped and the line is cut at 159 characters. Keep it short (< 100 characters), plain ASCII (other characters show as `?`), and specific, e.g. `Pillar at (9, -5) raised from 20 m to 25 m (line 47 split into 3 lines)`.
+- Then:
+  - **what changed**: map lines before → after (quote them, with line numbers);
+  - the **paths of the before/after images**;
+  - **anything left open**: assumptions, things you couldn't do, side effects;
+  - **"restart needed"** if you changed code.
+- If you couldn't do the request, still write `result.md`, with a summary line that says so (e.g. `Not done: ambiguous target, see terminal`). Otherwise the HUD shows the request as running forever.

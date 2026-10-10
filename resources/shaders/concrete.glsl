@@ -97,12 +97,19 @@ void fragment()
         float hole = 1.0 - smoothstep(0.012, 0.022, length(hl));
         c *= 1.0 - 0.55 * hole;
 
-        // Rain streaks: sparse, grouped in patches, fading in and out along their length
+        // Rain streaks: sparse, grouped in patches, fading in and out along their length.
+        // Most wall pixels lie outside a streak (first term exactly 0, so the product is
+        // 0): skip the fbm and the noise there. Same image, cheaper. (Skipping the board
+        // mark noise the same way changed 1 pixel by 1/255, presumably different FMA
+        // contraction, so that one stays as it was.)
         float streak = valueNoise(vec3(uv.x * 4.0, uv.y * 0.08, 3.1));
         streak = smoothstep(0.62, 0.9, streak);
-        streak *= smoothstep(0.35, 0.75, fbm(vec3(uv.x * 0.25, uv.y * 0.05, 7.7)));
-        streak *= 0.5 + 0.5 * valueNoise(vec3(uv.x * 1.5, uv.y * 0.4, 1.3));
-        grime += 0.3 * streak;
+        if (streak != 0.0)
+        {
+            streak *= smoothstep(0.35, 0.75, fbm(vec3(uv.x * 0.25, uv.y * 0.05, 7.7)));
+            streak *= 0.5 + 0.5 * valueNoise(vec3(uv.x * 1.5, uv.y * 0.4, 1.3));
+            grime += 0.3 * streak;
+        }
     }
     else
     {

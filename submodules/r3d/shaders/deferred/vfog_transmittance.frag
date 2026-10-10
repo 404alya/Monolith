@@ -15,6 +15,7 @@
 #include <lib/math.glsl>
 #include <ubo/view.glsl>
 #include <ubo/fx.glsl>
+#include <wrap/view.glsl>
 
 // ================================
 // In - Varyings
@@ -41,7 +42,9 @@ uniform sampler2D uDepthTex;
 void main()
 {
     float depth = texelFetch(uDepthTex, ivec2(gl_FragCoord.xy), 0).r;
-    float rayDist = min(depth, uVFog.maxDistance);
+    // Distance along the view ray, not view depth: view depth changes when the camera
+    // only turns, and the radiance march integrates over distance (local patch 4)
+    float rayDist = min(length(V_GetViewPosition(vTexCoord, depth)), uVFog.maxDistance);
 
     // Analytic transmittance over the full ray distance
     float sigmaT = uVFog.scatteringDensity + uVFog.absortionDensity;

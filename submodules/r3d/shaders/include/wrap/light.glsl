@@ -32,6 +32,13 @@ vec3 L_Specular(vec3 F0, float roughness, float NoV, float NoL, float NoH, float
 
 #define SHADOW_SAMPLES 8
 
+// Directional shadows fade out over this outer fraction of the map (x, y and depth).
+// Upstream: 0.05. Local patch (see patches.md): 0.01, so a world-fixed map (monolith's
+// static sun tiles) loses less of its area to the fade. Wherever shadows are weighted,
+// both the camera-fitted and the tiled maps keep every point far inside the map, so
+// the fade is exactly 1 there either way and the image doesn't change.
+#define SHADOW_DIR_EDGE_FADE 0.01
+
 const vec2 VOGEL_DISK[8] = vec2[8](
     vec2(0.250000, 0.000000),
     vec2(-0.319290, 0.292496),
@@ -66,7 +73,7 @@ float L_SampleShadowDir(Light light, vec3 Pws, float Zvs, float NoL, mat2 diskRo
     shadow /= float(SHADOW_SAMPLES);
 
     vec3 distToBorder = min(projCoords, 1.0 - projCoords);
-    float edgeFade = smoothstep(0.0, 0.05, min(distToBorder.x, min(distToBorder.y, distToBorder.z)));
+    float edgeFade = smoothstep(0.0, SHADOW_DIR_EDGE_FADE, min(distToBorder.x, min(distToBorder.y, distToBorder.z)));
     float distFade = smoothstep(light.range, light.range * 0.75, Zvs);
 
     return mix(1.0, shadow, edgeFade * distFade * light.shadowOpacity);

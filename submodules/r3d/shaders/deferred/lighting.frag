@@ -137,7 +137,9 @@ void main()
         mat2 diskRot = L_ShadowDebandingMatrix(gl_FragCoord.xy);
         switch (uLight.type)
         {
-        case LIGHT_DIR:  shadow *= L_SampleShadowDir(uLight, P, depth, NoL, diskRot); break;
+        // Fade by distance from the eye, not view depth: view depth changes when the
+        // camera only turns (local patch 4, see patches.md)
+        case LIGHT_DIR:  shadow *= L_SampleShadowDir(uLight, P, length(P - uView.position), NoL, diskRot); break;
         case LIGHT_SPOT: shadow *= L_SampleShadowSpot(uLight, P, NoL, diskRot); break;
         case LIGHT_OMNI: shadow *= L_SampleShadowOmni(uLight, P, NoL, diskRot); break;
         }

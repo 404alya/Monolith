@@ -6,6 +6,9 @@ screenshot*.png
 # Benchmark reports written by --bench (local results)
 benchmark/
 
+# In-game map edit requests (bundles for Claude Code, see src/launcher.c)
+requests/
+
 # Local editor config (machine-specific absolute paths)
 .clangd
 

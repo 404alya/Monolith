@@ -54,6 +54,15 @@ uniform float uRoughness;
 uniform float uMetalness;
 uniform float uSpecular;
 
+#if defined(GEOMETRY_PREPASS)
+// Monolith patch (depth pre-pass): this variant is used both for the depth-only
+// pre-pass (uDepthOnly, colour writes masked) and for the shading pass after it,
+// so gl_Position, and thus the depth tested with GL_EQUAL, comes from the same
+// program. It has no alpha test (R3D_NO_ALPHA_TEST): without any `discard` the
+// driver can keep early depth/stencil tests while the shading pass writes stencil.
+uniform bool uDepthOnly;
+#endif
+
 // ================================
 // User Override
 // ================================
@@ -66,6 +75,10 @@ uniform float uSpecular;
 
 void main()
 {
+#if defined(GEOMETRY_PREPASS)
+    if (uDepthOnly) return;
+#endif
+
     SceneFragment(vTexCoord, vTBN, uAlphaCutoff, 1.0);
 
     mat3 TBN = mat3(TANGENT, BITANGENT, NORMAL);

@@ -44,6 +44,16 @@ uniform sampler2DArrayShadow uShadowDirTex;
 uniform sampler2DArrayShadow uShadowSpotTex;
 uniform samplerCubeArrayShadow uShadowOmniTex;
 
+uniform sampler2DArray uShadowDirMinMaxTex;     // RG = min/max depth per 16x16 texels (local patch)
+
+// Baked sun visibility of directional lights (local patch, see patches.md): R = mean
+// shadow visibility per voxel over the box [uFogSunVolMin, uFogSunVolMin + extent]
+uniform sampler3D uFogSunVolTex;
+uniform bool uFogSunVolEnabled;
+uniform vec3 uFogSunVolMin;
+uniform vec3 uFogSunVolInvExtent;   // 1 / extent
+uniform vec3 uFogSunVolHalfTexel;   // half a voxel in texture coordinates
+
 // ================================
 // Helper Includes
 // ================================
@@ -62,6 +72,83 @@ float PhaseFunction_Schlick(vec3 w0, vec3 w1)
     float nom = 1.0 - uVFog.anisotropy * uVFog.anisotropy;
     float denom = 4.0 * M_PI * (1.0 + uVFog.anisotropy * cosTheta) * (1.0 + uVFog.anisotropy * cosTheta);
     return nom / denom;
+}
+
+// L_SampleShadowDir (NoL = 1) with an exact shortcut (local patch, see patches.md):
+// when the reference depth is in front of (or behind) every texel the 8 PCF taps can
+// touch, each tap returns exactly 1 (or 0), so the taps are skipped. The texels come
+// from the min/max depth tiles of uShadowDirMinMaxTex, 2x2 tiles cover the footprint.
+// fadeDist replaces L_SampleShadowDir's view depth (local patch 4): the distance from
+// the eye to the surface behind the march, so the fade doesn't change when the camera
+// only turns. Within that distance (< range) every step on screen lies well inside the
+// camera-fitted map, and inside monolith's static tiles (patch 7) as well, so edgeFade
+// is 1 there and doesn't depend on the camera either.
+float VFog_SampleShadowDir(vec3 Pws, float fadeDist, mat2 diskRot)
+{
+    vec4 Pls = uLight.viewProj * vec4(Pws, 1.0);
+    vec3 projCoords = Pls.xyz / Pls.w * 0.5 + 0.5;
+    float bias = uLight.shadowDepthBias + uLight.shadowSlopeBias * (1.0 - 1.0);
+    float compareDepth = projCoords.z - bias;
+
+    // Footprint in texels: largest Vogel offset (< 1.0 * softness) plus the bilinear
+    // neighbour, with margin. Clamped like CLAMP_TO_EDGE clamps the taps.
+    const int TILE_SIZE = 16;   // must match R3D_SHADOW_MINMAX_TILE
+    float mapSize = float(textureSize(uShadowDirTex, 0).x);
+    float radius = uLight.shadowSoftness * mapSize + 2.0;
+    vec2 center = projCoords.xy * mapSize - 0.5;
+    ivec2 last = ivec2(textureSize(uShadowDirTex, 0).xy) - 1;
+    ivec2 t0 = clamp(ivec2(floor(center - radius)), ivec2(0), last) / TILE_SIZE;
+    ivec2 t1 = clamp(ivec2(floor(center + radius)) + 1, ivec2(0), last) / TILE_SIZE;
+
+    vec2 a = texelFetch(uShadowDirMinMaxTex, ivec3(t0.x, t0.y, uLight.shadowLayer), 0).rg;
+    vec2 b = texelFetch(uShadowDirMinMaxTex, ivec3(t1.x, t0.y, uLight.shadowLayer), 0).rg;
+    vec2 c = texelFetch(uShadowDirMinMaxTex, ivec3(t0.x, t1.y, uLight.shadowLayer), 0).rg;
+    vec2 d = texelFetch(uShadowDirMinMaxTex, ivec3(t1.x, t1.y, uLight.shadowLayer), 0).rg;
+    float dMin = min(min(a.x, b.x), min(c.x, d.x));
+    float dMax = max(max(a.y, b.y), max(c.y, d.y));
+
+    // The hardware compares clamp(ref, 0, 1) <= stored; keep 2 units of the 16-bit
+    // depth format as margin so rounding of the reference can't flip a tap
+    const float EPS = 2.0 / 65535.0;
+    float ref = clamp(compareDepth, 0.0, 1.0);
+
+    // 2x2 tiles only cover footprints narrower than a tile (softness up to ~5 texels)
+    bool covered = all(lessThanEqual(t1 - t0, ivec2(1)));
+
+    float shadow;
+    if (covered && ref <= dMin - EPS) shadow = 1.0;
+    else if (covered && ref > dMax + EPS) shadow = 0.0;
+    else
+    {
+        shadow = 0.0;
+        for (int i = 0; i < SHADOW_SAMPLES; ++i)
+        {
+            vec2 offset = diskRot * VOGEL_DISK[i] * uLight.shadowSoftness;
+            shadow += texture(uShadowDirTex, vec4(projCoords.xy + offset, uLight.shadowLayer, compareDepth));
+        }
+        shadow /= float(SHADOW_SAMPLES);
+    }
+
+    vec3 distToBorder = min(projCoords, 1.0 - projCoords);
+    float edgeFade = smoothstep(0.0, SHADOW_DIR_EDGE_FADE, min(distToBorder.x, min(distToBorder.y, distToBorder.z)));
+    float distFade = smoothstep(uLight.range, uLight.range * 0.75, fadeDist);
+
+    return mix(1.0, shadow, edgeFade * distFade * uLight.shadowOpacity);
+}
+
+// Directional shadow visibility at Pws: one trilinear fetch of the baked volume inside
+// it (local patch, see patches.md), else VFog_SampleShadowDir. Same fades as there:
+// distFade by fadeDist; edgeFade is 1 wherever the shadow is weighted (see above).
+float VFog_SunVisibility(vec3 Pws, float fadeDist, mat2 diskRot)
+{
+    vec3 uvw = (Pws - uFogSunVolMin) * uFogSunVolInvExtent;
+    if (uFogSunVolEnabled && all(greaterThanEqual(uvw, uFogSunVolHalfTexel)) && all(lessThanEqual(uvw, 1.0 - uFogSunVolHalfTexel)))
+    {
+        float shadow = texture(uFogSunVolTex, uvw).r;
+        float distFade = smoothstep(uLight.range, uLight.range * 0.75, fadeDist);
+        return mix(1.0, shadow, distFade * uLight.shadowOpacity);
+    }
+    return VFog_SampleShadowDir(Pws, fadeDist, diskRot);
 }
 
 // Computes the march range [tEnter, tExit] along rayDir (from rayOrigin),
@@ -143,9 +230,49 @@ void main()
     mat2 diskRot = L_ShadowDebandingMatrix(gl_FragCoord.xy);
     bool hasShadow = uLight.shadowLayer >= 0 && uLight.shadowOpacity != 0.0;
 
+    // VFog_SampleShadowDir fades the shadow out by the distance to the surface behind the
+    // march (constant along the ray) and weights it by exactly 0 at fragDist >= range,
+    // e.g. on sky pixels. Skip its taps there: same result, no wasted PCF lookups.
+    if (uLight.type == LIGHT_DIR && fragDist >= uLight.range) hasShadow = false;
+
     // Precompute inverses used inside the loop
     float invRange = 1.0 / max(uLight.range, 1e-4);
     float invEpsilon = 1.0 / max(uLight.innerCutOff - uLight.outerCutOff, 1e-4);
+
+    // Directional light (local patch 9, see patches.md): L, and so the phase function and
+    // the whole in-scatter factor, are constant along the ray; only the visibility varies.
+    // Same arithmetic in the same order as the generic loop below, just hoisted.
+    if (uLight.type == LIGHT_DIR)
+    {
+        float phase = PhaseFunction_Schlick(-uLight.direction, fragToCameraNorm);
+        vec3 LiDir = uVFog.scatteringDensity * uVFog.scatteringColor.rgb * phase * lightColor;
+
+        // Unshadowed rays (sky, surfaces >= range away): every step adds LiDir times the
+        // transmittance so far, a geometric series with a closed form. n = the loop's
+        // step count (equal up to float rounding of the accumulated l).
+        if (!hasShadow)
+        {
+            float n = ceil(rayDist / uVFog.stepSize);
+            float series = (transmittanceStep < 0.99999)
+                ? transmittanceStep * (1.0 - pow(transmittanceStep, n)) / (1.0 - transmittanceStep)
+                : n;    // no extinction: n steps of 1
+            radiance = LiDir * series * uVFog.stepSize;
+            rayDist = 0.0;
+        }
+
+        for (float l = 0; l < rayDist; l += uVFog.stepSize)
+        {
+            float visibility = VFog_SunVisibility(marchPos, fragDist, diskRot);
+            vec3 Li = LiDir * visibility;
+
+            transmittance *= transmittanceStep;
+            radiance += Li * transmittance * uVFog.stepSize;
+
+            marchPos += deltaStep;
+        }
+
+        rayDist = 0.0;  // skip the generic loop
+    }
 
     for (float l = 0; l < rayDist; l += uVFog.stepSize)
     {
@@ -161,7 +288,7 @@ void main()
         {
             switch (uLight.type)
             {
-            case LIGHT_DIR:  visibility *= L_SampleShadowDir(uLight, marchPos, depth, 1.0, diskRot); break;
+            case LIGHT_DIR:  visibility *= VFog_SunVisibility(marchPos, fragDist, diskRot); break;
             case LIGHT_SPOT: visibility *= L_SampleShadowSpot(uLight, marchPos, 1.0, diskRot); break;
             case LIGHT_OMNI: visibility *= L_SampleShadowOmni(uLight, marchPos, 1.0, diskRot); break;
             }
