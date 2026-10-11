@@ -210,7 +210,9 @@ In `--submit` and `--type` text, a literal `\n` becomes a new line.
 |---|---|
 | `MONOLITH_TERMINAL` | Terminal to open, as a program name or path plus optional extra arguments (`"kitty --single-instance"`). It takes precedence over `TERMINAL`. |
 | `TERMINAL` | Used when `MONOLITH_TERMINAL` is unset. If neither is set, the first of `alacritty`, `kitty`, `foot`, `wezterm`, `xterm` found in `PATH` is used. |
-| `MONOLITH_CLAUDE_ARGS` | Extra Claude Code flags, split on whitespace (no quoting), e.g. a permission mode or a model. Default: none. Permissions are never bypassed by default. |
+| `MONOLITH_CLAUDE_ARGS` | Extra Claude Code flags, split on whitespace (no quoting), e.g. a model. Default: none. They follow `--allow-dangerously-skip-permissions --dangerously-skip-permissions`, which every session gets by default (the guard rails are in `CLAUDE.md` / `AI-MAP-TOOL.md`). |
+| `MONOLITH_CLAUDE_SAFE` | Set to `1` (any value but empty or `0`) to drop the two permission flags, so Claude Code asks before each command as usual. |
+| `MONOLITH_WORKSPACE` | i3 / sway workspace the new terminal is moved to (default `10`; empty = leave it where it opens). A number uses `workspace number N`, anything else a workspace name. Done with `i3-msg` (`swaymsg` when `SWAYSOCK` is set) and the criteria `[title="^monolith-claude: <slug>$"]`, retried by a detached helper every 0.1 s for up to 10 s; the visible workspace doesn't change and focus returns to the previous window. Without a `for_window` rule the window flashes up briefly where it opened; `for_window [title="^monolith-claude: "] move container to workspace number $ws10` in the i3 config avoids that. Other window managers: nothing happens. |
 
 Vsync is **off** and rendered frames are uncapped; reused (cached) frames sleep to the monitor refresh rate (frame reuse, §6). For benchmarks, also disable driver vsync:
 `__GL_SYNC_TO_VBLANK=0 ./build/linux/monolith --bench` (NVIDIA) or `vblank_mode=0` (Mesa).

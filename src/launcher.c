@@ -2,8 +2,9 @@
 //
 // A submitted request becomes a self-contained folder requests/<YYYY-MM-DD_HHMMSS>_<slug>/
 // (view.png, view-marked.png, request.md, request.json). Then a new terminal window runs
-// `claude [MONOLITH_CLAUDE_ARGS] "Map edit request: read requests/<id>/request.md and
-// carry it out."` in the repo root. The user's prompt never goes on a command line: it
+// `claude --allow-dangerously-skip-permissions --dangerously-skip-permissions
+// [MONOLITH_CLAUDE_ARGS] "Map edit request: read requests/<id>/request.md and carry it
+// out."` in the repo root. The user's prompt never goes on a command line: it
 // only lives in the bundle, and the process is started from an argv array (no shell).
 // The game then polls the bundle for result.md and shows its first line in the HUD.
 //
@@ -19,11 +20,25 @@
 //     it, which a game started from a desktop launcher may not have in PATH). It is
 //     passed to the terminal as an absolute path, so a terminal daemon with another
 //     environment (kitty --single-instance) still finds it.
-//   - extra Claude Code flags: $MONOLITH_CLAUDE_ARGS, split on whitespace (no quoting).
-//     Default none; permissions are never bypassed by default.
+//   - permissions: every session starts with --allow-dangerously-skip-permissions
+//     --dangerously-skip-permissions, so the developer isn't asked to approve each
+//     command; the guard rails live in CLAUDE.md / AI-MAP-TOOL.md instead.
+//     MONOLITH_CLAUDE_SAFE=1 (any value but empty or "0") drops the two flags.
+//   - extra Claude Code flags: $MONOLITH_CLAUDE_ARGS, split on whitespace (no quoting),
+//     after the permission flags. Default none.
+//   - workspace (i3 / sway): the new terminal is moved to workspace $MONOLITH_WORKSPACE
+//     (default 10; empty = leave it where it opens) with `i3-msg` (`swaymsg` when
+//     $SWAYSOCK is set) and the criteria [title="^monolith-claude: <slug>$"]. A detached
+//     /bin/sh helper retries every 0.1 s for up to 10 s until the window exists, so the
+//     game never waits. A criteria `move container to workspace` doesn't switch the
+//     visible workspace; focus returns to the previously focused window. The window may
+//     still flash up for a moment where it opened: an i3 `for_window` rule on the title
+//     (terminals set it before the window is mapped) avoids that, and the IPC move then
+//     finds it already there. Other window managers: i3-msg finds no i3 (exit 1) and the
+//     helper stops at once.
 //
 // Windows: the same bundle, then `cmd /c start "monolith-claude: <slug>" /D <root> cmd /k
-// "<claude>" ...` via _spawnvp (<process.h>, so no <windows.h> clash with raylib). Only
+// "<claude>" <permission flags> ...` via _spawnvp (no workspace move) (<process.h>, so no <windows.h> clash with raylib). Only
 // compile-tested; failures of `start` itself can't be seen from here.
 
 #ifndef _WIN32
@@ -770,6 +785,19 @@ bool LauncherLastDone(Vector3 *eye, float *yaw, float *pitch)
 // #region Launching (Linux: fork + execve; Windows: cmd start)
 // ======================================================================================
 
+// Every Claude Code session starts with these, unless MONOLITH_CLAUDE_SAFE is set
+// (to anything but "" or "0")
+static const char *const SKIP_PERMISSION_FLAGS[] = {
+    "--allow-dangerously-skip-permissions", "--dangerously-skip-permissions",
+};
+#define SKIP_PERMISSION_COUNT 2
+
+static bool ClaudeSafe(void)
+{
+    const char *s = getenv("MONOLITH_CLAUDE_SAFE");
+    return s && *s && strcmp(s, "0") != 0;
+}
+
 #ifdef _WIN32
 
 static bool FindProgram(const char *name, char *out, int outSize)
@@ -815,6 +843,8 @@ static bool Launch(const char *id, const char *slug, const char *prompt, OpenReq
     int extraCount = SplitWords(getenv("MONOLITH_CLAUDE_ARGS"), argsBuf, sizeof(argsBuf), extra, CLAUDE_ARGS_MAX);
     char cmd[4096];
     int len = snprintf(cmd, sizeof(cmd), "\"\"%s\"", claude);
+    for (int i = 0; i < SKIP_PERMISSION_COUNT && !ClaudeSafe(); i++)
+        len += snprintf(cmd + len, sizeof(cmd) - len, " %s", SKIP_PERMISSION_FLAGS[i]);
     for (int i = 0; i < extraCount && len < (int)sizeof(cmd); i++) len += snprintf(cmd + len, sizeof(cmd) - len, " %s", extra[i]);
     if (len < (int)sizeof(cmd)) snprintf(cmd + len, sizeof(cmd) - len, " \"%s\"\"", prompt);
     char title[128], dirArg[1100];
@@ -878,6 +908,48 @@ static const TermSyntax TERMINALS[] = {
 #define TERMINAL_COUNT ((int)(sizeof(TERMINALS) / sizeof(TERMINALS[0])))
 static const TermSyntax UNKNOWN_TERMINAL = { NULL, NULL, NULL, NULL, "-e" };
 
+// Moves the window titled `title` to workspace $MONOLITH_WORKSPACE (default 10) on i3 or
+// sway without waiting for it: a detached /bin/sh retries `i3-msg <criteria> move
+// container to workspace ...` every 0.1 s for up to 10 s. i3-msg / swaymsg exit with 2
+// while no window matches (keep trying), 0 once it moved, 1 when there is no i3 / sway to
+// talk to (stop). The command reaches the shell as a positional parameter, never as
+// script text. Best effort: nothing is reported back.
+static void MoveToWorkspace(const char *title)
+{
+    const char *ws = getenv("MONOLITH_WORKSPACE");
+    if (!ws) ws = "10";
+    if (!*ws) return;
+    if (strpbrk(ws, "\"\\")) {
+        TraceLog(LOG_WARNING, "monolith: MONOLITH_WORKSPACE has quotes or backslashes, terminal not moved");
+        return;
+    }
+    const char *sway = getenv("SWAYSOCK");
+    const char *tool = sway && *sway ? "swaymsg" : "i3-msg";
+    char toolPath[4096];
+    if (!FindProgram(tool, toolPath, sizeof(toolPath))) return;     // no i3 / sway here
+    bool number = ws[strspn(ws, "0123456789")] == 0;
+    // The title is "monolith-claude: <slug>" with a [a-z0-9-] slug: no regex specials
+    char cmd[512];
+    if (number) snprintf(cmd, sizeof(cmd), "[title=\"^%s$\"] move container to workspace number %s", title, ws);
+    else snprintf(cmd, sizeof(cmd), "[title=\"^%s$\"] move container to workspace \"%s\"", title, ws);
+    static const char script[] =
+        "i=0; while [ $i -lt 100 ]; do \"$0\" \"$1\" >/dev/null 2>&1; r=$?; "
+        "[ $r -eq 2 ] || exit $r; sleep 0.1; i=$((i + 1)); done; exit 2";
+    char *argv[] = { "/bin/sh", "-c", (char *)script, toolPath, cmd, NULL };
+    pid_t pid = fork();
+    if (pid < 0) { TraceLog(LOG_WARNING, "monolith: workspace move: fork: %s", strerror(errno)); return; }
+    if (pid == 0) {
+        setsid();       // outlives the game (a --shot --submit run exits right away)
+        int nul = open("/dev/null", O_RDWR);
+        if (nul >= 0) { dup2(nul, 0); dup2(nul, 1); dup2(nul, 2); if (nul > 2) close(nul); }
+        execve("/bin/sh", argv, environ);
+        _exit(127);
+    }
+    for (int i = 0; i < MAX_CHILDREN; i++)      // reaped by LauncherUpdate like the terminals
+        if (children[i] <= 0) { children[i] = pid; break; }
+    TraceLog(LOG_INFO, "monolith: moving '%s' to workspace %s via %s (pid %d)", title, ws, tool, (int)pid);
+}
+
 static bool Launch(const char *id, const char *slug, const char *prompt, OpenRequest *q, char *err, int errSize)
 {
     (void)id;
@@ -926,7 +998,7 @@ static bool Launch(const char *id, const char *slug, const char *prompt, OpenReq
     size_t dl = strlen(dir);
     if (dl > 1 && dir[dl - 1] == '/') dir[dl - 1] = 0;
     int extraCount = SplitWords(getenv("MONOLITH_CLAUDE_ARGS"), argsBuf, sizeof(argsBuf), extra, CLAUDE_ARGS_MAX);
-    char *argv[16 + 8 + CLAUDE_ARGS_MAX + 4];
+    char *argv[16 + 8 + SKIP_PERMISSION_COUNT + CLAUDE_ARGS_MAX + 4];
     int n = 0;
     for (int i = 0; i < termCount; i++) argv[n++] = termTok[i];
     if (ts->pre) argv[n++] = (char *)ts->pre;
@@ -934,6 +1006,7 @@ static bool Launch(const char *id, const char *slug, const char *prompt, OpenReq
     if (ts->dirFlag) { argv[n++] = (char *)ts->dirFlag; argv[n++] = dir; }
     if (ts->exec) argv[n++] = (char *)ts->exec;
     argv[n++] = claude;
+    for (int i = 0; i < SKIP_PERMISSION_COUNT && !ClaudeSafe(); i++) argv[n++] = (char *)SKIP_PERMISSION_FLAGS[i];
     for (int i = 0; i < extraCount; i++) argv[n++] = extra[i];
     argv[n++] = (char *)prompt;
     argv[n] = NULL;
@@ -986,6 +1059,7 @@ static bool Launch(const char *id, const char *slug, const char *prompt, OpenReq
     // All slots busy (64 terminals still open): it gets reaped by init after we exit
     if (!tracked) TraceLog(LOG_WARNING, "monolith: too many open terminals, pid %d not tracked", (int)pid);
     TraceLog(LOG_INFO, "monolith: launched %s (pid %d) for request %s", termPath, (int)pid, id);
+    MoveToWorkspace(title);
     return true;
 }
 
