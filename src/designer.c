@@ -80,13 +80,27 @@ DesignerHit DesignerPick(Vector3 origin, Vector3 dir)
     return h;
 }
 
-// Name of an object's material (the HUD and --pick show it); models: "own" = the file's
-static const char *ObjMaterialName(MS_ObjRef o)
+// Name of an object's material (the HUD, --pick and request bundles show it). Models
+// without a whole-model override use the file's own materials ("(own)"), possibly with
+// per-slot material.N overrides, which are listed: "(own; slot 0 = bark, slot 2 = needles)"
+const char *DesignerMaterialLabel(MS_ObjRef o)
 {
     const MS_Ref *r = MS_ObjectRef(scene, o);
     int m = r ? r->material : -1;
     if (m >= 0 && m < scene->materialCount) return scene->materials[m].name;
-    return o.kind == MS_OBJ_MODEL ? "(own)" : "default";
+    if (o.kind != MS_OBJ_MODEL) return "default";
+    const MS_ModelInstance *mi = &scene->models[o.index];
+    if (mi->slotCount <= 0) return "(own)";
+    static char buf[512];   // one label at a time; long lists are cut with "..."
+    int n = snprintf(buf, sizeof(buf), "(own;");
+    for (int i = 0; i < mi->slotCount && n < (int)sizeof(buf) - 8; i++) {
+        const MS_SlotMaterial *sm = &scene->modelSlots[mi->slotFirst + i];
+        const char *name = sm->material >= 0 && sm->material < scene->materialCount ? scene->materials[sm->material].name : "?";
+        n += snprintf(buf + n, sizeof(buf) - n, "%s slot %d = %s", i ? "," : "", sm->slot, name);
+    }
+    if (n >= (int)sizeof(buf) - 8) snprintf(buf + sizeof(buf) - 8, 8, "...)");
+    else snprintf(buf + n, sizeof(buf) - n, ")");
+    return buf;
 }
 
 void DesignerPrintHit(DesignerHit hit)
@@ -110,7 +124,7 @@ void DesignerPrintHit(DesignerHit hit)
                "pick: model position %.3f %.3f %.3f  rot %.3f %.3f %.3f  scale %.3f %.3f %.3f  origin %s  -> translation %.3f %.3f %.3f\n"
                "pick: model bounds min %.3f %.3f %.3f  max %.3f %.3f %.3f\n",
                hit.obj.index, scene->modelFiles[m->file].path, r.group >= 0 ? scene->groups[r.group] : "",
-               ObjMaterialName(hit.obj), r.line, textLen, text, hit.point.x, hit.point.y, hit.point.z, hit.normal.x, hit.normal.y,
+               DesignerMaterialLabel(hit.obj), r.line, textLen, text, hit.point.x, hit.point.y, hit.point.z, hit.normal.x, hit.normal.y,
                hit.normal.z, hit.dist, m->position.x, m->position.y, m->position.z, m->rotationDeg.x, m->rotationDeg.y,
                m->rotationDeg.z, m->scale.x, m->scale.y, m->scale.z, ORIGIN[m->origin % 3], m->translation.x,
                m->translation.y, m->translation.z, b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z);
@@ -118,7 +132,7 @@ void DesignerPrintHit(DesignerHit hit)
         printf("pick: box %d  group \"%s\"  material \"%s\"  line %d: %.*s\n"
                "pick: point %.3f %.3f %.3f  normal %.0f %.0f %.0f  dist %.3f\n"
                "pick: box min %.3f %.3f %.3f  max %.3f %.3f %.3f\n",
-               hit.obj.index, r.group >= 0 ? scene->groups[r.group] : "", ObjMaterialName(hit.obj), r.line, textLen, text,
+               hit.obj.index, r.group >= 0 ? scene->groups[r.group] : "", DesignerMaterialLabel(hit.obj), r.line, textLen, text,
                hit.point.x, hit.point.y, hit.point.z, hit.normal.x, hit.normal.y, hit.normal.z, hit.dist,
                b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z);
     }
@@ -1343,7 +1357,7 @@ int DesignerDrawHud(const Designer *d, int x, int y)
         if (d->hit.obj.kind == MS_OBJ_MODEL) {
             const MS_ModelInstance *m = &scene->models[d->hit.obj.index];
             HudText(TextFormat("crosshair: %s  |  model %s  |  material %s  |  line %d  |  model %d  |  %.1f m", group,
-                    scene->modelFiles[m->file].path, ObjMaterialName(d->hit.obj), r.line, d->hit.obj.index, d->hit.dist),
+                    scene->modelFiles[m->file].path, DesignerMaterialLabel(d->hit.obj), r.line, d->hit.obj.index, d->hit.dist),
                     x, y, main);
             y += 20;
             HudText(TextFormat("  at %.2f %.2f %.2f  rot %.1f %.1f %.1f  scale %.2f %.2f %.2f", m->position.x, m->position.y,
@@ -1351,7 +1365,7 @@ int DesignerDrawHud(const Designer *d, int x, int y)
                     x, y, dim);
         } else
             HudText(TextFormat("crosshair: %s  |  material %s  |  line %d  |  box %d  |  %.1f m",
-                    group, ObjMaterialName(d->hit.obj), r.line, d->hit.obj.index, d->hit.dist),
+                    group, DesignerMaterialLabel(d->hit.obj), r.line, d->hit.obj.index, d->hit.dist),
                     x, y, main);
         y += 20;
         char line[128];     // (cut below anyway)

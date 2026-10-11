@@ -176,6 +176,9 @@ void DesignerFreeRequest(DesignRequest *req);
 // of a `repeat`); objects of one line are consecutive, so this walks back over that line only
 int DesignerObjNth(MS_ObjRef o);
 
+// Material label of an object: its material, or for models "(own)" / "(own; slot N = name, ...)"
+const char *DesignerMaterialLabel(MS_ObjRef o);
+
 // Frees everything the designer allocated (selection, regions, prompt, scratch buffers)
 void DesignerFree(Designer *d);
 

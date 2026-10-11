@@ -414,6 +414,32 @@ bool ExportScene(const MS_Scene *s, const char *outDirIn, char *msg, int msgSize
             if (FileExists(TextFormat("%s%s", root, side))) CopyRel(&L, root, pkgDir, side, NULL);
         }
     }
+    // Provenance and licence files next to what was copied: the <file>.asset.md sidecar of
+    // every copied file (textures have them too), and licence texts in the same folders
+    // (e.g. models/kenney-License.txt), so the export carries the records ASSETS.md cites
+    for (int k = 0; k < L.count; k++) {
+        char side[MS_PATH_MAX + 16];
+        snprintf(side, sizeof(side), "%s.asset.md", L.rel[k]);
+        if (FileExists(TextFormat("%s%s", root, side))) CopyRel(&L, root, pkgDir, side, NULL);
+    }
+    for (int k = 0, n = L.count; k < n; k++) {
+        char dirRel[MS_PATH_MAX];
+        snprintf(dirRel, sizeof(dirRel), "%s", L.rel[k]);
+        char *slash = strrchr(dirRel, '/');
+        if (!slash) continue;               // package root: only MAP.md / ASSETS.md, below
+        *slash = 0;
+        FilePathList files = LoadDirectoryFiles(TextFormat("%s%s", root, dirRel));
+        for (unsigned int i = 0; i < files.count; i++) {
+            const char *base = GetFileName(files.paths[i]);
+            char lower[256];
+            int j = 0;
+            for (; base[j] && j < (int)sizeof(lower) - 1; j++) lower[j] = (char)tolower((unsigned char)base[j]);
+            lower[j] = 0;
+            if (strstr(lower, "license") || strstr(lower, "licence") || strstr(lower, "copying"))
+                CopyRel(&L, root, pkgDir, TextFormat("%s/%s", dirRel, base), NULL);
+        }
+        UnloadDirectoryFiles(files);
+    }
     // Docs of the package (a single v1 file outside a package has neither)
     bool ownFolder = strcmp(GetFileNameWithoutExt(s->path), GetFileName(GetDirectoryPath(s->path))) == 0;
     static const char *const DOCS[] = { "MAP.md", "ASSETS.md" };

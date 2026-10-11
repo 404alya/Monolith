@@ -703,7 +703,7 @@ static void MdRegionObject(FILE *f, MS_ObjRef o)
 {
     fprintf(f, "%s #%d, group \"%s\", line %d", ObjKindName(o), o.index, GroupName(ObjGroup(o)), ObjLine(o));
     if (o.kind == MS_OBJ_MODEL) fprintf(f, ", file `%s`", scene->modelFiles[scene->models[o.index].file].path);
-    if (ObjMaterial(o)) fprintf(f, ", material \"%s\"", ObjMaterial(o));
+    fprintf(f, ", material \"%s\"", DesignerMaterialLabel(o));
 }
 
 #define MD_REGION_ROWS 40   // objects per region in request.md (request.json lists them all)
@@ -840,7 +840,7 @@ static bool WriteRequestMd(const char *path, const Bundle *B)
                 o.kind == MS_OBJ_MODEL ? "world bounds " : "");
         MdVec(f, b.min); fprintf(f, ", max "); MdVec(f, b.max); fprintf(f, "\n");
         if (o.kind == MS_OBJ_MODEL) MdModel(f, o.index, "- ");
-        fprintf(f, "- group: \"%s\", material \"%s\"\n\n", GroupName(ObjGroup(o)), ObjMaterial(o) ? ObjMaterial(o) : "(own)");
+        fprintf(f, "- group: \"%s\", material \"%s\"\n\n", GroupName(ObjGroup(o)), DesignerMaterialLabel(o));
         MdLine(f, ObjLine(o));
     } else {
         fprintf(f, "Nothing: the crosshair points at the sky (no object hit).\n\n");
@@ -856,7 +856,7 @@ static bool WriteRequestMd(const char *path, const Bundle *B)
         MS_ObjRef first = B->selOrder[sl->first];
         bool model = first.kind == MS_OBJ_MODEL;
         fprintf(f, "### Line %d, group \"%s\", material \"%s\", %d %s%s\n\n", sl->line, GroupName(ObjGroup(first)),
-                ObjMaterial(first) ? ObjMaterial(first) : "(own)", sl->count, model ? "model" : "box",
+                DesignerMaterialLabel(first), sl->count, model ? "model" : "box",
                 sl->count == 1 ? "" : model ? "s" : "es");
         MdLine(f, sl->line);
         if (model) fprintf(f, "| model | copy | file | position | rotation (yaw pitch roll) | scale | world min | world max |\n"
