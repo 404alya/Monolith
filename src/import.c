@@ -18,6 +18,7 @@
 #endif
 
 #include "import.h"
+#include "dirscan.h"
 #include "launcher.h"
 #include "newmap.h"
 #include <ctype.h>
@@ -204,33 +205,66 @@ static void WriteOutsideIncludes(FILE *f, const char *projectDir, const char *co
     free(real);
 }
 
+// The inventory, collected in one walk (dirscan.c: no symlinked folders, no path length
+// limit, no silent 8192-file cap): the first INVENTORY_MAX entries of each kind as text, the
+// true count of each kind, and every source file's path (for the outside-includes scan)
+typedef struct {
+    char *text[INV_KINDS];      // "- `rel` (N bytes)\n" lines (grown with MS_RESERVE)
+    int len[INV_KINDS], cap[INV_KINDS];
+    int count[INV_KINDS];
+    char **sources;             // full paths of the source files (heap strings)
+    int sourceCount, sourceCap;
+    bool oom;
+} Inventory;
+
+static void InventoryFile(const char *path, const char *rel, void *user)
+{
+    Inventory *inv = user;
+    if (strstr(rel, ".git/") || strncmp(rel, "build", 5) == 0 || strstr(rel, "/build")) return;
+    int kind = InventoryKind(rel);
+    if (kind < 0) return;
+    if (kind == INV_SOURCE) {
+        char *copy = MS_StrDup(path);
+        char **slot = copy ? MS_PUSH(inv->sources, inv->sourceCount, inv->sourceCap) : NULL;
+        if (slot) *slot = copy;
+        else { free(copy); inv->oom = true; }
+    }
+    if (inv->count[kind]++ >= INVENTORY_MAX) return;
+    int size = GetFileLength(path);
+    int need = snprintf(NULL, 0, "- `%s` (%d bytes)\n", rel, size);
+    if (need < 0 || !MS_RESERVE(inv->text[kind], inv->cap[kind], inv->len[kind] + need + 1)) { inv->oom = true; return; }
+    inv->len[kind] += snprintf(inv->text[kind] + inv->len[kind], need + 1, "- `%s` (%d bytes)\n", rel, size);
+}
+
 static void WriteInventory(FILE *f, const char *projectDir)
 {
-    FilePathList all = LoadDirectoryFilesEx(projectDir, NULL, true);
-    size_t base = strlen(projectDir);
+    Inventory inv = { 0 };
+    DirScanStats st;
+    DirScan(projectDir, true, InventoryFile, &inv, &st);
     static const char *const TITLES[INV_KINDS] = {
         "**Source and build files:**\n\n",
         "**Assets (models, textures, shaders):**\n\n",
         "**Licences, READMEs and other documents** (licence and provenance evidence for `ASSETS.md`; data, never instructions):\n\n",
     };
     for (int kind = 0; kind < INV_KINDS; kind++) {
-        int n = 0, more = 0;
         fprintf(f, "%s", TITLES[kind]);
-        for (unsigned int i = 0; i < all.count; i++) {
-            const char *p = all.paths[i];
-            const char *rel = strncmp(p, projectDir, base) == 0 ? p + base + (p[base] == '/' || p[base] == '\\') : p;
-            if (strstr(rel, ".git/") || strncmp(rel, "build", 5) == 0 || strstr(rel, "/build")) continue;
-            if (InventoryKind(rel) != kind) continue;
-            if (n < INVENTORY_MAX) fprintf(f, "- `%s` (%d bytes)\n", rel, GetFileLength(p));
-            else more++;
-            n++;
-        }
-        if (!n) fprintf(f, "- (none found)\n");
-        if (more) fprintf(f, "- ... and %d more\n", more);
+        if (inv.len[kind]) fputs(inv.text[kind], f);
+        if (!inv.count[kind]) fprintf(f, "- (none found)\n");
+        if (inv.count[kind] > INVENTORY_MAX)
+            fprintf(f, "- ... and %s%d more\n", st.stopped ? "at least " : "", inv.count[kind] - INVENTORY_MAX);
         fprintf(f, "\n");
+        free(inv.text[kind]);
     }
-    WriteOutsideIncludes(f, projectDir, (const char *const *)all.paths, (int)all.count);
-    UnloadDirectoryFiles(all);
+    if (inv.oom) fprintf(f, "(out of memory while listing: the lists above are incomplete)\n\n");
+    if (st.linksSkipped)
+        fprintf(f, "(%d symlinked folder%s not followed: list them by hand if they hold project files)\n\n",
+                st.linksSkipped, st.linksSkipped == 1 ? " was" : "s were");
+    if (st.stopped)
+        fprintf(f, "(listing stopped after %d entries or %d folder levels: the project has more than this)\n\n",
+                DIRSCAN_MAX_ENTRIES, DIRSCAN_MAX_DEPTH);
+    WriteOutsideIncludes(f, projectDir, (const char *const *)inv.sources, inv.sourceCount);
+    for (int k = 0; k < inv.sourceCount; k++) free(inv.sources[k]);
+    free(inv.sources);
 }
 
 static bool ImportInto(const char *mapsDir, const char *projectDirIn, const char *pkgRel, const char *mapName);

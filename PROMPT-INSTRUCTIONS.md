@@ -81,6 +81,7 @@ monolith/
 │   ├── newmap.c/.h              # --new-map: creates a map package
 │   ├── export.c/.h              # --export / F9: package + runtime + README for other projects (§6.3)
 │   ├── import.c/.h              # --import: new package + an import request for Claude Code (§6.3)
+│   ├── dirscan.c/.h             # folder walk for import/export: heap paths, no symlinked folders, entry caps
 │   ├── inspect.c/.h             # --inspect-model: what a model file contains (assimp directly, no window)
 │   ├── dumpscene.c/.h           # --dump-scene: boxes, models, colliders, materials, lights as text
 │   ├── bench.c/.h               # --bench statistics and Markdown report

@@ -24,6 +24,7 @@
 // included), so a copied build folder can export too.
 
 #include "export.h"
+#include "dirscan.h"
 #include <ctype.h>
 #include <errno.h>
 #include <time.h>
@@ -47,6 +48,24 @@ static void FreeCopyList(CopyList *L)
     for (int i = 0; i < L->count; i++) free(L->rel[i]);
     free(L->rel);
     memset(L, 0, sizeof(*L));
+}
+
+// Files of the source package that the export didn't copy (DirScan callback)
+typedef struct {
+    const CopyList *L;
+    const char *mapPath;
+    int skipped;
+} UnusedScan;
+
+static void UnusedFile(const char *path, const char *rel, void *user)
+{
+    UnusedScan *u = user;
+    bool copied = strcmp(path, u->mapPath) == 0;
+    for (int k = 0; k < u->L->count && !copied; k++) copied = strcmp(u->L->rel[k], rel) == 0;
+    if (!copied) {
+        printf("monolith: export: not referenced, not copied: %s\n", path);
+        u->skipped++;
+    }
 }
 
 static bool CopyFile(const char *from, const char *to)
@@ -382,7 +401,8 @@ bool ExportScene(const MS_Scene *s, const char *outDirIn, char *msg, int msgSize
     while (ol > 1 && (outDir[ol - 1] == '/' || outDir[ol - 1] == '\\')) outDir[--ol] = 0;
     if (!ol) { snprintf(msg, msgSize, "export: empty folder name"); return false; }
     if (!DirIsEmptyOrMissing(outDir)) {
-        snprintf(msg, msgSize, "export: %s exists and is not empty (nothing written)", outDir);
+        snprintf(msg, msgSize, DirectoryExists(outDir) ? "export: %s exists and is not empty (nothing written)"
+                                                       : "export: %s is a file, not a folder (nothing written)", outDir);
         return false;
     }
     char rtDir[MS_PATH_MAX], viewer[MS_PATH_MAX];
@@ -471,23 +491,13 @@ bool ExportScene(const MS_Scene *s, const char *outDirIn, char *msg, int msgSize
 
     // Files of the source package nothing refers to (only for a real package folder)
     if (ownFolder && DirectoryExists(root)) {
-        char scanDir[MS_PATH_MAX];     // raylib joins with '/', so no trailing slash
-        snprintf(scanDir, sizeof(scanDir), "%.*s", (int)(rootLen > 1 ? rootLen - 1 : rootLen), root);
-        FilePathList all = LoadDirectoryFilesEx(scanDir, NULL, true);
-        int skipped = 0;
-        for (unsigned int i = 0; i < all.count; i++) {
-            const char *p = all.paths[i];
-            if (strncmp(p, root, rootLen) != 0) continue;
-            const char *rel = p + rootLen;
-            bool copied = strcmp(p, s->path) == 0;
-            for (int k = 0; k < L.count && !copied; k++) copied = strcmp(L.rel[k], rel) == 0;
-            if (!copied) {
-                printf("monolith: export: not referenced, not copied: %s\n", p);
-                skipped++;
-            }
-        }
-        UnloadDirectoryFiles(all);
-        if (skipped) printf("monolith: export: %d file(s) of %s are not used by the map\n", skipped, root);
+        UnusedScan u = { .L = &L, .mapPath = s->path };
+        DirScanStats st;
+        DirScan(root, true, UnusedFile, &u, &st);    // (dirscan.c: no symlinked folders, no path limit)
+        if (u.skipped) printf("monolith: export: %d file(s) of %s are not used by the map\n", u.skipped, root);
+        if (st.linksSkipped) printf("monolith: export: %d symlinked folder(s) in %s not listed\n", st.linksSkipped, root);
+        if (st.stopped) printf("monolith: export: listing of %s stopped after %d entries or %d folder levels\n", root,
+                               DIRSCAN_MAX_ENTRIES, DIRSCAN_MAX_DEPTH);
     }
 
     // The copy must load on its own (parse + every referenced file present)
