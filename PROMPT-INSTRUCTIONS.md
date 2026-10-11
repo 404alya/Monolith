@@ -72,6 +72,7 @@ monolith/
 │   ├── inspect.c/.h             # --inspect-model: what a model file contains (assimp directly, no window)
 │   ├── dumpscene.c/.h           # --dump-scene: boxes, models, colliders, materials, lights as text
 │   ├── bench.c/.h               # --bench statistics and Markdown report
+│   ├── windowemu.c/.h           # --bench-window: offscreen stand-in for the visible window (MSAA, HUD, resolve)
 │   └── glibc_compat.c           # Linux only: binds a few symbols to old glibc versions (§4)
 └── submodules/
     └── r3d/                     # vendored R3D (+ raylib, assimp); local fixes in patches.md
@@ -180,9 +181,12 @@ Selected boxes get an orange tint and outline, plus a faint always-on-top outlin
 | `--look yawDeg pitchDeg` | Start view angles. With `--view`, they override the viewpoint's angles. |
 | `--view n` | Start in spectator mode at viewpoint *n* (1-based) |
 | `--off <digits>` | Start with these effect toggles off, e.g. `--off 16` |
-| `--ao <mode>` | Screen-space AO / indirect trade-off (`atmosphere.c`, §7.5): `full` (default), `ssao` (SSIL off), `lite` (SSIL off, SSAO 8 samples), `off` (SSAO + SSIL off). Measured 2026-10-10 (headless, spinning): −0.62 / −0.67 / −0.93 ms per frame; the look barely changes (soft darkening along wall feet in close, shaded views goes away; no visible bounce loss). |
+| `--ao <mode>` | Screen-space AO / indirect trade-off (`atmosphere.c`, §7.5): `full` (default), `ssao` (SSIL off), `lite` (SSIL off, SSAO 8 samples), `off` (SSAO + SSIL off), `baked` (SSAO + SSIL off, replaced by the baked occlusion volume, `--ao-volume 0.5 0.6`; §7.3 "Trade-off knobs"). Measured 2026-10-10 (headless, spinning): −0.62 / −0.67 / −0.93 ms per frame; the look barely changes (soft darkening along wall feet in close, shaded views goes away; no visible bounce loss). |
+| `--ao-volume <voxel> <intensity>` | **Trade-off, off by default.** Bake a world-space occlusion volume (signed distance to the nearest box, 1 byte per voxel, ≤ 32 MB, ~60 ms on the CPU per map load) and darken the ambient light with it (R3D patch 11, `MS_RenderSettings.aoVolumeVoxel` / `aoVolumeIntensity`). View-independent, sees off-screen occluders, ~0.03 ms per frame. On top of SSAO/SSIL unless `--ao baked`. Boxes only (models are not in it). |
+| `--render-scale <s>` | **Trade-off, default 1.** R3D renders at `s` (0.25–1) times the window / shot size and upscales (`--upscale nearest\|linear\|bicubic\|lanczos`, default bicubic; `MS_RenderSettings.renderScale` / `upscale`, `MS_ApplyRenderResolution`). |
+| `--window-msaa` | 4× multisampled window, as before 2026-10-11: smoother designer overlay lines for ~0.1 ms GPU per frame. The scene image is the same either way (R3D writes one colour per pixel). Default: single-sampled. |
 | `--bloom on\|off` | `off` skips the bloom pass (−0.25 ms) and raises exposure ×1.19 instead: bloom (threshold 0, MIX 0.04) is mostly a uniform ~20% lift here, so the mean brightness stays within ±1.2/255; only the faint halo around bright openings goes. |
-| `--fx key=value` | Override one effect setting, repeatable, applied after `--ao`/`--bloom`: `ssao.samples`, `ssao.radius`, `ssao.intensity`, `ssao.power`, `ssil.samples`, `ssil.radius`, `ssil.gi`, `ssil.ao`, `bloom.levels`, `bloom.intensity`, `exposure`. For experiments. |
+| `--fx key=value` | Override one effect setting, repeatable, applied after `--ao`/`--bloom`: `ssao.samples`, `ssao.radius`, `ssao.intensity`, `ssao.power`, `ssil.samples`, `ssil.radius`, `ssil.gi`, `ssil.ao`, `bloom.levels`, `bloom.intensity`, `exposure`, `vfog.step`, `vfog.length`. For experiments. |
 | `--map <path>` | Load this map package (folder) or `.map` file instead of `maps/monolith/` (path relative to the working directory). A folder loads `<folder>/<folder name>.map`, else its only `.map`. It is hot-reloaded like the default map (every file of the package). |
 | `--new-map <name>` | Create the package `maps/<name>/` (`<name>.map` with a ground slab, the default material, the built-in environment written out, a spawn and two viewpoints; a `MAP.md` template; empty `shaders/ models/ textures/` and `ASSETS.md`), check that it loads, and exit without a window. Refuses to overwrite. |
 | `--export <dir>` | Write the map (`--map` or the default) for use in another raylib + R3D project and exit **without a window**: `<dir>/<name>/` (the package with every file the map references, `MAP.md`, `ASSETS.md`, model sidecars and the files model files refer to), `monolith_scene.h/.c`, `viewer.c` (= `examples/01_minimal/main.c`) and `README.md`. Refuses a non-empty `<dir>`; checks that the copy loads. §6.3. |
@@ -197,6 +201,7 @@ Selected boxes get an orange tint and outline, plus a faint always-on-top outlin
 | `--fog-cache <voxel> <sub>` | **Trade-off, off by default.** Bake the volumetric fog's sun visibility into an 8-bit 3D texture once per map load (voxel size in m, sub³ samples per voxel; `0.5 2` = 290×202×510 voxels, 28.5 MB, 17–55 ms bake, logged) and let the fog march fetch it instead of the shadow map (R3D patch 8). −0.2 ms per frame; shaft edges in the hall get ~0.5 m softer (0.5% of pixels change by > 2/255, max 20). The baked region is fixed and sized for the default map; outside it the march falls back to the shadow map. Voxel size is clamped to 0.25–8 m, sub to 1–4. |
 | `--no-prepass` | No depth pre-pass before the G-buffer pass (R3D patch 6). Same image; for A/B tests (without it the concrete shader runs for every overdrawn fragment). |
 | `--bench` | Benchmark: for each viewpoint, 60 warmup frames, then 600 measured frames while spinning the camera 360°. Prints a table and writes a **Markdown report** to `benchmark/<timestamp>_shadow-<size>-<range>.md` (GPU, driver, resolution, settings, command; avg ms, avg FPS, 1% low, worst frame and number of shadow-map re-renders per view). Reports are written only for completed runs. |
+| `--bench-window <samples>` | With `--bench --headless`: render into an offscreen stand-in for the visible window (`windowemu.c`: a framebuffer with `<samples>` samples, 4 = `--window-msaa`, 0 = today's window), draw the spectator HUD and overlay on top and resolve it like the swap, so the window-only costs can be timed without a visible window. |
 | `--headless` | With `--bench`: hidden window (never mapped), offscreen 1920×1006 target, `glFinish` after every frame. Doesn't touch the screen or need workspace 10 shown. Absolute times are ~10% higher than visible runs (no CPU/GPU overlap) and noisier if the machine is in use, so compare headless only with headless. |
 | `--bench-frames <n>` | Timed frames per viewpoint for `--bench` (10–600, default 600). Use ~150 for quick screening runs (~10 s); keep 600 for numbers you report. Fewer frames = faster spin, so more shadow re-renders. |
 | `--bench-still` | Like `--bench`, but the camera doesn't spin (the still-camera case: no shadow re-renders). Report suffix `_still`. |
@@ -269,10 +274,10 @@ The program is split into modules, and each one has a header with the interface.
 9. **Benchmark** (`bench.c`): frame statistics and the Markdown report for `--bench`.
 10. **Main** (`main.c`):
     - the header comment (controls and flags), argument parsing, `InitDataPaths()`, and map loading (+ `--dump-boxes`);
-    - the shadow-size hint, `R3D_Init`, `MS_InitRenderer()` (`glEnable(GL_DEPTH_CLAMP)`), then `MS_Load` (the boxes as **one instanced draw per material**: a unit cube, per-instance position = box centre, scale = box size; the default map has one material) and `MS_SetRenderSettings` (shadow mode, fog cache, pre-pass);
+    - the shadow-size hint, `R3D_Init`, `MS_InitRenderer()` (`glEnable(GL_DEPTH_CLAMP)`), then `MS_Load` (the boxes as **one instanced draw per material**: a unit cube, per-instance position = box centre, scale = box size; the default map has one material) and `MS_SetRenderSettings` (shadow mode, fog cache, pre-pass, the trade-off knobs `renderScale` / `upscale` / `aoVolumeVoxel`), then `MS_ApplyRenderResolution` (R3D's internal resolution = window × `renderScale`; also on resize). The window is single-sampled (`--window-msaa` brings back 4× MSAA);
     - the main loop: toggles, TAB, map hot reload, designer update, camera update, draw (with frame reuse, below), overlay, HUD, `--shot` / `--bench` handling;
     - **depth pre-pass** (R3D patch 6): the concrete material's `alpha_cutoff 0` (the concrete never discards) lets R3D lay depth first, so the procedural shader runs once per visible pixel instead of once per overdrawn fragment. `--no-prepass` turns it off for A/B tests;
-    - **frame reuse** (comment block "Frame reuse" in `main.c`): a `FrameKey` holds everything that changes R3D's image (camera, the whole `R3D_Environment`, the runtime's `MS_RenderSettings` incl. toggle 6, `scene->version`, window size; materials, lights and the sun only change with a reload, i.e. a new version), compared bytewise each frame. While it changes, R3D renders straight into the window. On the first unchanged frame R3D renders once more into a cache target (colour + depth *texture*); later unchanged frames only composite it with a shader that also writes `gl_FragDepth` (the window is 4× MSAA, so no blit), and the overlay/HUD go on top. A reused frame costs ~0.2 ms instead of ~4–5 ms, and the loop then sleeps to the monitor's refresh rate. Interactive only; off in `--shot` / `--bench` unless `--frame-reuse`. **Anything new that changes the image (a uniform, a light, a setting) must go into `FrameKey`**, or a still camera will keep showing the old image;
+    - **frame reuse** (comment block "Frame reuse" in `main.c`): a `FrameKey` holds everything that changes R3D's image (camera, the whole `R3D_Environment`, the runtime's `MS_RenderSettings` incl. toggle 6, `scene->version`, window size; materials, lights and the sun only change with a reload, i.e. a new version), compared bytewise each frame. While it changes, R3D renders straight into the window. On the first unchanged frame R3D renders once more into a cache target (colour + depth *texture*); later unchanged frames only composite it with a shader that also writes `gl_FragDepth` (with `--window-msaa` the window is multisampled, and a blit into it would be an error), and the overlay/HUD go on top. A reused frame costs ~0.2 ms instead of ~4–5 ms, and the loop then sleeps to the monitor's refresh rate. Interactive only; off in `--shot` / `--bench` unless `--frame-reuse`. **Anything new that changes the image (a uniform, a light, a setting) must go into `FrameKey`**, or a still camera will keep showing the old image;
     - `Submit()`, which renders the request images through the same `DrawScene()` as the main view, and cleanup.
 
 Rendering per frame (`DrawScene()`; `--shot` and the request images render into a `RenderTexture`, the window view into the default framebuffer):
@@ -400,6 +405,35 @@ The cost tracks map size, not range. 6144/100 is the recommended fallback for we
 | final, reused frame (`--frame-reuse`, 1 run) | still | **0.17** | ~5900 | – | – | – |
 
 Where the default's gain comes from: depth pre-pass + streak-fbm skip (geometry pass 0.98 → 0.55 ms spinning, 1.30 → 0.66 ms still), patch 9 (fog march 0.77 → 0.42 ms spinning), static shadow tiles (CPU 0.77 → 0.36 ms: no per-frame coverage check). In the interactive game a still camera costs only the reused frame plus HUD, and the loop sleeps to the refresh rate.
+
+**Pass trimming and the window (2026-10-11, stream P).** Headless `--bench`, 1920×1006, 4 interleaved full pairs per row (report notes "P final A/B (round 2)"); per-pass GPU ms are averages over all views.
+
+| | main 4455608 spinning | now spinning | main still | now still |
+|---|---:|---:|---:|---:|
+| frame | 3.73 | **3.45** (−7.6%) | 4.45 | **4.09** |
+| GPU total | 3.19 | 3.03 | 3.78 | 3.58 |
+| CPU until finish | 0.45 | 0.33 | 0.54 | 0.38 |
+| depth pyramid (+ normal/radiance downsample) | 0.164 | 0.063 | 0.183 | 0.063 |
+| bloom | 0.190 | 0.145 | 0.210 | 0.146 |
+| FXAA + final blit | 0.175 | 0.106 | 0.231 | 0.118 |
+
+All of it is R3D patch 10 (pyramid only as deep as something reads it, bloom composite folded into tonemapping, FXAA writing the final target): bit-identical, 0 pixels differ in the 27 shots and the models test map. Still pairs: three of four within −0.16..+0.02 ms, one disturbed baseline run; the honest still gain is ~−0.15 ms. The other passes are unchanged code; their per-pass split moves a little between runs (GPU timer attribution), the totals are what count.
+
+*The visible window* (`--bench-window`, an offscreen stand-in with the HUD and overlay drawn and resolved like the swap, 3 interleaved triples): plain headless 3.50 ms, single-sampled window 3.78, 4× MSAA window (as before) 3.94. So the window's own cost is ~0.45 ms in serial headless terms: 4× MSAA ~0.15 ms GPU (R3D's last pass writing 4 samples + the resolve; now off by default, `--window-msaa`), HUD text + overlay + designer pick ~0.15 ms CPU (raylib `DrawText`, ~1500 glyph quads with the shadows; it overlaps the GPU in the real window) and the resolve/copy. That doesn't explain ~200 fps visible vs. ~300 headless. What does is outside the game: this desktop runs **picom** (glx backend, `vsync = true`, `use-damage = false` = full-screen repaint on every damage, dual-kawase blur behind the 80%-opaque bar), so every game frame is also copied and the screen recomposited on the same GPU. A fullscreen window is unredirected (`unredir-if-possible = true`), i.e. no compositor cost (but then the driver's `SyncToVBlank` caps at 144 Hz unless `__GL_SYNC_TO_VBLANK=0`). Not measured (no visible windows in automated runs).
+
+**Trade-off knobs** (they change the image; off by default; for quality presets). Gain = headless frame ms vs. the default (3 interleaved full runs each, default 3.59 ms); images: before/after sheets of views 1/2/3/5 + steep.
+
+| Knob | What it does | Frame | Visual cost (5 views) |
+|---|---|---:|---|
+| `--render-scale 0.75` (`MS_RenderSettings.renderScale`, `upscale`) | R3D at 75% of the output size, bicubic upscale | 2.19 (−39%) | softer edges and concrete grain; 3.8% of pixels > 2/255, mean ±0 |
+| `--render-scale 0.5` | 50%, bicubic | 1.62 (−55%) | visibly soft, aliasing on thin slits; 6.3% |
+| `--ao baked` (`aoVolumeVoxel` 0.5, `aoVolumeIntensity` 0.6; R3D patch 11) | SSAO + SSIL off, baked world-space distance-field AO instead (32 MB, ~60 ms bake per map load) | 2.62 (−27%) | crisper contact darkening at wall feet and canyon corners, also from off-screen geometry, never changes when turning; faint SSIL bounce gone; 11.7%, mean −0.7/255 |
+| `--ao off` | SSAO + SSIL off | ~2.6 (screening run) | soft wall-foot darkening gone; 3.5%, mean +0.4 |
+| `--fog-cache 0.5 2 --fx vfog.step=1.5` | baked fog sun visibility + double march step | 3.02 (−16%) | shaft edges ~0.5 m softer; 0.2% |
+| `--bloom off` | no bloom, exposure ×1.19 | 3.35 (−6%) | faint halo at bright openings gone; 6.4% (±1–3/255), mean −0.1 |
+
+They stack (render scale scales everything else). Not done, ideas with numbers: the concrete shader costs ~0.3 ms of the 0.58 ms geometry pass (measured with a plain material), a distance LOD for its grain/board noise would change the image; SSIL's three half-res denoise passes and SSAO's one compute the same geometric weights (fusable, ~0.05 ms); a quarter-resolution fog march (R3D change) would save ~0.3 ms on top of the fog cache.
+
 
 ### 7.4 Other gotchas
 - **`CheckCollisionBoxes` is inclusive:** touching counts as a hit, so a player standing on the ground could never move. Use the project's strict `BoxesOverlap()`.
