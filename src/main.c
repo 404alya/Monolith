@@ -134,7 +134,12 @@
 //   --type "text"  open the prompt box with this text (cursor at the end)
 //   --shot-hud     with --shot: draw the HUD, crosshair, selection overlay, regions and prompt box
 //                  into the shot (to look at the UI; plain shots never contain it)
-//   In --submit and --type text, a literal \n becomes a new line.
+//   --classify "text"   print the model the launcher would choose for this prompt (tier,
+//                  model, reason; launcher.c "Model choice") and exit without opening a
+//                  window. Context: the loaded map (empty? MAP.md?), the --select lines, the
+//                  --region count and a crosshair hit. --classify-kind edit|import|new-map
+//                  sets the request kind (default edit)
+//   In --submit, --type and --classify text, a literal \n becomes a new line.
 //
 // Environment (launcher.c):
 //   MONOLITH_TERMINAL   terminal to open for Claude Code: program name or path + optional
@@ -143,6 +148,12 @@
 //                       kitty, foot, wezterm, xterm in PATH
 //   MONOLITH_CLAUDE_ARGS   extra Claude Code flags, split on whitespace (default none), after
 //                       --allow-dangerously-skip-permissions --dangerously-skip-permissions
+//                       --model <name>; a --model in them replaces the chosen model
+//   MONOLITH_MODEL      one model for every request (turns the per-request choice off)
+//   MONOLITH_MODEL_FAST / _DEFAULT / _HEAVY   model of each tier (default haiku / sonnet /
+//                       opus). The tier is chosen per request from the prompt and its
+//                       context; a leading @fast / @default / @heavy (or @haiku / @sonnet /
+//                       @opus) in the prompt picks it and is stripped from the bundle's prompt
 //   MONOLITH_CLAUDE_SAFE=1   drop those two permission flags
 //   MONOLITH_WORKSPACE  i3/sway workspace for the terminal (default 10, empty = don't move)
 //   __GL_SYNC_TO_VBLANK=0 (NVIDIA) / vblank_mode=0 (Mesa)   driver vsync off, for --bench
@@ -445,6 +456,7 @@ int main(int argc, char **argv)
     bool pickFlag = false, shotHud = false;
     int frameReuseFlag = -1;    // --no-frame-reuse 0, --frame-reuse 1, default -1 (see below)
     const char *submitText = NULL, *typeText = NULL;
+    const char *classifyText = NULL, *classifyKind = "edit";
     const char *aoMode = "full", *bloomMode = "on";
     const char *fxSettings[16];
     int fxCount = 0;
@@ -493,6 +505,8 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--frame-reuse") == 0) frameReuseFlag = 1;
         else if (strcmp(argv[i], "--submit") == 0 && i + 1 < argc) submitText = argv[++i];
         else if (strcmp(argv[i], "--type") == 0 && i + 1 < argc) typeText = argv[++i];
+        else if (strcmp(argv[i], "--classify") == 0 && i + 1 < argc) classifyText = argv[++i];
+        else if (strcmp(argv[i], "--classify-kind") == 0 && i + 1 < argc) classifyKind = argv[++i];
         else if (strcmp(argv[i], "--select") == 0 && i + 1 < argc) {
             int line = atoi(argv[++i]);
             if (selectLineCount < 64) selectLines[selectLineCount++] = line;
@@ -569,6 +583,22 @@ int main(int argc, char **argv)
                     peek->boxCount, dumpPath);
             MS_Unload(peek);
             return ok ? 0 : 1;
+        }
+        // --classify: the launcher's model choice for this prompt (no window). Context: the
+        // --select lines and --region count against this map, plus a crosshair hit
+        if (classifyText) {
+            int selected = 0;
+            for (int b = 0; b < peek->boxCount; b++)
+                for (int k = 0; k < selectLineCount; k++) if (peek->boxRefs[b].line == selectLines[k]) { selected++; break; }
+            const char *text = Unescape(classifyText);
+            ModelQuery q = { .prompt = text, .kind = classifyKind, .selected = selected, .regions = regionArgCount,
+                             .hit = true, .emptyMap = peek->boxCount + peek->modelCount <= 2, .noBrief = !peek->brief[0] };
+            ModelChoice c;
+            LauncherChooseModel(&q, &c);
+            printf("tier: %s\nmodel: %s%s\nreason: %s\nsource: %s\nprompt: %s\n", ModelTierName(c.tier), c.name,
+                   c.addFlag ? "" : " (from MONOLITH_CLAUDE_ARGS, no --model added)", c.reason, c.source, text + c.promptSkip);
+            MS_Unload(peek);
+            return 0;
         }
         // The spawn's angles in double, so 180 degrees lands exactly on the float PI
         if (!posSet && !eyeSet) player.feet = peek->spawnFeet;

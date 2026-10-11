@@ -3,9 +3,10 @@
 // A submitted request becomes a self-contained folder requests/<YYYY-MM-DD_HHMMSS>_<slug>/
 // (view.png, view-marked.png, region-<n>.png per screen region, request.md, request.json;
 // bundle format 2, docs/design-v2.md section 5). Then a new terminal window runs
-// `claude --allow-dangerously-skip-permissions --dangerously-skip-permissions
+// `claude --allow-dangerously-skip-permissions --dangerously-skip-permissions --model <name>
 // [MONOLITH_CLAUDE_ARGS] "Map edit request: read requests/<id>/request.md and carry it
-// out."` in the repo root. The user's prompt never goes on a command line: it
+// out."` in the repo root. The model is chosen per request (fast / default / heavy tier,
+// see "Model choice" below) and recorded in request.md / request.json. The user's prompt never goes on a command line: it
 // only lives in the bundle, and the process is started from an argv array (no shell).
 // The game then polls the bundle for result.md and shows its first line in the HUD.
 //
@@ -25,8 +26,10 @@
 //     --dangerously-skip-permissions, so the developer isn't asked to approve each
 //     command; the guard rails live in CLAUDE.md / AI-MAP-TOOL.md instead.
 //     MONOLITH_CLAUDE_SAFE=1 (any value but empty or "0") drops the two flags.
+//   - model: --model <name> after the permission flags; MONOLITH_MODEL, MONOLITH_MODEL_FAST /
+//     _DEFAULT / _HEAVY and an @tier prompt prefix steer it (region "Model choice").
 //   - extra Claude Code flags: $MONOLITH_CLAUDE_ARGS, split on whitespace (no quoting),
-//     after the permission flags. Default none.
+//     after --model. Default none. A --model in them replaces the chosen one.
 //   - workspace (i3 / sway): the new terminal is moved to workspace $MONOLITH_WORKSPACE
 //     (default 10; empty = leave it where it opens) with `i3-msg` (`swaymsg` when
 //     $SWAYSOCK is set) and the criteria [title="^monolith-claude: <slug>$"]. A detached
@@ -39,7 +42,7 @@
 //     helper stops at once.
 //
 // Windows: the same bundle, then `cmd /c start "monolith-claude: <slug>" /D <root> cmd /k
-// "<claude>" <permission flags> ...` via _spawnvp (no workspace move) (<process.h>, so no <windows.h> clash with raylib). Only
+// "<claude>" <permission flags> --model <name> ...` via _spawnvp (no workspace move) (<process.h>, so no <windows.h> clash with raylib). Only
 // compile-tested; failures of `start` itself can't be seen from here.
 
 #ifndef _WIN32
@@ -243,6 +246,236 @@ static int ObjNth(MS_ObjRef o)
 // #endregion
 
 // ======================================================================================
+// #region Model choice
+// ======================================================================================
+//
+// Each request runs on one of three tiers: fast (default model `haiku`), default (`sonnet`),
+// heavy (`opus`); Claude Code's aliases, so they follow the latest model of each family.
+// ClassifyRequest() is pure and deterministic. Words are runs of ASCII letters, compared
+// case-insensitively as whole words; a keyword also matches its plural (+s, +es, y->ies).
+// First rule that applies wins:
+//   heavy   1. kind "import" or "new-map"
+//           2. the map is (nearly) empty (<= 2 objects) or has no MAP.md: the session must
+//              write or extend the design brief
+//           3. an asset word (model, asset, download, tree, car, statue, lamp, ...): it means
+//              finding / importing models
+//           4. a look / engine word (shader, material, texture, light, fog, sky, sun, ...)
+//           5. a large-design word (build, design, create, district, city, building, ...)
+//           6. long text: > 280 bytes or 3+ sentences; or more than 2 screen regions
+//   fast    7. at most 120 bytes, one sentence, a target (crosshair hit, a selection of at
+//              most 100 objects, or exactly one region), a local edit word (move, raise,
+//              taller, delete, rename, mirror, ..., or "make"/"set" + a number), and no
+//              creation word (add, put, place, insert, open, replace, row, ...)
+//   default 8. everything else
+// Overrides, strongest first: --model in MONOLITH_CLAUDE_ARGS (no second --model is added);
+// MONOLITH_MODEL=<name> (one model for every request); a leading @fast / @default / @heavy
+// (or @haiku / @sonnet / @opus) in the prompt picks the tier and is stripped from the
+// prompt written to the bundle. MONOLITH_MODEL_FAST / _DEFAULT / _HEAVY rename the tiers.
+// --classify "text" (main.c) prints the decision without opening a window.
+
+static const char *const TIER_NAMES[] = { "fast", "default", "heavy" };
+static const char *const TIER_MODELS[] = { "haiku", "sonnet", "opus" };
+static const char *const TIER_ENV[] = { "MONOLITH_MODEL_FAST", "MONOLITH_MODEL_DEFAULT", "MONOLITH_MODEL_HEAVY" };
+
+const char *ModelTierName(ModelTier tier) { return TIER_NAMES[tier]; }
+
+#define FAST_MAX_BYTES      120
+#define HEAVY_MIN_BYTES     280
+#define FAST_MAX_SELECTION  100
+
+static const char *const KW_ASSET[] = {
+    "model", "asset", "download", "tree", "car", "statue", "lamp", "furniture", "prop", "vehicle",
+    "plant", "character", "sculpture", "sketchfab", "poly pizza", "polypizza", "mesh", "glb", "gltf",
+    "fbx", "person", "people", "human", "animal", "bush", "chair", "table", NULL };
+static const char *const KW_LOOK[] = {
+    "shader", "material", "texture", "light", "lighting", "fog", "sky", "sun", "mood", "atmosphere",
+    "render", "rendering", "engine", "code", "performance", "shadow", "color", "colour", "bloom",
+    "exposure", "glow", "emissive", "neon", "night", "weather", "rain", "snow", "fps", "dark", "darker",
+    "bright", "brighter", "lighter", "moody", "moodier", NULL };
+static const char *const KW_DESIGN[] = {
+    "build", "design", "create", "generate", "redesign", "district", "city", "building", "level",
+    "layout", "maze", "labyrinth", "interior", "town", "village", "street", "neighborhood",
+    "neighbourhood", "quarter", "campus", "park", "garden", "castle", "temple", "house", NULL };
+static const char *const KW_EDIT[] = {
+    "move", "raise", "lower", "tall", "taller", "short", "shorter", "high", "higher", "wide", "wider",
+    "narrow", "narrower", "thick", "thicker", "thin", "thinner", "long", "longer", "deep", "deeper",
+    "delete", "remove", "rename", "shift", "align", "copy", "duplicate", "mirror", "scale", "resize",
+    "flip", "hide", "rotate", "twice", "double", "half", "extend", "shrink", "stretch", "nudge",
+    "lift", "drop", "flatten", "trim", "widen", "lengthen", "shorten", "heighten", "smaller",
+    "bigger", "larger", "push", "pull", NULL };
+static const char *const KW_CREATE[] = {
+    "add", "put", "place", "insert", "new", "open", "opening", "connect", "attach", "fill",
+    "replace", "convert", "turn", "row", "grid", "array", "pattern", NULL };
+
+#define CLASSIFY_MAX_WORDS 1024
+typedef struct {
+    char w[CLASSIFY_MAX_WORDS][24];     // lowercase; letters, or a number ("2.5")
+    int n;
+} Words;
+
+static void SplitPromptWords(const char *s, Words *W)
+{
+    W->n = 0;
+    const unsigned char *p = (const unsigned char *)s;
+    while (*p && W->n < CLASSIFY_MAX_WORDS) {
+        bool alpha = *p < 128 && isalpha(*p), digit = *p < 128 && isdigit(*p);
+        if (!alpha && !digit) { p++; continue; }
+        int len = 0;
+        char *w = W->w[W->n++];
+        while (*p < 128 && (alpha ? isalpha(*p) : (isdigit(*p) || (*p == '.' && isdigit(p[1]))))) {
+            if (len < 23) w[len++] = (char)tolower(*p);
+            p++;
+        }
+        w[len] = 0;
+    }
+}
+
+static bool WordIs(const char *w, const char *k)
+{
+    size_t n = strlen(k);
+    if (strncmp(w, k, n) == 0) return !w[n] || strcmp(w + n, "s") == 0 || strcmp(w + n, "es") == 0;
+    return n > 1 && k[n - 1] == 'y' && strncmp(w, k, n - 1) == 0 && strcmp(w + n - 1, "ies") == 0;
+}
+
+// First keyword of the list found in the words (a "two words" keyword matches a word pair)
+static const char *FindKeyword(const Words *W, const char *const *list)
+{
+    for (int i = 0; i < W->n; i++)
+        for (const char *const *k = list; *k; k++) {
+            const char *sp = strchr(*k, ' ');
+            if (!sp) { if (WordIs(W->w[i], *k)) return *k; continue; }
+            char first[24];
+            snprintf(first, sizeof(first), "%.*s", (int)(sp - *k), *k);
+            if (i + 1 < W->n && strcmp(W->w[i], first) == 0 && WordIs(W->w[i + 1], sp + 1)) return *k;
+        }
+    return NULL;
+}
+
+static bool IsNumber(const char *w) { return isdigit((unsigned char)w[0]); }
+
+// Sentences: text runs separated by . ! ? (followed by a blank) or line breaks
+static int CountSentences(const char *s)
+{
+    int count = 0;
+    bool inText = false;
+    for (const char *p = s; *p; p++) {
+        bool end = *p == '\n' || ((*p == '.' || *p == '!' || *p == '?') && (p[1] == 0 || isspace((unsigned char)p[1])));
+        if (end) inText = false;
+        else if (!isspace((unsigned char)*p) && !inText) { inText = true; count++; }
+    }
+    return count;
+}
+
+ModelTier ClassifyRequest(const ModelQuery *q, char *reason, int reasonSize)
+{
+    static Words W;
+    const char *prompt = q->prompt ? q->prompt : "";
+    SplitPromptWords(prompt, &W);
+    int bytes = (int)strlen(prompt), sentences = CountSentences(prompt);
+    const char *k;
+
+    if (q->kind && (strcmp(q->kind, "import") == 0 || strcmp(q->kind, "new-map") == 0)) {
+        snprintf(reason, reasonSize, "%s request", q->kind);
+        return MODEL_TIER_HEAVY;
+    }
+    if (q->emptyMap || q->noBrief) {
+        snprintf(reason, reasonSize, "%s: the session writes the design brief", q->emptyMap ? "empty map" : "no MAP.md");
+        return MODEL_TIER_HEAVY;
+    }
+    if ((k = FindKeyword(&W, KW_ASSET))) { snprintf(reason, reasonSize, "asset word \"%s\"", k); return MODEL_TIER_HEAVY; }
+    if ((k = FindKeyword(&W, KW_LOOK))) { snprintf(reason, reasonSize, "look/engine word \"%s\"", k); return MODEL_TIER_HEAVY; }
+    if ((k = FindKeyword(&W, KW_DESIGN))) { snprintf(reason, reasonSize, "design word \"%s\"", k); return MODEL_TIER_HEAVY; }
+    if (bytes > HEAVY_MIN_BYTES) { snprintf(reason, reasonSize, "long prompt (%d bytes)", bytes); return MODEL_TIER_HEAVY; }
+    if (sentences >= 3) { snprintf(reason, reasonSize, "%d sentences", sentences); return MODEL_TIER_HEAVY; }
+    if (q->regions > 2) { snprintf(reason, reasonSize, "%d screen regions", q->regions); return MODEL_TIER_HEAVY; }
+
+    const char *edit = FindKeyword(&W, KW_EDIT);
+    for (int i = 0; !edit && i + 1 < W.n; i++)
+        if ((strcmp(W.w[i], "make") == 0 || strcmp(W.w[i], "set") == 0))
+            for (int j = i + 1; j < W.n && j <= i + 4 && !edit; j++) if (IsNumber(W.w[j])) edit = "make/set + number";
+    const char *create = FindKeyword(&W, KW_CREATE);
+    bool target = q->hit || (q->selected > 0 && q->selected <= FAST_MAX_SELECTION) || q->regions == 1;
+    if (q->selected > FAST_MAX_SELECTION) target = false;
+
+    if (!edit) snprintf(reason, reasonSize, "no local edit word");
+    else if (create) snprintf(reason, reasonSize, "creation word \"%s\"", create);
+    else if (bytes > FAST_MAX_BYTES) snprintf(reason, reasonSize, "edit \"%s\" but %d bytes", edit, bytes);
+    else if (sentences > 1) snprintf(reason, reasonSize, "edit \"%s\" but %d sentences", edit, sentences);
+    else if (!target) snprintf(reason, reasonSize, "edit \"%s\" but no small target (hit/selection/1 region)", edit);
+    else {
+        snprintf(reason, reasonSize, "short local edit \"%s\" with a target", edit);
+        return MODEL_TIER_FAST;
+    }
+    return MODEL_TIER_DEFAULT;
+}
+
+static const char *EnvOr(const char *name, const char *fallback)
+{
+    const char *v = getenv(name);
+    return v && *v ? v : fallback;
+}
+
+void LauncherChooseModel(const ModelQuery *q, ModelChoice *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->source = "classifier";
+    out->addFlag = true;
+    const char *prompt = q->prompt ? q->prompt : "";
+
+    // Leading @token: only when some text follows it
+    char why[200];
+    const char *p = prompt;
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+    int tier = -1;
+    if (*p == '@') {
+        static const char *const TOKENS[] = { "fast", "default", "heavy", "haiku", "sonnet", "opus" };
+        for (int t = 0; t < 6 && tier < 0; t++) {
+            size_t n = strlen(TOKENS[t]), i = 0;
+            while (i < n && tolower((unsigned char)p[1 + i]) == TOKENS[t][i]) i++;
+            if (i == n && (p[1 + n] == 0 || isspace((unsigned char)p[1 + n]))) {
+                const char *rest = p + 1 + n;
+                while (*rest && isspace((unsigned char)*rest)) rest++;
+                if (*rest) { tier = t % 3; out->promptSkip = (int)(rest - prompt); snprintf(why, sizeof(why), "@%s in the prompt", TOKENS[t]); }
+            }
+        }
+    }
+    if (tier >= 0) {
+        out->tier = (ModelTier)tier;
+        out->override = true;
+        out->source = "prompt";
+    } else {
+        ModelQuery stripped = *q;
+        stripped.prompt = prompt + out->promptSkip;
+        out->tier = ClassifyRequest(&stripped, why, sizeof(why));
+    }
+    snprintf(out->name, sizeof(out->name), "%s", EnvOr(TIER_ENV[out->tier], TIER_MODELS[out->tier]));
+    snprintf(out->reason, sizeof(out->reason), "%s", why);
+
+    const char *fixed = EnvOr("MONOLITH_MODEL", NULL);
+    if (fixed) {
+        snprintf(out->name, sizeof(out->name), "%s", fixed);
+        snprintf(out->reason, sizeof(out->reason), "MONOLITH_MODEL fixes the model (would be %s: %s)", TIER_NAMES[out->tier], why);
+        out->source = "MONOLITH_MODEL";
+    }
+    // A --model (or --model=x) in MONOLITH_CLAUDE_ARGS wins; no second --model then
+    char buf[1024], *tok[CLAUDE_ARGS_MAX];
+    int n = SplitWords(getenv("MONOLITH_CLAUDE_ARGS"), buf, sizeof(buf), tok, CLAUDE_ARGS_MAX);
+    for (int i = 0; i < n; i++) {
+        const char *m = NULL;
+        if (strcmp(tok[i], "--model") == 0 && i + 1 < n) m = tok[i + 1];
+        else if (strncmp(tok[i], "--model=", 8) == 0) m = tok[i] + 8;
+        if (!m) continue;
+        snprintf(out->name, sizeof(out->name), "%s", m);
+        snprintf(out->reason, sizeof(out->reason), "--model in MONOLITH_CLAUDE_ARGS (would be %s: %s)", TIER_NAMES[out->tier], why);
+        out->source = "MONOLITH_CLAUDE_ARGS";
+        out->addFlag = false;
+        break;
+    }
+}
+
+// #endregion
+
+// ======================================================================================
 // #region Bundle contents (computed once, written as Markdown and JSON)
 // ======================================================================================
 
@@ -283,6 +516,8 @@ typedef struct {
     char binaryQ[2100], mapPathQ[2100];     // shell-quoted
     char shotCmd[6144];
     bool stale;                         // world changed between the snapshot and now
+    ModelChoice model;                  // which Claude model runs it, and why
+    const char *userPrompt;             // req->prompt without a leading @tier token
 } Bundle;
 
 static int CompareNearby(const void *a, const void *b)
@@ -470,6 +705,7 @@ static bool WriteRequestMd(const char *path, const Bundle *B)
     if (!f) return false;
 
     fprintf(f, "# Map edit request: %s\n\n", B->slug);
+    fprintf(f, "Model: %s (%s tier: %s)\n\n", B->model.name, ModelTierName(B->model.tier), B->model.reason);
     fprintf(f, "Request `%s`, submitted %s from the monolith map designer. Bundle format 2: besides the "
                "crosshair hit and the selected objects it may contain **screen regions** the developer "
                "dragged over the frame (see *Screen regions* below and `AI-MAP-TOOL.md`).\n\n", B->id, B->created);
@@ -485,7 +721,7 @@ static bool WriteRequestMd(const char *path, const Bundle *B)
                    "below may not match what the user saw.\n\n");
 
     fprintf(f, "## Prompt\n\nThe user's words, verbatim:\n\n");
-    MdFence(f, r->prompt, "text");
+    MdFence(f, B->userPrompt, "text");
 
     fprintf(f, "## Design brief\n\n");
     if (B->brief[0]) fprintf(f, "Read `%s` before anything else: it is this map's design brief (style, scale, "
@@ -653,7 +889,10 @@ static bool WriteRequestJson(const char *path, const Bundle *B)
                           "prompt. When done, write requests/%s/result.md; its first line is a one-line summary.", B->id));
     fprintf(f, ",\n  \"resultFile\": "); JsonStr(f, TextFormat("requests/%s/result.md", B->id));
     fprintf(f, ",\n  \"mapReloadedSinceSnapshot\": %s", B->stale ? "true" : "false");
-    fprintf(f, ",\n  \"prompt\": "); JsonStr(f, r->prompt);
+    fprintf(f, ",\n  \"prompt\": "); JsonStr(f, B->userPrompt);
+    fprintf(f, ",\n  \"model\": { \"tier\": \"%s\", \"name\": ", ModelTierName(B->model.tier)); JsonStr(f, B->model.name);
+    fprintf(f, ", \"reason\": "); JsonStr(f, B->model.reason);
+    fprintf(f, ", \"override\": %s, \"source\": \"%s\" }", B->model.override ? "true" : "false", B->model.source);
 
     fprintf(f, ",\n  \"camera\": {\n    \"eye\": "); JsonVec(f, r->eye);
     fprintf(f, ",\n    \"yawDeg\": "); JsonNum(f, B->yawDeg);
@@ -1005,7 +1244,7 @@ static bool FindProgram(const char *name, char *out, int outSize)
     return false;
 }
 
-static bool Launch(const char *id, const char *slug, const char *prompt, OpenRequest *q, char *err, int errSize)
+static bool Launch(const char *id, const char *slug, const char *prompt, const char *model, OpenRequest *q, char *err, int errSize)
 {
     (void)q;
     char claude[1024];
@@ -1027,6 +1266,7 @@ static bool Launch(const char *id, const char *slug, const char *prompt, OpenReq
     int len = snprintf(cmd, sizeof(cmd), "\"\"%s\"", claude);
     for (int i = 0; i < SKIP_PERMISSION_COUNT && !ClaudeSafe(); i++)
         len += snprintf(cmd + len, sizeof(cmd) - len, " %s", SKIP_PERMISSION_FLAGS[i]);
+    if (model && len < (int)sizeof(cmd)) len += snprintf(cmd + len, sizeof(cmd) - len, " --model \"%s\"", model);
     for (int i = 0; i < extraCount && len < (int)sizeof(cmd); i++) len += snprintf(cmd + len, sizeof(cmd) - len, " %s", extra[i]);
     if (len < (int)sizeof(cmd)) snprintf(cmd + len, sizeof(cmd) - len, " \"%s\"\"", prompt);
     char title[128], dirArg[1100];
@@ -1132,7 +1372,7 @@ static void MoveToWorkspace(const char *title)
     TraceLog(LOG_INFO, "monolith: moving '%s' to workspace %s via %s (pid %d)", title, ws, tool, (int)pid);
 }
 
-static bool Launch(const char *id, const char *slug, const char *prompt, OpenRequest *q, char *err, int errSize)
+static bool Launch(const char *id, const char *slug, const char *prompt, const char *model, OpenRequest *q, char *err, int errSize)
 {
     (void)id;
     // Terminal: env override (program + extra args) or the first known one in PATH
@@ -1180,7 +1420,7 @@ static bool Launch(const char *id, const char *slug, const char *prompt, OpenReq
     size_t dl = strlen(dir);
     if (dl > 1 && dir[dl - 1] == '/') dir[dl - 1] = 0;
     int extraCount = SplitWords(getenv("MONOLITH_CLAUDE_ARGS"), argsBuf, sizeof(argsBuf), extra, CLAUDE_ARGS_MAX);
-    char *argv[16 + 8 + SKIP_PERMISSION_COUNT + CLAUDE_ARGS_MAX + 4];
+    char *argv[16 + 8 + SKIP_PERMISSION_COUNT + 2 + CLAUDE_ARGS_MAX + 4];
     int n = 0;
     for (int i = 0; i < termCount; i++) argv[n++] = termTok[i];
     if (ts->pre) argv[n++] = (char *)ts->pre;
@@ -1189,6 +1429,7 @@ static bool Launch(const char *id, const char *slug, const char *prompt, OpenReq
     if (ts->exec) argv[n++] = (char *)ts->exec;
     argv[n++] = claude;
     for (int i = 0; i < SKIP_PERMISSION_COUNT && !ClaudeSafe(); i++) argv[n++] = (char *)SKIP_PERMISSION_FLAGS[i];
+    if (model) { argv[n++] = "--model"; argv[n++] = (char *)model; }
     for (int i = 0; i < extraCount; i++) argv[n++] = extra[i];
     argv[n++] = (char *)prompt;
     argv[n] = NULL;
@@ -1268,7 +1509,13 @@ bool LauncherSubmit(const DesignRequest *req, Image view, Image marked, char *ms
         strftime(stamp, sizeof(stamp), "%Y-%m-%d_%H%M%S", tm);
         strftime(B.created, sizeof(B.created), "%Y-%m-%d %H:%M:%S", tm);
     }
-    MakeSlug(req->prompt, B.slug, sizeof(B.slug));
+    ModelQuery mq = { .prompt = req->prompt, .kind = "edit", .selected = req->selectedCount,
+                      .regions = req->regionCount, .hit = req->hit.box >= 0,
+                      .emptyMap = scene->boxCount + scene->modelCount <= 2, .noBrief = !scene->brief[0] };
+    LauncherChooseModel(&mq, &B.model);
+    B.userPrompt = req->prompt + B.model.promptSkip;
+    TraceLog(LOG_INFO, "monolith: model %s (%s tier: %s)", B.model.name, ModelTierName(B.model.tier), B.model.reason);
+    MakeSlug(B.userPrompt, B.slug, sizeof(B.slug));
 
     MakeDirectory(requestsDir);     // raylib: recursive, fine if it exists
     char dir[1300];
@@ -1326,14 +1573,14 @@ bool LauncherSubmit(const DesignRequest *req, Image view, Image marked, char *ms
     q->pitch = req->pitch;
 
     char err[512] = "";
-    q->launched = Launch(B.id, B.slug, B.prompt, q, err, sizeof(err));
+    q->launched = Launch(B.id, B.slug, B.prompt, B.model.addFlag ? B.model.name : NULL, q, err, sizeof(err));
     if (!q->launched) {
         snprintf(msg, msgSize, "launch failed: %s. Bundle kept: %s", err, dir);
         TraceLog(LOG_WARNING, "monolith: %s", msg);
-        TraceLog(LOG_WARNING, "monolith: run it by hand: cd '%s' && claude \"%s\"", rootDir, B.prompt);
+        TraceLog(LOG_WARNING, "monolith: run it by hand: cd '%s' && claude --model %s \"%s\"", rootDir, B.model.name, B.prompt);
         return false;
     }
-    snprintf(msg, msgSize, "request sent: %s (Claude Code opens in a new terminal)", B.id);
+    snprintf(msg, msgSize, "request sent (%s): %s (Claude Code opens in a new terminal)", B.model.name, B.id);
     return true;
 }
 
