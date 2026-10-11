@@ -197,6 +197,25 @@ R3DAPI void R3D_ClearFogSunVisibility(void);
 R3DAPI float R3D_GetFogSunVisibilityBakeTime(void);
 
 /**
+ * @brief Sets a baked world-space occlusion volume for the ambient light.
+ *
+ * Local monolith patch 11 (see patches.md). 'distance' is a w x h x d grid (x fastest, then
+ * y, then z) of one byte per voxel: the signed distance from the voxel centre to the nearest
+ * surface (negative inside geometry), decoded as value / 255 * (maxDistance - minDistance) +
+ * minDistance metres. Voxel (i, j, k) is centred at min + (i + 0.5, j + 0.5, k + 0.5) * voxelSize.
+ * The ambient pass then scales the ambient occlusion of every pixel inside the volume by a
+ * distance-field AO estimate (a few trilinear fetches along the normal, 0.15 to 3.2 m out),
+ * times 'intensity' (1 = full); outside it, and near its border, the factor fades to 1.
+ * It works with or without SSAO/SSIL (it multiplies with them). VRAM: one byte per voxel.
+ * The volume stays until the next call or R3D_ClearWorldOcclusion().
+ */
+R3DAPI void R3D_SetWorldOcclusion(const unsigned char *distance, int w, int h, int d, Vector3 min, float voxelSize,
+                                  float minDistance, float maxDistance, float intensity);
+
+/** @brief Drops the world occlusion volume (and frees its texture). */
+R3DAPI void R3D_ClearWorldOcclusion(void);
+
+/**
  * @brief Queues a probe to be rendered for the current frame.
  *
  * The probe is submitted for rendering during R3D_End(), and must be pushed

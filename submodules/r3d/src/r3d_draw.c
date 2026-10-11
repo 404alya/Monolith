@@ -238,7 +238,7 @@ static void pass_scene_probes(void);
 static void pass_scene_geometry(void);
 static void pass_scene_decals(void);
 
-static void pass_prepare_pyramid(void);
+static void pass_prepare_pyramid(int maxLevel);
 static void pass_prepare_downsample(r3d_target_t target, int level);
 static r3d_target_t pass_prepare_ssao(void);
 static r3d_target_t pass_prepare_ssil(void);
@@ -256,11 +256,13 @@ static void pass_scene_background(r3d_target_t sceneTarget);
 
 static r3d_target_t pass_post_setup(r3d_target_t sceneTarget);
 static r3d_target_t pass_post_dof(r3d_target_t sceneTarget);
-static r3d_target_t pass_post_bloom(r3d_target_t sceneTarget);
+static r3d_target_t pass_post_bloom(r3d_target_t sceneTarget, bool apply);
 static r3d_target_t pass_post_auto_exposure(r3d_target_t sceneTarget);
 static r3d_target_t pass_post_screen(R3D_ScreenShaderStage stage, r3d_target_t sceneTarget);
-static r3d_target_t pass_post_output(r3d_target_t sceneTarget);
+static r3d_target_t pass_post_output(r3d_target_t sceneTarget, bool bloomFused);
 static r3d_target_t pass_post_fxaa(r3d_target_t sceneTarget);
+static bool final_pass_direct(void);
+static void pass_post_fxaa_to_screen(r3d_target_t sceneTarget);
 static r3d_target_t pass_post_smaa(r3d_target_t sceneTarget);
 
 static void blit_to_screen(r3d_target_t source);
@@ -392,7 +394,9 @@ void R3D_End(void)
         if (ssao || ssil || ssgi || ssr || vfog || dof)
         {
             PROF_BEGIN(R3D_PROFILER_PYRAMID);
-            pass_prepare_pyramid();
+            // Monolith patch 10: only SSR reads depth levels above 1 (SSAO, SSIL, SSGI, the
+            // fog and DoF use levels 0 and 1), so without SSR the pyramid stops at level 1
+            pass_prepare_pyramid(ssr ? r3d_target_get_max_level(R3D_TARGET_DEPTH) : 1);
 
             if (ssao || ssil || ssgi || ssr) pass_prepare_downsample(R3D_TARGET_NORMAL, 1);
             // skip ssr check for radiance, we re-downsample during ssr for the full ambient reflection
@@ -444,9 +448,18 @@ void R3D_End(void)
         PROF_PASS(R3D_PROFILER_DOF, sceneTarget = pass_post_dof(sceneTarget));
     }
 
-    if (R3D.environment.bloom.mode != R3D_BLOOM_DISABLED)
+    // Monolith patch 10: the bloom composite is folded into the output (tonemap) pass when
+    // nothing runs between the two (no auto exposure, no POST stage screen shaders)
+    bool bloomOn = R3D.environment.bloom.mode != R3D_BLOOM_DISABLED;
+    bool bloomFused = bloomOn && !R3D.environment.autoExposure.enabled;
+    for (int i = 0; bloomFused && i < (int)R3D_ARRAY_SIZE(R3D.screenShaders[R3D_SCREEN_SHADER_STAGE_POST]); i++)
     {
-        PROF_PASS(R3D_PROFILER_BLOOM, sceneTarget = pass_post_bloom(sceneTarget));
+        if (R3D.screenShaders[R3D_SCREEN_SHADER_STAGE_POST][i] != NULL) bloomFused = false;
+    }
+
+    if (bloomOn)
+    {
+        PROF_PASS(R3D_PROFILER_BLOOM, sceneTarget = pass_post_bloom(sceneTarget, !bloomFused));
     }
 
     if (R3D.environment.autoExposure.enabled)
@@ -455,14 +468,26 @@ void R3D_End(void)
     }
 
     sceneTarget = pass_post_screen(R3D_SCREEN_SHADER_STAGE_POST, sceneTarget);
-    PROF_PASS(R3D_PROFILER_OUTPUT, sceneTarget = pass_post_output(sceneTarget));
+    PROF_PASS(R3D_PROFILER_OUTPUT, sceneTarget = pass_post_output(sceneTarget, bloomFused));
 
     sceneTarget = pass_post_screen(R3D_SCREEN_SHADER_STAGE_OUTPUT, sceneTarget);
+
+    // Monolith patch 10: FXAA renders straight into the final target when the final blit
+    // would only copy its result (same size, scene output, no FINAL stage screen shaders)
+    bool finalDone = false;
 
     switch (R3D.aaMode)
     {
     case R3D_ANTI_ALIASING_MODE_FXAA:
-        PROF_PASS(R3D_PROFILER_AA, sceneTarget = pass_post_fxaa(sceneTarget));
+        if (final_pass_direct())
+        {
+            PROF_PASS(R3D_PROFILER_AA, pass_post_fxaa_to_screen(sceneTarget));
+            finalDone = true;
+        }
+        else
+        {
+            PROF_PASS(R3D_PROFILER_AA, sceneTarget = pass_post_fxaa(sceneTarget));
+        }
         break;
     case R3D_ANTI_ALIASING_MODE_SMAA:
         PROF_PASS(R3D_PROFILER_AA, sceneTarget = pass_post_smaa(sceneTarget));
@@ -476,7 +501,7 @@ void R3D_End(void)
     PROF_BEGIN(R3D_PROFILER_BLIT);
     switch (R3D.outputMode)
     {
-    case R3D_OUTPUT_SCENE:    blit_to_screen(r3d_target_swap_scene(sceneTarget)); break;
+    case R3D_OUTPUT_SCENE:    if (!finalDone) blit_to_screen(r3d_target_swap_scene(sceneTarget)); break;
     case R3D_OUTPUT_ALBEDO:   visualize_to_screen(R3D_TARGET_ALBEDO); break;
     case R3D_OUTPUT_NORMAL:   visualize_to_screen(R3D_TARGET_NORMAL); break;
     case R3D_OUTPUT_ORM:      visualize_to_screen(R3D_TARGET_ORM); break;
@@ -531,6 +556,56 @@ void R3D_PushLightFixedShadow(R3D_Light light, R3D_ShadowMap map, Matrix lightVi
 }
 
 static float fogSunVolBakeMs;   //< local patch, see pass_scene_fog_sunvol()
+
+// Local patch 11: baked world-space occlusion volume, see R3D_SetWorldOcclusion()
+static struct {
+    GLuint texture;
+    Vector3 min, invExtent;
+    Vector2 decode;         //< distance = value * x + y (value in [0, 1])
+    float intensity;
+} worldAo;
+
+void R3D_SetWorldOcclusion(const unsigned char *distance, int w, int h, int d, Vector3 min, float voxelSize,
+                           float minDistance, float maxDistance, float intensity)
+{
+    if (!distance || w <= 0 || h <= 0 || d <= 0 || voxelSize <= 0.0f || maxDistance <= minDistance)
+    {
+        R3D_TRACELOG(LOG_WARNING, "R3D_SetWorldOcclusion: invalid volume");
+        R3D_ClearWorldOcclusion();
+        return;
+    }
+
+    if (worldAo.texture == 0) glGenTextures(1, &worldAo.texture);
+
+    glBindTexture(GL_TEXTURE_3D, worldAo.texture);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    r3d_driver_clear_errors();
+    glTexImage3D(GL_TEXTURE_3D, 0, GL_R8, w, h, d, 0, GL_RED, GL_UNSIGNED_BYTE, distance);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    if (r3d_driver_check_error("World occlusion -> texture upload"))
+    {
+        glBindTexture(GL_TEXTURE_3D, 0);
+        R3D_ClearWorldOcclusion();
+        return;
+    }
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_3D, 0);
+
+    worldAo.min = min;
+    worldAo.invExtent = (Vector3){ 1.0f / (voxelSize * w), 1.0f / (voxelSize * h), 1.0f / (voxelSize * d) };
+    worldAo.decode = (Vector2){ maxDistance - minDistance, minDistance };
+    worldAo.intensity = intensity;
+}
+
+void R3D_ClearWorldOcclusion(void)
+{
+    if (worldAo.texture != 0) glDeleteTextures(1, &worldAo.texture);
+    memset(&worldAo, 0, sizeof(worldAo));
+}
 
 void R3D_BakeFogSunVisibility(R3D_ShadowMap map, Matrix lightViewProj, BoundingBox region, float voxelSize, int subsamples)
 {
@@ -2209,7 +2284,7 @@ void pass_scene_decals(void)
     glColorMaski(2, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
 }
 
-void pass_prepare_pyramid(void)
+void pass_prepare_pyramid(int maxLevel)
 {
     r3d_driver_disable(GL_STENCIL_TEST);
     r3d_driver_disable(GL_CULL_FACE);
@@ -2223,7 +2298,7 @@ void pass_prepare_pyramid(void)
 
     R3D_SHADER_USE(prepare.pyramid);
 
-    int maxLevel = r3d_target_get_max_level(R3D_TARGET_DEPTH);
+    maxLevel = R3D_MIN(maxLevel, r3d_target_get_max_level(R3D_TARGET_DEPTH));
 
     for (int iDst = 1; iDst <= maxLevel; iDst++)
     {
@@ -2596,6 +2671,17 @@ void pass_deferred_ambient(r3d_target_t ssaoSource, r3d_target_t ssilSource, r3d
     R3D_SHADER_BIND_SAMPLER(deferred.ambient, uSsgiTex, r3d_target_get_or_null(ssgiSource));
     R3D_SHADER_BIND_SAMPLER(deferred.ambient, uOrmTex, r3d_target_get_level(R3D_TARGET_ORM, 0));
 
+    // Local patch 11: baked world occlusion
+    R3D_SHADER_SET_INT(deferred.ambient, uWorldAoEnabled, worldAo.texture != 0 ? 1 : 0);
+    if (worldAo.texture != 0)
+    {
+        R3D_SHADER_BIND_SAMPLER(deferred.ambient, uWorldAoTex, worldAo.texture);
+        R3D_SHADER_SET_VEC3(deferred.ambient, uWorldAoMin, worldAo.min);
+        R3D_SHADER_SET_VEC3(deferred.ambient, uWorldAoInvExtent, worldAo.invExtent);
+        R3D_SHADER_SET_VEC2(deferred.ambient, uWorldAoDecode, worldAo.decode);
+        R3D_SHADER_SET_FLOAT(deferred.ambient, uWorldAoIntensity, worldAo.intensity);
+    }
+
     R3D_RENDER_SCREEN();
 }
 
@@ -2878,7 +2964,7 @@ r3d_target_t pass_post_dof(r3d_target_t sceneTarget)
     return sceneTarget;
 }
 
-r3d_target_t pass_post_bloom(r3d_target_t sceneTarget)
+r3d_target_t pass_post_bloom(r3d_target_t sceneTarget, bool apply)
 {
     r3d_target_t sceneSource = r3d_target_swap_scene(sceneTarget);
     GLuint sceneSourceID = r3d_target_get(sceneSource);
@@ -2938,6 +3024,9 @@ r3d_target_t pass_post_bloom(r3d_target_t sceneTarget)
     }
 
     r3d_driver_disable(GL_BLEND);
+
+    // Monolith patch 10: without `apply` the output pass composites the bloom (uBloomFused)
+    if (!apply) return sceneTarget;
 
     /* --- Apply bloom to the scene --- */
 
@@ -3039,12 +3128,18 @@ r3d_target_t pass_post_screen(R3D_ScreenShaderStage stage, r3d_target_t sceneTar
     return sceneTarget;
 }
 
-r3d_target_t pass_post_output(r3d_target_t sceneTarget)
+r3d_target_t pass_post_output(r3d_target_t sceneTarget, bool bloomFused)
 {
     R3D_TARGET_BIND_AND_SWAP_SCENE(sceneTarget);
     R3D_SHADER_USE(post.output);
 
     R3D_SHADER_BIND_SAMPLER(post.output, uSceneTex, r3d_target_get(sceneTarget));
+    R3D_SHADER_SET_INT(post.output, uBloomFused, bloomFused ? 1 : 0);
+    if (bloomFused)
+    {
+        int minLevel = r3d_target_get_min_level(R3D_TARGET_BLOOM);
+        R3D_SHADER_BIND_SAMPLER(post.output, uBloomTex, r3d_target_get_level(R3D_TARGET_BLOOM, minLevel));
+    }
     R3D_RENDER_SCREEN();
 
     return sceneTarget;
@@ -3059,6 +3154,58 @@ r3d_target_t pass_post_fxaa(r3d_target_t sceneTarget)
     R3D_RENDER_SCREEN();
 
     return sceneTarget;
+}
+
+// Monolith patch 10: whether the last post pass may write the final target itself. That is
+// the case when blit_to_screen() would be a plain copy: scene output, internal resolution ==
+// destination viewport size, viewport at the origin (the copy and FXAA address texels by
+// gl_FragCoord), and no FINAL stage screen shaders after the AA pass.
+bool final_pass_direct(void)
+{
+    if (R3D.outputMode != R3D_OUTPUT_SCENE) return false;
+
+    for (int i = 0; i < (int)R3D_ARRAY_SIZE(R3D.screenShaders[R3D_SCREEN_SHADER_STAGE_FINAL]); i++)
+    {
+        if (R3D.screenShaders[R3D_SCREEN_SHADER_STAGE_FINAL][i] != NULL) return false;
+    }
+
+    Rectangle viewport = R3D.viewState.viewport;
+    int dstX = (int)(viewport.x + 0.5f);
+    int dstY = (int)(viewport.y + 0.5f);
+    int dstW = (int)(viewport.width + 0.5f);
+    int dstH = (int)(viewport.height + 0.5f);
+
+    GLuint dstId = R3D.screen.id;
+    int targetH = dstId ? R3D.screen.texture.height : GetRenderHeight();
+    int glDstY = targetH - dstY - dstH;
+
+    int srcW = 0, srcH = 0;
+    r3d_target_get_resolution(&srcW, &srcH, 0);
+
+    return dstX == 0 && glDstY == 0 && dstW == srcW && dstH == srcH;
+}
+
+// FXAA into the final target, with the scene depth like blit_to_screen()'s copy
+void pass_post_fxaa_to_screen(r3d_target_t sceneTarget)
+{
+    r3d_target_t source = r3d_target_swap_scene(sceneTarget);
+
+    int srcW = 0, srcH = 0;
+    r3d_target_get_resolution(&srcW, &srcH, 0);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, R3D.screen.id);
+    glViewport(0, 0, srcW, srcH);
+
+    r3d_driver_enable(GL_DEPTH_TEST);
+    r3d_driver_disable(GL_BLEND);
+
+    r3d_driver_set_depth_func(GL_ALWAYS);
+    r3d_driver_set_depth_mask(GL_TRUE);
+
+    R3D_SHADER_USE(post.fxaa[R3D.aaPreset]);
+    R3D_SHADER_BIND_SAMPLER(post.fxaa[R3D.aaPreset], uSceneTex, r3d_target_get(source));
+    R3D_SHADER_BIND_SAMPLER(post.fxaa[R3D.aaPreset], uDepthTex, r3d_target_get_depth_buffer());
+    R3D_RENDER_SCREEN();
 }
 
 r3d_target_t pass_post_smaa(r3d_target_t sceneTarget)

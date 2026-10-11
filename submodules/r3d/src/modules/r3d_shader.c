@@ -1447,6 +1447,13 @@ bool r3d_shader_load_deferred_ambient(r3d_shader_custom_t* custom)
     SET_SAMPLER(ambient, uPrefilterTex, R3D_SHADER_SAMPLER_IBL_PREFILTER);
     SET_SAMPLER(ambient, uBrdfLutTex, R3D_SHADER_SAMPLER_IBL_BRDF_LUT);
 
+    SET_SAMPLER(ambient, uWorldAoTex, R3D_SHADER_SAMPLER_WORLD_AO);
+    GET_LOCATION(ambient, uWorldAoEnabled);
+    GET_LOCATION(ambient, uWorldAoMin);
+    GET_LOCATION(ambient, uWorldAoInvExtent);
+    GET_LOCATION(ambient, uWorldAoDecode);
+    GET_LOCATION(ambient, uWorldAoIntensity);
+
     return true;
 }
 
@@ -1659,6 +1666,8 @@ bool r3d_shader_load_post_output(r3d_shader_custom_t* custom)
 
     USE_SHADER(output);
     SET_SAMPLER(output, uSceneTex, R3D_SHADER_SAMPLER_BUFFER_SCENE);
+    SET_SAMPLER(output, uBloomTex, R3D_SHADER_SAMPLER_BUFFER_BLOOM);
+    GET_LOCATION(output, uBloomFused);
 
     return true;
 }
@@ -1686,6 +1695,7 @@ static bool load_post_fxaa(r3d_shader_custom_t* custom, int index)
 
     USE_SHADER(fxaa);
     SET_SAMPLER(fxaa, uSceneTex, R3D_SHADER_SAMPLER_BUFFER_SCENE);
+    SET_SAMPLER(fxaa, uDepthTex, R3D_SHADER_SAMPLER_BUFFER_DEPTH);
 
     return true;
 }

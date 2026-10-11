@@ -7,6 +7,7 @@
  */
 
 #include <r3d/r3d_core.h>
+#include <r3d/r3d_draw.h>     // R3D_ClearWorldOcclusion (local patch 11)
 #include <raymath.h>
 #include <float.h>
 #include <glad.h>
@@ -222,6 +223,7 @@ bool R3D_Init(int resWidth, int resHeight)
 
 void R3D_Close(void)
 {
+    R3D_ClearWorldOcclusion();  // local patch 11
     r3d_stack_destroy(R3D.stack);
     r3d_texture_quit();
     r3d_target_quit();
