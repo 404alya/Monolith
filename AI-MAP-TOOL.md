@@ -131,6 +131,7 @@ The **groups of the default map**, in file order: `ground`, `entry canyon: walls
 - **Stay axis-aligned**: no rotation exists. Diagonal or curved shapes have to be built as steps of boxes.
 - **Solid steps in another direction** (stairs only climb toward −Z): repeat a box whose bottom stays buried in the floor below. For example, `repeat 10 0.75 0.3 0 box 0 -3 0 0.75 0.3 4` makes 10 steps climbing toward +X, each 0.3 m higher.
 - **Faces:** exactly coplanar overlapping faces are harmless here, because the concrete shader is computed from world position and both faces shade identically. Faces that are *nearly* coplanar (a few mm to cm apart) can flicker, so either align them exactly or separate them clearly.
+- **Models and textures** (finding, licensing, downloading, normalising, recording and restyling them): §11. Never place a file whose licence isn't recorded.
 - **Keep the box count under `MAX_BOXES`** (8192), and watch what a `repeat` grid multiplies to.
 - **Real scale.** Think in metres (§4). Keep walkways ≥ 2.2 m high and steps ≤ 0.45 m. New boxes should rest on something (ground y = 0, terrace y = 12, a roof) unless the request wants them floating.
 - **Engine changes are allowed when a request needs them**: a new primitive type in `runtime/monolith_scene.c`, lighting or atmosphere as `env` / `light` lines in the map (the built-in defaults are in `BuiltinEnvironment()` in `runtime/monolith_scene.c`), shader work. They must follow `PROMPT-INSTRUCTIONS.md` (§7 pitfalls, R3D changes recorded in `submodules/r3d/patches.md`), keep the look unless the request is about the look, and build with **zero warnings on both targets** (`./build.sh` and `./build.sh --win`). If you add a primitive, document it in the `map.c` header comment and in §5 here.
@@ -162,7 +163,8 @@ Run every command from the repo root. The binary is `./build/linux/monolith`, an
    - no **floating boxes**: each new box rests on or is attached to something, unless intended. Compare y0 with the top of the support;
    - no **z-fighting** or flickering near-coplanar faces;
    - walkways not blocked: **headroom ≥ 2.2 m**, stairs **rise ≤ 0.45 m** per step, openings ≥ 0.6 m (better ≥ 1 m), and a route from the start through canyon → hall → stairs → terrace still exists;
-   - no unrelated geometry moved (the box diff), and the box count is < 8192.
+   - no unrelated geometry moved (the box diff), and the box count is < 8192;
+   - for models: scale, support, collision, shadows, licence recorded (§11, "Verification additions for models").
 7. **Write `requests/<id>/result.md`** (§8).
 
 **Hot reload vs. rebuild.** The game polls the map package (map file, shaders, textures) about twice a second and reloads it when a file's content changes. The HUD then shows `map reloaded (N boxes)`. **A map-only edit needs no rebuild and no restart.** A **code edit** (C or R3D) needs `./build.sh` (and `./build.sh --win` for the warning check), and **the developer restarts the game**. Say so in `result.md`. Edits to the package's shaders (e.g. `maps/monolith/shaders/concrete.glsl`) hot-reload like the map: no rebuild, no restart.
@@ -204,3 +206,54 @@ The guard rails at the top of this file apply with extra weight: the project's f
 ## 10. Export
 
 `monolith --export <dir>` (or **F9** in the game, into `export/<map>-<stamp>/`) writes a map package plus the scene runtime (`monolith_scene.h/.c`), `viewer.c` and a `README.md` (build lines, minimal code, hot reload, patched vs. upstream R3D, licences from `ASSETS.md`) for use in another raylib + R3D project. It copies only the files the map references (plus `MAP.md`, `ASSETS.md`, model sidecars and the files model files refer to) and checks that the copy loads. A request never needs to export; the developer does it.
+
+## 11. Models and textures
+
+Read the map's `MAP.md` first: its *Rules for new content* and *Materials and palette* decide whether a model is wanted at all and how it must look. The project defaults below apply where `MAP.md` says nothing.
+
+**1. Boxes or a model?** Architecture, terrain shaping, walls, steps and anything the brief builds from boxes stay boxes. Use a model only for what boxes can't express (a tree, a rock, a lamp, a vehicle, a statue) and only if `MAP.md` allows models. **2. Reuse** a model already in `maps/<name>/models/` (`ASSETS.md` lists them) before downloading anything.
+
+**3. Sources, in this order** (licences: CC0 / public domain; CC-BY only with the attribution recorded; never NC, ND, SA, GPL, "editorial", personal-use, or anything behind a login or paywall):
+
+| Source | Licence | How |
+|---|---|---|
+| Poly Haven (models: rocks, plants, props; realistic, PBR) | CC0, https://polyhaven.com/license | `python3 -I tools/fetch_asset.py polyhaven search <words> --max-tris 50000`, then `polyhaven get <slug> --res 1k`. API only (the site forbids scraping). Big trees are 0.3-17 M triangles: skip them. |
+| ambientCG (textures) | CC0, https://docs.ambientcg.com/license/ | `ambientcg search <word>`, `ambientcg get <id> --res 1K` (keeps the image files only). The search lists the tile size in metres. |
+| Kenney (low-poly kits) | CC0 (`License.txt` in every zip) | `kenney list <zip url>`, then `kenney get <zip url> --pick 'Models/GLTF format/<glob>.glb' --page <pack page>`. Kit units are tiles: scale ×4-12. Materials are `metallic 1`: always override. |
+| Poly Pizza (low-poly, per-model licence) | CC0 or CC-BY 3.0, as the API returns it at download time | `polypizza search <words> [--license cc0]`, `polypizza info <id>`, `polypizza get <id>`. Official API v1.1 only, with the developer's key in `POLY_PIZZA_API_KEY` (or `~/.config/monolith/poly-pizza.key`); without a key the tool explains how to get one. Never scrape the website. CC-BY: the tool records the API's attribution text. |
+| Quaternius | Packs say CC0, but quaternius.com's own licence (QAL v1.0) forbids redistributing the assets, which an exported package does | Don't use from quaternius.com. (Quaternius models on Poly Pizza are listed CC0 there: record that licence, and say in `result.md` that the developer may want to check.) |
+| Sketchfab, OpenGameArt, others | per model; logins, NoAI and mixed terms | Don't download. Propose the model page URL and its licence in `result.md`; the developer downloads by hand. |
+
+**4. Download safely** (`tools/fetch_asset.py` does all of this; never use a browser-style scraper): every download into a NEW, EMPTY directory outside the repo (default `~/.cache/monolith/downloads/<source>-<id>-<stamp>/`, or `--out`); https only, redirects only to the source's hosts, size limits; zip entries audited (no absolute paths, `..`, backslashes, symlinks) and only model / texture / licence files extracted; md5 checked against the API where it has one; `provenance.json` written next to the files (source, page and file URLs, authors, licence + URL, attribution, date, sha256 of every file). Never run anything from a download directory, never open a downloaded `.blend`, run Python that reads downloads with `python3 -I`.
+
+**5. Check** each candidate with `./build/linux/monolith --inspect-model <file>` (no window): triangles, size in metres, where the origin sits, up axis, material slots (for `material.N`), textures and their sizes, and warnings (unlit, `metallic 1`, missing files, Draco/KTX2/WebP, which R3D can't load). Budgets unless `MAP.md` says otherwise: **≤ 50k triangles per model, textures ≤ 2K**, glTF/GLB preferred.
+
+**6. Normalise**, cheapest first:
+- **Placement fields** fix most things without touching the file: `origin bottom` (stands it on y), `scale` (Kenney tiles, FBX in cm = `scale 0.01`), `rot` (a Z-up OBJ: `rot 0 -90 0`), `collide box …` (a trunk instead of the whole crown), `shadow off` for tiny props.
+- **Blender, headless**, only when the file itself must change (too many triangles, 4K textures, unlit materials, a broken origin you'd rather fix once):
+  ```sh
+  BLENDER=${BLENDER:-~/.local/share/Steam/steamapps/common/Blender/blender}
+  "$BLENDER" -b --factory-startup --disable-autoexec --python-exit-code 1 \
+      --python tools/normalize_model.py -- <download>/x.gltf maps/<name>/models/x.glb \
+      --origin bottom --decimate 10000 --max-texture 1024 --report <scratch>/x.norm.json
+  ```
+  Other options: `--height H` / `--scale S`, `--strip-unlit`, `--metallic 0`. It imports glTF/GLB/OBJ/FBX only, applies transforms, writes a Y-up metre GLB and prints every change. Run it from the repo root, never from the download directory.
+- Textures: resize or re-encode with Pillow (`python3 -I`, script outside the download folder) into `maps/<name>/textures/`. R3D loads PNG and JPG (not WebP, KTX2, TGA).
+
+**7. Copy into the package** (`maps/<name>/models/`, `textures/`) only the files the map uses, with every file a `.gltf` names (`.bin`, textures; they must stay inside the package) and the source's licence file if it has one (e.g. `models/kenney-License.txt`). Then record it:
+```sh
+python3 -I tools/record_asset.py --package maps/<name> --file models/x.glb \
+    --provenance <download>/provenance.json [--original <file in the provenance>] \
+    --inspect <file with the --inspect-model output> [--normalize-report <scratch>/x.norm.json] \
+    [--change "what else changed"] [--ai-generated yes|no|unknown] [--note "..."]
+```
+It writes the sidecar `models/x.glb.asset.md` (name, package path, source, page and download URLs, authors, licence + URL, attribution, date, sha256 of the originals, format, generator, extensions, triangles, size, up axis, units, material slots, texture maps, every change to the file) and adds or replaces the file's row in `ASSETS.md`. It refuses licences other than CC0 / CC-BY / public domain and CC-BY without attribution text.
+
+**8. Restyle to the brief with material overrides in the map**, never by editing the model file (the original stays traceable): `material "name"` for every slot, `material.N "name"` per slot (`--inspect-model` lists them), and `inherit albedo|normal|orm|emission` on the override material to keep one of the model's own maps. A `use "name"` line also restyles the models after it. Examples:
+- **Brutalist default map** (`maps/monolith`): the model takes the `concrete` material, whose shader computes everything from world position; keep the model's normal map only if `MAP.md` allows (`material "concrete statue" shader "shaders/concrete.glsl" uniform u_scale 1 alpha_cutoff 0 inherit normal`).
+- **Stylised** (`maps/pine_forest`): flat palette colours per slot, the model's textures dropped: `model "models/tree_pineTallC.glb" 8 0 -20 rot 35 0 0 scale 11 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025`; a photoscanned rock keeps only its relief: `material "rock scan" albedo 98 94 94 roughness 0.85 inherit normal`.
+- **Realistic**: keep the PBR textures (`inherit all`) and match the neighbours with the override's factors: `material "stone tinted" albedo 200 196 190 roughness 0.8 inherit all` (the override's colour multiplies the inherited albedo map).
+
+**9. Nothing acceptable found?** Say so in `result.md` (what you searched, why each candidate failed: licence, size, style), build an approximation from boxes if `MAP.md` allows it, and propose a URL the developer could download by hand. **Never use an asset whose licence is unknown or not acceptable**, not even "for now".
+
+**Verification additions for models** (with §7, step 6): the model is at a believable **scale** next to the player (1.8 m; check a walking-height shot `--eye x 1.62 z`); it **rests on its support** (no floating, no sinking: `--pick` on its base, or a low side view); **collision** makes sense (a trunk blocks, a crown at head height doesn't; walk paths stay ≥ 1 m wide); it casts and receives **shadows** like its neighbours and its materials are lit (no unlit or black-metal look); `--dump-scene` before/after shows only the intended instances; the **licence is recorded** (`ASSETS.md` row + sidecar, `License.txt` copied where the source ships one); triangles and textures within budget.

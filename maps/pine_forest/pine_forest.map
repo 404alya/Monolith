@@ -1,0 +1,889 @@
+monolith 2
+# pine_forest.map -- a foggy pine forest at dusk. Design brief: MAP.md (read it first).
+# Format: the header comment of runtime/monolith_scene.c (and AI-MAP-TOOL.md). Paths are
+# relative to this folder. Asset provenance: ASSETS.md and models/*.asset.md.
+
+# --- Materials: flat, muted dusk palette (low-poly style); only the forest floor is textured
+material "default" albedo 120 116 110 roughness 0.9 metalness 0
+# forest floor: ambientCG Ground037 (CC0), 2.1 m tile on the 200 m ground slab (600 / 2.1 = 286)
+material "forest floor" albedo_map "textures/ground037_color.jpg" normal_map "textures/ground037_normal_gl.jpg"
+material "forest floor" albedo 150 150 140 normal_scale 0.8 roughness 0.95 metalness 0 uv_scale 286 286 wrap repeat
+material "needles" albedo 62 94 72 roughness 0.9 metalness 0
+material "needles_dark" albedo 48 76 62 roughness 0.9 metalness 0
+material "needles_blue" albedo 54 84 86 roughness 0.9 metalness 0
+material "bark" albedo 80 64 58 roughness 0.95 metalness 0
+material "wood" albedo 120 84 56 roughness 0.85 metalness 0
+material "rock" albedo 84 82 86 roughness 0.85 metalness 0
+material "moss" albedo 58 74 50 roughness 0.95 metalness 0
+# Poly Haven rock face: keep only its normal map (the relief), colour from the palette
+material "rock scan" albedo 98 94 94 roughness 0.85 metalness 0 inherit normal
+material "canvas" albedo 150 96 62 roughness 0.9 metalness 0 cull none
+material "camp stone" albedo 86 86 92 roughness 0.8 metalness 0
+material "iron" albedo 40 40 44 roughness 0.6 metalness 0.6
+material "embers" albedo 30 14 8 emission 255 110 40 emission_energy 5 roughness 1 metalness 0
+# Poly Pizza lantern: keep its flat-colour atlas, not metallic
+material "lantern" roughness 0.6 metalness 0.1 inherit albedo
+
+# --- Environment: dusk. Low warm sun ahead-left of the path (light travels +Z, slightly +X),
+# deep blue sky with an orange horizon, violet distance fog, sun shafts between the trunks.
+env sky.mode procedural
+env sky.size 1024
+env sky.skyTopColor 26 38 80
+env sky.skyHorizonColor 152 118 140
+env sky.skyHorizonCurve 0.18
+env sky.skyEnergy 1
+env sky.groundBottomColor 58 62 90
+env sky.groundHorizonColor 110 96 120
+env sky.groundHorizonCurve 0.05
+env sky.groundEnergy 1
+env sky.sunColor 255 158 90
+env sky.sunSizeDeg 2.2
+env sky.sunCurve 0.08
+env sky.sunEnergy 5
+env ambientSky.mode procedural
+env ambientSky.size 256
+env ambientSky.groundBottomColor 96 88 86
+env ambientSky.skyTopColor 92 112 160
+env ambientSky.skyHorizonColor 150 136 150
+env ambientSky.groundHorizonCurve 0.1
+env sun.enabled on
+env sun.direction 0.7 -0.32 0.64
+env sun.color 255 164 100
+env sun.energy 2.2
+env sun.specular 0.6
+env sun.fogEnergy 1.6
+env sun.range 100
+env sun.shadow on
+env sun.softness 3
+env sun.depthBias 0.0001
+env sun.slopeBias 0.0015
+env shadow.size 8192
+env background.color 60 60 80
+env background.energy 1
+env background.skyBlur 0
+env background.rotation 0 0 0 1
+env ambient.color 0 0 0
+env ambient.energy 1.5
+env ssao.enabled on
+env ssao.sampleCount 16
+env ssao.intensity 1.2
+env ssao.power 1
+env ssao.radius 1.2
+env ssao.bias 0.03
+env ssil.enabled on
+env ssil.sampleCount 16
+env ssil.giIntensity 1.2
+env ssil.aoIntensity 1
+env ssil.aoPower 1
+env ssil.radius 5
+env ssil.bias 0.03
+env ssgi.enabled off
+env ssr.enabled off
+env fog.mode exp2
+env fog.color 62 70 102
+env fog.start 1
+env fog.end 50
+env fog.density 0.022
+env fog.skyAffect 0.35
+env volumetricFog.enabled on
+env volumetricFog.scatteringDensity 0.012
+env volumetricFog.absortionDensity 0.001
+env volumetricFog.scatteringColor 236 206 196
+env volumetricFog.anisotropy 0.6
+env volumetricFog.emissionColor 62 70 102
+env volumetricFog.emissionEnergy 0.25
+env volumetricFog.skyAffect 0.5
+env volumetricFog.length 80
+env volumetricFog.stepSize 0.75
+env dof.mode disabled
+env bloom.mode mix
+env bloom.levels 0.5
+env bloom.intensity 0.06
+env bloom.threshold 0
+env bloom.softThreshold 0.5
+env bloom.filterRadius 1
+env autoExposure.enabled off
+env tonemap.mode agx
+env tonemap.exposure 1.15
+env tonemap.white 1
+env color.brightness 1
+env color.contrast 1.08
+env color.saturation 0.9
+
+# --- Player start (feet, yaw) and viewpoints (eye, target)
+spawn 0 0 48 180
+viewpoint "Forest path" 0 1.62 48 0 3 8
+viewpoint "Campfire clearing" 7 1.7 9 -2 1.2 -2
+viewpoint "Ridge lookout" 36 8.42 -27 0 -1 3
+viewpoint "Meadow edge" -47 1.62 42 -12 5 0
+viewpoint "Above the canopy" -26 24 50 2 4 -4
+
+# --- Geometry
+group "ground"
+use "forest floor"
+box -300 -1 -300 300 0 300
+
+group "clearing: campfire"
+use "default"
+model "models/campfire.glb" 0 0 0 rot 20 0 0 scale 3.2 origin bottom material.0 "wood" material.1 "iron" material.2 "camp stone"
+use "embers"
+block 0 0 0 0.5 0.12 0.5
+use "default"
+light point 0 1.1 0 color 255 130 50 energy 5 range 18 falloff 1 fogEnergy 0.8 shadow on
+
+group "clearing: camp"
+model "models/tent.glb" -6.5 0 -4 rot 55 0 0 scale 5 origin bottom material.0 "wood" material.1 "canvas"
+model "models/log.glb" 3.4 0 -1.6 rot 160 0 0 scale 3.6 origin bottom material.0 "bark" material.1 "wood"
+model "models/log.glb" -0.8 0 3.8 rot 85 0 0 scale 3.4 origin bottom material.0 "bark" material.1 "wood"
+model "models/stump_old.glb" -2.8 0 2.4 rot 30 0 0 scale 2.6 origin bottom material "bark"
+model "models/lantern.glb" -2.8 0.69 2.4 rot 10 0 0 scale 0.45 origin bottom material "lantern" collide none
+light point -2.8 1.0 2.4 color 255 180 110 energy 1.2 range 7 fogEnergy 1
+model "models/lantern.glb" -4.2 0 -1.6 rot 80 0 0 scale 0.45 origin bottom material "lantern" collide none
+light point -4.2 0.32 -1.6 color 255 180 110 energy 1 range 6 fogEnergy 1
+
+group "path: lantern posts"
+# 1.2 m wooden posts with a lantern on top, along the path from the spawn to the clearing
+use "wood"
+block 2.2 0 40 0.16 1.2 0.16
+block -2.4 0 30 0.16 1.2 0.16
+block 2.6 0 20 0.16 1.2 0.16
+use "default"
+model "models/lantern.glb" 2.2 1.2 40 rot 15 0 0 scale 0.45 origin bottom material "lantern" collide none
+model "models/lantern.glb" -2.4 1.2 30 rot 75 0 0 scale 0.45 origin bottom material "lantern" collide none
+model "models/lantern.glb" 2.6 1.2 20 rot 40 0 0 scale 0.45 origin bottom material "lantern" collide none
+light point 2.2 1.55 40 color 255 180 110 energy 1.2 range 8 fogEnergy 1
+light point -2.4 1.55 30 color 255 180 110 energy 1.2 range 8 fogEnergy 1
+light point 2.6 1.55 20 color 255 180 110 energy 1.2 range 8 fogEnergy 1
+
+group "ridge: terraces"
+# Rock outcrop north-east of the clearing: three flat-topped terraces (y 2, 4.4, 6.8)
+use "rock"
+box 22 0 -42 52 2 -10
+box 28 2 -40 52 4.4 -14
+box 34 4.4 -38 52 6.8 -20
+group "ridge: steps"
+# 0.4 m steps climbing +X from the ground (x 17) to each terrace, z -28..-25
+repeat 5 1 0.4 0 box 17 -1 -28 18 0.4 -25
+repeat 6 1 0.4 0 box 22 1 -28 23 2.4 -25
+repeat 6 1 0.4 0 box 28 3.4 -28 29 4.8 -25
+use "default"
+group "ridge: rock faces"
+# Poly Haven rock_face_01 (normalised GLB), restyled to the palette, softening the box edges
+model "models/rock_face_01.glb" 21 -0.4 -36 rot 90 0 0 scale 1.6 origin bottom material "rock scan"
+model "models/rock_face_01.glb" 25 -0.3 -13 rot 200 0 0 scale 1.4 origin bottom material "rock scan"
+model "models/rock_face_01.glb" 31 1.6 -40.5 rot 10 0 0 scale 1.5 origin bottom material "rock scan"
+model "models/rock_face_01.glb" 33 3.8 -17 rot 160 0 0 scale 1.2 origin bottom material "rock scan"
+model "models/rock_face_01.glb" 49 6.2 -36 rot 300 0 0 scale 1.3 origin bottom material "rock scan"
+
+group "meadow: rocks"
+# A grassy opening south-west, toward the last light
+model "models/rock_largeD.glb" -42 0 33 rot 30 0 0 scale 4 origin bottom material.0 "rock" material.1 "moss" material.2 "rock"
+model "models/rock_largeA.glb" -50 0 39 rot 120 0 0 scale 3.5 origin bottom material.0 "rock" material.1 "moss"
+model "models/rock_largeA.glb" -38 0 44 rot 250 0 0 scale 2.5 origin bottom material.0 "rock" material.1 "moss"
+model "models/stump_old.glb" -46 0 28 rot 200 0 0 scale 3 origin bottom material "bark"
+
+# --- The forest: Kenney pines, restyled with the needles / bark materials (slot order differs
+# per file: TallA has bark in slot 0). Collision: the trunk only (model-space box).
+group "forest: pines near"
+model "models/tree_pineTallD.glb" 8.25 0 -30.89 rot 255 0 0 scale 9.52 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -5.96 0 37.76 rot 350 0 0 scale 11.89 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" -30.07 0 15.26 rot 35 0 0 scale 12.84 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" -24.75 0 -23.23 rot 230 0 0 scale 11.4 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" -34.41 0 11.19 rot 60 0 0 scale 11.41 origin bottom material.1 "needles_blue" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallD.glb" -33.63 0 -9.62 rot 170 0 0 scale 10.69 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" -40.02 0 4.22 rot 325 0 0 scale 10.21 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" 25.88 0 1.28 rot 240 0 0 scale 11.9 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -10.96 0 7.66 rot 115 0 0 scale 11.86 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" -23.4 0 -2.93 rot 80 0 0 scale 12.48 origin bottom material.1 "needles_blue" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallB.glb" 3.59 0 -37.0 rot 110 0 0 scale 10.99 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallB.glb" -10.63 0 -37.0 rot 135 0 0 scale 10.95 origin bottom material.0 "needles" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineDefaultA.glb" -21.92 0 -35.06 rot 170 0 0 scale 11.15 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" 19.68 0 6.71 rot 125 0 0 scale 12.93 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" 13.46 0 29.39 rot 110 0 0 scale 9.22 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" -1.39 0 -27.01 rot 30 0 0 scale 12.78 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" -32.04 0 -16.55 rot 335 0 0 scale 12.26 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -19.81 0 5.56 rot 160 0 0 scale 11.04 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" -23.06 0 -12.45 rot 170 0 0 scale 9.51 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallD.glb" 5.62 0 19.06 rot 235 0 0 scale 11.87 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -37.25 0 -18.27 rot 260 0 0 scale 10.6 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -16.11 0 -1.5 rot 310 0 0 scale 9.87 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" 22.11 0 27.59 rot 90 0 0 scale 10.14 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" -24.08 0 11.53 rot 0 0 0 scale 10.6 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" -29.71 0 1.03 rot 170 0 0 scale 11.14 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" 4.12 0 -26.78 rot 230 0 0 scale 9.58 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" 22.89 0 11.51 rot 315 0 0 scale 10.19 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" -18.38 0 19.0 rot 255 0 0 scale 11.33 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" -17.08 0 36.53 rot 305 0 0 scale 9.95 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" -12.24 0 -14.18 rot 25 0 0 scale 11.93 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" 19.75 0 37.65 rot 15 0 0 scale 12.33 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" 28.5 0 -5.77 rot 220 0 0 scale 11.3 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallB.glb" -17.58 0 -10.31 rot 105 0 0 scale 11.06 origin bottom material.0 "needles" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineRoundC.glb" -7.09 0 14.27 rot 345 0 0 scale 11.2 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" 31.52 0 31.31 rot 340 0 0 scale 11.67 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" -17.85 0 12.43 rot 5 0 0 scale 12.57 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" -29.63 0 21.83 rot 270 0 0 scale 10.38 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" 4.67 0 -15.25 rot 115 0 0 scale 10.33 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" 13.03 0 -1.98 rot 270 0 0 scale 12.21 origin bottom material.1 "needles_blue" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineDefaultA.glb" 40.59 0 5.81 rot 130 0 0 scale 9.54 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" -13.76 0 28.66 rot 155 0 0 scale 12.69 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" 29.92 0 23.72 rot 290 0 0 scale 10.04 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" -11.54 0 -26.3 rot 185 0 0 scale 11.4 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -40.37 0 -7.21 rot 165 0 0 scale 11.48 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" 11.67 0 -21.63 rot 315 0 0 scale 11.54 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" -38.06 0 -1.3 rot 125 0 0 scale 10.36 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineRoundC.glb" 12.65 0 36.19 rot 295 0 0 scale 9.64 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" 10.11 0 11.23 rot 85 0 0 scale 11.93 origin bottom material.1 "needles_blue" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallA.glb" 33.63 0 11.26 rot 110 0 0 scale 12.15 origin bottom material.1 "needles_blue" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallC.glb" 6.04 0 25.95 rot 70 0 0 scale 10.42 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -9.13 0 32.32 rot 150 0 0 scale 11.98 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" 41.36 0 12.39 rot 130 0 0 scale 10.11 origin bottom material.1 "needles_dark" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineDefaultA.glb" -27.61 0 32.38 rot 180 0 0 scale 11.14 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" -33.84 0 -28.82 rot 295 0 0 scale 10.58 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" -36.89 0 21.82 rot 275 0 0 scale 10.43 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" -41.19 0 -14.19 rot 290 0 0 scale 12.63 origin bottom material.1 "needles_dark" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallB.glb" 38.6 0 17.9 rot 80 0 0 scale 11.34 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallD.glb" -38.86 0 15.74 rot 180 0 0 scale 11.45 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" -10.59 0 42.01 rot 350 0 0 scale 11.6 origin bottom material.1 "needles" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallC.glb" -10.03 0 19.67 rot 355 0 0 scale 11.83 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -6.75 0 -22.95 rot 180 0 0 scale 10.59 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" 44.17 0 -6.51 rot 190 0 0 scale 11.7 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" -21.3 0 25.53 rot 75 0 0 scale 9.85 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" 7.11 0 34.49 rot 140 0 0 scale 10.41 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineDefaultA.glb" -26.64 0 -30.97 rot 210 0 0 scale 9.43 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" 35.18 0 3.37 rot 195 0 0 scale 10.42 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" 24.13 0 34.76 rot 140 0 0 scale 11.01 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" -21.59 0 -18.22 rot 170 0 0 scale 10.41 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" -17.07 0 -37.25 rot 30 0 0 scale 9.65 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -20.57 0 31.24 rot 20 0 0 scale 10.76 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" 9.0 0 -37.63 rot 10 0 0 scale 11.84 origin bottom material.1 "needles_dark" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallD.glb" 10.99 0 -10.19 rot 50 0 0 scale 10.7 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" -5.31 0 -38.5 rot 120 0 0 scale 10.36 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" -37.49 0 -23.94 rot 25 0 0 scale 10.77 origin bottom material.1 "needles_blue" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineDefaultA.glb" 10.92 0 -42.81 rot 10 0 0 scale 10.81 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" 17.12 0 13.91 rot 275 0 0 scale 10.14 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineRoundC.glb" 39.06 0 -1.01 rot 295 0 0 scale 9.18 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" 2.19 0 -42.78 rot 350 0 0 scale 11.1 origin bottom material.1 "needles_blue" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallC.glb" 11.99 0 23.35 rot 170 0 0 scale 11.02 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -29.52 0 -4.61 rot 335 0 0 scale 10.6 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" -17.29 0 -28.84 rot 325 0 0 scale 11.98 origin bottom material.1 "needles" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineRoundC.glb" 18.86 0 0.93 rot 95 0 0 scale 10.18 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" -12.55 0 -8.79 rot 30 0 0 scale 10.94 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -2.46 0 -16.81 rot 345 0 0 scale 9.38 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" -14.91 0 -18.79 rot 5 0 0 scale 10.37 origin bottom material.0 "needles" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineDefaultA.glb" 35.33 0 25.94 rot 275 0 0 scale 11.85 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" 18.57 0 22.41 rot 105 0 0 scale 9.05 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" -34.1 0 5.37 rot 45 0 0 scale 10.08 origin bottom material.0 "needles" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallC.glb" -28.12 0 6.57 rot 165 0 0 scale 11.2 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" -7.69 0 -30.92 rot 175 0 0 scale 10.18 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" 12.38 0 16.95 rot 155 0 0 scale 9.92 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" 23.63 0 -7.76 rot 140 0 0 scale 10.62 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" 6.26 0 -21.87 rot 145 0 0 scale 11.87 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" -40.39 0 10.13 rot 70 0 0 scale 11.93 origin bottom material.0 "needles" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallC.glb" 28.95 0 15.8 rot 40 0 0 scale 10.88 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" 26.61 0 6.72 rot 110 0 0 scale 12.49 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -31.69 0 -23.66 rot 165 0 0 scale 9.54 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" -2.65 0 -32.95 rot 285 0 0 scale 9.51 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallB.glb" 12.81 0 6.52 rot 235 0 0 scale 11.08 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallB.glb" -24.5 0 16.87 rot 60 0 0 scale 11.21 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallA.glb" -30.64 0 27.49 rot 15 0 0 scale 12.29 origin bottom material.1 "needles" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallD.glb" 16.65 0 -5.85 rot 200 0 0 scale 10.79 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" 7.04 0 43.51 rot 195 0 0 scale 11.7 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" -19.22 0 -23.96 rot 355 0 0 scale 11.47 origin bottom material.0 "needles" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineRoundC.glb" 10.14 0 -15.7 rot 135 0 0 scale 9.17 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" -6.57 0 26.56 rot 185 0 0 scale 10.64 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" 33.21 0 -1.82 rot 220 0 0 scale 11.38 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" 36.21 0 -6.36 rot 250 0 0 scale 11.28 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" -14.45 0 23.35 rot 170 0 0 scale 9.45 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" 23.42 0 19.42 rot 120 0 0 scale 12.97 origin bottom material.1 "needles_dark" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallB.glb" 0.88 0 -21.04 rot 95 0 0 scale 11.94 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallD.glb" -7.61 0 -10.57 rot 235 0 0 scale 11.48 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" -4.74 0 44.37 rot 255 0 0 scale 10.37 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -7.67 0 -17.15 rot 5 0 0 scale 11.67 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" 12.4 0 42.52 rot 105 0 0 scale 10.83 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" 18.34 0 31.82 rot 355 0 0 scale 11.73 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" -12.59 0 14.81 rot 75 0 0 scale 10.28 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" -14.64 0 -42.48 rot 215 0 0 scale 11.11 origin bottom material.1 "needles_dark" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallC.glb" -26.54 0 -16.6 rot 60 0 0 scale 12.31 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" 33.31 0 18.85 rot 140 0 0 scale 9.06 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+group "forest: pines far"
+model "models/tree_pineTallD.glb" -40.52 0 -80.3 rot 305 0 0 scale 10.74 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" 34.71 0 -98.34 rot 275 0 0 scale 9.55 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallD.glb" -101.66 0 1.71 rot 270 0 0 scale 11.99 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" -106.38 0 -15.26 rot 110 0 0 scale 11.11 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" -98.93 0 -94.14 rot 10 0 0 scale 11.57 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -17.36 0 75.18 rot 230 0 0 scale 11.97 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -86.53 0 -63.66 rot 190 0 0 scale 11.77 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" 29.31 0 102.97 rot 205 0 0 scale 11.08 origin bottom material.1 "needles" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallA.glb" 109.54 0 -104.29 rot 220 0 0 scale 13.0 origin bottom material.1 "needles_dark" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallC.glb" 82.45 0 -48.39 rot 340 0 0 scale 12.13 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -81.82 0 -87.91 rot 230 0 0 scale 9.47 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" -44.05 0 72.71 rot 50 0 0 scale 11.38 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallC.glb" -73.43 0 18.77 rot 325 0 0 scale 12.59 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" 10.98 0 -100.56 rot 260 0 0 scale 9.4 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" -101.29 0 -67.63 rot 355 0 0 scale 10.71 origin bottom material.1 "needles_dark" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallD.glb" -42.75 0 19.68 rot 265 0 0 scale 10.41 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -10.77 0 -46.05 rot 210 0 0 scale 10.35 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" 67.71 0 45.77 rot 200 0 0 scale 11.92 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -58.86 0 17.12 rot 170 0 0 scale 9.46 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" 5.8 0 86.28 rot 160 0 0 scale 11.29 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" 52.77 0 -48.77 rot 105 0 0 scale 11.01 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" 110.44 0 -87.84 rot 245 0 0 scale 10.56 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" -18.83 0 59.14 rot 220 0 0 scale 12.91 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" -80.04 0 -2.54 rot 255 0 0 scale 10.21 origin bottom material.1 "needles_blue" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallD.glb" -105.98 0 38.69 rot 180 0 0 scale 11.74 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" 60.85 0 16.8 rot 135 0 0 scale 9.45 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" 44.92 0 21.71 rot 20 0 0 scale 9.84 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" 78.19 0 102.28 rot 70 0 0 scale 11.41 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" -101.05 0 46.34 rot 125 0 0 scale 10.92 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" 33.84 0 113.41 rot 270 0 0 scale 10.91 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" 74.04 0 -49.54 rot 340 0 0 scale 9.89 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" -26.27 0 38.79 rot 340 0 0 scale 10.51 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" -101.44 0 61.69 rot 185 0 0 scale 10.45 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -25.08 0 85.43 rot 210 0 0 scale 10.4 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" -96.47 0 -11.69 rot 155 0 0 scale 10.04 origin bottom material.1 "needles" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallB.glb" 73.43 0 83.72 rot 205 0 0 scale 9.99 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallB.glb" -50.96 0 -19.48 rot 65 0 0 scale 10.8 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineRoundC.glb" 105.28 0 -80.29 rot 135 0 0 scale 9.51 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" -74.47 0 -61.65 rot 240 0 0 scale 10.7 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" -61.33 0 -3.46 rot 330 0 0 scale 12.3 origin bottom material.1 "needles_blue" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineRoundC.glb" 20.5 0 -54.57 rot 110 0 0 scale 11.21 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" -114.06 0 -18.64 rot 205 0 0 scale 10.27 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" 104.21 0 43.81 rot 300 0 0 scale 11.67 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallB.glb" 91.89 0 64.39 rot 90 0 0 scale 11.08 origin bottom material.0 "needles" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallB.glb" -91.19 0 30.89 rot 0 0 0 scale 10.61 origin bottom material.0 "needles" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallD.glb" -66.98 0 -77.67 rot 120 0 0 scale 9.77 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" -36.79 0 -102.91 rot 295 0 0 scale 10.13 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" -114.95 0 -80.21 rot 290 0 0 scale 9.89 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallA.glb" -91.66 0 -31.37 rot 300 0 0 scale 10.28 origin bottom material.1 "needles_dark" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallA.glb" -109.13 0 86.1 rot 260 0 0 scale 11.69 origin bottom material.1 "needles_dark" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallC.glb" 26.24 0 -80.83 rot 45 0 0 scale 10.53 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" -56.98 0 -35.1 rot 55 0 0 scale 10.79 origin bottom material.1 "needles_dark" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallA.glb" -31.24 0 -86.75 rot 140 0 0 scale 10.26 origin bottom material.1 "needles_blue" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineRoundC.glb" 80.26 0 113.41 rot 350 0 0 scale 9.32 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -36.19 0 -54.11 rot 285 0 0 scale 9.75 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" 75.64 0 -77.87 rot 305 0 0 scale 10.66 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -109.69 0 103.73 rot 330 0 0 scale 9.19 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" 6.5 0 -81.28 rot 10 0 0 scale 11.58 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" 9.93 0 -108.78 rot 305 0 0 scale 10.06 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" 6.47 0 110.06 rot 55 0 0 scale 10.62 origin bottom material.1 "needles" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallA.glb" 83.56 0 45.13 rot 225 0 0 scale 12.7 origin bottom material.1 "needles_dark" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallD.glb" -76.58 0 62.55 rot 95 0 0 scale 9.55 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" 7.5 0 64.18 rot 195 0 0 scale 9.93 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineRoundC.glb" -39.18 0 -63.7 rot 300 0 0 scale 9.35 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" 71.65 0 111.53 rot 125 0 0 scale 11.03 origin bottom material.1 "needles_dark" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallB.glb" 81.1 0 70.4 rot 90 0 0 scale 11.36 origin bottom material.0 "needles" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineDefaultA.glb" 73.22 0 55.17 rot 295 0 0 scale 10.84 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" -62.85 0 4.06 rot 340 0 0 scale 10.9 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" -108.57 0 -50.73 rot 65 0 0 scale 11.78 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" 105.0 0 -12.14 rot 55 0 0 scale 11.01 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" 100.51 0 112.25 rot 215 0 0 scale 11.6 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallA.glb" 104.65 0 -31.13 rot 335 0 0 scale 10.67 origin bottom material.1 "needles" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineRoundC.glb" -64.29 0 -62.83 rot 80 0 0 scale 10.35 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" 28.54 0 92.07 rot 240 0 0 scale 12.75 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" 78.3 0 -4.72 rot 130 0 0 scale 9.5 origin bottom material.0 "needles" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallB.glb" 35.18 0 68.92 rot 330 0 0 scale 9.91 origin bottom material.0 "needles" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallB.glb" 57.53 0 -5.05 rot 270 0 0 scale 11.07 origin bottom material.0 "needles" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallA.glb" -38.52 0 69.19 rot 230 0 0 scale 11.12 origin bottom material.1 "needles_blue" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallB.glb" 108.48 0 -23.96 rot 315 0 0 scale 11.05 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallA.glb" -22.68 0 102.76 rot 175 0 0 scale 12.99 origin bottom material.1 "needles_blue" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallD.glb" 51.7 0 -75.9 rot 90 0 0 scale 10.48 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -85.78 0 -80.24 rot 0 0 0 scale 9.66 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" -81.38 0 75.1 rot 165 0 0 scale 11.11 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineRoundC.glb" 110.47 0 36.17 rot 65 0 0 scale 9.15 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" -84.87 0 -111.72 rot 45 0 0 scale 9.11 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" 6.11 0 99.73 rot 195 0 0 scale 10.01 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" -15.22 0 85.5 rot 50 0 0 scale 10.25 origin bottom material.0 "needles" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallD.glb" 75.02 0 -66.46 rot 105 0 0 scale 10.97 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" -57.08 0 -47.62 rot 135 0 0 scale 10.8 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineDefaultA.glb" -84.85 0 94.3 rot 255 0 0 scale 10.97 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" 19.17 0 92.99 rot 0 0 0 scale 11.8 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" -18.26 0 96.08 rot 155 0 0 scale 11.67 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallB.glb" -13.77 0 -72.89 rot 90 0 0 scale 10.02 origin bottom material.0 "needles" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallD.glb" -114.1 0 68.81 rot 255 0 0 scale 11.3 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" 51.79 0 12.99 rot 265 0 0 scale 10.36 origin bottom material.1 "needles" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineDefaultA.glb" -90.59 0 13.87 rot 140 0 0 scale 11.0 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" 62.62 0 1.77 rot 260 0 0 scale 10.28 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" 14.2 0 59.8 rot 5 0 0 scale 10.4 origin bottom material.1 "needles" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallC.glb" 94.87 0 -13.05 rot 175 0 0 scale 11.88 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" -5.05 0 101.55 rot 350 0 0 scale 10.82 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" 45.82 0 86.6 rot 240 0 0 scale 10.29 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" 101.7 0 -55.29 rot 40 0 0 scale 10.79 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" -87.03 0 -13.31 rot 340 0 0 scale 9.81 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallA.glb" -98.31 0 -59.65 rot 355 0 0 scale 10.3 origin bottom material.1 "needles" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineRoundC.glb" 65.31 0 91.32 rot 70 0 0 scale 11.11 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -79.48 0 49.71 rot 135 0 0 scale 9.12 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" 36.86 0 -82.11 rot 225 0 0 scale 11.33 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" 88.05 0 107.54 rot 340 0 0 scale 11.91 origin bottom material.1 "needles_dark" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallC.glb" -64.49 0 104.08 rot 245 0 0 scale 10.18 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" 112.67 0 76.46 rot 145 0 0 scale 10.26 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" -77.86 0 -15.75 rot 85 0 0 scale 10.28 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" -69.98 0 -41.74 rot 70 0 0 scale 12.27 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" 51.09 0 -110.52 rot 70 0 0 scale 10.96 origin bottom material.1 "needles_dark" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallB.glb" -110.84 0 -38.76 rot 305 0 0 scale 11.4 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallA.glb" -100.21 0 111.57 rot 40 0 0 scale 10.18 origin bottom material.1 "needles" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineRoundC.glb" -90.9 0 -53.92 rot 240 0 0 scale 11.48 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" -52.8 0 -85.2 rot 310 0 0 scale 10.18 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" 16.24 0 46.1 rot 200 0 0 scale 11.23 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" -94.42 0 -101.77 rot 175 0 0 scale 11.72 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallD.glb" -98.34 0 100.82 rot 165 0 0 scale 9.57 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" -95.74 0 81.93 rot 160 0 0 scale 10.79 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallA.glb" 6.19 0 -60.16 rot 25 0 0 scale 11.78 origin bottom material.1 "needles_dark" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineDefaultA.glb" -43.24 0 -44.85 rot 315 0 0 scale 11.6 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" 59.68 0 -48.31 rot 165 0 0 scale 10.03 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallA.glb" 0.02 0 -74.08 rot 355 0 0 scale 11.69 origin bottom material.1 "needles_dark" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineDefaultA.glb" -35.19 0 -110.82 rot 110 0 0 scale 10.56 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" -57.4 0 -111.47 rot 85 0 0 scale 10.37 origin bottom material.1 "needles" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineDefaultA.glb" -71.43 0 -5.81 rot 45 0 0 scale 11.96 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" 99.97 0 -90.56 rot 15 0 0 scale 9.64 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" 73.35 0 -15.6 rot 240 0 0 scale 11.71 origin bottom material.1 "needles_blue" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallC.glb" -1.15 0 76.96 rot 320 0 0 scale 10.07 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" 43.18 0 110.96 rot 330 0 0 scale 9.14 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" 47.55 0 31.27 rot 45 0 0 scale 10.91 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" -102.49 0 -85.14 rot 45 0 0 scale 12.16 origin bottom material.1 "needles_dark" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineRoundC.glb" -56.21 0 -77.45 rot 180 0 0 scale 11.39 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" -50.16 0 -59.29 rot 110 0 0 scale 12.97 origin bottom material.1 "needles_dark" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineRoundC.glb" -47.6 0 -9.33 rot 180 0 0 scale 11.15 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" -54.45 0 106.21 rot 315 0 0 scale 10.96 origin bottom material.0 "needles" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallC.glb" 108.7 0 10.83 rot 120 0 0 scale 12.04 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -43.8 0 -32.99 rot 160 0 0 scale 10.16 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" -114.75 0 -27.23 rot 285 0 0 scale 10.81 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" -68.77 0 1.09 rot 315 0 0 scale 11.26 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -94.36 0 -23.11 rot 5 0 0 scale 11.8 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" -105.42 0 -109.83 rot 295 0 0 scale 11.43 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" 57.62 0 36.24 rot 100 0 0 scale 11.55 origin bottom material.0 "needles" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallC.glb" -104.93 0 77.12 rot 250 0 0 scale 11.88 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" 90.15 0 29.29 rot 30 0 0 scale 11.13 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" 53.79 0 71.81 rot 125 0 0 scale 10.56 origin bottom material.1 "needles_dark" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallC.glb" -82.96 0 5.46 rot 75 0 0 scale 12.77 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" 70.08 0 75.07 rot 0 0 0 scale 10.53 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineRoundC.glb" 42.07 0 44.47 rot 100 0 0 scale 9.91 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" 29.03 0 41.55 rot 175 0 0 scale 11.24 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -2.46 0 -114.24 rot 245 0 0 scale 10.17 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" 54.46 0 -57.0 rot 60 0 0 scale 9.89 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineRoundC.glb" 52.75 0 -67.8 rot 305 0 0 scale 9.34 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" 55.16 0 109.42 rot 115 0 0 scale 11.69 origin bottom material.1 "needles" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallA.glb" 61.4 0 26.9 rot 285 0 0 scale 12.47 origin bottom material.1 "needles_blue" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineDefaultA.glb" -81.09 0 -56.59 rot 45 0 0 scale 11.69 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" 40.41 0 -48.1 rot 15 0 0 scale 9.54 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" -7.74 0 -87.74 rot 40 0 0 scale 11.74 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineDefaultA.glb" 90.54 0 -69.17 rot 150 0 0 scale 11.66 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" 109.97 0 100.34 rot 265 0 0 scale 10.3 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -11.63 0 -53.21 rot 105 0 0 scale 10.2 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" -66.54 0 18.74 rot 345 0 0 scale 11.46 origin bottom material.1 "needles_blue" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallD.glb" 73.65 0 2.01 rot 200 0 0 scale 10.37 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" -61.78 0 91.47 rot 0 0 0 scale 9.1 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" -114.17 0 -1.91 rot 250 0 0 scale 11.59 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallB.glb" -82.64 0 -35.89 rot 310 0 0 scale 11.28 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineDefaultA.glb" -114.6 0 57.67 rot 40 0 0 scale 10.43 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" 78.0 0 -87.39 rot 330 0 0 scale 11.19 origin bottom material.1 "needles_blue" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineDefaultA.glb" 98.07 0 49.0 rot 85 0 0 scale 11.68 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" 92.36 0 -48.34 rot 350 0 0 scale 11.29 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" 114.72 0 20.51 rot 20 0 0 scale 12.38 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" -51.71 0 -103.9 rot 330 0 0 scale 11.66 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -46.51 0 54.98 rot 20 0 0 scale 9.84 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" -76.51 0 -77.82 rot 280 0 0 scale 9.71 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -0.67 0 -64.39 rot 105 0 0 scale 11.47 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" -70.75 0 -94.14 rot 0 0 0 scale 11.74 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineRoundC.glb" -36.35 0 -94.05 rot 155 0 0 scale 9.98 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" -60.0 0 -55.58 rot 210 0 0 scale 11.02 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" 57.42 0 -20.06 rot 355 0 0 scale 11.25 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" -28.32 0 -37.21 rot 295 0 0 scale 9.13 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" 83.46 0 -65.33 rot 5 0 0 scale 9.71 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallB.glb" 104.41 0 80.2 rot 65 0 0 scale 11.64 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallB.glb" 85.76 0 -109.98 rot 245 0 0 scale 9.62 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineDefaultA.glb" 20.05 0 -114.96 rot 80 0 0 scale 11.71 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" 33.89 0 60.9 rot 310 0 0 scale 10.14 origin bottom material.1 "needles" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallD.glb" 33.47 0 -45.13 rot 0 0 0 scale 10.06 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" -25.74 0 -63.58 rot 275 0 0 scale 12.35 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" 88.27 0 -5.68 rot 75 0 0 scale 11.48 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" -44.3 0 -109.99 rot 330 0 0 scale 12.19 origin bottom material.1 "needles_dark" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineRoundC.glb" -18.4 0 -55.83 rot 10 0 0 scale 11.32 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" 38.49 0 97.79 rot 305 0 0 scale 11.86 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" 41.99 0 -69.44 rot 50 0 0 scale 11.54 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" 108.07 0 -43.31 rot 295 0 0 scale 10.83 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -64.07 0 59.91 rot 130 0 0 scale 11.74 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" -63.64 0 -19.08 rot 160 0 0 scale 9.53 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallA.glb" -81.33 0 -24.5 rot 320 0 0 scale 10.49 origin bottom material.1 "needles" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallC.glb" -82.36 0 -103.08 rot 45 0 0 scale 10.63 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" 91.58 0 88.22 rot 310 0 0 scale 9.65 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" 99.27 0 -39.27 rot 315 0 0 scale 10.7 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" -72.33 0 100.25 rot 255 0 0 scale 11.87 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" -76.07 0 -114.34 rot 35 0 0 scale 12.84 origin bottom material.1 "needles" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallD.glb" 106.78 0 -67.3 rot 130 0 0 scale 11.6 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" -103.67 0 -6.1 rot 105 0 0 scale 10.79 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallB.glb" -29.28 0 96.49 rot 215 0 0 scale 11.37 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallB.glb" -70.6 0 -31.22 rot 35 0 0 scale 10.45 origin bottom material.0 "needles" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineRoundC.glb" 61.33 0 -105.65 rot 245 0 0 scale 9.13 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" -106.98 0 -100.61 rot 75 0 0 scale 9.33 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" 56.88 0 91.67 rot 260 0 0 scale 10.28 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" 105.27 0 26.91 rot 305 0 0 scale 11.63 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" -54.7 0 49.83 rot 190 0 0 scale 11.13 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" -42.21 0 -51.61 rot 40 0 0 scale 12.84 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" 101.95 0 -109.42 rot 255 0 0 scale 11.27 origin bottom material.1 "needles" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallB.glb" 98.46 0 -72.92 rot 310 0 0 scale 11.7 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallD.glb" 64.92 0 -96.83 rot 280 0 0 scale 9.77 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" -107.21 0 12.1 rot 45 0 0 scale 10.07 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallC.glb" -40.08 0 110.46 rot 280 0 0 scale 12.67 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" -54.07 0 -95.66 rot 105 0 0 scale 11.74 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" -92.82 0 -0.35 rot 85 0 0 scale 11.0 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" 57.03 0 79.81 rot 10 0 0 scale 9.97 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" -23.9 0 113.26 rot 120 0 0 scale 11.1 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" 70.94 0 35.27 rot 210 0 0 scale 11.58 origin bottom material.0 "needles" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallC.glb" -55.21 0 63.89 rot 175 0 0 scale 11.86 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" 34.88 0 -68.21 rot 145 0 0 scale 10.7 origin bottom material.1 "needles_blue" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallD.glb" 67.91 0 11.05 rot 45 0 0 scale 10.63 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" -31.33 0 -69.64 rot 260 0 0 scale 10.85 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallB.glb" -8.99 0 -77.61 rot 180 0 0 scale 11.83 origin bottom material.0 "needles" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineRoundC.glb" -69.61 0 -85.87 rot 255 0 0 scale 10.36 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" -3.97 0 -102.72 rot 345 0 0 scale 9.22 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" 98.02 0 -25.78 rot 25 0 0 scale 9.92 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" 65.74 0 -63.92 rot 320 0 0 scale 12.1 origin bottom material.1 "needles_blue" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallC.glb" -109.62 0 27.35 rot 70 0 0 scale 11.89 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" 60.62 0 64.39 rot 310 0 0 scale 10.36 origin bottom material.1 "needles_blue" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallD.glb" -70.45 0 110.8 rot 10 0 0 scale 10.82 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" -99.93 0 -34.29 rot 170 0 0 scale 12.43 origin bottom material.1 "needles" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallB.glb" 85.78 0 12.69 rot 270 0 0 scale 10.08 origin bottom material.0 "needles" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineRoundC.glb" -90.94 0 113.38 rot 330 0 0 scale 9.86 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" -32.14 0 60.87 rot 230 0 0 scale 9.1 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" 35.21 0 -109.87 rot 40 0 0 scale 11.82 origin bottom material.1 "needles_dark" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallA.glb" 20.49 0 -68.04 rot 355 0 0 scale 10.63 origin bottom material.1 "needles" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallB.glb" -69.11 0 24.86 rot 120 0 0 scale 11.26 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallD.glb" -113.54 0 79.22 rot 30 0 0 scale 10.79 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -63.03 0 -90.79 rot 175 0 0 scale 9.03 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" -37.83 0 57.42 rot 160 0 0 scale 10.85 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineDefaultA.glb" 56.61 0 -39.82 rot 280 0 0 scale 11.34 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" 87.44 0 -39.43 rot 215 0 0 scale 11.12 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" -14.44 0 51.66 rot 25 0 0 scale 11.68 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" 16.18 0 -44.22 rot 215 0 0 scale 11.45 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" 45.31 0 54.46 rot 195 0 0 scale 10.07 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -99.87 0 20.81 rot 155 0 0 scale 10.26 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -31.42 0 73.04 rot 65 0 0 scale 11.75 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" 95.31 0 102.19 rot 295 0 0 scale 10.84 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" 106.72 0 0.86 rot 185 0 0 scale 10.5 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineRoundC.glb" 80.82 0 27.2 rot 75 0 0 scale 11.96 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" -35.24 0 47.07 rot 175 0 0 scale 9.42 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" 83.32 0 -94.1 rot 355 0 0 scale 10.38 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -114.7 0 -68.53 rot 0 0 0 scale 10.86 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" -1.96 0 68.26 rot 15 0 0 scale 12.95 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" 45.88 0 -0.39 rot 225 0 0 scale 12.76 origin bottom material.1 "needles_blue" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineDefaultA.glb" 45.35 0 65.99 rot 70 0 0 scale 11.29 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -34.85 0 -39.87 rot 230 0 0 scale 9.09 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" 109.28 0 52.61 rot 230 0 0 scale 9.7 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" 111.28 0 67.82 rot 100 0 0 scale 11.26 origin bottom material.0 "needles" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineRoundC.glb" -69.88 0 31.74 rot 180 0 0 scale 10.23 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" -25.68 0 -107.2 rot 240 0 0 scale 10.77 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" -23.23 0 66.93 rot 320 0 0 scale 10.12 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" -82.38 0 23.85 rot 190 0 0 scale 9.52 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" -18.13 0 -62.43 rot 65 0 0 scale 9.85 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" 29.81 0 -57.49 rot 105 0 0 scale 9.59 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallC.glb" 63.98 0 -25.6 rot 305 0 0 scale 11.97 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" -2.34 0 109.16 rot 275 0 0 scale 12.4 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" 9.44 0 49.98 rot 200 0 0 scale 11.0 origin bottom material.0 "needles" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineRoundC.glb" -66.68 0 42.4 rot 350 0 0 scale 9.17 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" -18.27 0 45.6 rot 30 0 0 scale 9.22 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -64.65 0 69.34 rot 285 0 0 scale 9.15 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" -85.26 0 63.62 rot 295 0 0 scale 9.69 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallD.glb" 76.76 0 -33.41 rot 260 0 0 scale 11.06 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" -28.49 0 -56.68 rot 55 0 0 scale 11.53 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -76.38 0 89.96 rot 125 0 0 scale 10.09 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" 24.92 0 64.69 rot 315 0 0 scale 10.56 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" 12.66 0 -54.17 rot 35 0 0 scale 11.89 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" 38.02 0 78.33 rot 260 0 0 scale 11.29 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" -37.12 0 83.19 rot 165 0 0 scale 10.94 origin bottom material.1 "needles" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineDefaultA.glb" 75.38 0 -22.14 rot 120 0 0 scale 11.54 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" 0.86 0 -52.51 rot 90 0 0 scale 10.94 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" 96.93 0 25.0 rot 260 0 0 scale 11.43 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallB.glb" -73.3 0 -106.5 rot 305 0 0 scale 11.44 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallB.glb" 74.2 0 65.9 rot 235 0 0 scale 11.9 origin bottom material.0 "needles" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallB.glb" 71.38 0 17.32 rot 250 0 0 scale 9.97 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineRoundC.glb" -20.14 0 -91.53 rot 190 0 0 scale 10.59 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -113.9 0 42.27 rot 285 0 0 scale 9.52 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" 52.84 0 -95.61 rot 145 0 0 scale 10.41 origin bottom material.0 "needles" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallA.glb" 29.58 0 48.12 rot 250 0 0 scale 12.33 origin bottom material.1 "needles_blue" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineDefaultA.glb" 72.99 0 -96.67 rot 315 0 0 scale 9.76 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" 102.33 0 65.46 rot 345 0 0 scale 10.91 origin bottom material.1 "needles" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineRoundC.glb" 23.26 0 -44.02 rot 330 0 0 scale 10.12 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" -7.98 0 -67.49 rot 30 0 0 scale 11.1 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" 67.08 0 -9.26 rot 210 0 0 scale 11.42 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" -94.83 0 70.51 rot 155 0 0 scale 10.61 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" 88.57 0 5.03 rot 165 0 0 scale 9.57 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -71.5 0 -70.77 rot 235 0 0 scale 9.81 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" 66.09 0 -79.08 rot 120 0 0 scale 10.75 origin bottom material.0 "needles" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallC.glb" 64.21 0 -17.03 rot 185 0 0 scale 10.02 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" 94.28 0 -100.24 rot 230 0 0 scale 10.11 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" -87.42 0 105.64 rot 115 0 0 scale 11.23 origin bottom material.1 "needles" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallC.glb" -64.0 0 -106.11 rot 295 0 0 scale 10.88 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" 77.56 0 -104.18 rot 205 0 0 scale 9.76 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" 58.64 0 101.06 rot 70 0 0 scale 11.75 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" 21.04 0 59.32 rot 315 0 0 scale 11.73 origin bottom material.1 "needles_blue" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineDefaultA.glb" -90.75 0 -40.5 rot 340 0 0 scale 10.11 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -41.84 0 92.73 rot 90 0 0 scale 11.37 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" -101.92 0 90.86 rot 275 0 0 scale 11.9 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" -55.71 0 -68.63 rot 330 0 0 scale 11.3 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" 70.62 0 -36.59 rot 330 0 0 scale 11.47 origin bottom material.1 "needles" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineRoundC.glb" 16.41 0 -83.24 rot 280 0 0 scale 11.06 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" -72.21 0 76.27 rot 35 0 0 scale 9.58 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" -57.39 0 72.95 rot 325 0 0 scale 12.28 origin bottom material.1 "needles_dark" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallB.glb" -21.7 0 -83.5 rot 220 0 0 scale 11.85 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallD.glb" 21.12 0 83.05 rot 190 0 0 scale 11.93 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" 63.69 0 -37.13 rot 295 0 0 scale 10.23 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" -14.82 0 110.68 rot 270 0 0 scale 9.71 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" -47.03 0 62.59 rot 220 0 0 scale 9.74 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" 85.39 0 -13.8 rot 240 0 0 scale 11.72 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" 54.92 0 55.95 rot 280 0 0 scale 10.68 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" 18.76 0 -94.78 rot 5 0 0 scale 9.72 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" -34.25 0 103.02 rot 120 0 0 scale 11.9 origin bottom material.0 "needles" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallB.glb" 114.11 0 -36.05 rot 130 0 0 scale 10.26 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallC.glb" 6.93 0 72.65 rot 140 0 0 scale 10.08 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" 2.9 0 -89.58 rot 215 0 0 scale 11.16 origin bottom material.1 "needles" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineRoundC.glb" -79.03 0 -48.32 rot 285 0 0 scale 9.3 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" 59.68 0 -90.47 rot 40 0 0 scale 9.82 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineDefaultA.glb" 19.01 0 105.71 rot 150 0 0 scale 9.11 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" -59.13 0 -25.35 rot 90 0 0 scale 9.83 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallD.glb" -22.26 0 -99.95 rot 355 0 0 scale 9.53 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" -71.03 0 -49.78 rot 260 0 0 scale 10.74 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" 47.49 0 -55.03 rot 230 0 0 scale 9.4 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" 29.63 0 -73.22 rot 290 0 0 scale 11.18 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" 53.83 0 48.9 rot 75 0 0 scale 9.48 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" 78.08 0 16.14 rot 85 0 0 scale 11.0 origin bottom material.1 "needles_blue" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallD.glb" -54.92 0 10.67 rot 295 0 0 scale 10.01 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" -20.32 0 -68.68 rot 45 0 0 scale 10.24 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" 47.6 0 39.18 rot 30 0 0 scale 11.49 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -82.37 0 14.55 rot 335 0 0 scale 10.96 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" -76.08 0 38.3 rot 270 0 0 scale 11.29 origin bottom material.0 "needles" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallB.glb" -24.85 0 -75.61 rot 330 0 0 scale 11.39 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallA.glb" 40.3 0 -56.44 rot 95 0 0 scale 11.42 origin bottom material.1 "needles_dark" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineDefaultA.glb" 20.52 0 -104.96 rot 5 0 0 scale 10.24 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" -113.62 0 18.21 rot 300 0 0 scale 9.57 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" -52.13 0 0.0 rot 75 0 0 scale 11.36 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" 55.09 0 2.05 rot 145 0 0 scale 10.41 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -71.72 0 8.5 rot 295 0 0 scale 11.62 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" 97.82 0 14.75 rot 195 0 0 scale 11.77 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" 12.71 0 -73.18 rot 225 0 0 scale 10.42 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallA.glb" -90.21 0 53.68 rot 285 0 0 scale 10.72 origin bottom material.1 "needles" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineRoundC.glb" -50.01 0 -38.75 rot 95 0 0 scale 10.47 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" -3.32 0 89.92 rot 280 0 0 scale 11.18 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" -112.83 0 94.67 rot 165 0 0 scale 11.83 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" 42.04 0 -94.25 rot 235 0 0 scale 10.34 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" 43.58 0 -106.29 rot 190 0 0 scale 10.84 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -110.41 0 112.88 rot 215 0 0 scale 9.53 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" 88.13 0 53.22 rot 125 0 0 scale 11.9 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" -23.16 0 -41.8 rot 195 0 0 scale 11.94 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" 114.62 0 -113.79 rot 305 0 0 scale 11.9 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" -56.43 0 25.51 rot 350 0 0 scale 9.91 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" 21.23 0 113.79 rot 150 0 0 scale 10.54 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" 55.96 0 -27.87 rot 20 0 0 scale 11.31 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineRoundC.glb" -54.07 0 94.01 rot 90 0 0 scale 9.19 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" -6.15 0 50.96 rot 125 0 0 scale 11.14 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallD.glb" 98.29 0 6.61 rot 200 0 0 scale 9.84 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" 85.54 0 -81.53 rot 195 0 0 scale 11.36 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" -103.23 0 -42.72 rot 305 0 0 scale 11.26 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" -63.63 0 10.52 rot 330 0 0 scale 10.76 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" -94.66 0 -82.87 rot 175 0 0 scale 11.4 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" -69.53 0 -22.14 rot 140 0 0 scale 11.68 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" 18.06 0 -61.2 rot 340 0 0 scale 9.96 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" -9.68 0 -60.57 rot 25 0 0 scale 11.96 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" -111.24 0 -89.56 rot 30 0 0 scale 10.45 origin bottom material.1 "needles" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallC.glb" -87.24 0 42.08 rot 280 0 0 scale 10.3 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" -10.45 0 71.16 rot 270 0 0 scale 11.28 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallD.glb" 90.57 0 38.25 rot 15 0 0 scale 11.42 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" -12.02 0 57.75 rot 140 0 0 scale 12.53 origin bottom material.1 "needles_blue" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallC.glb" 104.18 0 90.03 rot 100 0 0 scale 11.12 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" 17.29 0 74.95 rot 50 0 0 scale 11.61 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" -46.54 0 -26.92 rot 105 0 0 scale 10.73 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" 6.75 0 -48.67 rot 30 0 0 scale 9.81 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" -98.93 0 11.17 rot 265 0 0 scale 11.38 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" -52.02 0 79.3 rot 225 0 0 scale 9.54 origin bottom material.0 "needles" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineDefaultA.glb" -22.34 0 -50.01 rot 95 0 0 scale 9.66 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -70.33 0 54.28 rot 155 0 0 scale 10.47 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" -91.51 0 -90.46 rot 110 0 0 scale 9.84 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" 48.35 0 102.42 rot 340 0 0 scale 10.45 origin bottom material.1 "needles" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallC.glb" -13.89 0 -99.46 rot 260 0 0 scale 10.54 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" -59.85 0 34.39 rot 285 0 0 scale 10.29 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" -60.12 0 111.97 rot 275 0 0 scale 11.99 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -30.45 0 -45.37 rot 255 0 0 scale 9.15 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" 94.96 0 77.55 rot 320 0 0 scale 11.25 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallA.glb" -110.19 0 -61.92 rot 50 0 0 scale 10.35 origin bottom material.1 "needles_dark" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineRoundC.glb" 88.85 0 96.81 rot 235 0 0 scale 11.8 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" 27.88 0 -65.23 rot 275 0 0 scale 10.02 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" 114.9 0 -9.99 rot 270 0 0 scale 10.68 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -55.7 0 -10.54 rot 185 0 0 scale 10.95 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" -107.89 0 51.6 rot 135 0 0 scale 10.36 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" 49.75 0 6.73 rot 5 0 0 scale 10.02 origin bottom material.1 "needles_dark" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallC.glb" 27.31 0 -90.86 rot 290 0 0 scale 10.89 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" 40.69 0 35.07 rot 35 0 0 scale 12.37 origin bottom material.1 "needles_dark" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineDefaultA.glb" -65.75 0 -36.7 rot 165 0 0 scale 10.62 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" 65.77 0 -55.06 rot 220 0 0 scale 10.18 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" 109.16 0 113.83 rot 15 0 0 scale 11.81 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" 57.3 0 -81.67 rot 275 0 0 scale 10.73 origin bottom material.1 "needles" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallB.glb" 98.88 0 -6.0 rot 60 0 0 scale 10.08 origin bottom material.0 "needles" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallA.glb" 88.8 0 -30.43 rot 260 0 0 scale 12.86 origin bottom material.1 "needles_blue" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineDefaultA.glb" 92.6 0 -114.18 rot 220 0 0 scale 10.12 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" 69.2 0 -89.04 rot 285 0 0 scale 10.59 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" -14.27 0 -114.17 rot 90 0 0 scale 10.82 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" -114.17 0 -105.27 rot 300 0 0 scale 10.65 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" -66.03 0 -11.03 rot 245 0 0 scale 9.57 origin bottom material.0 "needles" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallA.glb" 35.56 0 40.52 rot 80 0 0 scale 10.54 origin bottom material.1 "needles_blue" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineRoundC.glb" 80.88 0 89.87 rot 340 0 0 scale 10.95 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" 94.13 0 -61.33 rot 15 0 0 scale 11.62 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -59.71 0 82.01 rot 290 0 0 scale 11.68 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -66.12 0 -114.51 rot 285 0 0 scale 10.47 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" -28.76 0 53.71 rot 335 0 0 scale 11.83 origin bottom material.1 "needles_blue" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineDefaultA.glb" 76.18 0 -58.01 rot 165 0 0 scale 9.42 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" -100.0 0 32.97 rot 95 0 0 scale 11.76 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" 90.0 0 -21.23 rot 170 0 0 scale 11.89 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallC.glb" 66.85 0 -44.68 rot 115 0 0 scale 12.58 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" 112.57 0 88.94 rot 185 0 0 scale 12.14 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" 0.46 0 61.75 rot 240 0 0 scale 11.69 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" 28.87 0 -50.79 rot 295 0 0 scale 12.89 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" -61.57 0 46.99 rot 75 0 0 scale 10.76 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" -45.73 0 10.38 rot 185 0 0 scale 9.54 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallB.glb" 83.61 0 82.33 rot 240 0 0 scale 10.95 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallB.glb" -104.76 0 -77.21 rot 340 0 0 scale 10.16 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallA.glb" 110.84 0 -56.1 rot 85 0 0 scale 12.26 origin bottom material.1 "needles" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineRoundC.glb" -50.12 0 -52.33 rot 210 0 0 scale 9.09 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" 61.01 0 8.22 rot 325 0 0 scale 9.63 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" 60.16 0 44.43 rot 355 0 0 scale 12.22 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" 83.14 0 59.82 rot 45 0 0 scale 11.91 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" 49.04 0 -84.67 rot 75 0 0 scale 12.36 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" 30.01 0 54.84 rot 220 0 0 scale 12.67 origin bottom material.1 "needles_blue" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallD.glb" 106.58 0 -96.12 rot 150 0 0 scale 10.73 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" 53.21 0 26.63 rot 105 0 0 scale 11.27 origin bottom material.1 "needles_blue" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallA.glb" -44.1 0 -90.8 rot 190 0 0 scale 12.07 origin bottom material.1 "needles_dark" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineDefaultA.glb" -81.91 0 84.1 rot 150 0 0 scale 11.29 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" 64.09 0 33.96 rot 25 0 0 scale 9.93 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" 66.84 0 102.89 rot 245 0 0 scale 10.29 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineDefaultA.glb" -45.5 0 84.4 rot 305 0 0 scale 11.8 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" 97.92 0 34.41 rot 55 0 0 scale 10.2 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" 105.62 0 18.32 rot 25 0 0 scale 11.68 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallA.glb" -79.47 0 110.05 rot 170 0 0 scale 11.29 origin bottom material.1 "needles_blue" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineRoundC.glb" -113.39 0 6.18 rot 0 0 0 scale 11.68 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" 43.84 0 -78.1 rot 60 0 0 scale 11.07 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallA.glb" -49.67 0 17.98 rot 295 0 0 scale 11.44 origin bottom material.1 "needles_blue" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallD.glb" -45.67 0 -2.91 rot 290 0 0 scale 9.64 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" 66.26 0 21.94 rot 265 0 0 scale 9.82 origin bottom material.0 "needles" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineRoundC.glb" 28.86 0 73.95 rot 270 0 0 scale 10.4 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" -44.61 0 100.54 rot 45 0 0 scale 12.16 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" -95.01 0 -110.68 rot 185 0 0 scale 11.93 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallA.glb" -46.61 0 -72.02 rot 60 0 0 scale 12.22 origin bottom material.1 "needles_dark" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallA.glb" 60.46 0 52.23 rot 60 0 0 scale 11.84 origin bottom material.1 "needles_blue" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineDefaultA.glb" 73.14 0 95.39 rot 225 0 0 scale 9.16 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" 46.56 0 76.15 rot 180 0 0 scale 10.82 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" 96.74 0 -82.67 rot 45 0 0 scale 11.69 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" -43.39 0 -58.7 rot 55 0 0 scale 11.92 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" 11.52 0 -66.31 rot 290 0 0 scale 11.32 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" -90.37 0 -72.93 rot 265 0 0 scale 10.4 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" -16.05 0 67.72 rot 130 0 0 scale 10.38 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" 73.1 0 -114.46 rot 135 0 0 scale 11.88 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" 36.54 0 48.32 rot 85 0 0 scale 10.19 origin bottom material.0 "needles" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallA.glb" 101.95 0 56.95 rot 205 0 0 scale 12.0 origin bottom material.1 "needles" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallC.glb" 47.61 0 -63.47 rot 25 0 0 scale 12.9 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" -91.15 0 22.89 rot 155 0 0 scale 11.56 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" 3.13 0 -97.69 rot 265 0 0 scale 11.39 origin bottom material.0 "needles" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineRoundC.glb" -93.96 0 92.0 rot 285 0 0 scale 11.03 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" 113.95 0 45.47 rot 90 0 0 scale 10.68 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" 53.77 0 19.59 rot 145 0 0 scale 12.43 origin bottom material.1 "needles_blue" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallC.glb" 50.72 0 -6.61 rot 340 0 0 scale 11.05 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" 70.73 0 27.03 rot 350 0 0 scale 10.4 origin bottom material.0 "needles" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallC.glb" -63.77 0 -30.29 rot 235 0 0 scale 10.95 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" 113.53 0 59.44 rot 170 0 0 scale 10.65 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" 114.16 0 -63.81 rot 150 0 0 scale 11.42 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallB.glb" 74.46 0 10.73 rot 65 0 0 scale 11.92 origin bottom material.0 "needles" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallC.glb" -58.89 0 41.01 rot 80 0 0 scale 12.83 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" 41.11 0 61.03 rot 65 0 0 scale 10.31 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineDefaultA.glb" 90.78 0 19.51 rot 300 0 0 scale 9.36 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" -44.4 0 -98.87 rot 300 0 0 scale 11.78 origin bottom material.1 "needles_blue" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallD.glb" 17.38 0 65.85 rot 145 0 0 scale 10.87 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" 78.74 0 38.02 rot 335 0 0 scale 11.83 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallA.glb" -56.58 0 56.48 rot 0 0 0 scale 11.24 origin bottom material.1 "needles_dark" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineRoundC.glb" 91.97 0 -91.97 rot 90 0 0 scale 11.81 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" -24.6 0 75.97 rot 110 0 0 scale 11.94 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" 21.25 0 50.85 rot 145 0 0 scale 9.69 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" 6.01 0 56.39 rot 180 0 0 scale 11.19 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallA.glb" 70.88 0 -3.96 rot 280 0 0 scale 11.5 origin bottom material.1 "needles_blue" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineDefaultA.glb" -63.98 0 -45.53 rot 100 0 0 scale 11.17 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" 11.41 0 -90.43 rot 25 0 0 scale 12.44 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" 61.07 0 -70.71 rot 320 0 0 scale 11.57 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallD.glb" -98.46 0 -50.48 rot 220 0 0 scale 9.55 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" -3.83 0 -46.41 rot 155 0 0 scale 11.32 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" 91.58 0 114.95 rot 195 0 0 scale 10.05 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" 86.17 0 -56.42 rot 335 0 0 scale 11.13 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" -27.76 0 46.62 rot 75 0 0 scale 12.77 origin bottom material.1 "needles_blue" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallB.glb" 112.03 0 -75.34 rot 140 0 0 scale 9.67 origin bottom material.0 "needles" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineDefaultA.glb" 27.07 0 -110.11 rot 280 0 0 scale 11.08 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" 26.54 0 -99.03 rot 65 0 0 scale 9.57 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" -75.44 0 3.14 rot 295 0 0 scale 11.38 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" 8.44 0 79.08 rot 255 0 0 scale 9.53 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" 62.84 0 112.69 rot 150 0 0 scale 11.28 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallC.glb" -6.18 0 60.8 rot 115 0 0 scale 10.64 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" -114.3 0 -114.66 rot 120 0 0 scale 11.01 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineDefaultA.glb" 114.66 0 3.7 rot 280 0 0 scale 9.13 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" 59.29 0 -113.69 rot 170 0 0 scale 9.04 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" -46.51 0 -64.73 rot 60 0 0 scale 12.06 origin bottom material.1 "needles_blue" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineDefaultA.glb" -52.0 0 -30.53 rot 35 0 0 scale 10.96 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" -7.81 0 78.07 rot 310 0 0 scale 9.97 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" -51.24 0 114.02 rot 85 0 0 scale 10.05 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" 31.2 0 84.37 rot 180 0 0 scale 11.03 origin bottom material.0 "needles" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallA.glb" -68.97 0 86.15 rot 20 0 0 scale 12.53 origin bottom material.1 "needles" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallA.glb" 6.38 0 -71.52 rot 345 0 0 scale 12.85 origin bottom material.1 "needles_blue" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineDefaultA.glb" 79.09 0 -11.79 rot 0 0 0 scale 11.96 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" -106.19 0 -26.65 rot 45 0 0 scale 10.83 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineDefaultA.glb" 71.03 0 -29.88 rot 270 0 0 scale 9.09 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -31.95 0 112.23 rot 295 0 0 scale 11.72 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" -21.84 0 53.31 rot 180 0 0 scale 10.66 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" -49.81 0 -45.56 rot 240 0 0 scale 12.25 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" -82.76 0 33.27 rot 205 0 0 scale 11.78 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" -3.72 0 -57.8 rot 65 0 0 scale 10.78 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" 114.96 0 -94.88 rot 120 0 0 scale 9.16 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" -95.07 0 39.95 rot 105 0 0 scale 11.72 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallB.glb" -1.53 0 -82.17 rot 0 0 0 scale 10.03 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineDefaultA.glb" 22.74 0 -74.23 rot 135 0 0 scale 11.78 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" 69.27 0 -106.91 rot 100 0 0 scale 11.48 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" -75.64 0 25.17 rot 285 0 0 scale 11.01 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" -10.11 0 94.95 rot 355 0 0 scale 10.72 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" 54.08 0 -13.39 rot 220 0 0 scale 11.02 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallA.glb" 76.15 0 22.37 rot 225 0 0 scale 11.05 origin bottom material.1 "needles" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallC.glb" 50.24 0 61.42 rot 70 0 0 scale 10.6 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" -41.16 0 50.63 rot 295 0 0 scale 9.96 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" -106.04 0 68.68 rot 155 0 0 scale 9.22 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -82.01 0 -70.4 rot 315 0 0 scale 9.56 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" 65.27 0 83.03 rot 235 0 0 scale 11.38 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" 22.74 0 44.49 rot 220 0 0 scale 9.41 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" 47.32 0 -44.21 rot 350 0 0 scale 11.08 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallD.glb" 61.84 0 72.74 rot 15 0 0 scale 10.01 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineRoundC.glb" -89.27 0 77.09 rot 235 0 0 scale 10.3 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" -114.07 0 -10.22 rot 40 0 0 scale 11.29 origin bottom material.1 "needles_blue" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallD.glb" 82.75 0 -73.81 rot 275 0 0 scale 12.0 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallB.glb" 113.87 0 28.81 rot 290 0 0 scale 11.47 origin bottom material.0 "needles" material.1 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineTallC.glb" -114.74 0 33.96 rot 95 0 0 scale 11.78 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineDefaultA.glb" 79.56 0 6.29 rot 280 0 0 scale 10.29 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallC.glb" 114.65 0 107.41 rot 130 0 0 scale 10.21 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineTallA.glb" 22.78 0 70.85 rot 20 0 0 scale 10.8 origin bottom material.1 "needles_blue" material.0 "bark" collide box -0.011 -0.05 -0.023 0.039 0.4 0.027
+model "models/tree_pineRoundC.glb" -27.94 0 -94.16 rot 65 0 0 scale 10.41 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+group "forest: young pines"
+model "models/tree_pineSmallA.glb" -21.84 0 1.18 rot 5 0 0 scale 3.91 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineSmallA.glb" -27.47 0 9.89 rot 300 0 0 scale 4.86 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineSmallA.glb" 9.93 0 14.66 rot 225 0 0 scale 4.84 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineSmallA.glb" -22.82 0 7.75 rot 25 0 0 scale 4.68 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineSmallA.glb" -6.13 0 22.87 rot 280 0 0 scale 5.01 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineSmallA.glb" 26.99 0 10.67 rot 270 0 0 scale 4.71 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineSmallA.glb" -26.9 0 2.5 rot 235 0 0 scale 5.42 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineSmallA.glb" -22.32 0 14.02 rot 180 0 0 scale 4.41 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineSmallA.glb" -25.95 0 -10.62 rot 315 0 0 scale 5.16 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineSmallA.glb" -7.22 0 -13.55 rot 55 0 0 scale 4.11 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineSmallA.glb" 7.84 0 -24.8 rot 285 0 0 scale 4.83 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineSmallA.glb" -17.57 0 -20.64 rot 100 0 0 scale 4.19 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineSmallA.glb" -14.97 0 20.13 rot 50 0 0 scale 3.67 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineSmallA.glb" -10.61 0 25.1 rot 335 0 0 scale 5.07 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineSmallA.glb" 20.14 0 -4.47 rot 290 0 0 scale 4.17 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineSmallA.glb" -3.92 0 -20.91 rot 210 0 0 scale 5.29 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineSmallA.glb" 19.83 0 9.73 rot 295 0 0 scale 3.92 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineSmallA.glb" 23.38 0 8.49 rot 310 0 0 scale 5.05 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineSmallA.glb" -18.04 0 -4.35 rot 95 0 0 scale 3.61 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineSmallA.glb" -14.36 0 8.21 rot 250 0 0 scale 3.85 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineSmallA.glb" -26.52 0 -2.62 rot 300 0 0 scale 4.91 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineSmallA.glb" 5.88 0 12.37 rot 255 0 0 scale 3.64 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineSmallA.glb" -15.22 0 -5.66 rot 310 0 0 scale 5.18 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineSmallA.glb" -10.42 0 10.76 rot 90 0 0 scale 5.09 origin bottom material.0 "needles_blue" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineSmallA.glb" -14.13 0 -22.01 rot 345 0 0 scale 3.81 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025
+model "models/tree_pineSmallA.glb" 17.55 0 17.38 rot 10 0 0 scale 5.09 origin bottom material.0 "needles_dark" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025

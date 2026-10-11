@@ -47,13 +47,17 @@ monolith/
 ├── AI-MAP-DESIGNER-PROMPT.md    # the original task description for the map designer + caching work
 ├── docs/design-v2.md            # v2 design note: map packages, format v2, runtime API, bundle format 2
 ├── maps/
-│   └── monolith/                # the default map package (§6.1)
-│       ├── monolith.map         # format v2 (reference: runtime/monolith_scene.c header, AI-MAP-TOOL.md §5)
-│       ├── MAP.md               # the map's design brief
-│       ├── ASSETS.md            # external assets (none)
-│       └── shaders/concrete.glsl    # procedural board-formed concrete (R3D surface shader)
+│   ├── monolith/                # the default map package (§6.1)
+│   │   ├── monolith.map         # format v2 (reference: runtime/monolith_scene.c header, AI-MAP-TOOL.md §5)
+│   │   ├── MAP.md               # the map's design brief
+│   │   ├── ASSETS.md            # external assets (none)
+│   │   └── shaders/concrete.glsl    # procedural board-formed concrete (R3D surface shader)
+│   └── pine_forest/             # second test map: stylised low-poly pine forest at dusk (CC0 models + texture)
 ├── runtime/                     # the scene runtime: monolith_scene.h (API) + monolith_scene.c (§6),
 │                                #   monolith_capture.h (capture shim for imports, §6.3)
+├── tools/                       # asset tools for AI sessions (AI-MAP-TOOL.md §11): fetch_asset.py (Poly Haven,
+│                                #   ambientCG, Kenney, Poly Pizza API), normalize_model.py (headless Blender),
+│                                #   record_asset.py (ASSETS.md row + <file>.asset.md sidecar)
 ├── examples/                    # raylib + R3D programs using map packages + examples/build.sh (§6.3)
 ├── export/                      # F9 exports (gitignored)
 ├── requests/                    # request bundles written by the game (gitignored), see AI-MAP-TOOL.md §2
