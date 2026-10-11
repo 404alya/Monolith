@@ -2201,6 +2201,7 @@ static bool ParseText(Parser *P, const char *text, int size)
 {
     int lineNo = 0, pos = 0;
     P->cur = (MS_Ref){ 0, -1, -1, 0 };
+    if (size >= 3 && memcmp(text, "\xEF\xBB\xBF", 3) == 0) pos = 3;     // a UTF-8 byte order mark: skipped
     while (pos < size) {
         int start = pos;
         while (pos < size && text[pos] != '\n') pos++;
@@ -2224,7 +2225,7 @@ static bool ParseText(Parser *P, const char *text, int size)
     }
     P->line = 0;
     if (P->d->boxCount == 0 && P->d->modelCount == 0)
-        return Fail(P, P->d->formatVersion >= 2 ? "map is empty (no boxes and no models)" : "map has no boxes", NULL);
+        return Fail(P, P->d->formatVersion >= 2 ? "map is empty (no boxes and no models)" : "map is empty (no boxes)", NULL);
     return true;
 }
 

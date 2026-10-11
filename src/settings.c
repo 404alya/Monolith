@@ -363,12 +363,29 @@ static char *Trim(char *t)
 
 bool GfxSetKey(GfxSettings *s, const char *keyValue)
 {
-    char buf[256];
-    snprintf(buf, sizeof(buf), "%s", keyValue);
-    char *eq = strchr(buf, '=');
-    if (!eq) return false;
-    *eq = 0;
-    return SetKeyValue(s, Trim(buf), Trim(eq + 1));
+    char *buf = MS_StrDup(keyValue);    // (any length: a cut-off value could parse as another one)
+    char *eq = buf ? strchr(buf, '=') : NULL;
+    bool ok = false;
+    if (eq) {
+        *eq = 0;
+        ok = SetKeyValue(s, Trim(buf), Trim(eq + 1));
+    }
+    free(buf);
+    return ok;
+}
+
+// The next line of f without its '\n' (any length) in *buf, grown with MS_RESERVE; false at the end
+static bool ReadLine(FILE *f, char **buf, int *cap)
+{
+    int len = 0, c;
+    while ((c = fgetc(f)) != EOF && c != '\n') {
+        if (!MS_RESERVE(*buf, *cap, len + 2)) return false;
+        (*buf)[len++] = (char)c;
+    }
+    if (c == EOF && len == 0) return false;
+    if (!MS_RESERVE(*buf, *cap, len + 1)) return false;
+    (*buf)[len] = 0;
+    return true;
 }
 
 const char *GfxKeyHelp(void)
@@ -386,9 +403,10 @@ bool GfxLoad(GfxSettings *s, const char *path, char *err, int errSize)
     if (errSize > 0) err[0] = 0;
     FILE *f = fopen(path, "r");
     if (!f) return false;
-    char line[512];
+    char *line = NULL;      // whole lines: a fixed buffer split long ones into two (QA2 F15)
+    int lineCap = 0;
     int n = 0, bad = 0;
-    while (fgets(line, sizeof(line), f)) {
+    while (ReadLine(f, &line, &lineCap)) {
         n++;
         char *hash = strchr(line, '#');
         if (hash) *hash = 0;
@@ -403,6 +421,7 @@ bool GfxLoad(GfxSettings *s, const char *path, char *err, int errSize)
             bad++;
         }
     }
+    free(line);
     fclose(f);
     if (bad && errSize > 0) snprintf(err, errSize, "%s: %d line%s ignored", path, bad, bad == 1 ? "" : "s");
     return true;
