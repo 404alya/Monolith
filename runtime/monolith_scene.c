@@ -134,7 +134,8 @@
 // ".." components are rejected, so a package can be copied anywhere.
 // Limits: none on content (any number of objects, groups, materials, lights, viewpoints; lines
 // and names of any length). Sanity caps against runaway input: MS_MAX_OBJECTS (1000000 boxes +
-// models + lights; a `repeat` grid multiplying to more fails), MS_MAX_FILE_BYTES (4 MB file).
+// models + lights; a `repeat` grid multiplying to more fails), MS_MAX_FILE_BYTES (4 MB file),
+// spawn / viewpoint / light positions within +-1000000 m.
 // Every box remembers the map line of the statement that made it (boxRefs[]).
 // Errors are reported as "file:line: message" and the previous scene is kept.
 //
@@ -630,6 +631,15 @@ static const SkyKeyDef SKY_KEYS[] = {
 };
 #define COUNT(a) ((int)(sizeof(a) / sizeof((a)[0])))
 
+// floorf(v) as an int, clamped (NaN -> 0): a camera or box far outside any sane map (e.g. a
+// player falling for hours) must not overflow a cell index (float -> int out of range is UB)
+static int CellKey(float v)
+{
+    float f = floorf(v);
+    if (f != f) return 0;
+    return f < -1e8f ? -100000000 : f > 1e8f ? 100000000 : (int)f;
+}
+
 static const char *const FOG_NAMES[] = { "disabled", "linear", "exp2", "exp" };
 static const char *const BLOOM_NAMES[] = { "disabled", "mix", "additive", "screen" };
 static const char *const TONEMAP_NAMES[] = { "linear", "reinhard", "filmic", "aces", "agx" };
@@ -863,6 +873,16 @@ static bool NumF(Parser *P, Token t, float *out)
 {
     if (t.quoted) return Fail(P, "expected a number, got the string \"%s\"", t.s);
     return ParseFloat(P, t.s, out);
+}
+
+// A camera or light position number (spawn, viewpoint, light): |v| <= MS_COORD_LIMIT, so the
+// sun shadow tiles' integer cell keys never overflow (QA2 F4)
+#define MS_COORD_LIMIT 1e6f
+static bool NumPos(Parser *P, Token t, float *out)
+{
+    if (!NumF(P, t, out)) return false;
+    if (fabsf(*out) > MS_COORD_LIMIT) return Fail(P, "position out of range: %s (allowed -1000000..1000000)", t.s);
+    return true;
 }
 
 static bool NumI(Parser *P, Token t, int lo, int hi, int *out)
@@ -1230,7 +1250,7 @@ static bool ParseLight(Parser *P, Token *args, int n, const Placement *pl)
     if (n < 1 + nPos + nDir) return Fail(P, "light: missing coordinates (point x y z, spot x y z dx dy dz, dir dx dy dz)", NULL);
     float v[6];
     for (int i = 0; i < nPos + nDir; i++)
-        if (!NumF(P, args[1 + i], &v[i])) return false;
+        if (!(i < nPos ? NumPos(P, args[1 + i], &v[i]) : NumF(P, args[1 + i], &v[i]))) return false;
     Vector3 pos = { 0 }, dir = { 0, -1, 0 };
     if (nPos) pos = (Vector3){ v[0], v[1], v[2] };
     if (nDir) dir = (Vector3){ v[nPos], v[nPos + 1], v[nPos + 2] };
@@ -1489,6 +1509,18 @@ static const EnvRange ENV_RANGES[] = {
     { "sun.energy", 0, 1e6f, false }, { "sun.fogEnergy", 0, 1e6f, false }, { "sun.softness", 0, 1e6f, false },
     { "bloom.offExposure", 0, 100, true },
 };
+
+bool MS_EnvKeyRange(const char *key, float *lo, float *hi, bool *loOpen)
+{
+    for (int i = 0; i < COUNT(ENV_RANGES); i++) {
+        if (strcmp(ENV_RANGES[i].key, key) != 0) continue;
+        *lo = ENV_RANGES[i].lo;
+        *hi = ENV_RANGES[i].hi;
+        *loOpen = ENV_RANGES[i].loOpen;
+        return true;
+    }
+    return false;
+}
 
 static bool CheckEnvRange(Parser *P, const char *key, int type, const void *p)
 {
@@ -1893,7 +1925,7 @@ static bool ParseStatement(Parser *P, Token *tok, int n)
         float v[5] = { 0 };
         if (n != 5 && n != 6) return Fail(P, "spawn takes x y z yawDeg [pitchDeg] (feet position)", NULL);
         for (int i = 1; i < n; i++)
-            if (!NumF(P, tok[i], &v[i - 1])) return false;
+            if (!(i <= 3 ? NumPos(P, tok[i], &v[i - 1]) : NumF(P, tok[i], &v[i - 1]))) return false;
         d->hasSpawn = true;
         d->spawnFeet = (Vector3){ v[0], v[1], v[2] };
         d->spawnYawDeg = v[3];
@@ -1907,7 +1939,7 @@ static bool ParseStatement(Parser *P, Token *tok, int n)
         if (!Name(P, tok, n, "viewpoint", &name)) return false;
         float v[6];
         for (int i = 0; i < 6; i++)
-            if (!NumF(P, tok[2 + i], &v[i])) return false;
+            if (!NumPos(P, tok[2 + i], &v[i])) return false;
         vp.eye = (Vector3){ v[0], v[1], v[2] };
         vp.target = (Vector3){ v[3], v[4], v[5] };
         if (Vector3Equals(vp.eye, vp.target)) return Fail(P, "viewpoint eye and target must differ", NULL);
@@ -2131,8 +2163,8 @@ static bool BakeOcclusionVolume(const SceneData *d, float voxel, float intensity
         float *ax[3] = { axis, axis + dim[0], axis + dim[0] + dim[1] };
         for (int a = 0; a < 3 && !empty; a++) {
             // voxel centres c = rmin + (i + 0.5) * voxel within AO_DIST_MAX of the box
-            lo[a] = (int)floorf((bmin[a] - AO_DIST_MAX - rmin[a]) / voxel - 0.5f);
-            hi[a] = (int)ceilf((bmax[a] + AO_DIST_MAX - rmin[a]) / voxel - 0.5f);
+            lo[a] = CellKey((bmin[a] - AO_DIST_MAX - rmin[a]) / voxel - 0.5f);
+            hi[a] = -CellKey(-((bmax[a] + AO_DIST_MAX - rmin[a]) / voxel - 0.5f));  // = ceil
             if (lo[a] < 0) lo[a] = 0;
             if (hi[a] > dim[a] - 1) hi[a] = dim[a] - 1;
             empty = lo[a] > hi[a];
@@ -2289,8 +2321,8 @@ static int SunShadowTileSelect(SunShadowTiles *t, Vector3 sunDir, float range, i
     *render = false;
     if (pick < 0) {
         // The eye's cell, into the least recently used slot
-        int key[3] = { (int)floorf((ls.x - origin.x) / cellXY), (int)floorf((ls.y - origin.y) / cellXY),
-                       (int)floorf((ls.z - origin.z) / cellZ) };
+        int key[3] = { CellKey((ls.x - origin.x) / cellXY), CellKey((ls.y - origin.y) / cellXY),
+                       CellKey((ls.z - origin.z) / cellZ) };
         pick = 0;
         for (int i = 1; i < SUN_TILE_COUNT; i++) {
             if (!t->tile[i].valid && t->tile[pick].valid) pick = i;

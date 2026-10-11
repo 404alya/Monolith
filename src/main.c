@@ -116,7 +116,8 @@
 //   --fx key=value   override one effect setting, repeatable, e.g. --fx ssil.radius=2.5
 //                  (keys: ssao./ssil.samples, .radius; ssao.intensity/.power; ssil.gi/.ao;
 //                  bloom.levels/.intensity; exposure; vfog.step/.length). Applied after the
-//                  map's environment and the quality settings (--quality, --ao, --bloom, ...)
+//                  map's environment and the quality settings (--quality, --ao, --bloom, ...).
+//                  Values must lie in the range of the matching env key (e.g. bloom.levels 0..1)
 //   --shadow <size> <range>   sun shadow map size (px) and distance (m), overriding the map's
 //                  env shadow.size / sun.range (the default map: 8192 100)
 //   --shadow-camera   sun shadow from R3D's camera-fitted map, re-rendered only when the

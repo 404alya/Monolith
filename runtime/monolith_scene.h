@@ -415,6 +415,11 @@ const char *MS_Dependency(const MS_Scene *scene, int index);   // NULL when out 
 // which are not part of R3D_Environment). For tools that translate a running R3D program.
 bool MS_WriteR3DEnvironment(const R3D_Environment *env, FILE *f);
 
+// The range the map parser enforces for an `env` key (e.g. "volumetricFog.stepSize": >= 0.05):
+// lo..hi, lo excluded when *loOpen. False if the key has no range. For tools that set
+// environment values from elsewhere (monolith's --fx), so they can't do what a map can't.
+bool MS_EnvKeyRange(const char *key, float *lo, float *hi, bool *loOpen);
+
 // ======================================================================================
 // Growable arrays and strings (plain heap memory; the runtime's own helpers, also used by
 // the monolith editor so that both follow one rule: content-sized data is never a fixed array)

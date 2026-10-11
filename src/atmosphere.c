@@ -40,24 +40,26 @@ const char *AoModeHelp(void)
 }
 
 // Numeric knobs for experiments: --fx ssil.radius=2.5 etc. Integers are rounded.
-typedef struct { const char *key; float *f; int *i; } FxKnob;
+// envKey: the map's `env` key for the same field; its range (MS_EnvKeyRange) applies to --fx
+// too, so a flag can't ask for what a map can't (bloom.levels 16384 took minutes per frame)
+typedef struct { const char *key, *envKey; float *f; int *i; } FxKnob;
 
 bool ApplyFxSetting(R3D_Environment *env, const char *keyValue)
 {
     const FxKnob knobs[] = {
-        { "ssao.samples",   NULL, &env->ssao.sampleCount },
-        { "ssao.radius",    &env->ssao.radius, NULL },
-        { "ssao.intensity", &env->ssao.intensity, NULL },
-        { "ssao.power",     &env->ssao.power, NULL },
-        { "ssil.samples",   NULL, &env->ssil.sampleCount },
-        { "ssil.radius",    &env->ssil.radius, NULL },
-        { "ssil.gi",        &env->ssil.giIntensity, NULL },
-        { "ssil.ao",        &env->ssil.aoIntensity, NULL },
-        { "bloom.levels",   &env->bloom.levels, NULL },
-        { "bloom.intensity", &env->bloom.intensity, NULL },
-        { "exposure",       &env->tonemap.exposure, NULL },
-        { "vfog.step",      &env->volumetricFog.stepSize, NULL },
-        { "vfog.length",    &env->volumetricFog.length, NULL },
+        { "ssao.samples",   "ssao.sampleCount", NULL, &env->ssao.sampleCount },
+        { "ssao.radius",    "ssao.radius", &env->ssao.radius, NULL },
+        { "ssao.intensity", "ssao.intensity", &env->ssao.intensity, NULL },
+        { "ssao.power",     "ssao.power", &env->ssao.power, NULL },
+        { "ssil.samples",   "ssil.sampleCount", NULL, &env->ssil.sampleCount },
+        { "ssil.radius",    "ssil.radius", &env->ssil.radius, NULL },
+        { "ssil.gi",        "ssil.giIntensity", &env->ssil.giIntensity, NULL },
+        { "ssil.ao",        "ssil.aoIntensity", &env->ssil.aoIntensity, NULL },
+        { "bloom.levels",   "bloom.levels", &env->bloom.levels, NULL },
+        { "bloom.intensity", "bloom.intensity", &env->bloom.intensity, NULL },
+        { "exposure",       "tonemap.exposure", &env->tonemap.exposure, NULL },
+        { "vfog.step",      "volumetricFog.stepSize", &env->volumetricFog.stepSize, NULL },
+        { "vfog.length",    "volumetricFog.length", &env->volumetricFog.length, NULL },
     };
     const char *eq = strchr(keyValue, '=');
     if (!eq || !eq[1]) return false;
@@ -70,8 +72,15 @@ bool ApplyFxSetting(R3D_Environment *env, const char *keyValue)
     }
     for (int k = 0; k < (int)(sizeof(knobs) / sizeof(knobs[0])); k++) {
         if (strlen(knobs[k].key) != (size_t)(eq - keyValue) || strncmp(knobs[k].key, keyValue, eq - keyValue) != 0) continue;
+        float lo, hi, r = knobs[k].f ? v : roundf(v);
+        bool loOpen;
+        if (MS_EnvKeyRange(knobs[k].envKey, &lo, &hi, &loOpen) && (r > hi || r < lo || (loOpen && r == lo))) {
+            TraceLog(LOG_WARNING, "monolith: --fx %s: out of range (%s: %s%g .. %g, as env %s)", keyValue, knobs[k].key,
+                     loOpen ? "> " : "", lo, hi, knobs[k].envKey);
+            return false;
+        }
         if (knobs[k].f) *knobs[k].f = v;
-        else *knobs[k].i = (int)lroundf(v);
+        else *knobs[k].i = (int)r;
         return true;
     }
     return false;
