@@ -56,6 +56,7 @@
 #endif
 
 #include "launcher.h"
+#include "wincmd.h"
 #include <ctype.h>
 #include <errno.h>
 #include <math.h>
@@ -172,6 +173,29 @@ static bool SplitArgs(const char *s, ArgList *a)
         while (*p && !isspace((unsigned char)*p)) p++;
         if (*p) *p++ = 0;
     }
+    return true;
+}
+
+// $MONOLITH_CLAUDE_ARGS split into words, without a --model that has no value: a bare
+// `--model` as the last word, or `--model=` with nothing after the '='. Passed on, such a
+// word would take the next argument as the model name, which is the prompt (Claude Code
+// would then start without a prompt and with a bogus model). Logs a warning (warn) and sets
+// *dropped when it removed one. False when out of memory (a is empty then).
+static bool ClaudeArgs(ArgList *a, bool *dropped, bool warn)
+{
+    if (dropped) *dropped = false;
+    if (!SplitArgs(getenv("MONOLITH_CLAUDE_ARGS"), a)) return false;
+    int n = 0;
+    for (int i = 0; i < a->count; i++) {
+        const char *t = a->tok[i];
+        if ((strcmp(t, "--model") == 0 && i + 1 == a->count) || strcmp(t, "--model=") == 0) {
+            if (warn) TraceLog(LOG_WARNING, "monolith: MONOLITH_CLAUDE_ARGS: '%s' without a model name ignored", t);
+            if (dropped) *dropped = true;
+            continue;
+        }
+        a->tok[n++] = a->tok[i];
+    }
+    a->count = n;
     return true;
 }
 
@@ -491,7 +515,7 @@ void LauncherChooseModel(const ModelQuery *q, ModelChoice *out)
     }
     // A --model (or --model=x) in MONOLITH_CLAUDE_ARGS wins; no second --model then
     ArgList args;
-    SplitArgs(getenv("MONOLITH_CLAUDE_ARGS"), &args);
+    ClaudeArgs(&args, &out->droppedModelArg, true);
     char **tok = args.tok;
     int n = args.count;
     for (int i = 0; i < n; i++) {
@@ -1280,8 +1304,17 @@ static bool ChildAlive(pid_t pid)
     for (int i = 0; i < childCount; i++) if (children[i] == pid) slot = i;
     if (slot < 0) return false;             // reaped already (or never tracked)
     if (waitpid(pid, NULL, WNOHANG) == 0) return true;
+    // Reaped: from now on the kernel may hand this pid to any new process, including a
+    // later terminal of ours. Forget it in every request that holds it (and cancel a
+    // pending WM close -> SIGTERM -> SIGKILL escalation), so a close of the old request
+    // can never signal the new process.
     for (int k = 0; k < reqCount; k++)
-        if (reqs[k].used && reqs[k].pid == pid) reqs[k].exited = true;
+        if (reqs[k].used && reqs[k].pid == pid) {
+            reqs[k].exited = true;
+            reqs[k].pid = 0;
+            reqs[k].killStage = 0;
+            TraceLog(LOG_INFO, "monolith: terminal of %s exited (pid %d reaped)", reqs[k].id, (int)pid);
+        }
     children[slot] = children[--childCount];    // reaped (or not ours any more: ECHILD)
     return false;
 }
@@ -1420,6 +1453,19 @@ bool LauncherLastDone(Vector3 *eye, float *yaw, float *pitch)
 // #region Launching (Linux: fork + execve; Windows: cmd start)
 // ======================================================================================
 
+// The request terminal's window title: "monolith-claude: <slug> <HHMMSS>" plus the bundle
+// id's "-n" suffix if it has one, i.e. unique per bundle (ids are). Two requests with the
+// same text then never share a title, so MarkAndMove's exact title match can't mark the
+// other one's window (K would close the wrong terminal). Ids that don't start with the
+// time stamp give "monolith-claude: <slug> <id>". Characters: [0-9a-z_ -] only.
+static void RequestTitle(const char *id, const char *slug, char *out, int outSize)
+{
+    size_t sl = strlen(slug), il = strlen(id);
+    bool stamped = il >= 18 + sl && id[10] == '_' && id[17] == '_' && strncmp(id + 18, slug, sl) == 0;
+    if (stamped) snprintf(out, outSize, "monolith-claude: %s %.6s%s", slug, id + 11, id + 18 + sl);
+    else snprintf(out, outSize, "monolith-claude: %s %s", slug, id);
+}
+
 // Every Claude Code session starts with these, unless MONOLITH_CLAUDE_SAFE is set
 // (to anything but "" or "0")
 static const char *const SKIP_PERMISSION_FLAGS[] = {
@@ -1472,25 +1518,32 @@ static bool Launch(const char *id, const char *slug, const char *prompt, const c
     size_t n = strlen(dir);
     if (n > 1 && dir[n - 1] == '\\') dir[n - 1] = 0;     // "C:\x\" would escape the closing quote
 
-    // msvcrt joins the argv with spaces and adds no quotes, so quote here. cmd /k strips
-    // the outer pair of quotes of its command when it contains more than two.
+    // (quoting for cmd /k: see wincmd.c)
     ArgList args;
-    if (!SplitArgs(getenv("MONOLITH_CLAUDE_ARGS"), &args)) { snprintf(err, errSize, "out of memory"); return false; }
-    char **extra = args.tok;
-    int extraCount = args.count;
-    char cmd[4096];
-    int len = snprintf(cmd, sizeof(cmd), "\"\"%s\"", claude);
-    for (int i = 0; i < SKIP_PERMISSION_COUNT && !ClaudeSafe(); i++)
-        len += snprintf(cmd + len, sizeof(cmd) - len, " %s", SKIP_PERMISSION_FLAGS[i]);
-    if (model && len < (int)sizeof(cmd)) len += snprintf(cmd + len, sizeof(cmd) - len, " --model \"%s\"", model);
-    for (int i = 0; i < extraCount && len < (int)sizeof(cmd); i++) len += snprintf(cmd + len, sizeof(cmd) - len, " %s", extra[i]);
-    if (len < (int)sizeof(cmd)) snprintf(cmd + len, sizeof(cmd) - len, " \"%s\"\"", prompt);
+    if (!ClaudeArgs(&args, NULL, false)) { snprintf(err, errSize, "out of memory"); return false; }
+    int skipped = 0;
+    char *cmd = WinClaudeCommand(claude, SKIP_PERMISSION_FLAGS, ClaudeSafe() ? 0 : SKIP_PERMISSION_COUNT, model,
+                                 args.tok, args.count, prompt, &skipped);
     FreeArgs(&args);
-    char title[128], dirArg[1100];
-    snprintf(title, sizeof(title), "\"monolith-claude: %s\"", slug);
+    if (!cmd) { snprintf(err, errSize, "out of memory"); return false; }
+    if (skipped) TraceLog(LOG_WARNING, "monolith: %d word%s with a double quote left out of the claude command line (cmd can't pass them)",
+                          skipped, skipped == 1 ? "" : "s");
+    char title[300], dirArg[1100];
+    title[0] = '"';
+    RequestTitle(id, slug, title + 1, (int)sizeof(title) - 2);
+    strcat(title, "\"");
     snprintf(dirArg, sizeof(dirArg), "\"%s\"", dir);
+    // cmd.exe takes command lines of at most 8191 characters: say so instead of a bare
+    // "cannot start" (or a window that drops the end)
+    size_t total = strlen(cmd) + strlen(title) + strlen(dirArg) + 40;
+    if (total > 8191) {
+        snprintf(err, errSize, "the claude command line is %zu characters, cmd.exe takes at most 8191 (shorten MONOLITH_CLAUDE_ARGS)", total);
+        free(cmd);
+        return false;
+    }
     const char *argv[] = { "cmd.exe", "/c", "start", title, "/D", dirArg, "cmd.exe", "/k", cmd, NULL };
     intptr_t h = _spawnvp(_P_NOWAIT, "cmd.exe", argv);
+    free(cmd);
     if (h == -1) {
         snprintf(err, errSize, "cannot start cmd.exe: %s", strerror(errno));
         return false;
@@ -1577,8 +1630,8 @@ static void MarkAndMove(const char *title, const char *mark)
     char toolPath[4096];
     if (!WmTool(toolPath, sizeof(toolPath), &tool)) return;     // no i3 / sway here
     bool number = ws[strspn(ws, "0123456789")] == 0;
-    // The title is "monolith-claude: <slug>" with a [a-z0-9-] slug, the mark "_monolith_<id>"
-    // (id: [0-9_a-z-]): no regex specials, no quotes
+    // The title is RequestTitle's (unique per request; [0-9a-z_ -]), the mark
+    // "_monolith_<id>" (id: [0-9_a-z-]): no regex specials, no quotes
     char cmd[640];
     int len = snprintf(cmd, sizeof(cmd), "[title=\"^%s$\"] mark --add \"%s\"", title, mark);
     if (*ws && number) snprintf(cmd + len, sizeof(cmd) - len, ", move container to workspace number %s", ws);
@@ -1603,7 +1656,6 @@ static void MarkAndMove(const char *title, const char *mark)
 
 static bool Launch(const char *id, const char *slug, const char *prompt, const char *model, OpenRequest *q, char *err, int errSize)
 {
-    (void)id;
     // Terminal: env override (program + extra args) or the first known one in PATH
     ArgList term = { 0 }, args = { 0 };
     char termPath[4096];
@@ -1652,12 +1704,12 @@ static bool Launch(const char *id, const char *slug, const char *prompt, const c
     }
 
     // argv: terminal [its extra args] [pre] [title] [dir] [exec] claude [claude args] prompt
-    char title[128], dir[1024];
-    snprintf(title, sizeof(title), "monolith-claude: %s", slug);
+    char title[300], dir[1024];
+    RequestTitle(id, slug, title, sizeof(title));
     snprintf(dir, sizeof(dir), "%s", rootDir);
     size_t dl = strlen(dir);
     if (dl > 1 && dir[dl - 1] == '/') dir[dl - 1] = 0;
-    if (!SplitArgs(getenv("MONOLITH_CLAUDE_ARGS"), &args)) { snprintf(err, errSize, "out of memory"); goto fail; }
+    if (!ClaudeArgs(&args, NULL, false)) { snprintf(err, errSize, "out of memory"); goto fail; }
     char **extra = args.tok;
     int extraCount = args.count;
     // (allocated before the fork: the child may only call async-signal-safe functions)
@@ -1793,7 +1845,7 @@ static int WmCloseMarked(const OpenRequest *q)
 
 static void SignalGroup(const OpenRequest *q, int sig)
 {
-    if (ChildAlive(q->pid) && kill(-q->pid, sig) == 0)
+    if (q->pid > 0 && ChildAlive(q->pid) && kill(-q->pid, sig) == 0)
         TraceLog(LOG_INFO, "monolith: %s sent to the terminal of %s (process group %d)",
                  sig == SIGKILL ? "SIGKILL" : "SIGTERM", q->id, (int)q->pid);
 }
@@ -1804,7 +1856,8 @@ static void CloseEscalate(void)
     for (int i = 0; i < reqCount; i++) {
         OpenRequest *q = &reqs[i];
         if (!q->used || !q->killStage || clockTime < q->killTime) continue;
-        if (!ChildAlive(q->pid)) { q->killStage = 0; continue; }
+        // (ChildAlive: only a pid that is still our unreaped child; reaping clears q->pid)
+        if (q->pid <= 0 || !ChildAlive(q->pid)) { q->killStage = 0; continue; }
         if (q->killStage == 1) { SignalGroup(q, SIGTERM); q->killStage = 2; q->killTime = clockTime + CLOSE_GRACE; }
         else { SignalGroup(q, SIGKILL); q->killStage = 0; }
     }
@@ -2031,7 +2084,8 @@ bool LauncherSubmit(const DesignRequest *req, Image view, Image marked, char *ms
         TraceLog(LOG_WARNING, "monolith: run it by hand: cd '%s' && claude --model %s \"%s\"", rootDir, B.model.name, B.prompt);
         goto done;
     }
-    snprintf(msg, msgSize, "request sent (%s): %s (Claude Code opens in a new terminal)", B.model.name, B.id);
+    snprintf(msg, msgSize, "request sent (%s): %s (Claude Code opens in a new terminal)%s", B.model.name, B.id,
+             B.model.droppedModelArg ? "; a --model without a name in MONOLITH_CLAUDE_ARGS was ignored" : "");
     result = true;
 done:
 #undef B

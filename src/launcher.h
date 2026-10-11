@@ -26,6 +26,7 @@ typedef struct {
     const char *source;     // "classifier", "prompt", "MONOLITH_MODEL" or "MONOLITH_CLAUDE_ARGS"
     bool addFlag;           // false: MONOLITH_CLAUDE_ARGS already has --model, don't add one
     int promptSkip;         // bytes at the start of the prompt taken by the @token (+ blanks)
+    bool droppedModelArg;   // MONOLITH_CLAUDE_ARGS had a --model without a name (ignored)
 } ModelChoice;
 
 const char *ModelTierName(ModelTier tier);
