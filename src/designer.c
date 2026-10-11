@@ -6,13 +6,19 @@
 // #region Picking
 // ======================================================================================
 
-DesignerHit DesignerPick(Vector3 origin, Vector3 dir)
+// Slab test against the boxes list[0..n) (NULL: all boxes, n = world.count). With
+// minDist (the list's boxes' distances from the origin, ascending) the loop stops at the
+// first box that can't be nearer than the best hit. Equal distances go to the lowest box
+// index, as in a plain loop over all boxes, so every list gives the same hit.
+static DesignerHit PickBoxes(Vector3 origin, Vector3 dir, const int *list, const float *minDist, int n)
 {
     DesignerHit best = { .box = -1, .dist = INFINITY };
     const float o[3] = { origin.x, origin.y, origin.z };
     const float d[3] = { dir.x, dir.y, dir.z };
 
-    for (int i = 0; i < world.count; i++) {
+    for (int k = 0; k < n; k++) {
+        if (minDist && minDist[k] > best.dist) break;
+        int i = list ? list[k] : k;
         const BoundingBox *b = &world.items[i];
         const float mn[3] = { b->min.x, b->min.y, b->min.z };
         const float mx[3] = { b->max.x, b->max.y, b->max.z };
@@ -33,7 +39,8 @@ DesignerHit DesignerPick(Vector3 origin, Vector3 dir)
         }
         // tNear < 0: the eye is inside this box. Skip it, so flying through a wall
         // still lets you pick what is beyond.
-        if (miss || axis < 0 || tNear < 0.0f || tNear >= best.dist) continue;
+        if (miss || axis < 0 || tNear < 0.0f || tNear > best.dist) continue;
+        if (tNear == best.dist && i > best.box) continue;
 
         best.box = i;
         best.dist = tNear;
@@ -44,6 +51,11 @@ DesignerHit DesignerPick(Vector3 origin, Vector3 dir)
     }
     if (best.box < 0) best.dist = 0.0f;
     return best;
+}
+
+DesignerHit DesignerPick(Vector3 origin, Vector3 dir)
+{
+    return PickBoxes(origin, dir, NULL, NULL, world.count);
 }
 
 void DesignerPrintHit(DesignerHit hit)
@@ -64,6 +76,212 @@ void DesignerPrintHit(DesignerHit hit)
            hit.point.x, hit.point.y, hit.point.z, hit.normal.x, hit.normal.y, hit.normal.z, hit.dist,
            b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z);
     fflush(stdout);
+}
+
+// #endregion
+
+// ======================================================================================
+// #region Screen regions: what a region shows (ray sampling)
+// ======================================================================================
+
+static float BoxDistance(BoundingBox b, Vector3 p);     // drawing region
+
+// The shape of the scene runtime's MS_Hit
+typedef struct {
+    MS_ObjRef obj;          // kind MS_OBJ_NONE = nothing hit
+    Vector3 point, normal;
+    float dist;
+} RegionHit;
+
+// The objects a region's rays can hit: the boxes that touch the region's frustum, nearest
+// first (see PickBoxes). Without it a region costs 4096 rays x all boxes (~300 ms at 8192
+// boxes); with it, rays stop at the first hit's distance and boxes outside are never tested.
+typedef struct {
+    int list[MAX_BOXES];
+    float minDist[MAX_BOXES];   // distance from the eye to the box, slightly rounded down
+    int count;
+} RegionCull;
+
+// The one place region sampling asks the scene what a ray hits: the same hit as
+// DesignerPick (the crosshair), from the region's candidates only. With the scene runtime
+// this is where MS_Raycast (models) joins in.
+static RegionHit RegionPick(const RegionCull *c, Vector3 origin, Vector3 dir)
+{
+    DesignerHit h = PickBoxes(origin, dir, c->list, c->minDist, c->count);
+    RegionHit r = { .obj = { h.box >= 0 ? MS_OBJ_BOX : MS_OBJ_NONE, h.box }, .point = h.point,
+                    .normal = h.normal, .dist = h.dist };
+    return r;
+}
+
+static float boxDist[MAX_BOXES];    // per box index, for CompareCull (qsort has no context)
+static int CompareCull(const void *a, const void *b)
+{
+    int ia = *(const int *)a, ib = *(const int *)b;
+    if (boxDist[ia] != boxDist[ib]) return boxDist[ia] < boxDist[ib] ? -1 : 1;
+    return ia - ib;
+}
+
+// Rays through a w x h frame of camera `cam`, built like raylib's perspective projection
+// (MatrixLookAt + fovy, aspect w / h), so the ray through (x, y) (continuous pixel
+// coordinates, top-left origin, pixel centres at i + 0.5) passes through what that pixel
+// shows. The frame centre gives exactly the crosshair ray of DesignerPickCamera.
+typedef struct { Vector3 eye, fwd, right, up; float tanX, tanY; int w, h; } RayFrame;
+
+static RayFrame MakeRayFrame(Camera3D cam, int w, int h)
+{
+    RayFrame f = { .eye = cam.position, .w = w, .h = h };
+    f.fwd = Vector3Normalize(Vector3Subtract(cam.target, cam.position));
+    f.right = Vector3Normalize(Vector3CrossProduct(f.fwd, cam.up));
+    f.up = Vector3CrossProduct(f.right, f.fwd);
+    f.tanY = tanf(cam.fovy * DEG2RAD * 0.5f);
+    f.tanX = f.tanY * (float)w / (float)h;
+    return f;
+}
+
+static Vector3 RayThrough(const RayFrame *f, float x, float y)
+{
+    if (x * 2.0f == (float)f->w && y * 2.0f == (float)f->h) return f->fwd;    // the crosshair ray, bit for bit
+    float nx = 2.0f * x / f->w - 1.0f, ny = 1.0f - 2.0f * y / f->h;
+    Vector3 d = Vector3Add(f->fwd, Vector3Add(Vector3Scale(f->right, nx * f->tanX), Vector3Scale(f->up, ny * f->tanY)));
+    return Vector3Normalize(d);
+}
+
+// Candidates of a rect (pixels): boxes not entirely outside one of the four planes through
+// the eye and the rect's edges (every ray through the rect lies inside them), nearest first.
+// in = NULL: from all boxes; else filtered from in's list (already sorted).
+static void BuildRegionCull(const RayFrame *f, Rectangle rect, const RegionCull *in, RegionCull *c)
+{
+    float x0 = rect.x, y0 = rect.y, x1 = rect.x + rect.width, y1 = rect.y + rect.height;
+    Vector3 corner[4] = { RayThrough(f, x0, y0), RayThrough(f, x1, y0), RayThrough(f, x1, y1), RayThrough(f, x0, y1) };
+    Vector3 mid = RayThrough(f, (x0 + x1) * 0.5f, (y0 + y1) * 0.5f);
+    Vector3 n[4];
+    for (int i = 0; i < 4; i++) {
+        n[i] = Vector3Normalize(Vector3CrossProduct(corner[i], corner[(i + 1) % 4]));
+        if (Vector3DotProduct(n[i], mid) < 0.0f) n[i] = Vector3Negate(n[i]);    // pointing inside
+    }
+    c->count = 0;
+    int count = in ? in->count : world.count;
+    for (int k = 0; k < count; k++) {
+        int b = in ? in->list[k] : k;
+        BoundingBox bb = world.items[b];
+        bool outside = false;
+        for (int i = 0; i < 4 && !outside; i++) {
+            // The box corner furthest along the plane normal
+            Vector3 p = { n[i].x > 0 ? bb.max.x : bb.min.x, n[i].y > 0 ? bb.max.y : bb.min.y, n[i].z > 0 ? bb.max.z : bb.min.z };
+            outside = Vector3DotProduct(n[i], Vector3Subtract(p, f->eye)) < -1e-3f;     // 1 mm of slack
+        }
+        if (outside) continue;
+        if (in) {
+            c->minDist[c->count] = in->minDist[k];
+            c->list[c->count++] = b;
+            continue;
+        }
+        // Distance to the box, rounded down a little so float noise can't stop a ray early
+        boxDist[b] = BoxDistance(bb, f->eye) * (1.0f - 1e-5f) - 1e-4f;
+        c->list[c->count++] = b;
+    }
+    if (in) return;
+    qsort(c->list, c->count, sizeof(c->list[0]), CompareCull);
+    for (int k = 0; k < c->count; k++) c->minDist[k] = boxDist[c->list[k]];
+}
+
+#define REGION_TILE 8   // rays per tile side in DesignerAnalyzeRegion
+
+// Samples per object: open addressing over (kind, index). A region has at most
+// REGION_MAX_SAMPLES samples, so at most that many distinct objects.
+#define TALLY_SIZE (2 * REGION_MAX_SAMPLES)
+typedef struct { MS_ObjRef obj; int samples; } TallySlot;
+static TallySlot tally[TALLY_SIZE];
+
+static void TallyAdd(MS_ObjRef obj)
+{
+    unsigned int h = ((unsigned int)obj.index * 2654435761u) ^ (unsigned int)obj.kind;
+    for (unsigned int i = h % TALLY_SIZE; ; i = (i + 1) % TALLY_SIZE) {
+        if (tally[i].samples == 0) { tally[i].obj = obj; tally[i].samples = 1; return; }
+        if (tally[i].obj.kind == obj.kind && tally[i].obj.index == obj.index) { tally[i].samples++; return; }
+    }
+}
+
+static int CompareRegionObjects(const void *pa, const void *pb)
+{
+    const DesignRegionObject *a = pa, *b = pb;
+    if (a->samples != b->samples) return b->samples - a->samples;
+    if (a->obj.kind != b->obj.kind) return (int)a->obj.kind - (int)b->obj.kind;
+    return a->obj.index - b->obj.index;
+}
+
+void DesignerAnalyzeRegion(Camera3D cam, int w, int h, Rectangle rect, DesignRegionInfo *out)
+{
+    double t0 = GetTime();
+    static DesignRegionObject all[REGION_MAX_SAMPLES];
+    memset(out, 0, sizeof(*out));
+    out->rect = rect;
+    out->centerObj = (MS_ObjRef){ MS_OBJ_NONE, -1 };
+    int rw = (int)rect.width, rh = (int)rect.height;
+    if (rw <= 0 || rh <= 0 || w <= 0 || h <= 0) return;
+    RayFrame f = MakeRayFrame(cam, w, h);
+    static RegionCull cull, tileCull;
+    BuildRegionCull(&f, rect, NULL, &cull);
+
+    RegionHit c = RegionPick(&cull, f.eye, RayThrough(&f, rect.x + rect.width * 0.5f, rect.y + rect.height * 0.5f));
+    out->centerObj = c.obj;
+    out->centerPoint = c.point;
+    out->centerNormal = c.normal;
+    out->centerDist = c.dist;
+
+    // Grid: every pixel centre while that is at most REGION_MAX_SAMPLES rays, else a
+    // regular grid of about square cells, sampled at the cell centres
+    int gx = rw, gy = rh;
+    if (rw * rh > REGION_MAX_SAMPLES) {
+        float cell = sqrtf((float)rw * rh / REGION_MAX_SAMPLES);
+        gx = (int)fmaxf(1.0f, floorf(rw / cell));
+        gy = (int)fmaxf(1.0f, floorf(rh / cell));
+        while (gx * gy > REGION_MAX_SAMPLES) { if (gx > gy) gx--; else gy--; }
+    }
+    out->gridW = gx;
+    out->gridH = gy;
+
+    memset(tally, 0, sizeof(tally));
+    int sky = 0, total = gx * gy;
+    out->depthMin = INFINITY;
+    out->depthMax = 0.0f;
+    // Tiles of REGION_TILE x REGION_TILE rays, each with the region's candidates that touch
+    // it: rays that hit nothing (sky) otherwise test every box in the region's frustum
+    const int T = REGION_TILE;
+    float cellW = rect.width / gx, cellH = rect.height / gy;
+    for (int tj = 0; tj < gy; tj += T) {
+        for (int ti = 0; ti < gx; ti += T) {
+            int i1 = ti + T < gx ? ti + T : gx, j1 = tj + T < gy ? tj + T : gy;
+            BuildRegionCull(&f, (Rectangle){ rect.x + ti * cellW, rect.y + tj * cellH, (i1 - ti) * cellW, (j1 - tj) * cellH },
+                            &cull, &tileCull);
+            for (int j = tj; j < j1; j++) {
+                float y = rect.y + (j + 0.5f) * cellH;
+                for (int i = ti; i < i1; i++) {
+                    float x = rect.x + (i + 0.5f) * cellW;
+                    RegionHit r = RegionPick(&tileCull, f.eye, RayThrough(&f, x, y));
+                    if (r.obj.kind == MS_OBJ_NONE) { sky++; continue; }
+                    TallyAdd(r.obj);
+                    out->depthMin = fminf(out->depthMin, r.dist);
+                    out->depthMax = fmaxf(out->depthMax, r.dist);
+                }
+            }
+        }
+    }
+    out->hasDepth = sky < total;
+    if (!out->hasDepth) out->depthMin = out->depthMax = 0.0f;
+    out->sky = (float)sky / total;
+
+    int n = 0;
+    for (int i = 0; i < TALLY_SIZE; i++)
+        if (tally[i].samples > 0) all[n++] = (DesignRegionObject){ tally[i].obj, tally[i].samples, (float)tally[i].samples / total };
+    qsort(all, n, sizeof(all[0]), CompareRegionObjects);
+    out->objectCount = n < REGION_MAX_OBJECTS ? n : REGION_MAX_OBJECTS;
+    memcpy(out->objects, all, out->objectCount * sizeof(all[0]));
+    for (int i = out->objectCount; i < n; i++) {
+        out->omittedObjects++;
+        out->omittedShare += all[i].share;
+    }
+    out->ms = (GetTime() - t0) * 1000.0;
 }
 
 // #endregion
@@ -400,13 +618,19 @@ static void ClosePrompt(Designer *d, bool clear)
     }
     // GLFW can report one big mouse jump when the cursor is captured again
     d->freezeFrames = 2;
-    if (d->interactive) DisableCursor();
+    // Opened from snip mode: back to it (camera still frozen, cursor still free)
+    if (d->interactive && !d->snipping) DisableCursor();
 }
 
+// Success: the box closes and the text and the regions are gone (snip mode ends).
+// Failure: the box stays open with the text and the regions, to try again.
 void DesignerSubmitDone(Designer *d, bool ok, const char *msg)
 {
     DesignerMessage(d, !ok, msg);
-    if (ok) ClosePrompt(d, true);
+    if (ok) {
+        DesignerSnipEnd(d);
+        ClosePrompt(d, true);
+    }
 }
 
 static bool KeyRepeat(int key) { return IsKeyPressed(key) || IsKeyPressedRepeat(key); }
@@ -493,7 +717,96 @@ static DesignerAction PromptInput(Designer *d)
 
 bool DesignerCapturesInput(const Designer *d)
 {
-    return d->promptOpen || d->freezeFrames > 0;
+    return d->promptOpen || d->snipping || d->freezeFrames > 0;
+}
+
+// #endregion
+
+// ======================================================================================
+// #region Snip mode
+// ======================================================================================
+// C in spectator mode: the camera freezes and the cursor is free. Drag = a new region
+// (replaces the others), Shift+drag = add one (up to MAX_REGIONS), Enter = the prompt box
+// with the regions attached (plus the box selection, made before C). RMB, Esc or C again
+// leave snip mode and drop its regions: they only mean something for this frozen camera.
+// Esc in the prompt box closes the box (discarding the text, as always) and returns to
+// snip mode with the regions intact; a successful submit ends snip mode.
+
+void DesignerSnipBegin(Designer *d)
+{
+    d->snipping = true;
+    d->dragging = false;
+    d->regionCount = 0;
+    if (d->interactive) EnableCursor();
+}
+
+void DesignerSnipEnd(Designer *d)
+{
+    if (!d->snipping) return;
+    d->snipping = false;
+    d->dragging = false;
+    d->regionCount = 0;
+    d->freezeFrames = 2;    // GLFW can report one big mouse jump when the cursor is captured again
+    if (d->interactive) DisableCursor();
+}
+
+// Whole pixels, clamped to the frame
+static Rectangle ClampRect(Rectangle r, int w, int h)
+{
+    float x0 = Clamp(roundf(fminf(r.x, r.x + r.width)), 0.0f, (float)w);
+    float y0 = Clamp(roundf(fminf(r.y, r.y + r.height)), 0.0f, (float)h);
+    float x1 = Clamp(roundf(fmaxf(r.x, r.x + r.width)), 0.0f, (float)w);
+    float y1 = Clamp(roundf(fmaxf(r.y, r.y + r.height)), 0.0f, (float)h);
+    return (Rectangle){ x0, y0, x1 - x0, y1 - y0 };
+}
+
+bool DesignerAddRegion(Designer *d, Rectangle rect, int w, int h)
+{
+    Rectangle r = ClampRect(rect, w, h);
+    if (r.width < 1.0f || r.height < 1.0f) return false;
+    if (d->regionCount >= MAX_REGIONS) {
+        DesignerMessage(d, true, TextFormat("at most %d regions per request", MAX_REGIONS));
+        return false;
+    }
+    d->regions[d->regionCount++].rect = r;
+    return true;
+}
+
+static Rectangle DragRect(const Designer *d)
+{
+    return ClampRect((Rectangle){ d->dragStart.x, d->dragStart.y, d->dragEnd.x - d->dragStart.x,
+                                  d->dragEnd.y - d->dragStart.y }, GetScreenWidth(), GetScreenHeight());
+}
+
+static DesignerAction SnipInput(Designer *d)
+{
+    if (IsKeyPressed(KEY_ESCAPE) || IsKeyPressed(KEY_C) || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) {
+        DesignerSnipEnd(d);
+        return DESIGNER_NONE;
+    }
+    if (!d->dragging && (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER))) {
+        DesignerOpenPrompt(d, NULL);
+        return DESIGNER_NONE;
+    }
+    Vector2 m = GetMousePosition();
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        d->dragging = true;
+        d->dragAdd = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+        d->dragStart = d->dragEnd = m;
+    }
+    if (d->dragging) {
+        d->dragEnd = m;
+        if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+            d->dragging = false;
+            Rectangle r = DragRect(d);
+            // A click without a drag (under 4 px) changes nothing
+            if (r.width >= 4.0f && r.height >= 4.0f) {
+                if (!d->dragAdd) d->regionCount = 0;
+                DesignerAddRegion(d, r, GetScreenWidth(), GetScreenHeight());
+            }
+        }
+    }
+    return DESIGNER_NONE;
 }
 
 void DesignerPickCamera(Designer *d, Camera3D cam)
@@ -508,10 +821,15 @@ DesignerAction DesignerUpdate(Designer *d, float dt)
     if (d->freezeFrames > 0) d->freezeFrames--;
 
     if (d->promptOpen) return PromptInput(d);
+    if (d->snipping) return SnipInput(d);
     if (frozen) return DESIGNER_NONE;   // the frame(s) right after the box closed
 
     if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) {
         DesignerOpenPrompt(d, NULL);
+        return DESIGNER_NONE;
+    }
+    if (IsKeyPressed(KEY_C)) {
+        DesignerSnipBegin(d);
         return DESIGNER_NONE;
     }
 
@@ -549,8 +867,19 @@ void DesignerBuildRequest(const Designer *d, Camera3D cam, float yaw, float pitc
     req->height = height;
     req->hit = d->hit;
     req->selectedCount = d->selectedCount;
-    memcpy(req->selected, d->selected, d->selectedCount * sizeof(req->selected[0]));
+    for (int i = 0; i < d->selectedCount; i++) req->selected[i] = (MS_ObjRef){ MS_OBJ_BOX, d->selected[i] };
     req->mapVersion = world.version;
+
+    // Regions: what each one shows is computed now, against the map as it is at submit
+    req->regionCount = d->regionCount;
+    for (int i = 0; i < d->regionCount; i++) {
+        DesignRegionInfo *r = &req->regions[i];
+        DesignerAnalyzeRegion(cam, width, height, d->regions[i].rect, r);
+        int objects = r->objectCount + r->omittedObjects;
+        TraceLog(LOG_INFO, "monolith: region %d: %.0fx%.0f px, %dx%d rays, %d object%s, sky %.0f%%, %.1f ms (%d boxes)",
+                 i + 1, r->rect.width, r->rect.height, r->gridW, r->gridH, objects, objects == 1 ? "" : "s",
+                 100.0f * r->sky, r->ms, world.count);
+    }
 }
 
 // #endregion
@@ -561,6 +890,7 @@ void DesignerBuildRequest(const Designer *d, Camera3D cam, float yaw, float pitc
 
 #define SEL_COLOR   (Color){ 255, 160, 40, 255 }
 #define HIT_COLOR   (Color){ 90, 220, 255, 255 }
+#define REGION_COLOR (Color){ 240, 90, 220, 255 }
 
 // Distance from the eye to the nearest point of a box (0 inside)
 static float BoxDistance(BoundingBox b, Vector3 p)
@@ -739,6 +1069,90 @@ int DesignerDrawHud(const Designer *d, int x, int y)
     return y - y0;
 }
 
+// Darkens everything outside the rectangles (whole pixels): horizontal bands between the
+// rectangles' y edges, and in each band the gaps between the rectangles spanning it
+static void DimOutside(const Rectangle *rects, int n, int w, int h, Color c)
+{
+    float ys[2 * (MAX_REGIONS + 1) + 2];
+    int ny = 0;
+    ys[ny++] = 0.0f;
+    ys[ny++] = (float)h;
+    for (int i = 0; i < n; i++) { ys[ny++] = rects[i].y; ys[ny++] = rects[i].y + rects[i].height; }
+    for (int i = 1; i < ny; i++)    // insertion sort, a few dozen values at most
+        for (int j = i; j > 0 && ys[j] < ys[j - 1]; j--) { float t = ys[j]; ys[j] = ys[j - 1]; ys[j - 1] = t; }
+
+    for (int b = 0; b + 1 < ny; b++) {
+        float y0 = ys[b], y1 = ys[b + 1];
+        if (y1 <= y0) continue;
+        Vector2 xs[MAX_REGIONS + 1];    // x = left, y = right edge of each rectangle in the band
+        int nx = 0;
+        for (int i = 0; i < n; i++) {
+            if (rects[i].y > y0 || rects[i].y + rects[i].height < y1) continue;
+            xs[nx] = (Vector2){ rects[i].x, rects[i].x + rects[i].width };
+            for (int j = nx++; j > 0 && xs[j].x < xs[j - 1].x; j--) { Vector2 t = xs[j]; xs[j] = xs[j - 1]; xs[j - 1] = t; }
+        }
+        float x = 0.0f;
+        for (int i = 0; i < nx; i++) {
+            if (xs[i].x > x) DrawRectangleRec((Rectangle){ x, y0, xs[i].x - x, y1 - y0 }, c);
+            x = fmaxf(x, xs[i].y);
+        }
+        if (x < w) DrawRectangleRec((Rectangle){ x, y0, w - x, y1 - y0 }, c);
+    }
+}
+
+// Outline with a dark rim (reads on bright fog and in shade alike) and a label tab with
+// the number (0 = none) and, if asked, the pixel size
+static void DrawRegionFrame(Rectangle r, int number, bool size, int w)
+{
+    DrawRectangleLinesEx((Rectangle){ r.x - 1, r.y - 1, r.width + 2, r.height + 2 }, 1.0f, (Color){ 0, 0, 0, 170 });
+    DrawRectangleLinesEx((Rectangle){ r.x + 2, r.y + 2, r.width - 4, r.height - 4 }, 1.0f, (Color){ 0, 0, 0, 90 });
+    DrawRectangleLinesEx(r, 2.0f, REGION_COLOR);
+    char text[64];
+    if (number > 0 && size) snprintf(text, sizeof(text), "%d   %.0f x %.0f", number, r.width, r.height);
+    else if (number > 0) snprintf(text, sizeof(text), "%d", number);
+    else snprintf(text, sizeof(text), "%.0f x %.0f", r.width, r.height);
+    int tw = MeasureText(text, 16) + 8, th = 20;
+    // Above the top-left corner, or inside the rect at the top of the screen; kept on screen
+    int lx = (int)r.x, ly = r.y >= th ? (int)r.y - th : (int)r.y + 2;
+    if (lx + tw > w) lx = w - tw;
+    if (lx < 0) lx = 0;
+    DrawRectangle(lx, ly, tw, th, REGION_COLOR);
+    DrawText(text, lx + 4, ly + 2, 16, (Color){ 20, 10, 20, 255 });
+}
+
+void DesignerDrawRegions(const Designer *d, int w, int h, bool marked)
+{
+    if (marked) {
+        for (int i = 0; i < d->regionCount; i++) DrawRegionFrame(d->regions[i].rect, i + 1, false, w);
+        return;
+    }
+    if (!d->snipping) return;
+
+    // A plain drag replaces the regions, so while it runs only the new one shows
+    Rectangle rects[MAX_REGIONS + 1];
+    int n = 0;
+    bool replacing = d->dragging && !d->dragAdd;
+    if (!replacing) for (int i = 0; i < d->regionCount; i++) rects[n++] = d->regions[i].rect;
+    Rectangle drag = d->dragging ? DragRect(d) : (Rectangle){ 0 };
+    if (d->dragging) rects[n++] = drag;
+
+    DimOutside(rects, n, w, h, (Color){ 0, 0, 0, 120 });
+    if (!replacing)
+        for (int i = 0; i < d->regionCount; i++) DrawRegionFrame(d->regions[i].rect, i + 1, true, w);
+    if (d->dragging && drag.width > 0.0f && drag.height > 0.0f) {
+        int number = replacing ? 1 : d->regionCount < MAX_REGIONS ? d->regionCount + 1 : 0;
+        DrawRegionFrame(drag, number, true, w);
+    }
+
+    if (!d->promptOpen) {
+        const char *help = TextFormat("SNIP   drag: new region  |  SHIFT+drag: add  |  ENTER: request  |  RMB / ESC / C: cancel"
+                                      "   (%d/%d)", d->regionCount, MAX_REGIONS);
+        int tw = MeasureText(help, 18);
+        DrawRectangle((w - tw) / 2 - 10, h - 64, tw + 20, 28, (Color){ 16, 16, 18, 200 });
+        DrawText(help, (w - tw) / 2, h - 59, 18, (Color){ 240, 238, 232, 230 });
+    }
+}
+
 void DesignerDrawPrompt(Designer *d, int w, int h)
 {
     int msgY = h - 100;
@@ -757,8 +1171,11 @@ void DesignerDrawPrompt(Designer *d, int w, int h)
         DrawRectangleLinesEx(box, 1.0f, (Color){ 230, 230, 230, 90 });
 
         int tx = (int)box.x + PROMPT_PAD, ty = (int)box.y + PROMPT_PAD;
-        DrawText(TextFormat("Request for Claude   (%d selected%s)   Enter send  |  Shift+Enter new line  |  Ctrl+V paste  |  Esc cancel",
-                 d->selectedCount, d->hit.box >= 0 ? " + crosshair point" : ""), tx, ty, 16, (Color){ 230, 230, 230, 140 });
+        char regions[32] = "";
+        if (d->regionCount > 0) snprintf(regions, sizeof(regions), " + %d region%s", d->regionCount, d->regionCount == 1 ? "" : "s");
+        DrawText(TextFormat("Request for Claude   (%d selected%s%s)   Enter send  |  Shift+Enter new line  |  Ctrl+V paste  |  Esc %s",
+                 d->selectedCount, d->hit.box >= 0 ? " + crosshair point" : "", regions,
+                 d->snipping ? "back to snip" : "cancel"), tx, ty, 16, (Color){ 230, 230, 230, 140 });
         const char *counter = TextFormat("%d / %d", d->promptLen, PROMPT_MAX - 1);
         Color counterColor = d->promptLen >= PROMPT_MAX - 1 ? (Color){ 255, 110, 90, 230 } : (Color){ 230, 230, 230, 140 };
         DrawText(counter, (int)(box.x + box.width) - PROMPT_PAD - MeasureText(counter, 16), ty, 16, counterColor);
@@ -767,7 +1184,9 @@ void DesignerDrawPrompt(Designer *d, int w, int h)
         Font font = GetFontDefault();
         Color ink = { 240, 238, 232, 255 };
         if (d->promptLen == 0) {
-            DrawTextEx(font, "Describe the change. The crosshair point and the selected boxes are sent along.",
+            DrawTextEx(font, d->regionCount > 0
+                       ? "Describe the change. The crosshair point, the selected boxes and the screen regions are sent along."
+                       : "Describe the change. The crosshair point and the selected boxes are sent along.",
                        (Vector2){ (float)tx, (float)ty }, PROMPT_FONT, PROMPT_SPACING, (Color){ 240, 238, 232, 90 });
         }
         static char buf[PROMPT_MAX];

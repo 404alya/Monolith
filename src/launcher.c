@@ -1,7 +1,8 @@
 // Launcher: request bundles, Claude Code in a new terminal, polling for result.md
 //
 // A submitted request becomes a self-contained folder requests/<YYYY-MM-DD_HHMMSS>_<slug>/
-// (view.png, view-marked.png, request.md, request.json). Then a new terminal window runs
+// (view.png, view-marked.png, region-<n>.png per screen region, request.md, request.json;
+// bundle format 2, docs/design-v2.md section 5). Then a new terminal window runs
 // `claude [MONOLITH_CLAUDE_ARGS] "Map edit request: read requests/<id>/request.md and
 // carry it out."` in the repo root. The user's prompt never goes on a command line: it
 // only lives in the bundle, and the process is started from an argv array (no shell).
@@ -200,6 +201,26 @@ static const char *GroupName(int g)
     return (g >= 0 && g < world.groupCount) ? world.groups[g] : "(no group)";
 }
 
+// Object references ({kind, index}, designer.h). The bundle's per-object lookups go through
+// these, so models (and the scene runtime's arrays) only need a case here.
+static bool ObjValid(MS_ObjRef o) { return o.kind == MS_OBJ_BOX && o.index >= 0 && o.index < world.count; }
+static const char *ObjKindName(MS_ObjRef o) { return o.kind == MS_OBJ_BOX ? "box" : o.kind == MS_OBJ_MODEL ? "model" : "none"; }
+static BoundingBox ObjBounds(MS_ObjRef o) { return world.items[o.index]; }
+static int ObjLine(MS_ObjRef o) { return world.refs[o.index].line; }
+static int ObjGroup(MS_ObjRef o) { return world.refs[o.index].group; }
+// Material name; NULL while maps have no named materials
+static const char *ObjMaterial(MS_ObjRef o) { (void)o; return NULL; }
+#define MAP_MATERIALS 1         // today every box uses the one surface material
+#define MAP_FORMAT_VERSION 1    // what today's loader reads (format 2 comes with the scene runtime)
+
+// Index of a box among the boxes of its map line
+static int ObjNth(MS_ObjRef o)
+{
+    int nth = 0, line = ObjLine(o);
+    for (int i = 0; i < o.index; i++) if (world.refs[i].line == line) nth++;
+    return nth;
+}
+
 // #endregion
 
 // ======================================================================================
@@ -238,6 +259,8 @@ typedef struct {
     int nearbyCount;
     Vector3 nearbyCenter;
     char binary[1024], mapPath[1024], prompt[256];
+    char package[1024];                 // folder of the map file
+    char brief[1100];                   // <package>/MAP.md if it exists, else ""
     char binaryQ[2100], mapPathQ[2100];     // shell-quoted
     char shotCmd[6144];
     bool stale;                         // world changed between the snapshot and now
@@ -262,9 +285,9 @@ static void BuildBundle(Bundle *B, const DesignRequest *req)
     B->hit = req->hit.box >= 0 && req->hit.box < world.count;
     if (B->hit) B->hitHasLine = MapGetLine(world.refs[req->hit.box].line, B->hitLine, sizeof(B->hitLine));
 
-    // Selection: drop invalid indices, then group by line
+    // Selection: drop invalid references, then group by line
     for (int i = 0; i < req->selectedCount && i < MAX_SELECTION; i++)
-        if (req->selected[i] >= 0 && req->selected[i] < world.count) B->sel[B->selCount++] = req->selected[i];
+        if (ObjValid(req->selected[i])) B->sel[B->selCount++] = req->selected[i].index;
     for (int i = 0; i < B->selCount; i++) {
         int line = world.refs[B->sel[i]].line, k = 0;
         while (k < B->selLineCount && B->selLines[k].line != line) k++;
@@ -298,6 +321,9 @@ static void BuildBundle(Bundle *B, const DesignRequest *req)
 
     BinaryPath(B->binary, sizeof(B->binary));
     AbsPath(world.path, B->mapPath, sizeof(B->mapPath));
+    snprintf(B->package, sizeof(B->package), "%s", GetDirectoryPath(B->mapPath));
+    snprintf(B->brief, sizeof(B->brief), "%s/MAP.md", B->package);
+    if (!FileExists(B->brief)) B->brief[0] = 0;
     ShellQuote(B->binary, B->binaryQ, sizeof(B->binaryQ));
     ShellQuote(B->mapPath, B->mapPathQ, sizeof(B->mapPathQ));
     snprintf(B->shotCmd, sizeof(B->shotCmd), "%s --shot requests/%s/before.png --shot-size %d %d --eye %.6f %.6f %.6f --look %.6f %.6f --map %s",
@@ -339,6 +365,85 @@ static void MdLine(FILE *f, int line)
     } else fprintf(f, "Not from a map line.\n\n");
 }
 
+static void MdRegionObject(FILE *f, MS_ObjRef o)
+{
+    fprintf(f, "%s #%d, group \"%s\", line %d", ObjKindName(o), o.index, GroupName(ObjGroup(o)), ObjLine(o));
+    if (ObjMaterial(o)) fprintf(f, ", material \"%s\"", ObjMaterial(o));
+}
+
+#define MD_REGION_ROWS 40   // objects per region in request.md (request.json lists them all)
+
+static void WriteRegionsMd(FILE *f, const Bundle *B)
+{
+    const DesignRequest *r = B->req;
+    fprintf(f, "## Screen regions (%d)\n\n", r->regionCount);
+    if (r->regionCount == 0) {
+        fprintf(f, "None: no region was dragged out.\n\n");
+        return;
+    }
+    fprintf(f, "The developer dragged these rectangles over the frame (snip mode). Rects are pixels of "
+               "`view.png` (x, y of the top-left corner, then width x height); `view-marked.png` outlines and "
+               "numbers them. *Objects* are what the region shows, from a regular grid of rays through it: "
+               "share = fraction of the rays that hit that object first, sky = fraction that hit nothing. "
+               "Depth = distance from the eye over the rays that hit something. Computed at submit time.\n\n");
+    for (int i = 0; i < r->regionCount; i++) {
+        const DesignRegionInfo *g = &r->regions[i];
+        fprintf(f, "### Region %d (`region-%d.png`)\n\n", i + 1, i + 1);
+        fprintf(f, "| | |\n|---|---|\n");
+        fprintf(f, "| rect | x %.0f, y %.0f, %.0f x %.0f px (normalised %.4f, %.4f, %.4f, %.4f) |\n",
+                g->rect.x, g->rect.y, g->rect.width, g->rect.height, g->rect.x / r->width, g->rect.y / r->height,
+                g->rect.width / r->width, g->rect.height / r->height);
+        fprintf(f, "| centre | ");
+        if (ObjValid(g->centerObj)) {
+            MdRegionObject(f, g->centerObj);
+            fprintf(f, "; point "); MdVec(f, g->centerPoint);
+            fprintf(f, ", normal "); MdVec(f, g->centerNormal);
+            fprintf(f, ", %.2f m |\n", g->centerDist);
+        } else fprintf(f, "sky (no object under the centre) |\n");
+        if (g->hasDepth) fprintf(f, "| depth | %.2f - %.2f m |\n", g->depthMin, g->depthMax);
+        else fprintf(f, "| depth | - (only sky) |\n");
+        fprintf(f, "| sky | %.1f%% |\n", 100.0f * g->sky);
+        fprintf(f, "| rays | %d x %d |\n\n", g->gridW, g->gridH);
+
+        if (g->objectCount == 0) { fprintf(f, "No objects in this region.\n\n"); continue; }
+        fprintf(f, "| share | object | group | line | min | max |\n|---|---|---|---|---|---|\n");
+        int rows = g->objectCount < MD_REGION_ROWS ? g->objectCount : MD_REGION_ROWS;
+        for (int k = 0; k < rows; k++) {
+            MS_ObjRef o = g->objects[k].obj;
+            if (!ObjValid(o)) continue;
+            BoundingBox b = ObjBounds(o);
+            fprintf(f, "| %.1f%% | %s #%d | %s | %d | ", 100.0f * g->objects[k].share, ObjKindName(o), o.index,
+                    GroupName(ObjGroup(o)), ObjLine(o));
+            MdVec(f, b.min); fprintf(f, " | "); MdVec(f, b.max); fprintf(f, " |\n");
+        }
+        int more = g->objectCount - rows + g->omittedObjects;
+        if (more > 0) {
+            float share = g->omittedShare;
+            for (int k = rows; k < g->objectCount; k++) share += g->objects[k].share;
+            fprintf(f, "| %.1f%% | %d more object%s (see `request.json`) | | | | |\n", 100.0f * share, more, more == 1 ? "" : "s");
+        }
+        fprintf(f, "\n");
+
+        // The map lines behind the listed objects, each quoted once
+        static char text[MAP_LINE_MAX + 1], block[16384];
+        int lines[MD_REGION_ROWS], lineCount = 0, n = 0;
+        block[0] = 0;
+        for (int k = 0; k < rows; k++) {
+            if (!ObjValid(g->objects[k].obj)) continue;
+            int line = ObjLine(g->objects[k].obj);
+            bool seen = false;
+            for (int j = 0; j < lineCount; j++) seen |= lines[j] == line;
+            if (seen || line <= 0 || !MapGetLine(line, text, sizeof(text))) continue;
+            lines[lineCount++] = line;
+            if (n < (int)sizeof(block) - 1) n += snprintf(block + n, sizeof(block) - n, "%d: %s\n", line, text);
+        }
+        if (lineCount > 0) {
+            fprintf(f, "Map lines of these objects:\n\n");
+            MdFence(f, block, "");
+        }
+    }
+}
+
 static bool WriteRequestMd(const char *path, const Bundle *B)
 {
     const DesignRequest *r = B->req;
@@ -346,7 +451,9 @@ static bool WriteRequestMd(const char *path, const Bundle *B)
     if (!f) return false;
 
     fprintf(f, "# Map edit request: %s\n\n", B->slug);
-    fprintf(f, "Request `%s`, submitted %s from the monolith map designer.\n\n", B->id, B->created);
+    fprintf(f, "Request `%s`, submitted %s from the monolith map designer. Bundle format 2: besides the "
+               "crosshair hit and the selected objects it may contain **screen regions** the developer "
+               "dragged over the frame (see *Screen regions* below and `AI-MAP-TOOL.md`).\n\n", B->id, B->created);
     fprintf(f, "**First** read `CLAUDE.md` and `AI-MAP-TOOL.md` in the repository root (if they are not "
                "loaded already); they explain the map format, the conventions and how to verify an edit. "
                "Then carry out the request below.\n\n"
@@ -361,6 +468,11 @@ static bool WriteRequestMd(const char *path, const Bundle *B)
     fprintf(f, "## Prompt\n\nThe user's words, verbatim:\n\n");
     MdFence(f, r->prompt, "text");
 
+    fprintf(f, "## Design brief\n\n");
+    if (B->brief[0]) fprintf(f, "Read `%s` before anything else: it is this map's design brief (style, scale, "
+                                "materials, rules for new content).\n\n", B->brief);
+    else fprintf(f, "This map has no design brief (no `MAP.md` next to the map file).\n\n");
+
     fprintf(f, "## Camera\n\n");
     fprintf(f, "- eye: "); MdVec(f, r->eye); fprintf(f, "\n");
     fprintf(f, "- yaw %.2f deg, pitch %.2f deg. Convention: yaw 0 looks toward +Z, yaw 180 toward -Z, "
@@ -369,7 +481,8 @@ static bool WriteRequestMd(const char *path, const Bundle *B)
     fprintf(f, "- right: "); MdVec(f, B->right); fprintf(f, " = (-cos yaw, 0, sin yaw); up is +Y\n");
     fprintf(f, "- fovy %.1f deg (vertical), aspect %.4f, resolution %d x %d\n\n", r->fovy, B->aspect, r->width, r->height);
     fprintf(f, "Images in this folder: `view.png` (the frame without HUD) and `view-marked.png` (the same "
-               "frame with the selection highlighted and the crosshair hit marked).\n\n");
+               "frame with the selection highlighted, the crosshair hit marked and the screen regions "
+               "outlined and numbered)%s.\n\n", r->regionCount ? ", plus one crop `region-<n>.png` per region" : "");
 
     fprintf(f, "## Crosshair hit\n\n");
     if (B->hit) {
@@ -378,7 +491,7 @@ static bool WriteRequestMd(const char *path, const Bundle *B)
         fprintf(f, "- point: "); MdVec(f, r->hit.point); fprintf(f, "\n");
         fprintf(f, "- face normal: "); MdVec(f, r->hit.normal); fprintf(f, "\n");
         fprintf(f, "- distance from the eye: %.2f m\n", r->hit.dist);
-        fprintf(f, "- box #%d: min ", r->hit.box); MdVec(f, b.min); fprintf(f, ", max "); MdVec(f, b.max); fprintf(f, "\n");
+        fprintf(f, "- object: box #%d (kind `box`, index %d): min ", r->hit.box, r->hit.box); MdVec(f, b.min); fprintf(f, ", max "); MdVec(f, b.max); fprintf(f, "\n");
         fprintf(f, "- group: \"%s\"\n\n", GroupName(ref.group));
         MdLine(f, ref.line);
     } else {
@@ -405,6 +518,8 @@ static bool WriteRequestMd(const char *path, const Bundle *B)
         fprintf(f, "\n");
     }
 
+    WriteRegionsMd(f, B);
+
     fprintf(f, "## Nearby\n\nGroups with a box within %.0f m of the %s ", NEARBY_RADIUS, B->hit ? "hit point" : "eye");
     MdVec(f, B->nearbyCenter);
     fprintf(f, ", nearest first. The map lines are the range over the whole group.\n\n");
@@ -425,13 +540,15 @@ static bool WriteRequestMd(const char *path, const Bundle *B)
     MdFence(f, B->shotCmd, "sh");
 
     fprintf(f, "## Map\n\n");
-    fprintf(f, "- file: `%s`\n", B->mapPath);
+    fprintf(f, "- file: `%s` (format %d)\n", B->mapPath, MAP_FORMAT_VERSION);
+    if (B->brief[0]) fprintf(f, "- package (folder): `%s`; design brief: `%s`\n", B->package, B->brief);
+    else fprintf(f, "- package (folder): `%s`; design brief: none\n", B->package);
     char when[32] = "?";
     time_t mt = (time_t)world.mtime;
     struct tm *tm = localtime(&mt);
     if (tm) strftime(when, sizeof(when), "%Y-%m-%d %H:%M:%S", tm);
-    fprintf(f, "- at submit: FNV-1a 64 hash `%016llx`, mtime %ld (%s), load #%u, %d boxes, %d groups\n\n",
-            world.hash, world.mtime, when, world.version, world.count, world.groupCount);
+    fprintf(f, "- at submit: FNV-1a 64 hash `%016llx`, mtime %ld (%s), load #%u, %d boxes, 0 models, %d groups, %d material%s\n\n",
+            world.hash, world.mtime, when, world.version, world.count, world.groupCount, MAP_MATERIALS, MAP_MATERIALS == 1 ? "" : "s");
     fprintf(f, "Several requests can run at once. Before editing, check that the file still has this hash; "
                "if not, it changed since this request was submitted (maybe another request edited it): "
                "re-read it, the line numbers above may have moved.\n\n");
@@ -496,13 +613,19 @@ static void JsonLineText(FILE *f, int line)
     else fputs("null", f);
 }
 
+static void JsonMaterial(FILE *f, MS_ObjRef o)
+{
+    if (ObjMaterial(o)) JsonStr(f, ObjMaterial(o));
+    else fputs("null", f);
+}
+
 static bool WriteRequestJson(const char *path, const Bundle *B)
 {
     const DesignRequest *r = B->req;
     FILE *f = fopen(path, "wb");
     if (!f) return false;
 
-    fprintf(f, "{\n  \"format\": 1,\n  \"id\": "); JsonStr(f, B->id);
+    fprintf(f, "{\n  \"format\": 2,\n  \"kind\": \"edit\",\n  \"id\": "); JsonStr(f, B->id);
     fprintf(f, ",\n  \"slug\": "); JsonStr(f, B->slug);
     fprintf(f, ",\n  \"created\": "); JsonStr(f, B->created);
     fprintf(f, ",\n  \"instructions\": ");
@@ -522,13 +645,17 @@ static bool WriteRequestJson(const char *path, const Bundle *B)
     fprintf(f, ",\n    \"fovyDeg\": "); JsonNum(f, r->fovy);
     fprintf(f, ",\n    \"aspect\": "); JsonNum(f, B->aspect);
     fprintf(f, ",\n    \"width\": %d,\n    \"height\": %d\n  }", r->width, r->height);
-    fprintf(f, ",\n  \"images\": { \"view\": \"view.png\", \"marked\": \"view-marked.png\" }");
+    fprintf(f, ",\n  \"images\": { \"view\": \"view.png\", \"marked\": \"view-marked.png\", \"regions\": [");
+    for (int i = 0; i < r->regionCount; i++) fprintf(f, "%s\"region-%d.png\"", i ? ", " : "", i + 1);
+    fprintf(f, "] }");
 
     fprintf(f, ",\n  \"hit\": ");
     if (B->hit) {
         BoundingBox b = world.items[r->hit.box];
         BoxRef ref = world.refs[r->hit.box];
-        fprintf(f, "{\n    \"point\": "); JsonVec(f, r->hit.point);
+        fprintf(f, "{\n    \"kind\": \"box\",\n    \"index\": %d", r->hit.box);
+        fprintf(f, ",\n    \"material\": "); JsonMaterial(f, (MS_ObjRef){ MS_OBJ_BOX, r->hit.box });
+        fprintf(f, ",\n    \"point\": "); JsonVec(f, r->hit.point);
         fprintf(f, ",\n    \"normal\": "); JsonVec(f, r->hit.normal);
         fprintf(f, ",\n    \"distance\": "); JsonNum(f, r->hit.dist);
         fprintf(f, ",\n    \"box\": %d,\n    \"min\": ", r->hit.box); JsonVec(f, b.min);
@@ -544,10 +671,14 @@ static bool WriteRequestJson(const char *path, const Bundle *B)
         fprintf(f, "%s\n    {\n      \"line\": %d,\n      \"lineText\": ", k ? "," : "", sl->line);
         JsonLineText(f, sl->line);
         fprintf(f, ",\n      \"group\": "); JsonStr(f, GroupName(world.refs[B->selOrder[sl->first]].group));
-        fprintf(f, ",\n      \"boxes\": [");
+        fprintf(f, ",\n      \"objects\": [");
         for (int i = sl->first; i < sl->first + sl->count; i++) {
-            BoundingBox b = world.items[B->selOrder[i]];
-            fprintf(f, "%s\n        { \"box\": %d, \"min\": ", i > sl->first ? "," : "", B->selOrder[i]);
+            MS_ObjRef o = { MS_OBJ_BOX, B->selOrder[i] };
+            BoundingBox b = ObjBounds(o);
+            fprintf(f, "%s\n        { \"kind\": \"%s\", \"index\": %d, \"box\": %d, \"nth\": %d, \"material\": ",
+                    i > sl->first ? "," : "", ObjKindName(o), o.index, o.index, ObjNth(o));
+            JsonMaterial(f, o);
+            fprintf(f, ", \"min\": ");
             JsonVec(f, b.min);
             fprintf(f, ", \"max\": "); JsonVec(f, b.max);
             fprintf(f, ", \"center\": "); JsonVec(f, Vector3Scale(Vector3Add(b.min, b.max), 0.5f));
@@ -557,6 +688,48 @@ static bool WriteRequestJson(const char *path, const Bundle *B)
         fprintf(f, "\n      ]\n    }");
     }
     fprintf(f, "%s],\n  \"selectedCount\": %d", B->selLineCount ? "\n  " : "", B->selCount);
+
+    fprintf(f, ",\n  \"regions\": [");
+    for (int i = 0; i < r->regionCount; i++) {
+        const DesignRegionInfo *g = &r->regions[i];
+        fprintf(f, "%s\n    {\n      \"index\": %d,\n      \"rect\": [%.0f, %.0f, %.0f, %.0f],\n      \"rectNorm\": [",
+                i ? "," : "", i + 1, g->rect.x, g->rect.y, g->rect.width, g->rect.height);
+        JsonNum(f, g->rect.x / r->width); fputs(", ", f); JsonNum(f, g->rect.y / r->height); fputs(", ", f);
+        JsonNum(f, g->rect.width / r->width); fputs(", ", f); JsonNum(f, g->rect.height / r->height);
+        fprintf(f, "],\n      \"crop\": \"region-%d.png\",\n      \"center\": ", i + 1);
+        if (ObjValid(g->centerObj)) {
+            fprintf(f, "{ \"point\": "); JsonVec(f, g->centerPoint);
+            fprintf(f, ", \"normal\": "); JsonVec(f, g->centerNormal);
+            fprintf(f, ", \"kind\": \"%s\", \"index\": %d, \"distance\": ", ObjKindName(g->centerObj), g->centerObj.index);
+            JsonNum(f, g->centerDist);
+            fprintf(f, ", \"line\": %d, \"group\": ", ObjLine(g->centerObj)); JsonStr(f, GroupName(ObjGroup(g->centerObj)));
+            fprintf(f, " }");
+        } else fprintf(f, "null");
+        fprintf(f, ",\n      \"depth\": ");
+        if (g->hasDepth) {
+            fprintf(f, "{ \"min\": "); JsonNum(f, g->depthMin); fprintf(f, ", \"max\": "); JsonNum(f, g->depthMax); fprintf(f, " }");
+        } else fprintf(f, "null");
+        fprintf(f, ",\n      \"samples\": %d,\n      \"grid\": [%d, %d],\n      \"objects\": [", g->gridW * g->gridH, g->gridW, g->gridH);
+        int listed = 0;
+        for (int k = 0; k < g->objectCount; k++) {
+            MS_ObjRef o = g->objects[k].obj;
+            if (!ObjValid(o)) continue;
+            BoundingBox b = ObjBounds(o);
+            fprintf(f, "%s\n        { \"kind\": \"%s\", \"index\": %d, \"line\": %d, \"group\": ",
+                    listed++ ? "," : "", ObjKindName(o), o.index, ObjLine(o));
+            JsonStr(f, GroupName(ObjGroup(o)));
+            fprintf(f, ", \"material\": "); JsonMaterial(f, o);
+            fprintf(f, ", \"share\": "); JsonNum(f, g->objects[k].share);
+            fprintf(f, ", \"min\": "); JsonVec(f, b.min);
+            fprintf(f, ", \"max\": "); JsonVec(f, b.max);
+            fprintf(f, " }");
+        }
+        fprintf(f, "%s],\n      \"omittedObjects\": %d,\n      \"omittedShare\": ", listed ? "\n      " : "", g->omittedObjects);
+        JsonNum(f, g->omittedShare);
+        fprintf(f, ",\n      \"sky\": "); JsonNum(f, g->sky);
+        fprintf(f, "\n    }");
+    }
+    fprintf(f, "%s]", r->regionCount ? "\n  " : "");
 
     fprintf(f, ",\n  \"nearby\": {\n    \"center\": "); JsonVec(f, B->nearbyCenter);
     fprintf(f, ",\n    \"centerIs\": \"%s\",\n    \"radius\": ", B->hit ? "hit" : "eye"); JsonNum(f, NEARBY_RADIUS);
@@ -579,9 +752,13 @@ static bool WriteRequestJson(const char *path, const Bundle *B)
     fprintf(f, "]\n  }");
 
     fprintf(f, ",\n  \"map\": {\n    \"path\": "); JsonStr(f, B->mapPath);
+    fprintf(f, ",\n    \"package\": "); JsonStr(f, B->package);
+    fprintf(f, ",\n    \"brief\": ");
+    if (B->brief[0]) JsonStr(f, B->brief); else fputs("null", f);
+    fprintf(f, ",\n    \"formatVersion\": %d", MAP_FORMAT_VERSION);
     fprintf(f, ",\n    \"hash\": \"%016llx\",\n    \"hashAlgorithm\": \"FNV-1a 64 of the file bytes\"", world.hash);
-    fprintf(f, ",\n    \"mtime\": %ld,\n    \"version\": %u,\n    \"boxes\": %d,\n    \"groups\": %d\n  }\n}\n",
-            world.mtime, world.version, world.count, world.groupCount);
+    fprintf(f, ",\n    \"mtime\": %ld,\n    \"version\": %u,\n    \"boxes\": %d,\n    \"models\": 0,\n    \"groups\": %d,\n    \"materials\": %d\n  }\n}\n",
+            world.mtime, world.version, world.count, world.groupCount, MAP_MATERIALS);
 
     return fclose(f) == 0;
 }
@@ -1039,6 +1216,17 @@ bool LauncherSubmit(const DesignRequest *req, Image view, Image marked, char *ms
     if (view.data) ok &= ExportImage(view, path);
     snprintf(path, sizeof(path), "%sview-marked.png", dir);
     if (marked.data) ok &= ExportImage(marked, path);
+    // One crop per region, from view.png's pixels
+    for (int i = 0; i < req->regionCount && view.data; i++) {
+        Rectangle r = req->regions[i].rect;
+        float x0 = Clamp(r.x, 0.0f, (float)view.width), y0 = Clamp(r.y, 0.0f, (float)view.height);
+        float x1 = Clamp(r.x + r.width, 0.0f, (float)view.width), y1 = Clamp(r.y + r.height, 0.0f, (float)view.height);
+        if (x1 - x0 < 1.0f || y1 - y0 < 1.0f) continue;
+        Image crop = ImageFromImage(view, (Rectangle){ x0, y0, x1 - x0, y1 - y0 });
+        snprintf(path, sizeof(path), "%sregion-%d.png", dir, i + 1);
+        ok &= ExportImage(crop, path);
+        UnloadImage(crop);
+    }
     snprintf(path, sizeof(path), "%srequest.md", dir);
     ok &= WriteRequestMd(path, &B);
     snprintf(path, sizeof(path), "%srequest.json", dir);

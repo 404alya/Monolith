@@ -281,6 +281,15 @@ Region object visibility: dense ray sampling with `MS_Raycast` over the region (
 ~4096 rays per region, a regular grid), or an object-ID render; either way the result
 lists every object that covers at least one sample.
 
+As implemented (stream E): ray sampling through one function, `RegionPick` in `designer.c`,
+which tests per-region candidate lists (boxes culled to the region's and then each 8x8-ray
+tile's frustum, nearest first) and returns exactly the crosshair pick's hit; ~6 ms per
+full-screen region at 8192 boxes. Extra keys beyond the schema above: `images.regions`;
+`hit.box` and selection `objects[].box` (format 1 names, = `index`); `regions[].center.line`
+/ `.group`; `regions[].samples`, `.grid` `[w, h]`, `.omittedObjects` / `.omittedShare`
+(objects beyond the 256 listed per region); `regions[].objects[].min` / `.max`. `depth` is the
+distance from the eye.
+
 ---
 
 ## 6. Controls and defaults chosen for the developer's calls
