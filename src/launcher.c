@@ -32,7 +32,7 @@
 //     after --model. Default none. A --model in them replaces the chosen one.
 //   - workspace (i3 / sway): the new terminal is moved to workspace $MONOLITH_WORKSPACE
 //     (default 10; empty = leave it where it opens) with `i3-msg` (`swaymsg` when
-//     $SWAYSOCK is set) and the criteria [title="^monolith-claude: <slug>$"]. A detached
+//     $SWAYSOCK is set) and the criteria [title="^monolith-claude: <slug> <HHMMSS>$"]. A detached
 //     /bin/sh helper retries every 0.1 s for up to 10 s until the window exists, so the
 //     game never waits. A criteria `move container to workspace` doesn't switch the
 //     visible workspace; focus returns to the previously focused window. The window may
@@ -47,7 +47,7 @@
 //     group, and take it off the list (the bundle stays). MONOLITH_CLOSE_ON_EXIT=1 closes
 //     the finished ones when the game quits.
 //
-// Windows: the same bundle, then `cmd /c start "monolith-claude: <slug>" /D <root> cmd /k
+// Windows: the same bundle, then `cmd /c start "monolith-claude: <slug> <HHMMSS>" /D <root> cmd /k
 // "<claude>" <permission flags> --model <name> ...` via _spawnvp (no workspace move) (<process.h>, so no <windows.h> clash with raylib). Only
 // compile-tested; failures of `start` itself can't be seen from here.
 
