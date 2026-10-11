@@ -13,4 +13,5 @@ monolith is an **AI-assisted map designer** for brutalist concrete levels, writt
 - **Both targets build with zero warnings:** `./build.sh` and `./build.sh --win`, after any code change.
 - **Don't change how the scene looks without the developer's approval.** The exception is when the look is what the request asks for. Optimisations must be pixel-identical (prove it with `--shot` comparisons), or be presented as a trade-off with before/after images.
 - **Record every change under `submodules/r3d`** in `submodules/r3d/patches.md` (symptom, cause, files, diff, verification). Don't touch `~/Projects/r3d` or other projects.
+- **Never delete with `rm`** (or `rmdir`, `find -delete`, `unlink`): every `rm` needs the developer's approval. Move files to the trash instead with `gio trash <path>…` (works for folders too; the developer can restore them). This includes test bundles in `requests/`, scratch shots and temporary files in the repo.
 - **Don't commit unless asked.** Never commit `build/`, screenshots, `benchmark/` or `requests/`.

@@ -196,7 +196,7 @@ Selected boxes get an orange tint and outline, plus a faint always-on-top outlin
 |---|---|
 | `--pick` | With `--shot`: print what the crosshair (screen centre) hits on the shot frame: box index, group, map line + its text, point, normal, distance, box min/max. Works in walk mode too. |
 | `--select <line>` | Select every box made by this map line (repeatable, up to 64) |
-| `--submit "text"` | With `--shot`: after saving the shot, run the real submit path. It renders `view.png` + `view-marked.png` offscreen and calls `LauncherSubmit` with the centre pick and the `--select` boxes, then prints `submit: ok/failed: <message>`. **It writes a real bundle into `requests/` and launches a real terminal + Claude Code**, so for tests set `MONOLITH_TERMINAL` to a stub script that only logs its arguments, and delete the bundle afterwards. |
+| `--submit "text"` | With `--shot`: after saving the shot, run the real submit path. It renders `view.png` + `view-marked.png` offscreen and calls `LauncherSubmit` with the centre pick and the `--select` boxes, then prints `submit: ok/failed: <message>`. **It writes a real bundle into `requests/` and launches a real terminal + Claude Code**, so for tests set `MONOLITH_TERMINAL` to a stub script that only logs its arguments, and move the bundle to the trash afterwards (`gio trash requests/<id>`, never `rm`). |
 | `--type "text"` | Open the prompt box with this text (cursor at the end) |
 | `--shot-hud` | With `--shot`: draw the HUD, crosshair, selection overlay and prompt box into the shot. Plain shots never contain them. |
 | `--shot-size w h` | Size of `--shot` images (default 1600 × 900). Request bundles pass the window size in their reproduction command so it frames like `view.png`. |
@@ -426,7 +426,7 @@ There's no test suite; verification is **visual and numeric**:
 8. **Designer and launcher without a window:**
    - `--shot x.png --view 2 --pick` prints the centre hit. It must be a `hypostyle hall: pillars` box from map line 47, at distance ≈ 42.07 m.
    - `--shot-hud` (with `--select <line>` / `--type "text"`) puts the overlay, HUD and prompt box into the shot.
-   - `--submit "text"` runs the real submit path. **Always** with `MONOLITH_TERMINAL=/path/to/stub.sh` (a script that only logs its arguments), so no real terminal or Claude session starts. Delete the bundle from `requests/` afterwards.
+   - `--submit "text"` runs the real submit path. **Always** with `MONOLITH_TERMINAL=/path/to/stub.sh` (a script that only logs its arguments), so no real terminal or Claude session starts. Move the bundle to the trash afterwards (`gio trash requests/<id>`, never `rm`).
    - Mouse and keyboard input (clicks, typing, paste, Esc) can only be tested by hand.
 
 ## 9. Common modifications

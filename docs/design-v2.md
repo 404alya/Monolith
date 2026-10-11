@@ -1,0 +1,314 @@
+# monolith v2: design note (interfaces for the parallel work streams)
+
+Written before the v2 work fans out (`AI-MAP-DESIGNER-V2-PROMPT.md`). It fixes the shared
+interfaces; each stream works against them. A stream that has to change an interface
+updates this file in the same change and says so in its report.
+
+Goals in one line each: any style of map; a per-map design brief; models; export/import
+to plain raylib + R3D projects; `examples/`; Claude terminals on i3 workspace 10 with
+permission flags; screen-region selection.
+
+---
+
+## 1. Map package
+
+```
+maps/<name>/
+├── <name>.map        geometry, materials, models, lights, environment (format v2)
+├── MAP.md            design brief, read by the AI first on every request
+├── shaders/          surface shaders used by this map's materials
+├── models/           model files, each with a provenance sidecar <file>.asset.md
+├── textures/
+└── ASSETS.md         every external asset: source URL, author, licence (+URL), date, sha256, changes
+```
+
+- Every path inside a map file is **relative to the folder that contains the map file**
+  (the package root). Absolute paths and `..` components are rejected by the loader
+  (`file:line: path must stay inside the package`), so a package can be copied anywhere.
+- `--map <path>` accepts a package folder or a `.map` file. For a folder the loader uses
+  `<folder>/<basename of folder>.map`, else the only `*.map` inside it, else it fails with
+  a message listing what it found.
+- A single `.map` file outside a package (v1 or v2) loads too; its folder is its root.
+- The default map is `maps/monolith/` (`maps/monolith/monolith.map`). `concrete.glsl` moves
+  to `maps/monolith/shaders/concrete.glsl`; nothing else in the engine refers to it.
+- `--new-map <name>` creates `maps/<name>/` with `<name>.map` (format line, a ground slab,
+  a default material, the default environment written out), a `MAP.md` template with the
+  recommended sections (§1.1), empty `shaders/ models/ textures/` and an empty `ASSETS.md`.
+  It refuses to overwrite an existing folder.
+
+### 1.1 `MAP.md` (free-form Markdown; recommended sections)
+
+*Style and mood*, *Scale and walkability* (player size, step height, headroom, typical
+dimensions), *Materials and palette*, *Lighting and atmosphere*, *Rules for new content*
+(when to use boxes, when models are allowed, how models are restyled, polygon budget,
+texture size limit), *Groups and landmarks*. The default map's `MAP.md` takes over
+everything brutalist from the project docs.
+
+---
+
+## 2. Map format v2
+
+Format v1 (today's grammar: `group`, `box`, `block`, `stairs`, `waffle`, `repeat`, `at`)
+stays valid unchanged. v2 adds statements; still one statement per line, `#` comments,
+`"strings"` without escapes, numbers as plain decimals.
+
+### 2.1 Version line
+
+```
+monolith 2          first statement of the file (comments/blank lines may precede it)
+```
+
+- No version line: format 1. Only v1 statements are accepted; everything else uses the
+  built-in defaults (§2.6).
+- `monolith 2`: all statements below are accepted.
+- `monolith N` with N > the runtime's `MS_FORMAT_VERSION`:
+  `file:line: map format N is newer than this runtime supports (2); update monolith_scene`.
+
+### 2.2 Materials
+
+```
+material "name" key value [key value ...]
+use "name"                 following primitives (boxes and models) use this material,
+                           like `group`; `use "default"` goes back to the default
+```
+
+- Several `material` lines with the same name add to / override keys of one material, so
+  long definitions can span lines. A material must be defined before a `use` names it.
+- The material `"default"` always exists (built-in: plain PBR, albedo 180 180 180,
+  roughness 0.9, metalness 0). A map may redefine it with `material "default" ...`.
+- Keys (all optional):
+
+| Key | Values | R3D field |
+|---|---|---|
+| `shader` | `"shaders/x.glsl"` | `R3D_LoadSurfaceShader`; one shader instance per material (uniforms are global per shader, §7.4) |
+| `uniform` | `<name> f [f f f]` (repeatable) | `R3D_SetSurfaceShaderUniform`, float / vec2 / vec3 / vec4 |
+| `albedo` | `R G B [A]` (0–255 sRGB) | `albedo.color` |
+| `albedo_map` | `"textures/x.png"` | `albedo.texture` |
+| `normal_map`, `normal_scale` | path; float | `normal.texture`, `normal.scale` |
+| `orm_map` | path (R occlusion, G roughness, B metalness) | `orm.texture` |
+| `occlusion`, `roughness`, `metalness` | float | `orm.*` |
+| `emission`, `emission_energy`, `emission_map` | `R G B`; float; path | `emission.*` |
+| `uv_scale`, `uv_offset` | `u v` | `uvScale`, `uvOffset` |
+| `alpha_cutoff` | float (0 = never discards; enables the depth pre-pass for it) | `alphaCutoff` |
+| `cull` | `back` / `front` / `none` | `cullMode` |
+| `transparency` | `off` / `prepass` / `alpha` | `transparencyMode` |
+| `inherit` | `albedo` / `normal` / `orm` / `emission` / `all` (repeatable) | model overrides only: keep that map from the model's own material (§2.5) |
+
+- Rendering: **one instanced draw per material that has boxes** (the default map: one).
+- Picking, the HUD and request bundles name a box's or model's material.
+
+### 2.3 Environment
+
+```
+env <key> <value...>
+```
+
+Keys are dotted paths. Every key has a built-in default equal to today's hard-coded value
+(§2.6), so a v1 map renders as before apart from its material.
+
+- **R3D environment**: the `R3D_Environment` field names, e.g. `fog.mode exp2`,
+  `fog.color 150 148 143`, `fog.density 0.0085`, `fog.skyAffect 0.7`,
+  `volumetricFog.enabled on`, `volumetricFog.scatteringDensity 0.012`, `ssao.radius 1.2`,
+  `ssil.giIntensity 1.2`, `bloom.mode mix`, `bloom.intensity 0.04`, `tonemap.mode agx`,
+  `tonemap.exposure 0.9`, `color.saturation 0.8`, `ambient.energy 0.9`,
+  `background.color ...`, `ssr.*`, `ssgi.*`, `dof.*`, `autoExposure.*`.
+  Enums by lower-case name (`exp2`, `linear`, `exp`, `disabled`; `mix`, `additive`, `screen`;
+  `linear`, `reinhard`, `filmic`, `aces`, `agx`). Booleans `on`/`off`. Colours `R G B [A]`.
+  The table lives in one place in `monolith_scene.c` and covers every field, so imports
+  can express any R3D setup.
+- **Sky** (`sky.*`): `sky.mode procedural|color|panorama`, `sky.size 1024`,
+  `sky.panorama "textures/x.hdr"`, and the `R3D_ProceduralSky` fields
+  (`sky.skyTopColor`, `sky.skyHorizonColor`, `sky.skyHorizonCurve`, `sky.skyEnergy`,
+  `sky.groundBottomColor`, `sky.groundHorizonColor`, `sky.groundHorizonCurve`,
+  `sky.groundEnergy`, `sky.sunDirection`, `sky.sunColor`, `sky.sunSizeDeg`, `sky.sunCurve`,
+  `sky.sunEnergy`). `sky.sunDirection` defaults to `sun.direction`.
+- **Ambient-only sky** (`ambientSky.*`, §7.5 of PROMPT-INSTRUCTIONS): the same keys as
+  `sky.*`, applied to a copy of the visible sky that only feeds `R3D_GenAmbientMap`;
+  `ambientSky.size 256`; `ambientSky.mode same|procedural|off` (`same` = use the visible sky).
+- **Sun** (`sun.*`, the one shadowed directional light with the static shadow tiles):
+  `sun.enabled on`, `sun.direction x y z` (the direction light travels), `sun.color`,
+  `sun.energy`, `sun.specular`, `sun.fogEnergy`, `sun.range`, `sun.shadow on|off`,
+  `sun.softness`, `sun.depthBias`, `sun.slopeBias`. `--shadow <size> <range>` overrides
+  `shadow.size` / `sun.range`.
+- **Caches**: `shadow.size 8192`, and optional placement hints `shadow.home x y z` and
+  `fogCache.region x0 y0 z0 x1 y1 z1`. Without hints both are derived from the map bounds
+  (§4); a hint is only needed to reproduce an existing layout bit for bit.
+
+### 2.4 Lights, spawn, viewpoints
+
+```
+light point x y z [color R G B] [energy f] [range f] [falloff f] [specular f] [fogEnergy f] [shadow on|off]
+light spot  x y z dx dy dz [inner deg] [outer deg] [same keys as point]
+light dir   dx dy dz [color ...] [energy ...] [shadow on|off]     extra directional lights (no static tiles)
+spawn x y z yawDeg [pitchDeg]          player start, feet position
+viewpoint "Name" ex ey ez tx ty tz     spectator viewpoint (eye, target); order = 1..n for --view and --bench
+```
+
+`repeat` / `at` shift light positions (not directions). Lights belong to the current group.
+Without `spawn`: feet (0, 0, 0), yaw 0. Without viewpoints: one viewpoint from the spawn.
+The default map's player start `(0,0,90)` yaw 180 and the 7 `VIEWPOINTS[]` move into its
+map file (exact same floats).
+
+### 2.5 Models (Phase 2)
+
+```
+model "models/x.glb" x y z [rot yawDeg pitchDeg rollDeg] [scale s | scale sx sy sz]
+      [origin model|bottom|center] [material "name"] [material.N "name"]
+      [collide aabb|none|box x0 y0 z0 x1 y1 z1 [box ...]] [shadow on|off]
+```
+(one line; wrapped here for reading)
+
+- `x y z` are shifted by `repeat` / `at`. Rotation: yaw about +Y, pitch about +X, roll about
+  +Z, applied roll, then pitch, then yaw (`R = Ry · Rx · Rz`), degrees.
+- `origin`: `model` (default) puts the file's origin at x y z; `bottom` puts the bottom
+  centre of the model's (scaled, rotated) bounds there; `center` the bounds centre.
+  `bottom` is the safe way to stand a model on a surface.
+- `material "name"` overrides every material slot; `material.N "name"` slot N only. Without
+  either, the model's own materials are used, unless a `use` is active: then `use` applies
+  as the override (so `use "concrete"` restyles following models too). Overrides can keep the
+  model's own maps with `inherit` (§2.2).
+- `collide`: `aabb` (default) = the transformed bounds; `none`; or `box ...` = one or more
+  boxes in model-local space (before rotation/scale), each turned into a world AABB.
+- Each file is loaded once per map load and drawn instanced per (file, override set).
+- Picking: ray vs transformed bounds, then triangles where cheap (`MS_Raycast`).
+- Models cast and receive the sun shadow, count towards the map bounds, invalidate caches.
+
+### 2.6 Built-in defaults
+
+The defaults are today's values from `SetupEnvironment()` and `main()` (sun direction
+`0.55 -0.78 0.30`, colour 255 238 214, energy 2, fogEnergy 4, range 100, softness 2;
+procedural sky and ambient-only sky as in `atmosphere.c`; fog, volumetric fog, SSAO, SSIL,
+bloom, tonemap, colour as there), except the material: the built-in `"default"` is plain
+PBR (§2.2), not concrete. The default map writes **all** of its settings out explicitly,
+so later changes to the defaults never change it.
+
+### 2.7 Limits
+
+`MS_MAX_BOXES` 8192, groups 256, materials 64, model files 64, model instances 4096,
+lights 64 (plus the sun), viewpoints 32; 1024 characters / 64 words per line, 4 MB file.
+
+---
+
+## 3. Scene runtime (`runtime/monolith_scene.h` + `runtime/monolith_scene.c`)
+
+A separately compilable C11 module, depending only on raylib, raymath, rlgl and R3D. It is
+what the game uses to load, hot-reload, draw, collide and pick, and what `--export` ships.
+Editor-only code (designer, launcher, bench, prompt box, frame reuse, player, spectator)
+stays in `src/`.
+
+- The header (`runtime/monolith_scene.h`) is the API contract; see its comments.
+- **Patched vs. upstream R3D.** monolith's R3D copy has local patches (static shadow tiles
+  `R3D_PushLightFixedShadow`, depth pre-pass, fog bake, ...). The runtime compiles against
+  both: with `-DMS_PATCHED_R3D` (set by `build.sh` and `examples/build.sh` when they build
+  against `submodules/r3d`) it uses the patched APIs; without it, it falls back to
+  `R3D_PushLightEx` with the camera-fitted map re-rendered when needed, no pre-pass toggle
+  and no fog cache. The export README says which image differences that implies.
+- It owns everything that was in `map.c`, `world.c`, `shadow.c` and the scene part of
+  `atmosphere.c` / `main.c` (materials, instances, sun + shadow maps, sky, ambient map,
+  lights, fog cache). `--ao` / `--bloom` / `--fx` stay in the game as overrides applied
+  after `MS_ApplyEnvironment`.
+- Hot reload watches every file the scene depends on (map, shaders, model files,
+  textures). Any change reloads the whole package and bumps `version`; a failed reload
+  keeps the old scene. New GPU resources are created before old ones are freed (§7.4
+  instance-buffer name caching).
+- `version` changes on every successful (re)load; everything that changes the image
+  without a reload is in `R3D_GetEnvironment()` or in `MS_RenderSettings`, so the game's
+  `FrameKey` = camera + environment bytes + render settings + `version` + window size.
+
+---
+
+## 4. Caches follow the map
+
+- **Shadow tile home** (`TILE_HOME`, today `(10, 38, 2)`) and the **fog-cache region**
+  (today `FOG_CACHE_REGION`) are derived from the loaded map's bounds, ignoring huge
+  ground-like boxes as the stream that implements it decides and documents. Explicit hints
+  (`env shadow.home`, `env fogCache.region`) override. The default map must give
+  pixel-identical images; if the derived values can't reproduce today's layout exactly,
+  the default map carries the hints.
+
+---
+
+## 5. Selection record and bundle `format: 2`
+
+Object references are `{kind, index}`: `kind` is `box` or `model`, `index` is into
+`scene->boxes` or `scene->models` at submit time.
+
+```c
+typedef struct { MS_ObjKind kind; int index; } MS_ObjRef;     // runtime header
+#define MAX_REGIONS 16
+typedef struct { Rectangle rect; } DesignRegion;               // pixels of view.png, top-left origin
+// DesignRequest gains: MS_ObjRef selected[]; DesignRegion regions[MAX_REGIONS]; int regionCount;
+```
+
+`request.json`, `"format": 2` (format 1 bundles stay readable; `AI-MAP-TOOL.md` describes both):
+
+```jsonc
+{
+  "format": 2,
+  "kind": "edit",                       // "edit" | "import" | "new-map"
+  "prompt": "...",
+  "camera": { /* as format 1 */ },
+  "hit": { "kind": "box"|"model", "index": 12, "point": [..], "normal": [..], "distance": 4.2,
+           "line": 47, "lineText": "...", "group": "...", "material": "concrete",
+           "min": [..], "max": [..],                       // world AABB (both kinds)
+           "model": { "file": "models/x.glb", "position": [..], "rotationDeg": [..], "scale": [..] } // models only
+         } | null,
+  "selection": [ { "line": 47, "lineText": "...", "group": "...",
+                   "objects": [ { "kind": "box", "index": 46, "nth": 3, "min": [..], "max": [..],
+                                  "center": [..], "size": [..], "material": "..." /*, "model": {...} */ } ] } ],
+  "regions": [ { "index": 1, "rect": [x, y, w, h], "rectNorm": [x, y, w, h], "crop": "region-1.png",
+                 "center": { "point": [..], "normal": [..], "kind": "box", "index": 3, "distance": 12.5 } | null,
+                 "depth": { "min": 3.1, "max": 48.0 } | null,
+                 "objects": [ { "kind": "box", "index": 3, "line": 47, "group": "...", "material": "...",
+                                "share": 0.42 } ],          // share of the region's pixels, sorted descending
+                 "sky": 0.10 } ],                           // share of region pixels with no object
+  "nearby": [ /* as format 1 */ ],
+  "reproduce": { /* as format 1 */ },
+  "map": { "path": "maps/monolith/monolith.map", "package": "maps/monolith", "brief": "maps/monolith/MAP.md" | null,
+           "formatVersion": 2, "hash": "…", "mtime": 0, "version": 3,
+           "boxes": 279, "models": 0, "groups": 13, "materials": 1 },
+  "mapReloadedSinceSnapshot": false,
+  "import": { "projectDir": "...", "mapName": "...", "package": "maps/<name>" }   // kind "import" only
+}
+```
+
+`request.md` gets matching sections: *Design brief* (path of `MAP.md`, to be read first),
+*Selection* (boxes and models), *Screen regions* (one table per region), and for imports an
+*Import* section. Region crops are `region-<n>.png`; `view-marked.png` outlines each region
+with its number.
+
+Region object visibility: dense ray sampling with `MS_Raycast` over the region (at most
+~4096 rays per region, a regular grid), or an object-ID render; either way the result
+lists every object that covers at least one sample.
+
+---
+
+## 6. Controls and defaults chosen for the developer's calls
+
+| Decision | Default chosen |
+|---|---|
+| Snip-mode key | **C** in spectator mode (free today). Drag = new region, Shift+drag = add, RMB/Esc = cancel, Enter = prompt with the regions |
+| Workspace for Claude terminals | `MONOLITH_WORKSPACE` (default `10`, empty = don't move) |
+| Permission flags | on by default; `MONOLITH_CLAUDE_SAFE=1` drops them |
+| Licence policy | CC0 / public domain by default; CC-BY allowed with the attribution recorded in `ASSETS.md` and the export README; nothing else |
+| Polygon / texture budget | project default ≤ 50k triangles per model, textures ≤ 2K; a `MAP.md` may set its own |
+| Package layout | §1 |
+
+---
+
+## 7. Streams and merge order
+
+| Stream | Content | Depends on |
+|---|---|---|
+| A | runtime extraction + packages + materials + environment/lights/spawn/viewpoints as data + caches from bounds + `--new-map` + format versioning (Phases 1, 3.1, 3.3) | — |
+| F | launcher: workspace 10 + permission flags (Phase 6) | — |
+| E | snip-mode regions + bundle format 2 (Phase 5) | rebased on A after it merges |
+| C1 | research: model/texture sources, licences, safe download + normalisation tooling | — (read-only) |
+| B | models in maps, `--inspect-model`, `--dump-scene` (Phase 2.1) | A |
+| C2 | asset workflow docs + the second-style test map with a restyled CC0 model (Phases 2.2–2.3) | B, C1 |
+| D | `--export`, `examples/` 01–04, `--import`, capture-shim evaluation (Phases 3.2, 4) | A (B for models) |
+| G | style-neutral docs, `maps/monolith/MAP.md` (Phase 7) | last |
+| V | independent verification after each merge | each merge |
+
+Merges go into `main` one at a time; after each: both targets build with zero warnings, the
+default map's box dump and the verification shots are unchanged.
