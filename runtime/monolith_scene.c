@@ -114,7 +114,10 @@
 //   sun.enabled on|off, sun.direction x y z (the direction the light travels), sun.color,
 //   sun.energy, sun.specular, sun.fogEnergy, sun.range (shadow distance), sun.shadow on|off,
 //   sun.softness, sun.depthBias, sun.slopeBias; shadow.size n (px, read before R3D_Init:
-//   MS_SetInitHints).
+//   MS_SetInitHints). The biases are for shadow.size: with a smaller shadow map (quality
+//   preset, --shadow) they are scaled up by shadow.size / actual size (the texel ratio).
+//   bloom.offExposure f: exposure factor applied when a quality setting turns bloom off, so
+//   the mean brightness stays (default 1.19, matched on the default map).
 //   Cache hints (optional; derived from the map bounds without them, see "Caches"):
 //   shadow.home x y z, fogCache.region x0 y0 z0 x1 y1 z1.
 //   Every key has a built-in default (BuiltinEnvironment(): the values the default map was
@@ -202,6 +205,7 @@ typedef struct {
     Color color;
     float energy, specular, fogEnergy, range, softness, depthBias, slopeBias;
     int shadowSize;
+    int fileShadowSize;                 // shadow.size as the map gives it (before any override)
 } SunDef;
 
 enum { SKY_PROCEDURAL, SKY_COLOR, SKY_PANORAMA };
@@ -217,6 +221,7 @@ typedef struct {
     R3D_ProceduralSky ambient;          // ambientSky.* values, only the fields in ambientSet
     unsigned ambientSet;                // bit i = SKY_KEYS[i] was set
     SunDef sun;
+    float bloomOffExposure;             // exposure factor when a quality setting turns bloom off
     bool homeSet, fogRegionSet;
     Vector3 home;
     BoundingBox fogRegion;
@@ -600,6 +605,7 @@ static const KeyDef DEF_KEYS[] = {
     KD("sun.depthBias", T_F, sun.depthBias),
     KD("sun.slopeBias", T_F, sun.slopeBias),
     KD("shadow.size", T_I, sun.shadowSize),
+    KD("bloom.offExposure", T_F, bloomOffExposure),
     KD("shadow.home", T_V3, home),
     KD("fogCache.region", T_BOX, fogRegion),
 };
@@ -721,6 +727,9 @@ static void BuiltinEnvironment(EnvDef *e)
         .softness = 2.0f, .depthBias = 0.0001f, .slopeBias = 0.0015f,   // biases: R3D's defaults
         .shadowSize = 8192,
     };
+    // Bloom here is mostly a uniform ~20% lift (threshold 0, MIX 0.04): without it, exposure
+    // x1.19 keeps the mean brightness (matched over the default map's 26 verification shots)
+    e->bloomOffExposure = 1.19f;
 }
 
 // Shortest decimal that reads back as the same float
@@ -1478,6 +1487,7 @@ static const EnvRange ENV_RANGES[] = {
     { "tonemap.exposure", 0, 1e6f, false }, { "tonemap.white", 0, 1e6f, true },
     { "background.energy", 0, 1e6f, false }, { "ambient.energy", 0, 1e6f, false },
     { "sun.energy", 0, 1e6f, false }, { "sun.fogEnergy", 0, 1e6f, false }, { "sun.softness", 0, 1e6f, false },
+    { "bloom.offExposure", 0, 100, true },
 };
 
 static bool CheckEnvRange(Parser *P, const char *key, int type, const void *p)
@@ -2436,6 +2446,7 @@ static bool SunShadowNeedsUpdate(SunShadowCache *c, Vector3 sunDir, float range,
 static bool FinishParse(SceneData *d, const MS_LoadOptions *opt)
 {
     SunDef *sun = &d->env.sun;
+    sun->fileShadowSize = sun->shadowSize;
     if (opt->shadowSizeOverride > 0) sun->shadowSize = opt->shadowSizeOverride;
     if (opt->shadowRangeOverride > 0.0f) sun->range = opt->shadowRangeOverride;
     d->sunLight = R3D_CreateDirLight(sun->direction, sun->color, sun->energy);
@@ -3636,11 +3647,11 @@ void MS_ApplyQuality(MS_Scene *s, const MS_Quality *qIn)
     if (q->fogStepScale > 0.0f && q->fogStepScale != 1.0f) env->volumetricFog.stepSize *= q->fogStepScale;
     if (q->fogLengthScale > 0.0f && q->fogLengthScale != 1.0f) env->volumetricFog.length *= q->fogLengthScale;
     if (!q->distanceFog) env->fog.mode = R3D_FOG_DISABLED;
-    // Bloom here is mostly a uniform ~20% lift (threshold 0, MIX 0.04): without it, exposure
-    // x1.19 keeps the mean brightness (matched over the 26 verification shots)
+    // Without bloom the map's env bloom.offExposure keeps the mean brightness (bloom with
+    // threshold 0 is mostly a uniform lift; default 1.19, matched on the default map)
     if (!q->bloom && env->bloom.mode != R3D_BLOOM_DISABLED) {
         env->bloom.mode = R3D_BLOOM_DISABLED;
-        env->tonemap.exposure *= 1.19f;
+        env->tonemap.exposure *= s->priv->d ? s->priv->d->env.bloomOffExposure : 1.19f;
     }
     if (q->bloomIntensityScale != 1.0f) env->bloom.intensity *= q->bloomIntensityScale;
     if (q->ssr) env->ssr.enabled = q->ssr > 0;
@@ -3657,6 +3668,15 @@ static R3D_ShadowMap SunShadowMap(const MS_Private *p, int slot)
     m.softness = p->rs.shadowSoftness > 0.0f ? p->rs.shadowSoftness : p->d->env.sun.softness;
     m.depthBias = p->d->env.sun.depthBias;
     m.slopeBias = p->d->env.sun.slopeBias;
+    // The map's biases are tuned for its shadow.size. A smaller map (a quality preset, --shadow)
+    // has larger texels and so larger depth steps across a texel on sloped receivers: scale
+    // both biases with the texel size, or low sun angles show acne stripes on flat tops.
+    int size = R3D_GetHint(R3D_HINT_SHADOW_DIR_SIZE);
+    if (size > 0 && size < p->d->env.sun.fileShadowSize) {
+        float k = (float)p->d->env.sun.fileShadowSize / (float)size;
+        m.depthBias *= k;
+        m.slopeBias *= k;
+    }
     return m;
 }
 
@@ -3962,6 +3982,8 @@ bool MS_WriteEnvironment(const MS_Scene *s, FILE *f)
     fprintf(f, "# R3D environment\n");
     for (int i = 0; i < COUNT(ENV_KEYS); i++)
         WriteKey(f, "", ENV_KEYS[i].key, ENV_KEYS[i].type, (const char *)&e->env + ENV_KEYS[i].off);
+    fprintf(f, "# Quality presets: exposure factor when a preset turns bloom off (keeps the mean brightness)\n");
+    WriteDefKeys(f, e, "bloom.");
     return !ferror(f);
 }
 

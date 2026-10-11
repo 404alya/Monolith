@@ -10,8 +10,9 @@
 // (MS_Quality.ao, applied by MS_ApplyQuality) so the developer can trade them away and judge
 // the look live. The default ("full") is the map's setup, unchanged. --bloom off is
 // MS_Quality.bloom = false (bloom here is mostly a uniform ~20% lift: threshold 0, MIX 0.04;
-// "off" skips the pass, ~0.18 ms, and raises exposure x1.19 instead, which matched the mean
-// of the 26 verification shots best: +0.07/255 on average, every shot within -1.2..+0.8/255).
+// "off" skips the pass, ~0.18 ms, and raises exposure by the map's env bloom.offExposure
+// instead: its default 1.19 matched the mean of the default map's 26 verification shots best,
+// +0.07/255 on average, every shot within -1.2..+0.8/255; pine_forest sets 1.3).
 
 typedef struct { const char *name, *help; MS_AoMode mode; } AoMode;
 static const AoMode AO_MODES[] = {

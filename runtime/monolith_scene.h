@@ -327,7 +327,7 @@ typedef struct {
     int fogCacheSub;                // sub^3 samples per voxel (1..4)
     bool distanceFog;               // false turns the map's distance fog off
     // Post
-    bool bloom;                     // false: bloom off, exposure x1.19 instead (same mean brightness)
+    bool bloom;                     // false: bloom off, exposure x env bloom.offExposure (default 1.19)
     float bloomIntensityScale;      // x the map's bloom intensity
     int ssr, ssgi;                  // -1 off, 0 the map's, 1 on (with the map's parameters)
     // Display trims on top of the map's grading (multipliers, 1 = the map's)

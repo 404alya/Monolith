@@ -214,7 +214,7 @@ Selected objects get an orange tint and outline, plus a faint always-on-top outl
 | `--ao-volume <voxel> <intensity>` | **Trade-off, off by default.** Bake a world-space occlusion volume (signed distance to the nearest box, 1 byte per voxel, ≤ 32 MB, ~60 ms on the CPU per map load) and darken the ambient light with it (R3D patch 11, `MS_RenderSettings.aoVolumeVoxel` / `aoVolumeIntensity`). View-independent, sees off-screen occluders, ~0.03 ms per frame. On top of SSAO/SSIL unless `--ao baked`. Boxes only (models are not in it). |
 | `--render-scale <s>` | **Trade-off, default 1.** R3D renders at `s` (0.25–1) times the window / shot size and upscales (`--upscale nearest\|linear\|bicubic\|lanczos`, default bicubic; `MS_RenderSettings.renderScale` / `upscale`, `MS_ApplyRenderResolution`). |
 | `--window-msaa` | 4× multisampled window, as before 2026-10-11: smoother designer overlay lines for ~0.1 ms GPU per frame. The scene image is the same either way (R3D writes one colour per pixel). Default: single-sampled. |
-| `--bloom on\|off` | `off` skips the bloom pass (−0.25 ms) and raises exposure ×1.19 instead: in the default map bloom (threshold 0, MIX 0.04) is mostly a uniform ~20% lift, so the mean brightness stays within ±1.2/255; only the faint halo around bright openings goes. |
+| `--bloom on\|off` | `off` skips the bloom pass (−0.25 ms) and raises exposure by the map's `env bloom.offExposure` instead (default ×1.19): in the default map bloom (threshold 0, MIX 0.04) is mostly a uniform ~20% lift, so the mean brightness stays within ±1.2/255; only the faint halo around bright openings goes. A map with a stronger bloom sets its own factor (`maps/pine_forest`: 1.3, measured over its 5 viewpoints). |
 | `--quality low\|medium\|high\|ultra` | Graphics quality preset for this run ("Graphics settings" below; `MS_Quality` in the runtime). Default: the settings file in the interactive game, else ultra (= the map exactly). Not saved. |
 | `--settings <file>` | Graphics settings file to read (and, from the panel, write) instead of `~/.config/monolith/settings.ini` (`$XDG_CONFIG_HOME`; Windows `%APPDATA%\monolith\settings.ini`; else next to the executable). |
 | `--no-settings` | Neither read nor save a settings file. |
@@ -303,10 +303,10 @@ In `--submit`, `--type` and `--classify` text, a literal `\n` becomes a new line
 | | anti-aliasing (`anti_aliasing`) | none / fxaa / smaa | FXAA is today's; SMAA sharper, a bit more GPU |
 | | window MSAA (`window_msaa`) | on/off, next start | ~0.1 ms, overlay lines only |
 | | exposure, brightness, contrast, saturation | multipliers, 1 = the map's | display trims, free |
-| Shadows | sun shadow (`sun_shadow`), map size (`shadow_size`), range (`shadow_range`), softness (`shadow_softness`), mode (`shadow_mode`) | on/off; map's/2048–16384; map's/60–300 m; map's/0.5–6; tiles/camera/always | 8192 = 3.7 cm texels, 256 MB VRAM; 4096 = 7.4 cm, 64 MB. Range below the fog length (90 m) fades the shafts early |
+| Shadows | sun shadow (`sun_shadow`), map size (`shadow_size`), range (`shadow_range`), softness (`shadow_softness`), mode (`shadow_mode`) | on/off; map's/2048–16384; map's/60–300 m; map's/0.5–6; tiles/camera/always | 8192 = 3.7 cm texels, 256 MB VRAM; 4096 = 7.4 cm, 64 MB. Below the map's `shadow.size` the sun's depth and slope biases are scaled by the texel ratio (`SunShadowMap()`), so low sun angles get no acne stripes at 4096. Range below the fog length (90 m) fades the shafts early |
 | Ambient occlusion | mode (`ao`), baked voxel / intensity, SSAO samples/radius/intensity, SSIL samples/radius | full/ssao/lite/baked/off | baked: −27% (crisper wall-foot contact shadow, no SSIL bounce); off: ~−0.9 ms |
 | Fog | volumetric fog, march step (`fog_step`, x the map's 0.75 m), length, fog cache voxel/samples, distance fog | | fog cache 0.5 m + step x2: −16%, shaft edges ~0.5 m softer |
-| Post | bloom, bloom intensity, SSR, SSGI (off / map's / on) | | bloom off: −6% (exposure x1.19 keeps the mean); SSR/SSGI cost extra (off in the default map) |
+| Post | bloom, bloom intensity, SSR, SSGI (off / map's / on) | | bloom off: −6% (exposure x the map's `bloom.offExposure`, default 1.19, keeps the mean); SSR/SSGI cost extra (off in the default map) |
 | Performance | frame reuse, fps cap (off/monitor/30–240), vsync, depth pre-pass | | pre-pass off = same image, slower |
 
 **Presets** (`MS_QualityPreset`; measured 2026-10-11 on the default map: headless `--bench`, 1920×1006, spinning camera, 3 interleaved rounds):
@@ -316,7 +316,7 @@ In `--submit`, `--type` and `--classify` text, a literal `\n` becomes a new line
 | **ultra** (default) | nothing: the map exactly | 3.17 ms |
 | **high** | AO baked (0.5 m, 0.6) instead of SSAO + SSIL; fog cache 0.5 m | 2.07 ms |
 | **medium** | high + render scale 0.75 (bicubic), fog march step x2, shadow map 4096 | 1.32 ms |
-| **low** | render scale 0.5, AO off, bloom off (exposure x1.19), fog cache 0.5 m + step x2, shadow map 4096 | 0.77 ms |
+| **low** | render scale 0.5, AO off, bloom off (exposure x `bloom.offExposure`), fog cache 0.5 m + step x2, shadow map 4096 | 0.77 ms |
 
 **The settings file** is plain `key = value` text (`settings.c`: `preset = low|medium|high|ultra` sets every scene setting, later keys override single ones; `custom` files list every key). Only the interactive game reads the default file; **`--shot`, `--bench`, `--dump-*`, `--export` and `--classify` never read it** unless `--settings <file>` names one, so verification shots and benchmarks stay deterministic. Command-line flags (`--quality` first, then `--ao`, `--bloom`, `--shadow`, `--render-scale`, ...) override for one run and are never saved, also when the panel saves later: a panel change is written to the saved settings field by field, so a flag's override of another field stays out of the file. Unknown keys and bad values are logged and ignored.
 

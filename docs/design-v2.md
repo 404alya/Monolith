@@ -139,7 +139,7 @@ Keys are dotted paths. Every key has a built-in default equal to today's hard-co
 - **Sun** (`sun.*`, the one shadowed directional light with the static shadow tiles):
   `sun.enabled on`, `sun.direction x y z` (the direction light travels), `sun.color`,
   `sun.energy`, `sun.specular`, `sun.fogEnergy`, `sun.range`, `sun.shadow on|off`,
-  `sun.softness`, `sun.depthBias`, `sun.slopeBias`. `--shadow <size> <range>` overrides
+  `sun.softness`, `sun.depthBias`, `sun.slopeBias` (scaled by the texel ratio when the shadow map is smaller than `shadow.size`), `bloom.offExposure` (exposure factor when a quality setting turns bloom off). `--shadow <size> <range>` overrides
   `shadow.size` / `sun.range`.
 - **Caches**: `shadow.size 8192`, and optional placement hints `shadow.home x y z` and
   `fogCache.region x0 y0 z0 x1 y1 z1`. Without hints both are derived from the map bounds

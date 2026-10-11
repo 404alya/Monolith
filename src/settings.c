@@ -128,7 +128,7 @@ static const Row ROWS[] = {
     { GFX_GROUP_FOG, 0, "Distance fog", "distance_fog", "the far haze that turns megastructures into silhouettes",
       V_BOOL, OFF(q.distanceFog) },
     // --- Post
-    { GFX_GROUP_POST, 0, "Bloom", "bloom", "off: -6%, exposure x1.19 instead (same mean brightness)",
+    { GFX_GROUP_POST, 0, "Bloom", "bloom", "off: -6%, exposure x the map's bloom.offExposure instead (same mean brightness)",
       V_BOOL, OFF(q.bloom) },
     { GFX_GROUP_POST, 0, "Bloom intensity", "bloom_intensity", "x the map's bloom intensity",
       V_FLOAT, OFF(q.bloomIntensityScale), OPTS(0.5f, 0.75f, 1, 1.5f, 2), .fmt = "x%.2f", .min = 0, .max = 10 },

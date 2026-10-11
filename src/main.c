@@ -88,8 +88,9 @@
 //   --ao-volume <voxel> <intensity>   trade-off, off by default: bake a world-space occlusion
 //                  volume of the boxes once per map load (voxel size in m, 0.25..4) and darken
 //                  the ambient light with it (R3D patch 11; on top of SSAO/SSIL unless --ao baked)
-//   --bloom off    bloom pass off, exposure x1.19 instead (same mean brightness, no faint
-//                  halo at bright openings; atmosphere.c). Default: on
+//   --bloom off    bloom pass off, exposure x the map's env bloom.offExposure instead
+//                  (default 1.19: same mean brightness, no faint halo at bright openings;
+//                  atmosphere.c). Default: on
 //   --quality <low|medium|high|ultra>   graphics quality preset for this run (MS_Quality in
 //                  runtime/monolith_scene.h; ultra = the map exactly, the default). The flags
 //                  --ao, --ao-volume, --bloom, --shadow, --shadow-camera/-always, --fog-cache,
