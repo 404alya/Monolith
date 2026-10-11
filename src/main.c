@@ -12,7 +12,7 @@
 //   F1             toggle HUD (also hides the crosshair and selection overlay)
 //   "(cached)" after the fps: nothing changed, the frame reused the last R3D image
 //   F12            screenshot           TAB    toggle spectator camera
-//   ESC            quit (closes the prompt box instead while it is open)
+//   ESC            quit (closes the prompt box / leaves snip mode instead while open)
 //   The HUD's bottom line shows "map reloaded (N boxes)" after a map edit, or the parse
 //   error (file:line: message) in red while the file is broken (the old map stays loaded).
 //
@@ -34,6 +34,12 @@
 //                  ESC cancel (discards the text). While the box is open every game key
 //                  and the camera are frozen and the mouse cursor is free. If sending
 //                  fails, the box stays open with the text.
+//   C              snip mode: the camera freezes and the cursor is free. Drag = a screen
+//                  region (replaces the others), SHIFT+drag = add one (up to 16), ENTER =
+//                  prompt box with the regions (and the box selection made before C)
+//                  attached, RMB / ESC / C = leave snip mode and drop the regions. ESC in the
+//                  prompt box returns to snip mode with the regions; a successful submit
+//                  ends it. The bundle lists what each region shows (designer.c)
 //   R              fly back to the camera of the last finished request
 //   The HUD lists open requests ("running", "waiting for result.md") and, for 20 s,
 //   finished ones with the first line of their result.md.
@@ -104,13 +110,16 @@
 //   --pick         with --shot: print what the crosshair (screen centre) hits on the shot
 //                  frame: box index, group, map line + its text, point, normal, distance
 //   --select <line>  select every box made by this map line (repeatable, up to 64)
+//   --region x y w h   attach a screen region (pixels of the shot, top-left origin), as if
+//                  dragged out in snip mode (repeatable, up to 16); with --shot-hud the shot
+//                  shows the snip-mode drawing, with --submit the bundle gets the regions
 //   --submit "text"  with --shot: after saving the shot, run the real submit path (render
-//                  view + view-marked offscreen, LauncherSubmit with the centre pick and
-//                  the --select boxes) and print the launcher's message. This writes a real
+//                  view + view-marked offscreen, LauncherSubmit with the centre pick,
+//                  the --select boxes and the --region regions) and print the launcher's message. This writes a real
 //                  bundle into requests/ and launches a real terminal + Claude Code: for
 //                  tests, set MONOLITH_TERMINAL to a stub script that only logs its arguments
 //   --type "text"  open the prompt box with this text (cursor at the end)
-//   --shot-hud     with --shot: draw the HUD, crosshair, selection overlay and prompt box
+//   --shot-hud     with --shot: draw the HUD, crosshair, selection overlay, regions and prompt box
 //                  into the shot (to look at the UI; plain shots never contain it)
 //   In --submit and --type text, a literal \n becomes a new line.
 //
@@ -396,6 +405,7 @@ static bool Submit(Scene *sc, Designer *d, Camera3D cam, float yaw, float pitch,
     BeginTextureMode(rt);
         DesignerDrawOverlay(d, cam, false);
         DesignerDrawCrosshair(rt.texture.width, rt.texture.height);
+        DesignerDrawRegions(d, rt.texture.width, rt.texture.height, true);
     EndTextureMode();
     Image marked = ReadTarget(rt);
 
@@ -458,6 +468,8 @@ int main(int argc, char **argv)
     const char *fxSettings[16];
     int fxCount = 0;
     int selectLines[64], selectLineCount = 0;
+    Rectangle regionArgs[MAX_REGIONS];
+    int regionArgCount = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--shot") == 0 && i + 1 < argc) shotPath = argv[++i];
         else if (strcmp(argv[i], "--shot-size") == 0 && i + 2 < argc) {
@@ -502,6 +514,11 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--select") == 0 && i + 1 < argc) {
             int line = atoi(argv[++i]);
             if (selectLineCount < 64) selectLines[selectLineCount++] = line;
+        }
+        else if (strcmp(argv[i], "--region") == 0 && i + 4 < argc) {
+            if (regionArgCount < MAX_REGIONS)
+                regionArgs[regionArgCount++] = (Rectangle){ atof(argv[i + 1]), atof(argv[i + 2]), atof(argv[i + 3]), atof(argv[i + 4]) };
+            i += 4;
         }
         else if (strcmp(argv[i], "--shadow") == 0 && i + 2 < argc) {
             // Clamped: a zero range or size would divide by zero in the shadow tile layout
@@ -665,6 +682,12 @@ int main(int argc, char **argv)
     designer.interactive = !hidden;
     DesignerSync(&designer);
     for (int i = 0; i < selectLineCount; i++) DesignerSelectLine(&designer, selectLines[i]);
+    // --region: as if dragged out in snip mode (pixels of the shot)
+    if (regionArgCount > 0) DesignerSnipBegin(&designer);
+    for (int i = 0; i < regionArgCount; i++)
+        if (!DesignerAddRegion(&designer, regionArgs[i], GetScreenWidth(), GetScreenHeight()))
+            TraceLog(LOG_WARNING, "monolith: --region %.0f %.0f %.0f %.0f is empty after clamping to %dx%d; ignored",
+                     regionArgs[i].x, regionArgs[i].y, regionArgs[i].width, regionArgs[i].height, GetScreenWidth(), GetScreenHeight());
 
     if (!hidden) DisableCursor();
     if (typeText) DesignerOpenPrompt(&designer, Unescape(typeText));
@@ -710,8 +733,8 @@ int main(int argc, char **argv)
 
         if (IsWindowResized()) R3D_SetResolution(GetScreenWidth(), GetScreenHeight());
 
-        // Esc quits, unless the prompt box is open (then the designer closes it below)
-        if (IsKeyPressed(KEY_ESCAPE) && !designer.promptOpen) break;
+        // Esc quits, unless the prompt box is open or snip mode is on (the designer handles it)
+        if (IsKeyPressed(KEY_ESCAPE) && !designer.promptOpen && !designer.snipping) break;
 
         // While the prompt box is open (and a couple of frames after it closed) every
         // game key and the camera are frozen: the keys are text now
@@ -872,6 +895,8 @@ int main(int argc, char **argv)
                 DesignerDrawOverlay(&designer, camera, true);
                 DesignerDrawCrosshair(GetScreenWidth(), GetScreenHeight());
             }
+            // Snip mode (screen regions) shows even with the HUD off, like the prompt box
+            if (drawUi && designerUi) DesignerDrawRegions(&designer, GetScreenWidth(), GetScreenHeight(), false);
             if (drawUi && hud) {
                 DrawText(TextFormat("%d fps%s  |  %s  |  1 volFog:%s  2 fog:%s  3 ssao:%s  4 ssil:%s  5 bloom:%s  6 sun:%s",
                          GetFPS(), reused ? " (cached)" : "", spec.active ? "SPECTATOR" : player.fly ? "FLY" : "WALK",
@@ -883,7 +908,7 @@ int main(int argc, char **argv)
                 if (spec.active) {
                     DrawText(TextFormat("speed %.1f m/s (wheel)  |  <- -> viewpoints  |  P copy view  |  G drop player  |  TAB exit",
                              spec.speed), 12, 32, 16, (Color){ 230, 230, 230, 120 });
-                    DrawText("LMB select  |  SHIFT+LMB add/remove  |  CTRL+LMB group  |  RMB clear  |  ENTER request  |  R fly to last result",
+                    DrawText("LMB select  |  SHIFT+LMB add/remove  |  CTRL+LMB group  |  RMB clear  |  C snip regions  |  ENTER request  |  R fly to last result",
                              12, 52, 16, (Color){ 230, 230, 230, 120 });
                     int y = 80;
                     y += DesignerDrawHud(&designer, 12, y);

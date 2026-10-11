@@ -128,7 +128,7 @@ The header comment at the top of `src/main.c` is the source of truth; keep it up
 | F1 | Toggle HUD (also hides the crosshair and selection overlay) |
 | F12 | Save `screenshot.png` |
 | TAB | Toggle spectator mode |
-| Esc | Quit (closes the prompt box instead while it is open) |
+| Esc | Quit (closes the prompt box / leaves snip mode instead while open) |
 
 Esc quitting is handled in the main loop (`SetExitKey(KEY_NULL)`), so that Esc can close the prompt box. The window's close button still quits. The bottom-left HUD line shows map reload messages: `map reloaded (N boxes)`, or the parse error in red, which stays until the file is valid again. The list of open and finished requests is shown in both modes.
 
@@ -155,6 +155,7 @@ Esc quitting is handled in the main loop (`SetExitKey(KEY_NULL)`), so that Esc c
 | Ctrl + Shift + LMB | Add the whole group |
 | RMB | Clear the selection |
 | Enter | Open the prompt box |
+| C | Snip mode (screen regions): camera frozen, cursor free. Drag = a region (replaces the others), Shift + drag = add one (up to 16), Enter = prompt box with the regions and the box selection attached, RMB / Esc / C = leave and drop the regions. Esc in that prompt box goes back to snip mode with the regions; a successful submit ends it. |
 | R | Fly back to the camera of the most recently finished request |
 
 Selected boxes get an orange tint and outline, plus a faint always-on-top outline so they can be found behind walls. The HUD shows how many boxes are selected and their group names. The selection survives map hot reloads: boxes are matched by identical geometry first, then by the same map line + index within that line + group name. The HUD reports any that were lost.
@@ -196,9 +197,10 @@ Selected boxes get an orange tint and outline, plus a faint always-on-top outlin
 |---|---|
 | `--pick` | With `--shot`: print what the crosshair (screen centre) hits on the shot frame: box index, group, map line + its text, point, normal, distance, box min/max. Works in walk mode too. |
 | `--select <line>` | Select every box made by this map line (repeatable, up to 64) |
-| `--submit "text"` | With `--shot`: after saving the shot, run the real submit path. It renders `view.png` + `view-marked.png` offscreen and calls `LauncherSubmit` with the centre pick and the `--select` boxes, then prints `submit: ok/failed: <message>`. **It writes a real bundle into `requests/` and launches a real terminal + Claude Code**, so for tests set `MONOLITH_TERMINAL` to a stub script that only logs its arguments, and move the bundle to the trash afterwards (`gio trash requests/<id>`, never `rm`). |
+| `--region x y w h` | Attach a screen region (pixels of the shot, top-left origin) as if dragged in snip mode (repeatable, up to 16). Drawn with `--shot-hud`, sent with `--submit`. |
+| `--submit "text"` | With `--shot`: after saving the shot, run the real submit path. It renders `view.png` + `view-marked.png` offscreen and calls `LauncherSubmit` with the centre pick, the `--select` boxes and the `--region` regions, then prints `submit: ok/failed: <message>`. **It writes a real bundle into `requests/` and launches a real terminal + Claude Code**, so for tests set `MONOLITH_TERMINAL` to a stub script that only logs its arguments, and move the bundle to the trash afterwards (`gio trash requests/<id>`, never `rm`). |
 | `--type "text"` | Open the prompt box with this text (cursor at the end) |
-| `--shot-hud` | With `--shot`: draw the HUD, crosshair, selection overlay and prompt box into the shot. Plain shots never contain them. |
+| `--shot-hud` | With `--shot`: draw the HUD, crosshair, selection overlay, regions and prompt box into the shot. Plain shots never contain them. |
 | `--shot-size w h` | Size of `--shot` images (default 1600 × 900). Request bundles pass the window size in their reproduction command so it frames like `view.png`. |
 | `--reload-test <file>` | With `--shot`: after 10 frames, load `<file>` through the real hot-reload path, then render the rest. The shot must equal a plain `--shot --map <file>`: this proves that every static cache (instances, shadow tiles, fog volume, frame reuse) is rebuilt on reload. |
 

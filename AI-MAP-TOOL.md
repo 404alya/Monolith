@@ -21,7 +21,7 @@ You are that Claude Code session. Your job is to change the map (rarely the engi
 
 ## 2. Request workflow
 
-1. In spectator mode the developer aims, selects and presses **Enter**, types the request and presses **Enter** again.
+1. In spectator mode the developer aims, selects, optionally drags out screen regions (snip mode, **C**) and presses **Enter**, types the request and presses **Enter** again.
 2. The game writes a bundle folder, **`requests/<YYYY-MM-DD_HHMMSS>_<slug>/`**, in the repo root (`requests/` is gitignored). The slug is made from the prompt's first words.
 3. The game opens a terminal running `claude "Map edit request: read requests/<id>/request.md and carry it out."` in the repo root. The user's text is never put on a command line. It is only in the bundle. The session runs **without approval prompts** (`--allow-dangerously-skip-permissions --dangerously-skip-permissions`, unless `MONOLITH_CLAUDE_SAFE=1`), so the guard rails at the top of this file apply, and its terminal is moved to i3/sway workspace 10 (`MONOLITH_WORKSPACE`).
 4. You read `request.md`, look at the images, edit the map, verify the edit, and write **`requests/<id>/result.md`**.
@@ -33,16 +33,18 @@ Several requests can run at the same time, and two of them may edit the same map
 
 | File | Content |
 |---|---|
-| `request.md` | **Read this first.** The prompt (verbatim, fenced), the camera, the crosshair hit, the selection, nearby groups, a reproduction `--shot` command, and the map path + hash at submit time. |
-| `request.json` | The same data in machine-readable form (`format: 1`). The keys are `prompt`, `camera` (eye, yawDeg, pitchDeg, forward, right, fovyDeg, aspect, width, height), `hit` (point, normal, distance, box, min, max, group, line, lineText) or `null`, `selection` (per map line: line, lineText, group, boxes with min/max/center/size), `nearby`, `reproduce` (command + argv), `map` (path, hash, mtime, version, boxes, groups) and `mapReloadedSinceSnapshot`. |
+| `request.md` | **Read this first.** The prompt (verbatim, fenced), the design brief (format 2), the camera, the crosshair hit, the selection, the screen regions (format 2), nearby groups, a reproduction `--shot` command, and the map path + hash at submit time. |
+| `request.json` | The same data in machine-readable form. Format 1 (older bundles): The keys are `prompt`, `camera` (eye, yawDeg, pitchDeg, forward, right, fovyDeg, aspect, width, height), `hit` (point, normal, distance, box, min, max, group, line, lineText) or `null`, `selection` (per map line: line, lineText, group, boxes with min/max/center/size), `nearby`, `reproduce` (command + argv), `map` (path, hash, mtime, version, boxes, groups) and `mapReloadedSinceSnapshot`. **Format 2** (`"format": 2`, `"kind": "edit"`) keeps all of that and adds: objects are `{kind, index}` references (`kind` `"box"` today, `"model"` later); `hit` gains `kind`, `index`, `material`; each `selection` entry lists `objects` (kind, index, box, nth = index among the line's boxes, material, min/max/center/size) instead of `boxes`; `regions` (below); `images.regions`; `map` gains `package`, `brief` (path of `MAP.md` or `null`), `formatVersion`, `models`, `materials`. |
 | `view.png` | The frame exactly as the developer saw it, **without the HUD**, at the window's resolution. |
-| `view-marked.png` | The same frame with the **selected boxes** tinted and outlined in orange, the **crosshair hit** shown as a small cyan square with a normal tick, and the crosshair drawn at the centre. |
+| `view-marked.png` | The same frame with the **selected boxes** tinted and outlined in orange, the **crosshair hit** shown as a small cyan square with a normal tick, the crosshair drawn at the centre, and (format 2) each **screen region** outlined in magenta with its number. |
+| `region-<n>.png` | Format 2, one per screen region: the crop of `view.png` inside region *n*. |
 | `result.md` | **Written by you**, last. See §8. |
 
 Details of `request.md`:
 - **Camera**: the eye position (not the feet), yaw/pitch in degrees, forward and right vectors, fovy 70° (vertical), aspect and resolution.
 - **Crosshair hit**: the world point at the screen centre, its face normal (axis-aligned, pointing out of the face), the distance from the eye, box index + min/max, group, and the map line, quoted. If the crosshair pointed at the sky it says "Nothing" and `hit` is `null`.
 - **Selection**: the selected boxes, grouped by source line. Each line's text is quoted once and is followed by a table of the boxes it made (box index, min, max, centre, size). One `repeat` line can make dozens of boxes. When the selection is only some of them, the user means those copies, not the whole line.
+- **Screen regions** (format 2): one table per region: its pixel rect in `view.png` (x, y of the top-left corner, width × height, also normalised 0–1), what is under its centre (object, point, normal, distance), the depth range (distance from the eye over the rays that hit something), the sky share, and the objects it shows, each with the **share** of the region's rays that hit it first (sorted, largest first; `request.json` has them all: `regions[].objects`, `.center`, `.depth`, `.sky`). The shares come from a regular grid of up to 4096 rays per region, computed at submit time.
 - **Nearby**: the groups that have a box within 30 m of the hit point (of the eye if there was no hit), nearest first, with the range of map lines each group covers.
 - **Box indices** (`#46`) are positions in the box list of the map that was loaded at submit time. They shift when lines are inserted above. The map line and its text are the stable reference.
 - A **Warning** line (`mapReloadedSinceSnapshot: true`) means the map reloaded between the selection and the submit, so the indices may not match what the user saw. Locate the target by the coordinates and the quoted line text instead.
@@ -57,8 +59,9 @@ Work through these sources in this order:
    - camera right = `(−cos y, 0, sin y)` and up = +Y.
    - "Left" is −right, "behind" is −forward (horizontally: the forward vector with its y set to 0), "in front of / beyond" is +forward. "Higher" is +Y. `request.md` gives both vectors already computed.
 3. **Group names and nearby context.** "The hall roof" or "the canyon walls" refer to groups (§6.3). The Nearby table tells you what surrounds the spot.
-4. **The images.** Look at `view-marked.png` (Read it as an image) to see what the user saw and what was marked. `view.png` shows the same frame without the marks.
-5. **If it is still ambiguous**, for example "this" when there is no hit and no selection, or two plausible targets, **ask in the terminal**. Don't guess. The developer is watching that terminal.
+4. **Screen regions** (format-2 bundles; older bundles have none). The developer dragged a rectangle over the frame, usually to point at an *area* rather than one object: "this area", "everything here", "fill this gap", "make this part darker". Read the region's crop (`region-<n>.png`) and its numbered outline in `view-marked.png`. "Everything here" means the region's object list (ignore tiny shares, a few percent or less, unless they are what the request is about). "Fill this gap" / "put something here" is about the empty part: the sky share and the depth range tell you whether there is open space or distant geometry behind it, and the centre point + normal is the anchor to build from. Combine with the selection and the crosshair hit when they are given too; when several regions are numbered in the prompt ("1", "2"), match them to the outlines.
+5. **The images.** Look at `view-marked.png` (Read it as an image) to see what the user saw and what was marked. `view.png` shows the same frame without the marks.
+6. **If it is still ambiguous**, for example "this" when there is no hit and no selection, or two plausible targets, **ask in the terminal**. Don't guess. The developer is watching that terminal.
 
 ## 4. Coordinates and scale
 
