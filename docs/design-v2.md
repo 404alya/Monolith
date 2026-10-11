@@ -1,8 +1,18 @@
-# monolith v2: design note (interfaces for the parallel work streams)
+# monolith v2: design record (interfaces for the parallel work streams)
 
-Written before the v2 work fans out (`AI-MAP-DESIGNER-V2-PROMPT.md`). It fixes the shared
-interfaces; each stream works against them. A stream that has to change an interface
-updates this file in the same change and says so in its report.
+> **Design record.** This note was written before the v2 work fanned out
+> (`AI-MAP-DESIGNER-V2-PROMPT.md`) and fixed the shared interfaces; the streams appended
+> implementation notes (§8–§10) as they merged. It is kept as the record of *why* things are
+> the way they are. It is not the reference: where it and the code differ, the code wins, and
+> the current, authoritative descriptions are
+> - the map format: the header comment of `runtime/monolith_scene.c` and `AI-MAP-TOOL.md` §5–6;
+> - the runtime API: `runtime/monolith_scene.h` and `PROMPT-INSTRUCTIONS.md` §6.1;
+> - request bundles: `AI-MAP-TOOL.md` §2 (and `src/launcher.c`);
+> - flags, keys and environment variables: the header comment of `src/main.c` and
+>   `PROMPT-INSTRUCTIONS.md` §5;
+> - a map's look and rules: its `MAP.md` (the default map: `maps/monolith/MAP.md`).
+>
+> Later additions are summarised in §11.
 
 Goals in one line each: any style of map; a per-map design brief; models; export/import
 to plain raylib + R3D projects; `examples/`; Claude terminals on i3 workspace 10 with
@@ -227,7 +237,8 @@ stays in `src/`.
 - It owns everything that was in `map.c`, `world.c`, `shadow.c` and the scene part of
   `atmosphere.c` / `main.c` (materials, instances, sun + shadow maps, sky, ambient map,
   lights, fog cache). `--ao` / `--bloom` / `--fx` stay in the game as overrides applied
-  after `MS_ApplyEnvironment`.
+  after `MS_ApplyEnvironment` (as implemented later: `--ao` and `--bloom` became fields of
+  the runtime's `MS_Quality`, applied by `MS_ApplyQuality`; only `--fx` stays game-side, §11).
 - Hot reload watches every file the scene depends on (map, shaders, model files,
   textures). Any change reloads the whole package and bumps `version`; a failed reload
   keeps the old scene. New GPU resources are created before old ones are freed (§7.4
@@ -483,3 +494,23 @@ default map's box dump and the verification shots are unchanged.
   the importer's settings): examples 01-03 change by up to 26/255 on the edges of the `tiles`
   faces only. `MS_InitRenderer()` (after `R3D_Init`) does `glEnable(GL_DEPTH_CLAMP)`; main.c,
   examples 01-03 and the export README use it (02 newly gets depth clamp).
+
+---
+
+## 11. Later additions (after the streams above; pointers only)
+
+- **Memory rules and leak check** (stream M): no content limits, heap arrays via `MS_RESERVE` /
+  `MS_PUSH`, sanity caps (§2.7); `tools/leakcheck.sh` with `tools/lsan.supp` /
+  `tools/lsan_report.py` (`PROMPT-INSTRUCTIONS.md` §4).
+- **Pass trimming** (stream P): R3D patch 10, single-sampled window by default (`--window-msaa`),
+  `--bench-window`; trade-off knobs `--render-scale` / `--upscale` and the baked occlusion volume
+  `--ao-volume` / `--ao baked` (R3D patch 11) (`PROMPT-INSTRUCTIONS.md` §7.3).
+- **Graphics settings**: `MS_Quality`, `MS_QualityPreset`, `MS_ApplyQuality`,
+  `MS_ApplyRenderResolution` in the runtime; the F2 panel and the settings file in the game
+  (`settings.c`, `settingspanel.c`; `PROMPT-INSTRUCTIONS.md` §5 "Graphics settings").
+- **Model tiers**: every request gets a fast / default / heavy model (`request.md` `Model:` line,
+  `request.json` `model`; `launcher.c` "Model choice"; `MONOLITH_MODEL*`).
+- **Closing request terminals**: K, Shift+K, Ctrl+K n; i3 / sway marks `_monolith_<id>`
+  (`launcher.c` "Closing request windows").
+- **Style-neutral docs** (stream G): the default map's brief, look and reasons moved from the
+  project docs into `maps/monolith/MAP.md`.

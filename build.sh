@@ -120,7 +120,7 @@ fi
 # (glibc, libm, libGL from the GPU driver). Release since 2026-10-10; before that there
 # was no CMAKE_BUILD_TYPE (R3D unoptimised, like the original ../r3d/build), so frame
 # times in older benchmark reports aren't comparable (R3D_BUILD_TYPE=None rebuilds that).
-# R3D_GPU_PROFILER: per-pass GPU timer queries, off at runtime unless --bench/--profile
+# R3D_GPU_PROFILER: per-pass GPU timer queries, off at runtime unless --bench or the F2 panel
 # turns them on (see submodules/r3d/patches.md). ASSIMP_BUILD_ZLIB: bundled zlib, linked in too.
 # ASSIMP_BUILD_MINIZIP: use assimp's bundled unzip; a system minizip (Arch:
 # /usr/include/minizip/) is found by pkg-config but its headers aren't where assimp's

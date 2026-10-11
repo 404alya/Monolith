@@ -1,11 +1,13 @@
-// monolith -- AI-assisted map designer for brutalist concrete levels (raylib + R3D)
+// monolith -- AI-assisted map designer for 3D levels of any style (raylib + R3D)
 //
-// The level is a map package (maps/<name>/: a plain-text <name>.map plus MAP.md, shaders,
-// textures; format: the header comment of runtime/monolith_scene.c), loaded, drawn and
-// hot-reloaded by the scene runtime (runtime/monolith_scene.h) while the game runs. In
-// spectator mode you point at things, select boxes and type a request; the game writes
-// requests/<id>/ and opens Claude Code in a new terminal to edit the map (AI-MAP-TOOL.md).
-// Engine reference: PROMPT-INSTRUCTIONS.md.
+// The level is a map package (maps/<name>/: a plain-text <name>.map of boxes, models,
+// materials, lights and environment, plus its design brief MAP.md, shaders, models, textures
+// and ASSETS.md; format: the header comment of runtime/monolith_scene.c), loaded, drawn and
+// hot-reloaded by the scene runtime (runtime/monolith_scene.h) while the game runs. The
+// default map is maps/monolith/. In spectator mode you point at things, select boxes and
+// models or drag out screen regions, and type a request; the game writes requests/<id>/ and
+// opens Claude Code in a new terminal to edit the map (AI-MAP-TOOL.md). Engine reference:
+// PROMPT-INSTRUCTIONS.md.
 //
 // Controls:
 //   WASD / mouse   walk & look          SHIFT  walk faster
@@ -49,7 +51,7 @@
 //                  fails, the box stays open with the text.
 //   C              snip mode: the camera freezes and the cursor is free. Drag = a screen
 //                  region (replaces the others), SHIFT+drag = add one, ENTER =
-//                  prompt box with the regions (and the box selection made before C)
+//                  prompt box with the regions (and the object selection made before C)
 //                  attached, RMB / ESC / C = leave snip mode and drop the regions. ESC in the
 //                  prompt box returns to snip mode with the regions; a successful submit
 //                  ends it. The bundle lists what each region shows (designer.c)
@@ -110,7 +112,8 @@
 //   --settings-panel   with --shot --shot-hud: draw the open settings panel into the shot
 //   --fx key=value   override one effect setting, repeatable, e.g. --fx ssil.radius=2.5
 //                  (keys: ssao./ssil.samples, .radius; ssao.intensity/.power; ssil.gi/.ao;
-//                  bloom.levels/.intensity; exposure). Applied after --ao / --bloom
+//                  bloom.levels/.intensity; exposure; vfog.step/.length). Applied after the
+//                  map's environment and the quality settings (--quality, --ao, --bloom, ...)
 //   --shadow <size> <range>   sun shadow map size (px) and distance (m), overriding the map's
 //                  env shadow.size / sun.range (the default map: 8192 100)
 //   --shadow-camera   sun shadow from R3D's camera-fitted map, re-rendered only when the
@@ -128,8 +131,9 @@
 //   --window-msaa  4x multisampled window (the default before 2026-10-11): smoother designer
 //                  overlay lines for ~0.1 ms GPU per frame; the scene image is the same
 //   --no-prepass   no depth pre-pass before the G-buffer pass (R3D patch 6; same image,
-//                  for A/B tests: the concrete shader then runs for every overdrawn fragment)
-//   --bench        visit every viewpoint, spin the camera, print frame time stats, write a
+//                  for A/B tests: a material's surface shader then runs for every overdrawn
+//                  fragment)
+//   --bench        visit every viewpoint of the map, spin the camera, print frame time stats, write a
 //                  Markdown report to benchmark/<timestamp>_shadow-<size>-<range>.md and exit
 //   --headless     with --bench: hidden window + offscreen target + glFinish per frame,
 //                  so nothing appears on screen (compare headless runs only with each other)
@@ -197,10 +201,11 @@
 //                  dragged out in snip mode (repeatable); with --shot-hud the shot
 //                  shows the snip-mode drawing, with --submit the bundle gets the regions
 //   --submit "text"  with --shot: after saving the shot, run the real submit path (render
-//                  view + view-marked offscreen, LauncherSubmit with the centre pick,
-//                  the --select boxes and the --region regions) and print the launcher's message. This writes a real
-//                  bundle into requests/ and launches a real terminal + Claude Code: for
-//                  tests, set MONOLITH_TERMINAL to a stub script that only logs its arguments
+//                  view + view-marked offscreen, LauncherSubmit with the centre pick, the
+//                  --select objects and the --region regions) and print the launcher's
+//                  message. This writes a real bundle into requests/ and launches a real
+//                  terminal + Claude Code: for tests, set MONOLITH_TERMINAL to a stub script
+//                  that only logs its arguments (tools/stub-terminal.sh)
 //   --type "text"  open the prompt box with this text (cursor at the end)
 //   --shot-hud     with --shot: draw the HUD, crosshair, selection overlay, regions and prompt box
 //                  into the shot (to look at the UI; plain shots never contain it)

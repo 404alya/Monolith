@@ -2,14 +2,16 @@
 
 `main.c` is the smallest complete program that shows a monolith map package: parse it once
 without the GPU (errors before a window opens, and the sun's shadow map size is an R3D init
-hint), open the window, `R3D_Init`, `MS_Load`, `MS_ApplyEnvironment`, then `MS_Draw` every
-frame. The camera starts at the map's first viewpoint and orbits the point it looks at.
+hint), open the window, `R3D_Init`, `MS_InitRenderer`, `MS_Load`, `MS_ApplyEnvironment` (then
+`MS_ApplyQuality` and `MS_ApplyRenderResolution`, for `--quality`), then `MS_Draw` every frame.
+The camera starts at the map's first viewpoint and orbits the point it looks at.
 
 ```sh
 examples/build/linux/01_minimal/minimal                      # scene/ next to the executable
 examples/build/linux/01_minimal/minimal path/to/package      # any package folder or .map file
 examples/build/linux/01_minimal/minimal --shot /tmp/a.png --view 2 [--size 1600 900]
 examples/build/linux/01_minimal/minimal --shot /tmp/b.png --eye 0 1.62 16 --look 180 0
+examples/build/linux/01_minimal/minimal --shot /tmp/c.png --view 2 --quality medium   # a quality preset
 ```
 
 Keys: mouse wheel zooms, LEFT/RIGHT switch viewpoints, ESC quits.
