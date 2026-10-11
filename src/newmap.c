@@ -59,7 +59,50 @@ static bool WriteText(const char *path, const char *fmt, const char *a, const ch
     return fclose(f) == 0;
 }
 
-bool NewMap(const char *mapsDir, const char *name)
+static bool IsSep(char c) { return c == '/' || c == '\\'; }
+
+char *NewMapDir(const char *mapsDir, const char *target, const char **name)
+{
+    bool path = false;
+    for (const char *c = target; *c; c++) path |= IsSep(*c);
+    if (!path) {
+        *name = target;
+        size_t a = strlen(mapsDir), b = strlen(target);
+        char *dir = malloc(a + b + 1);
+        if (dir) { memcpy(dir, mapsDir, a); memcpy(dir + a, target, b + 1); }
+        return dir;
+    }
+    // A path: drop trailing separators; the name is its last component
+    size_t len = strlen(target);
+    while (len > 1 && IsSep(target[len - 1])) len--;
+    char *dir = MS_StrNDup(target, len);
+    if (!dir) return NULL;
+    const char *n = dir + len;
+    while (n > dir && !IsSep(n[-1])) n--;
+    *name = n;
+    return dir;
+}
+
+bool NewMap(const char *mapsDir, const char *target)
+{
+    const char *name = NULL;
+    char *dir = NewMapDir(mapsDir, target, &name);
+    if (!dir) { fprintf(stderr, "monolith: --new-map: out of memory\n"); return false; }
+    bool ok = NewMapIn(dir, name, mapsDir);
+    free(dir);
+    return ok;
+}
+
+// path = a + b (heap; NULL when out of memory)
+static char *Join(const char *a, const char *b)
+{
+    size_t la = strlen(a), lb = strlen(b);
+    char *p = malloc(la + lb + 1);
+    if (p) { memcpy(p, a, la); memcpy(p + la, b, lb + 1); }
+    return p;
+}
+
+bool NewMapIn(const char *dir, const char *name, const char *mapsDir)
 {
     // A folder and file name: letters, digits, '_' and '-', short enough for any file system
     // once ".map" is appended
@@ -70,28 +113,42 @@ bool NewMap(const char *mapsDir, const char *name)
         ok &= (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-';
     }
     if (!ok) {
-        fprintf(stderr, "monolith: --new-map: the name may only use letters, digits, '_' and '-' (max 200)\n");
+        fprintf(stderr, "monolith: --new-map: the map name (the last component of a path) may only use letters, "
+                        "digits, '_' and '-' (max 200)\n");
         return false;
     }
-    char dir[1200], path[1300];
-    snprintf(dir, sizeof(dir), "%s%s", mapsDir, name);
     if (DirectoryExists(dir) || FileExists(dir)) {
         fprintf(stderr, "monolith: --new-map: %s already exists (nothing changed)\n", dir);
         return false;
     }
-    if (!DirectoryExists(mapsDir)) MakeDirectory(mapsDir);
+    // maps/ itself may be created; any other parent folder must exist already
+    const char *parent = GetPrevDirectoryPath(dir);
+    bool inMaps = strncmp(dir, mapsDir, strlen(mapsDir)) == 0 && !strchr(dir + strlen(mapsDir), '/');
+    if (inMaps && !DirectoryExists(mapsDir)) MakeDirectory(mapsDir);
+    else if (!inMaps && parent && parent[0] && !DirectoryExists(parent)) {
+        fprintf(stderr, "monolith: --new-map: the folder %s does not exist (nothing changed)\n", parent);
+        return false;
+    }
+    char *path = NULL, *mapFile = NULL;
     static const char *const SUBDIRS[] = { "", "/shaders", "/models", "/textures" };
     for (int i = 0; i < 4; i++) {
-        snprintf(path, sizeof(path), "%s%s", dir, SUBDIRS[i]);
-        if (MakeDirectory(path) != 0 || !DirectoryExists(path)) {
-            fprintf(stderr, "monolith: --new-map: cannot create %s\n", path);
+        free(path);
+        path = Join(dir, SUBDIRS[i]);
+        if (!path || MakeDirectory(path) != 0 || !DirectoryExists(path)) {
+            fprintf(stderr, "monolith: --new-map: cannot create %s\n", path ? path : dir);
+            free(path);
             return false;
         }
     }
-
-    snprintf(path, sizeof(path), "%s/%s.map", dir, name);
+    free(path);
+    char *sub = Join("/", name);
+    mapFile = sub ? Join(dir, sub) : NULL;
+    path = mapFile ? Join(mapFile, ".map") : NULL;
+    free(sub);
+    free(mapFile);
+    if (!path) { fprintf(stderr, "monolith: --new-map: out of memory\n"); return false; }
     FILE *f = fopen(path, "wb");
-    if (!f) { fprintf(stderr, "monolith: cannot write %s\n", path); return false; }
+    if (!f) { fprintf(stderr, "monolith: cannot write %s\n", path); free(path); return false; }
     fprintf(f,
         "monolith 2\n"
         "# %s.map -- created by `monolith --new-map %s`. Edit while the game runs: it reloads on save.\n"
@@ -114,12 +171,17 @@ bool NewMap(const char *mapsDir, const char *name)
         "# --- Geometry\n"
         "group \"ground\"\n"
         "box -100 -1 -100 100 0 100\n");
-    if (fclose(f) != 0) { fprintf(stderr, "monolith: cannot write %s\n", path); return false; }
+    if (fclose(f) != 0) { fprintf(stderr, "monolith: cannot write %s\n", path); free(path); return false; }
+    free(path);
 
-    snprintf(path, sizeof(path), "%s/MAP.md", dir);
-    if (!WriteText(path, MAP_MD, name, name)) return false;
-    snprintf(path, sizeof(path), "%s/ASSETS.md", dir);
-    if (!WriteText(path, ASSETS_MD, name, "")) return false;
+    path = Join(dir, "/MAP.md");
+    ok = path && WriteText(path, MAP_MD, name, name);
+    free(path);
+    if (!ok) return false;
+    path = Join(dir, "/ASSETS.md");
+    ok = path && WriteText(path, ASSETS_MD, name, "");
+    free(path);
+    if (!ok) return false;
 
     // The package must load (it is generated, so a failure is a bug here)
     char err[512];

@@ -12,7 +12,7 @@
 # zero leaks before the change counts as done. Map-only edits don't need it.
 #
 # Every run uses a hidden window (--shot, --dump-*, ...) or none: nothing appears on screen.
-# What it runs: --dump-boxes, --dump-scene (with and without models), --shot of the default map
+# What it runs: --dump-boxes, --dump-scene (with and without models, and -diff), --shot of the default map
 # (two views, camera-fitted shadow and fog cache variants; every quality preset, settings files,
 # live settings changes incl. the renderer restart, the settings panel), of tests/models (models, textured /
 # shader materials, shadowed lights), of examples/01_minimal/scene and maps/pine_forest
@@ -118,6 +118,7 @@ echo "leakcheck: running monolith ($MODE build) ..."
 Run dump-boxes 0        "$M" --dump-boxes "$TMP/boxes.txt"
 Run dump-scene 0        "$M" --dump-scene "$TMP/scene.txt"
 Run dump-scene-models 0 "$M" --dump-scene "$TMP/scene-models.txt" --map tests/models
+Run dump-scene-diff 0   "$M" --dump-scene-diff "$TMP/scene-diff.txt" --map tests/models
 Run shot-view2 0        "$M" --shot "$TMP/v2.png" --view 2
 Run shot-view5-camera 0 "$M" --shot "$TMP/v5.png" --view 5 --shadow-camera --fog-cache 1 2
 Run shot-models 0       "$M" --shot "$TMP/models.png" --view 1 --map tests/models
@@ -152,7 +153,8 @@ printf 'monolith 2\nbox 0 0 0 1 1 1\nbogus statement here\n' > "$TMP/broken.map"
 Run reload-to-broken 0  "$M" --shot "$TMP/r3.png" --view 1 --map tests/models --reload-test "$TMP/broken.map"
 Run broken-map 1        "$M" --dump-boxes "$TMP/broken.txt" --map "$TMP/broken.map"
 Run shot-hud 0          "$M" --shot "$TMP/hud.png" --view 2 --shot-hud --select 192 --select 198 \
-                            --region 100 100 300 200 --region 800 300 200 200 --type 'make it\ntaller' --pick
+                            --region 100 100 300 200 --region 800 300 200 200 --type 'make it\ntaller' --pick \
+                            --pick-at 10 10 --pick-at 1590 890
 Run submit-default 0    env MONOLITH_TERMINAL="$STUB" MONOLITH_STUB_LOG="$TMP/stub1.txt" MONOLITH_WORKSPACE= \
                             "$M" --shot "$TMP/s1.png" --view 2 --select 192 --select 193 --region 100 100 300 200 \
                             --region 800 300 200 200 --submit 'leakcheck: make these taller'
@@ -165,6 +167,7 @@ Run inspect-model 0     "$M" --inspect-model tests/models/models/tree_oak.glb
 Run inspect-missing 1   "$M" --inspect-model "$TMP/missing.glb"
 NEWMAP="_leakcheck_$STAMP"
 Run new-map 0           "$M" --new-map "$NEWMAP"
+Run new-map-path 0      "$M" --new-map "$TMP/newmap_path"
 Run classify 0          "$M" --classify 'make the pillar taller' --select 192
 IMPORTMAP="_leakcheck_import_$STAMP"
 Run import 0            env MONOLITH_TERMINAL="$STUB" MONOLITH_STUB_LOG="$TMP/stub3.txt" MONOLITH_WORKSPACE= \

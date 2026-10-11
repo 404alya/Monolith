@@ -174,21 +174,27 @@
 //   --dump-scene <file>   like --dump-boxes, plus model files, model instances (transform and
 //                  world bounds as hex floats), model colliders, materials and lights
 //                  (format: src/dumpscene.c). Maps with models load them in a hidden window
+//   --dump-scene-diff <file>   the same without object indices and map lines, references
+//                  by name (group, material, model file): diff two of these to see only the
+//                  objects an edit changed, even after inserted lines (src/dumpscene.c)
 //   --inspect-model <file>   print what a model file contains and exit, without a window:
 //                  bounds, size, origin, mesh/triangle/vertex counts, materials (= the slots
 //                  for material.N) and their textures (embedded or external, sizes), up axis
 //                  and unit hints, glTF extensions, warnings (unlit or fully metallic
 //                  materials, > 50k triangles, textures > 2K, unsupported extensions) and a
 //                  placement line (src/inspect.c)
-//   --new-map <name>   create the map package maps/<name>/ (<name>.map with a ground slab,
-//                  the default material and the default environment written out, a MAP.md
-//                  template, empty shaders/ models/ textures/ and ASSETS.md) and exit without
-//                  opening a window. Refuses to overwrite an existing folder
+//   --new-map <name|path>   create the map package maps/<name>/ (<name>.map with a ground
+//                  slab, the default material and the default environment written out, a
+//                  MAP.md template, empty shaders/ models/ textures/ and ASSETS.md) and exit
+//                  without opening a window. A path (anything with a '/') creates the package
+//                  in that folder instead (its parent must exist; the name is its last
+//                  component), e.g. a scratch draft. Refuses to overwrite an existing folder
 //   --export <dir>  write the map (--map or the default) as a folder for a plain raylib + R3D
 //                  project and exit without opening a window: the package with every file it
 //                  references, monolith_scene.h/.c, viewer.c and a README.md (export.c).
 //                  Refuses a non-empty <dir>
-//   --import <project dir> <name>   create maps/<name>/ (as --new-map) and open a Claude Code
+//   --import <project dir> <name|path>   create maps/<name>/ or the package folder a path
+//                  names (as --new-map) and open a Claude Code
 //                  import session on a bundle requests/<stamp>_import-<name>/ that translates
 //                  the raylib + R3D project's scene into it (import.c, AI-MAP-TOOL.md "Import
 //                  requests"); no window. Same terminal / flags / workspace as edit requests
@@ -197,6 +203,9 @@
 //   --pick         with --shot: print what the crosshair (screen centre) hits on the shot
 //                  frame: box or model index, group, map line + its text, point, normal,
 //                  distance (models: file, position, rotation, scale, origin, bounds)
+//   --pick-at x y  with --shot: the same for the ray through pixel (x, y) of the shot
+//                  (top-left origin, as --region and view.png), e.g. the edges of a gap;
+//                  repeatable, each printed after a "pick-at x y" line
 //   --select <line>  select every box / model made by this map line (repeatable)
 //   --region x y w h   attach a screen region (pixels of the shot, top-left origin), as if
 //                  dragged out in snip mode (repeatable); with --shot-hud the shot
@@ -571,6 +580,7 @@ static struct {
     const char **settingsChange;    // --settings-change key=value
     int *selectLines;           // --select <line>
     Rectangle *regions;         // --region x y w h
+    Vector2 *pickAt;            // --pick-at x y
     double *benchTimes;         // [view * benchFrames + frame]
     int *benchShadowUpdates;    // per view
 } mainHeap;
@@ -582,6 +592,7 @@ static void FreeMainHeap(void)
     free(mainHeap.settingsChange);
     free(mainHeap.selectLines);
     free(mainHeap.regions);
+    free(mainHeap.pickAt);
     free(mainHeap.benchTimes);
     free(mainHeap.benchShadowUpdates);
     memset(&mainHeap, 0, sizeof(mainHeap));
@@ -638,7 +649,8 @@ static int Run(int argc, char **argv)
     const char *benchNote = NULL;
     const char *mapPath = NULL;
     const char *dumpPath = NULL;
-    const char *dumpScenePath = NULL;   // --dump-scene
+    const char *dumpScenePath = NULL;   // --dump-scene, --dump-scene-diff
+    bool dumpSceneDiff = false;         // --dump-scene-diff: no indices or lines
     const char *reloadTestPath = NULL;
     bool eyeSet = false, lookSet = false;   // --eye / --look given (they override --view)
     Vector3 eye = { 0 };
@@ -653,9 +665,11 @@ static int Run(int argc, char **argv)
     mainHeap.fx = malloc(sizeof(const char *) * argc);
     mainHeap.selectLines = malloc(sizeof(int) * argc);
     mainHeap.regions = malloc(sizeof(Rectangle) * argc);
+    mainHeap.pickAt = malloc(sizeof(Vector2) * argc);
     mainHeap.settingsSet = malloc(sizeof(const char *) * argc);
     mainHeap.settingsChange = malloc(sizeof(const char *) * argc);
-    if (!mainHeap.fx || !mainHeap.selectLines || !mainHeap.regions || !mainHeap.settingsSet || !mainHeap.settingsChange) {
+    if (!mainHeap.fx || !mainHeap.selectLines || !mainHeap.regions || !mainHeap.pickAt || !mainHeap.settingsSet ||
+        !mainHeap.settingsChange) {
         fprintf(stderr, "monolith: out of memory\n");
         return 1;
     }
@@ -663,6 +677,8 @@ static int Run(int argc, char **argv)
     int fxCount = 0;
     int *selectLines = mainHeap.selectLines, selectLineCount = 0;
     Rectangle *regionArgs = mainHeap.regions;
+    Vector2 *pickAtArgs = mainHeap.pickAt;
+    int pickAtCount = 0;
     int regionArgCount = 0;
     const char **settingsSets = mainHeap.settingsSet, **settingsChanges = mainHeap.settingsChange;
     int settingsSetCount = 0, settingsChangeCount = 0;
@@ -730,10 +746,15 @@ static int Run(int argc, char **argv)
         else if (strcmp(argv[i], "--note") == 0 && i + 1 < argc) benchNote = argv[++i];
         else if (strcmp(argv[i], "--map") == 0 && i + 1 < argc) mapPath = argv[++i];
         else if (strcmp(argv[i], "--dump-boxes") == 0 && i + 1 < argc) dumpPath = argv[++i];
-        else if (strcmp(argv[i], "--dump-scene") == 0 && i + 1 < argc) dumpScenePath = argv[++i];
+        else if (strcmp(argv[i], "--dump-scene") == 0 && i + 1 < argc) { dumpScenePath = argv[++i]; dumpSceneDiff = false; }
+        else if (strcmp(argv[i], "--dump-scene-diff") == 0 && i + 1 < argc) { dumpScenePath = argv[++i]; dumpSceneDiff = true; }
         else if (strcmp(argv[i], "--inspect-model") == 0 && i + 1 < argc) return InspectModel(argv[++i]);
         else if (strcmp(argv[i], "--reload-test") == 0 && i + 1 < argc) reloadTestPath = argv[++i];
         else if (strcmp(argv[i], "--pick") == 0) pickFlag = true;
+        else if (strcmp(argv[i], "--pick-at") == 0 && i + 2 < argc) {
+            pickAtArgs[pickAtCount++] = (Vector2){ (float)atof(argv[i + 1]), (float)atof(argv[i + 2]) };
+            i += 2;
+        }
         else if (strcmp(argv[i], "--shot-hud") == 0) shotHud = true;
         else if (strcmp(argv[i], "--no-frame-reuse") == 0) frameReuseFlag = 0;
         else if (strcmp(argv[i], "--frame-reuse") == 0) frameReuseFlag = 1;
@@ -904,7 +925,7 @@ static int Run(int argc, char **argv)
         }
         if (dumpScenePath && peek->modelCount == 0) {
             // Without models nothing needs the GPU: no window at all
-            bool ok = DumpScene(peek, dumpScenePath);
+            bool ok = DumpScene(peek, dumpScenePath, dumpSceneDiff);
             fprintf(ok ? stdout : stderr, ok ? "monolith: wrote the scene to %s\n" : "monolith: cannot write %s\n", dumpScenePath);
             MS_Unload(peek);
             return ok ? 0 : 1;
@@ -980,7 +1001,7 @@ static int Run(int argc, char **argv)
             return 1;
         }
         if (dumpScenePath) {
-            bool ok = DumpScene(scene, dumpScenePath);
+            bool ok = DumpScene(scene, dumpScenePath, dumpSceneDiff);
             fprintf(ok ? stdout : stderr, ok ? "monolith: wrote the scene to %s\n" : "monolith: cannot write %s\n", dumpScenePath);
             MS_Unload(scene);
             R3D_Close();
@@ -1436,6 +1457,15 @@ static int Run(int argc, char **argv)
             if (!ExportImage(img, shotPath)) TraceLog(LOG_ERROR, "monolith: failed to save %s", shotPath);
             UnloadImage(img);
             if (pickFlag) DesignerPrintHit(designer.hit);
+            if (pickAtCount > 0) {
+                // The same camera and ray frame as the shot (and as screen regions)
+                Camera3D cam = spec.active ? SpectatorCamera(&spec) : PlayerCamera(&player);
+                for (int k = 0; k < pickAtCount; k++) {
+                    printf("pick-at %g %g (of %d x %d):\n", pickAtArgs[k].x, pickAtArgs[k].y, shotW, shotH);
+                    DesignerPrintHit(DesignerPickAt(cam, shotW, shotH, pickAtArgs[k].x, pickAtArgs[k].y));
+                }
+                fflush(stdout);
+            }
             if (reuse.enabled) TraceLog(LOG_INFO, "monolith: frame reuse: %d of %d frames composited from the cache", reusedFrames, frame);
             if (submitText) {
                 char msg[512];
