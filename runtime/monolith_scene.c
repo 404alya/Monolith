@@ -273,6 +273,7 @@ typedef struct {
     MS_Material *materials;
     MatDef *matDefs;                    // parallel to materials[]
     int materialCount, materialCap, matDefCap;
+    int *matHash, matHashCap;           // material name -> index + 1 (open addressing, 0 = empty)
     MS_LightDef *lights;
     int lightCount, lightCap;
     MS_Viewpoint *viewpoints;
@@ -1319,11 +1320,46 @@ static bool ParseLight(Parser *P, Token *args, int n, const Placement *pl)
     return true;
 }
 
+// Material names are looked up through a hash table: a linear search made a map with many
+// materials quadratic to parse (QA2 F6: 80000 materials took 17 s)
+static unsigned MatHashSlot(const char *name, int cap)
+{
+    return (unsigned)(Fnv1a64Update(FNV_OFFSET, name, strlen(name)) & (unsigned long long)(cap - 1));
+}
+
 static int FindMaterial(const SceneData *d, const char *name)
 {
-    for (int i = 0; i < d->materialCount; i++)
-        if (strcmp(d->materials[i].name, name) == 0) return i;
+    if (!d->matHashCap) return -1;
+    for (unsigned h = MatHashSlot(name, d->matHashCap); d->matHash[h]; h = (h + 1) & (unsigned)(d->matHashCap - 1))
+        if (strcmp(d->materials[d->matHash[h] - 1].name, name) == 0) return d->matHash[h] - 1;
     return -1;
+}
+
+// Enters material `mi` into the table (grown to keep it at most half full)
+static bool MatHashInsert(SceneData *d, int mi)
+{
+    if (2 * (d->materialCount + 1) > d->matHashCap) {
+        int cap = d->matHashCap ? d->matHashCap : 64;
+        while (2 * (d->materialCount + 1) > cap) {
+            if (cap > (1 << 29)) return false;
+            cap *= 2;
+        }
+        int *t = calloc((size_t)cap, sizeof(int));
+        if (!t) return false;
+        free(d->matHash);
+        d->matHash = t;
+        d->matHashCap = cap;
+        for (int i = 0; i < d->materialCount; i++)
+            if (i != mi) {
+                unsigned h = MatHashSlot(d->materials[i].name, cap);
+                while (t[h]) h = (h + 1) & (unsigned)(cap - 1);
+                t[h] = i + 1;
+            }
+    }
+    unsigned h = MatHashSlot(d->materials[mi].name, d->matHashCap);
+    while (d->matHash[h]) h = (h + 1) & (unsigned)(d->matHashCap - 1);
+    d->matHash[h] = mi + 1;
+    return true;
 }
 
 // A new material `name` with R3D's defaults: its index, or -1 when out of memory
@@ -1338,6 +1374,7 @@ static int AddMaterial(SceneData *d, const char *name)
     int mi = d->materialCount++;
     d->materials[mi] = (MS_Material){ .name = copy, .material = R3D_MATERIAL_BASE };
     d->matDefs[mi] = (MatDef){ 0 };
+    if (!MatHashInsert(d, mi)) return -1;   // (the entry stays; FreeData frees its name)
     return mi;
 }
 
@@ -3310,6 +3347,7 @@ static void FreeData(SceneData *d)
     }
     free(d->materials);
     free(d->matDefs);
+    free(d->matHash);
     for (int i = 0; i < d->groupCount; i++) free(d->groups[i]);
     free(d->groups);
     for (int i = 0; i < d->viewpointCount; i++) free((char *)d->viewpoints[i].name);
