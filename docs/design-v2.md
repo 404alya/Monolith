@@ -93,6 +93,7 @@ use "name"                 following primitives (boxes and models) use this mate
 | `cull` | `back` / `front` / `none` | `cullMode` |
 | `transparency` | `off` / `prepass` / `alpha` | `transparencyMode` |
 | `inherit` | `albedo` / `normal` / `orm` / `emission` / `all` (repeatable) | model overrides only: keep that map from the model's own material (§2.5) |
+| `wrap` | `repeat` / `clamp` / `mirror` (stream B) | wrapping of the material's textures and samplers; default `repeat` (R3D's own default is clamp, which made `uv_scale` > 1 useless); trilinear + mipmaps |
 
 - Rendering: **one instanced draw per material that has boxes** (the default map: one).
 - Picking, the HUD and request bundles name a box's or model's material.
@@ -457,3 +458,10 @@ default map's box dump and the verification shots are unchanged.
   `ambientSky.sunDirection` are rejected; (4) a spot light with `inner > outer` is rejected,
   the header comment states the `dir` light's default range (50), and shader / texture load
   errors cite the map line of the key that names the file.
+- **After the merge of D (stream D's requests):** `MS_Dependency` lists model files and the
+  files they name, so `--export` copies them (tested: the exported models package renders
+  pixel-identical in monolith and in the exported `viewer.c`). Material textures load with
+  `wrap repeat` by default (material key `wrap repeat|clamp|mirror`; model-own textures keep
+  the importer's settings): examples 01-03 change by up to 26/255 on the edges of the `tiles`
+  faces only. `MS_InitRenderer()` (after `R3D_Init`) does `glEnable(GL_DEPTH_CLAMP)`; main.c,
+  examples 01-03 and the export README use it (02 newly gets depth clamp).

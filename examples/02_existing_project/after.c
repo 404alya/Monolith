@@ -93,6 +93,7 @@ int main(int argc, char **argv)
     MS_Unload(peek);                                // monolith
     R3D_Init(GetScreenWidth(), GetScreenHeight());
     R3D_SetAntiAliasingMode(R3D_ANTI_ALIASING_MODE_FXAA);
+    MS_InitRenderer();                              // monolith: GL state for the sun's shadow (depth clamp)
     ShotBegin(&shot);
 
     scene = MS_Load(package, NULL, err, sizeof(err));   // monolith: load the level

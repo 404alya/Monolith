@@ -24,10 +24,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-// Depth clamp for the sun's shadow pass (see the export README, "Sun shadow and depth
-// clamp"). Declared by hand instead of including GL headers, which clash with raylib.
-#define GL_DEPTH_CLAMP 0x864F
-extern void glEnable(unsigned int cap);
 
 // monolith's camera convention: yaw about +Y (0 = toward +Z), pitch up, fovy 70
 static Camera3D CameraFromAngles(Vector3 eye, float yaw, float pitch)
@@ -86,7 +82,7 @@ int main(int argc, char **argv)
     MS_Unload(peek);
     R3D_Init(GetScreenWidth(), GetScreenHeight());
     R3D_SetAntiAliasingMode(R3D_ANTI_ALIASING_MODE_FXAA);
-    glEnable(GL_DEPTH_CLAMP);
+    MS_InitRenderer();                  // depth clamp for the sun's shadow (see monolith_scene.h)
 
     MS_Scene *scene = MS_Load(package, NULL, err, sizeof(err));
     if (!scene) { fprintf(stderr, "%s\n", err); R3D_Close(); CloseWindow(); return 1; }

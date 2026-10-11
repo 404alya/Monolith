@@ -18,8 +18,6 @@
 #include <math.h>
 #include <stdlib.h>
 
-#define GL_DEPTH_CLAMP 0x864F               // see 01_minimal / the export README
-extern void glEnable(unsigned int cap);
 
 static Camera3D ViewpointCamera(const MS_Scene *s, int i)
 {
@@ -46,7 +44,7 @@ int main(int argc, char **argv)
     MS_Unload(peek);
     R3D_Init(GetScreenWidth(), GetScreenHeight());
     R3D_SetAntiAliasingMode(R3D_ANTI_ALIASING_MODE_FXAA);
-    glEnable(GL_DEPTH_CLAMP);
+    MS_InitRenderer();                  // depth clamp for the sun's shadow (see monolith_scene.h)
     ShotBegin(&shot);
 
     MS_Scene *scene = MS_Load(package, NULL, err, sizeof(err));

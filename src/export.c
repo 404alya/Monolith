@@ -243,7 +243,7 @@ static bool WriteReadme(const char *path, const MS_Scene *s, const char *name, c
         "if (peek) { MS_SetInitHints(peek); MS_Unload(peek); }\n"
         "R3D_Init(GetScreenWidth(), GetScreenHeight());\n"
         "R3D_SetAntiAliasingMode(R3D_ANTI_ALIASING_MODE_FXAA);   // what monolith uses\n"
-        "glEnable(GL_DEPTH_CLAMP);   // recommended, see \"Sun shadow\" below\n\n"
+        "MS_InitRenderer();          // GL state the scene needs (depth clamp), see \"Sun shadow\" below\n\n"
         "MS_Scene *scene = MS_Load(\"%s\", NULL, err, sizeof(err));\n"
         "if (!scene) { puts(err); return 1; }\n"
         "MS_ApplyEnvironment(scene);         // sky, ambient light, fog, SSAO/SSIL, bloom, tonemap ...\n\n"
@@ -269,8 +269,8 @@ static bool WriteReadme(const char *path, const MS_Scene *s, const char *name, c
         "if your game needs other settings. **Collision and picking**: `MS_Collides(scene, box)` (strict AABB overlap "
         "against every box and model collider), `MS_Raycast(scene, origin, dir, maxDist)`. The map's player start "
         "(`scene->spawnFeet`, `spawnYawDeg`) and viewpoints (`scene->viewpoints`) are there too. "
-        "`GL_DEPTH_CLAMP` needs `extern void glEnable(unsigned int);` and `#define GL_DEPTH_CLAMP 0x864F` (or your GL "
-        "loader's header) and links against libGL / opengl32.\n\n",
+        "`MS_InitRenderer` calls `glEnable` from libGL / opengl32, so link against it "
+        "(as every raylib program does).\n\n",
         name, name);
 
     fprintf(f,
@@ -313,9 +313,9 @@ static bool WriteReadme(const char *path, const MS_Scene *s, const char *name, c
     fprintf(f,
         "## Sun shadow and depth clamp\n\n"
         "R3D's sun shadow map has a limited depth range toward the sun; tall casters far away get clipped and their "
-        "shadows pop as the camera turns. monolith calls `glEnable(GL_DEPTH_CLAMP)` once after `R3D_Init` (R3D never "
-        "changes that state), which flattens such casters onto the near plane instead. Do the same for an identical "
-        "image; the side effect is that geometry closer than the 1 cm near plane is clamped rather than cut away.\n\n");
+        "shadows pop as the camera turns. `MS_InitRenderer()` (call it once after `R3D_Init`) enables `GL_DEPTH_CLAMP` (R3D never "
+        "changes that state), which flattens such casters onto the near plane instead, as the editor does. Without it "
+        "such shadows can pop; the side effect is that geometry closer than the 1 cm near plane is clamped rather than cut away.\n\n");
 
     fprintf(f, "## Licences and attribution\n\nFrom `%s/ASSETS.md` (the package's record of every external file; keep it with "
                "the package and credit CC-BY assets as listed):\n\n", name);

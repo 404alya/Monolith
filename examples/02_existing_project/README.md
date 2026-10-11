@@ -16,7 +16,8 @@ Keys: WASD move, LEFT/RIGHT or the mouse turn, SPACE jumps.
 
 1. **Include and load.** `#include "monolith_scene.h"`, add `monolith_scene.c` to the build.
    Parse the package once with `.noGpu = true` before `R3D_Init` and call `MS_SetInitHints`
-   (the sun's shadow map size is an R3D init hint), then `MS_Load` + `MS_ApplyEnvironment`.
+   (the sun's shadow map size is an R3D init hint), `MS_InitRenderer()` right after `R3D_Init`
+   (depth clamp for the sun's shadow), then `MS_Load` + `MS_ApplyEnvironment`.
 2. **Remove what the scene now provides:** the floor mesh, the game's own sky, ambient map,
    tonemap setting and sun (with its shadow map). Keep your own lights for your own things (the
    lamp stays). R3D has two directional shadow layers and the scene's sun uses them, so a
@@ -29,9 +30,6 @@ Keys: WASD move, LEFT/RIGHT or the mouse turn, SPACE jumps.
 6. **Hot reload** (optional): `if (MS_Poll(scene, dt) == MS_RELOADED) MS_ApplyEnvironment(scene);`
    (see `03_live_editing`).
 7. **Unload**: `MS_Unload(scene)` before `R3D_Close`.
-
-Not done here, see the export README: `glEnable(GL_DEPTH_CLAMP)` (matters for tall shadow
-casters far away; this scene has none).
 
 ## The diff
 
@@ -52,6 +50,8 @@ casters far away; this scene has none).
 +    MS_SetInitHints(peek);                          // monolith
 +    MS_Unload(peek);                                // monolith
      R3D_Init(GetScreenWidth(), GetScreenHeight());
+     R3D_SetAntiAliasingMode(R3D_ANTI_ALIASING_MODE_FXAA);
++    MS_InitRenderer();                              // monolith: GL state for the sun's shadow (depth clamp)
 @@ main(): setup
 -    R3D_Mesh floorMesh = R3D_GenMeshPlane(60, 60, 1, 1);
 +    scene = MS_Load(package, NULL, err, sizeof(err));   // monolith: load the level

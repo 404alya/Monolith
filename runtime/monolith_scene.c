@@ -89,6 +89,8 @@
 //         pre-pass)  cull back|front|none  transparency off|prepass|alpha
 //         blend alpha|additive|add_alpha|multiply|premultiplied  unlit on|off  priority n
 //         inherit albedo|normal|orm|emission|all   (model overrides: keep the model's own map)
+//         wrap repeat|clamp|mirror   wrapping of this material's textures and samplers
+//                                    (default repeat, so uv_scale > 1 tiles; trilinear + mipmaps)
 //   Colours are 0-255 sRGB. Unset keys keep R3D's defaults (R3D_MATERIAL_BASE).
 //
 // Environment (format 2):  env <key> <value...>
@@ -176,6 +178,7 @@ typedef struct {
     int samplerCount;
     unsigned inherit;                   // INHERIT_* (for model overrides)
     int shaderLine, mapLine[MAP_COUNT];  // map lines of the keys, for load errors
+    int wrap;                           // texture wrapping: 0 repeat (default), 1 clamp, 2 mirror
 } MatDef;
 
 typedef struct {
@@ -204,7 +207,7 @@ typedef struct {
     BoundingBox fogRegion;
 } EnvDef;
 
-typedef struct { char path[MS_PATH_MAX]; bool isColor; Texture2D tex; } TexEntry;
+typedef struct { char path[MS_PATH_MAX]; bool isColor; int wrap; Texture2D tex; } TexEntry;
 
 // Picking data of a model file: a CPU copy of its triangles (model space) and a BVH over them
 typedef struct { Vector3 mn, mx; int left, first, count; } BvhNode;    // leaf: count > 0 (left = -1)
@@ -1335,6 +1338,10 @@ static bool ParseMaterial(Parser *P, Token *tok, int n)
             ONE_WORD();
             if (!Keyword(P, v[0], BL, 5, "blend mode", &e)) return false;
             m->blendMode = (R3D_BlendMode)e;
+        } else if (strcmp(k, "wrap") == 0) {
+            static const char *const WR[] = { "repeat", "clamp", "mirror" };
+            ONE_WORD();
+            if (!Keyword(P, v[0], WR, 3, "wrap mode", &D->wrap)) return false;
         } else if (strcmp(k, "unlit") == 0) {
             ONE_WORD();
             if (!OnOff(P, v[0], &m->unlit)) return false;
@@ -1984,7 +1991,7 @@ static float FitRadius(float range, float fovy, float aspect)
 // every point within `range` of the eye stays inside that, so the fades are exactly 1
 // wherever shadows show: same result as the camera-fitted map, minus 16-bit depth
 // rounding. Casters toward the sun beyond the near plane are flattened onto it by
-// GL_DEPTH_CLAMP (pancaking, enabled by the caller after R3D_Init), so tall far-away
+// GL_DEPTH_CLAMP (pancaking, MS_InitRenderer after R3D_Init), so tall far-away
 // casters still shadow.
 
 #define SHADOW_EDGE_FADE    0.01f   // SHADOW_DIR_EDGE_FADE in r3d/shaders/include/wrap/light.glsl
@@ -2267,17 +2274,20 @@ static bool ParseScene(SceneData *d, const char *mapPath, const char *text, int 
     return true;
 }
 
-static Texture2D GetTexture(SceneData *d, const char *rel, bool isColor, int line, char *err, int errSize)
+static Texture2D GetTexture(SceneData *d, const char *rel, bool isColor, int wrap, int line, char *err, int errSize)
 {
     char full[MS_PATH_MAX + MS_PATH_MAX];
     snprintf(full, sizeof(full), "%s%s", d->root, rel);
     for (int i = 0; i < d->textureCount; i++)
-        if (strcmp(d->textures[i].path, full) == 0 && d->textures[i].isColor == isColor) return d->textures[i].tex;
+        if (strcmp(d->textures[i].path, full) == 0 && d->textures[i].isColor == isColor && d->textures[i].wrap == wrap) return d->textures[i].tex;
     if (d->textureCount >= MS_MAX_TEXTURES) {
         snprintf(err, errSize, "%s:%d: too many textures (max 256)", d->path, line);
         return (Texture2D){ 0 };
     }
-    Texture2D tex = R3D_LoadTexture(full, isColor);
+    // R3D's default wrap is clamp, which would make uv_scale > 1 useless; map materials repeat
+    // unless `wrap clamp|mirror`. Filter: trilinear with generated mipmaps (R3D's default).
+    static const TextureWrap WRAPS[] = { TEXTURE_WRAP_REPEAT, TEXTURE_WRAP_CLAMP, TEXTURE_WRAP_MIRROR_REPEAT };
+    Texture2D tex = R3D_LoadTextureEx(full, WRAPS[wrap % 3], TEXTURE_FILTER_TRILINEAR, isColor);
     if (tex.id == 0) {
         snprintf(err, errSize, "%s:%d: cannot load the texture \"%s\"", d->path, line, rel);
         return tex;
@@ -2285,6 +2295,7 @@ static Texture2D GetTexture(SceneData *d, const char *rel, bool isColor, int lin
     TexEntry *e = &d->textures[d->textureCount++];
     if (snprintf(e->path, sizeof(e->path), "%s", full) >= (int)sizeof(e->path)) e->path[0] = '\0';   // (not shared then)
     e->isColor = isColor;
+    e->wrap = wrap;
     e->tex = tex;
     return tex;
 }
@@ -2624,7 +2635,7 @@ static bool UploadGpu(SceneData *d, char *err, int errSize)
             for (int u = 0; u < D->uniformCount; u++)
                 R3D_SetSurfaceShaderUniform(m->shader, D->uniforms[u].name, D->uniforms[u].v);
             for (int s = 0; s < D->samplerCount; s++) {
-                Texture2D tex = GetTexture(d, D->samplers[s].path, true, D->samplers[s].line, err, errSize);
+                Texture2D tex = GetTexture(d, D->samplers[s].path, true, D->wrap, D->samplers[s].line, err, errSize);
                 if (!tex.id) { FreeGpu(d); return false; }
                 R3D_SetSurfaceShaderSampler(m->shader, D->samplers[s].name, tex);
             }
@@ -2633,7 +2644,7 @@ static bool UploadGpu(SceneData *d, char *err, int errSize)
         Texture2D *slot[MAP_COUNT] = { &m->albedo.texture, &m->normal.texture, &m->orm.texture, &m->emission.texture };
         for (int k = 0; k < MAP_COUNT; k++) {
             if (!D->maps[k][0]) continue;
-            *slot[k] = GetTexture(d, D->maps[k], IS_COLOR[k], D->mapLine[k], err, errSize);
+            *slot[k] = GetTexture(d, D->maps[k], IS_COLOR[k], D->wrap, D->mapLine[k], err, errSize);
             if (!slot[k]->id) { FreeGpu(d); return false; }
         }
 
@@ -2953,6 +2964,16 @@ bool MS_GetLine(const MS_Scene *s, int line, char *out, int outSize)
     memcpy(out, d->text + pos, len);
     out[len] = '\0';
     return true;
+}
+
+// Declared by hand rather than via <GL/gl.h> / <windows.h> (which clash with raylib). On
+// Windows x64 there is a single calling convention, so this matches opengl32.dll.
+#define MS_GL_DEPTH_CLAMP 0x864F
+extern void glEnable(unsigned int cap);
+
+void MS_InitRenderer(void)
+{
+    glEnable(MS_GL_DEPTH_CLAMP);
 }
 
 void MS_SetInitHints(const MS_Scene *s)

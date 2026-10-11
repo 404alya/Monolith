@@ -27,7 +27,7 @@ external assets.
 
 `minimal --shot x.png --view n` and `monolith --shot y.png --view n --map examples/01_minimal/scene`
 are pixel-identical (same 1600 x 900 default, the same viewpoint-to-camera math as monolith's
-spectator, FXAA, `glEnable(GL_DEPTH_CLAMP)`, 30 frames into a `RenderTexture`). The same holds
+spectator, FXAA, `MS_InitRenderer()` (depth clamp), 30 frames into a `RenderTexture`). The same holds
 for an exported default map built in a folder outside the repo.
 
 `--export` copies this file into every export as `viewer.c`, so keep it dependent on raylib,

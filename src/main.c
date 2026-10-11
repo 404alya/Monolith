@@ -194,11 +194,9 @@
 #include "inspect.h"
 #include "dumpscene.h"
 
-// Only needed for glEnable(GL_DEPTH_CLAMP), see main(), and glFinish() for --headless.
-// Declared by hand rather than via <GL/gl.h> / <windows.h> (which clashes with raylib).
-// On Windows x64 there is a single calling convention, so these match opengl32.dll.
-#define GL_DEPTH_CLAMP 0x864F
-extern void glEnable(unsigned int cap);
+// Only needed for glFinish() for --headless (depth clamp: MS_InitRenderer). Declared by hand
+// rather than via <GL/gl.h> / <windows.h> (which clashes with raylib). On Windows x64 there
+// is a single calling convention, so this matches opengl32.dll.
 extern void glFinish(void);
 
 #ifndef BENCHMARK_PATH
@@ -625,6 +623,8 @@ int main(int argc, char **argv)
             int selected = 0;
             for (int b = 0; b < peek->boxCount; b++)
                 for (int k = 0; k < selectLineCount; k++) if (peek->boxRefs[b].line == selectLines[k]) { selected++; break; }
+            for (int m = 0; m < peek->modelCount; m++)
+                for (int k = 0; k < selectLineCount; k++) if (peek->models[m].ref.line == selectLines[k]) { selected++; break; }
             const char *text = Unescape(classifyText);
             ModelQuery q = { .prompt = text, .kind = classifyKind, .selected = selected, .regions = regionArgCount,
                              .hit = true, .emptyMap = peek->boxCount + peek->modelCount <= 2, .noBrief = !peek->brief[0] };
@@ -698,7 +698,8 @@ int main(int argc, char **argv)
     // being clipped, and still write depth. R3D never touches this state, so
     // enabling it once covers its shadow pass. Side effect on the main view:
     // geometry closer than the 1 cm near plane is clamped rather than cut away.
-    glEnable(GL_DEPTH_CLAMP);
+    // (glEnable(GL_DEPTH_CLAMP), in the runtime so every program that draws a scene gets it.)
+    MS_InitRenderer();
 
     // --- The scene (runtime/monolith_scene.c): boxes as one instanced draw per material,
     // materials and their shaders, sky + ambient map, lights, sun shadow tiles

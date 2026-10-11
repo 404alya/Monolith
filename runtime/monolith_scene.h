@@ -14,6 +14,7 @@
 //     MS_Scene *peek = MS_Load("maps/forest", &(MS_LoadOptions){ .noGpu = true }, err, sizeof(err));
 //     if (peek) { MS_SetInitHints(peek); MS_Unload(peek); }
 //     R3D_Init(w, h);
+//     MS_InitRenderer();                 // GL state the scene needs (depth clamp for the sun shadow)
 //     MS_Scene *scene = MS_Load("maps/forest", NULL, err, sizeof(err));
 //     if (!scene) { puts(err); return 1; }
 //     MS_ApplyEnvironment(scene);
@@ -221,6 +222,14 @@ const char *MS_Error(const MS_Scene *scene);    // last failed (re)load, "" afte
 // queries GL) and before R3D_Init, e.g. with a noGpu scene. A reload that changes shadow.size
 // keeps the old size until a restart.
 void MS_SetInitHints(const MS_Scene *scene);
+
+// GL state the scene needs that R3D doesn't set. Call once right after R3D_Init (before or
+// after MS_Load). Today: glEnable(GL_DEPTH_CLAMP), "shadow pancaking": the sun's shadow map
+// only reaches a limited distance toward the sun, so parts of tall casters beyond its near
+// plane would be clipped and their shadows pop as the camera turns; with depth clamp they
+// are flattened onto the near plane instead (R3D never touches this state). Side effect:
+// geometry closer than the camera's near plane (1 cm) is clamped rather than cut away.
+void MS_InitRenderer(void);
 
 // Line `line` (1-based) of the loaded map's text, without the newline
 bool MS_GetLine(const MS_Scene *scene, int line, char *out, int outSize);

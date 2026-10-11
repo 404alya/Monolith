@@ -1579,7 +1579,7 @@ bool LauncherSubmit(const DesignRequest *req, Image view, Image marked, char *ms
         strftime(B.created, sizeof(B.created), "%Y-%m-%d %H:%M:%S", tm);
     }
     ModelQuery mq = { .prompt = req->prompt, .kind = "edit", .selected = req->selectedCount,
-                      .regions = req->regionCount, .hit = req->hit.box >= 0,
+                      .regions = req->regionCount, .hit = req->hit.obj.kind != MS_OBJ_NONE,
                       .emptyMap = scene->boxCount + scene->modelCount <= 2, .noBrief = !scene->brief[0] };
     LauncherChooseModel(&mq, &B.model);
     B.userPrompt = req->prompt + B.model.promptSkip;
