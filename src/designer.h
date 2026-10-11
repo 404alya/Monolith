@@ -34,6 +34,19 @@ typedef struct {
     float share;            // samples / all samples of the region
 } DesignRegionObject;
 
+// Edge sides of a region (DesignRegionEdge.sides)
+enum { REGION_EDGE_LEFT = 1, REGION_EDGE_RIGHT = 2, REGION_EDGE_TOP = 4, REGION_EDGE_BOTTOM = 8 };
+
+// An object that rays just outside a region's border hit: what bounds an opening or a gap
+// the region looks through (the region's own objects are what is seen through it)
+typedef struct {
+    MS_ObjRef obj;
+    int samples;            // edge rays that hit this object first
+    unsigned int sides;     // REGION_EDGE_* bits: on which sides of the rect
+    float dist;             // nearest hit, metres from the eye
+    Vector3 point;          // that nearest hit point
+} DesignRegionEdge;
+
 // What a region shows, computed at submit time by DesignerAnalyzeRegion (ray sampling)
 typedef struct {
     Rectangle rect;         // clamped to the frame, whole pixels
@@ -48,6 +61,13 @@ typedef struct {
     int omittedObjects;     // objects hit but not listed: always 0 now (kept for the bundle format)
     float omittedShare;
     float sky;              // share of samples that hit nothing
+    // Edge objects: rays on a ring edgeOffset px outside the rect (sides that leave the frame
+    // are skipped), nearest first (heap; DesignerFreeRequest)
+    DesignRegionEdge *edges;
+    int edgeCount;
+    int edgeSamples;        // rays on the ring
+    float edgeSky;          // share of them that hit nothing
+    float edgeOffset;       // px outside the rect
     double ms;              // time the analysis took
 } DesignRegionInfo;
 
@@ -134,6 +154,9 @@ void DesignerSync(Designer *d);
 
 // d->hit = what the camera's centre ray hits. Call after the camera moved, before drawing.
 void DesignerPickCamera(Designer *d, Camera3D cam);
+// What the ray through pixel (x, y) of a w x h frame of `cam` hits (top-left origin, pixel
+// centres at i + 0.5; the frame centre is the crosshair ray): --pick-at
+DesignerHit DesignerPickAt(Camera3D cam, int w, int h, float x, float y);
 
 // Spectator-mode input: clicks (selection, against d->hit, i.e. what the last frame
 // showed under the crosshair), Enter (opens the prompt box) and all prompt editing.
@@ -152,7 +175,9 @@ bool DesignerAddRegion(Designer *d, Rectangle rect, int w, int h);
 
 // What region `rect` (pixels of a w x h frame rendered with `cam`) shows: a regular grid of
 // at most REGION_SAMPLES rays through pixel centres, plus one through the rect's centre.
-// out->objects is heap memory (free(out->objects), or DesignerFreeRequest for a request).
+// Also the edge objects: rays on a ring just outside the rect (out->edges).
+// out->objects and out->edges are heap memory (DesignerFreeRegion, or DesignerFreeRequest).
+void DesignerFreeRegion(DesignRegionInfo *r);
 void DesignerAnalyzeRegion(Camera3D cam, int w, int h, Rectangle rect, DesignRegionInfo *out);
 
 void DesignerOpenPrompt(Designer *d, const char *text);

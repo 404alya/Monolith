@@ -1,5 +1,6 @@
 #include "designer.h"
 #include <math.h>
+#include <limits.h>
 
 // Memory: the selection, regions and prompt live in the Designer (heap arrays, freed by
 // DesignerFree); per-frame drawing and picking reuse file-level scratch arrays that only grow
@@ -82,7 +83,9 @@ DesignerHit DesignerPick(Vector3 origin, Vector3 dir)
 
 // Name of an object's material (the HUD, --pick and request bundles show it). Models
 // without a whole-model override use the file's own materials ("(own)"), possibly with
-// per-slot material.N overrides, which are listed: "(own; slot 0 = bark, slot 2 = needles)"
+// per-slot material.N overrides, which are listed: "(own; slot 0 = bark, slot 2 = needles)",
+// or "(all slots overridden: slot 0 = wood, slot 1 = canvas)" when no slot of the file keeps
+// its own material. The label lives in a buffer grown as needed and reused by the next call.
 const char *DesignerMaterialLabel(MS_ObjRef o)
 {
     const MS_Ref *r = MS_ObjectRef(scene, o);
@@ -91,15 +94,30 @@ const char *DesignerMaterialLabel(MS_ObjRef o)
     if (o.kind != MS_OBJ_MODEL) return "default";
     const MS_ModelInstance *mi = &scene->models[o.index];
     if (mi->slotCount <= 0) return "(own)";
-    static char buf[512];   // one label at a time; long lists are cut with "..."
-    int n = snprintf(buf, sizeof(buf), "(own;");
-    for (int i = 0; i < mi->slotCount && n < (int)sizeof(buf) - 8; i++) {
-        const MS_SlotMaterial *sm = &scene->modelSlots[mi->slotFirst + i];
-        const char *name = sm->material >= 0 && sm->material < scene->materialCount ? scene->materials[sm->material].name : "?";
-        n += snprintf(buf + n, sizeof(buf) - n, "%s slot %d = %s", i ? "," : "", sm->slot, name);
+    const MS_SlotMaterial *slots = &scene->modelSlots[mi->slotFirst];
+    int fileSlots = scene->modelFiles[mi->file].materialCount;
+    bool all = fileSlots > 0;
+    for (int s = 0; s < fileSlots && all; s++) {
+        bool found = false;
+        for (int i = 0; i < mi->slotCount && !found; i++) found = slots[i].slot == s;
+        all = found;
     }
-    if (n >= (int)sizeof(buf) - 8) snprintf(buf + sizeof(buf) - 8, 8, "...)");
-    else snprintf(buf + n, sizeof(buf) - n, ")");
+    static char *buf;
+    static int cap;
+    const char *head = all ? "(all slots overridden:" : "(own;";
+    size_t need = strlen(head) + 2;
+    for (int i = 0; i < mi->slotCount; i++) {
+        int sm = slots[i].material;
+        need += 32 + strlen(sm >= 0 && sm < scene->materialCount ? scene->materials[sm].name : "?");
+    }
+    if (need > (size_t)INT_MAX || !MS_RESERVE(buf, cap, (int)need)) return all ? "(all slots overridden)" : "(own; slot overrides)";
+    int n = snprintf(buf, cap, "%s", head);
+    for (int i = 0; i < mi->slotCount; i++) {
+        int sm = slots[i].material;
+        const char *name = sm >= 0 && sm < scene->materialCount ? scene->materials[sm].name : "?";
+        n += snprintf(buf + n, cap - n, "%s slot %d = %s", i ? "," : "", slots[i].slot, name);
+    }
+    snprintf(buf + n, cap - n, ")");
     return buf;
 }
 
@@ -320,6 +338,76 @@ static int CompareRegionObjects(const void *pa, const void *pb)
     return a->obj.index - b->obj.index;
 }
 
+static int CompareRegionEdges(const void *pa, const void *pb)
+{
+    const DesignRegionEdge *a = pa, *b = pb;
+    if (a->dist != b->dist) return a->dist < b->dist ? -1 : 1;
+    if (a->obj.kind != b->obj.kind) return (int)a->obj.kind - (int)b->obj.kind;
+    return a->obj.index - b->obj.index;
+}
+
+#define REGION_EDGE_STEP 8.0f   // px between edge rays along a side
+#define REGION_EDGE_MAX 64      // edge rays per side at most
+
+// The ring of rays just outside the rect: which objects bound it, nearest first. A region
+// dragged over an opening ("fill this gap") shows what lies behind the opening; the opening
+// itself is bounded by these. False when out of memory.
+static bool AnalyzeRegionEdge(const RayFrame *f, Rectangle rect, DesignRegionInfo *out)
+{
+    float off = fmaxf(4.0f, 0.03f * fminf(rect.width, rect.height));
+    out->edgeOffset = off;
+    float x0 = rect.x - off, y0 = rect.y - off, x1 = rect.x + rect.width + off, y1 = rect.y + rect.height + off;
+    RegionCull cull = { 0 };
+    DesignRegionEdge *e = NULL;
+    int n = 0, cap = 0, sky = 0, total = 0;
+    // The ring's bounding rect, clamped to the frame (rays outside the frame are not cast)
+    Rectangle ring = { fmaxf(x0, 0.0f), fmaxf(y0, 0.0f), 0, 0 };
+    ring.width = fminf(x1, (float)f->w) - ring.x;
+    ring.height = fminf(y1, (float)f->h) - ring.y;
+    if (ring.width <= 0 || ring.height <= 0) return true;
+    if (!BuildRegionCull(f, ring, NULL, &cull)) return false;
+    for (int side = 0; side < 4; side++) {
+        bool vertical = side < 2;   // left, right: a column of rays; top, bottom: a row
+        float fixed = side == 0 ? x0 : side == 1 ? x1 : side == 2 ? y0 : y1;
+        if (fixed < 0.0f || fixed >= (vertical ? (float)f->w : (float)f->h)) continue;   // outside the frame
+        float a = vertical ? y0 : x0, b = vertical ? y1 : x1;
+        int count = (int)fminf((float)REGION_EDGE_MAX, fmaxf(2.0f, ceilf((b - a) / REGION_EDGE_STEP)));
+        for (int k = 0; k < count; k++) {
+            float t = a + (b - a) * (k + 0.5f) / count;
+            float x = vertical ? fixed : t, y = vertical ? t : fixed;
+            if (x < 0.0f || y < 0.0f || x >= (float)f->w || y >= (float)f->h) continue;
+            total++;
+            RegionHit r = RegionPick(&cull, f->eye, RayThrough(f, x, y));
+            if (r.obj.kind == MS_OBJ_NONE) { sky++; continue; }
+            int j = 0;
+            while (j < n && !ObjEqual(e[j].obj, r.obj)) j++;
+            if (j == n) {
+                if (!MS_RESERVE(e, cap, n + 1)) { free(e); CullFree(&cull); return false; }
+                e[n++] = (DesignRegionEdge){ r.obj, 0, 0, INFINITY, r.point };
+            }
+            e[j].samples++;
+            e[j].sides |= 1u << side;
+            if (r.dist < e[j].dist) { e[j].dist = r.dist; e[j].point = r.point; }
+        }
+    }
+    CullFree(&cull);
+    if (n > 1) qsort(e, n, sizeof(e[0]), CompareRegionEdges);
+    out->edges = e;
+    out->edgeCount = n;
+    out->edgeSamples = total;
+    out->edgeSky = total > 0 ? (float)sky / total : 0.0f;
+    return true;
+}
+
+void DesignerFreeRegion(DesignRegionInfo *r)
+{
+    free(r->objects);
+    free(r->edges);
+    r->objects = NULL;
+    r->edges = NULL;
+    r->objectCount = r->edgeCount = 0;
+}
+
 void DesignerAnalyzeRegion(Camera3D cam, int w, int h, Rectangle rect, DesignRegionInfo *out)
 {
     double t0 = GetTime();
@@ -390,6 +478,7 @@ void DesignerAnalyzeRegion(Camera3D cam, int w, int h, Rectangle rect, DesignReg
         if (tally[i].samples > 0) out->objects[n++] = (DesignRegionObject){ tally[i].obj, tally[i].samples, (float)tally[i].samples / total };
     if (n > 1) qsort(out->objects, n, sizeof(out->objects[0]), CompareRegionObjects);
     out->objectCount = n;
+    if (!AnalyzeRegionEdge(&f, rect, out)) goto oom;
     out->ms = (GetTime() - t0) * 1000.0;
     free(tally);
     CullFree(&cull);
@@ -1043,6 +1132,12 @@ void DesignerPickCamera(Designer *d, Camera3D cam)
     d->hit = DesignerPick(cam.position, Vector3Normalize(Vector3Subtract(cam.target, cam.position)));
 }
 
+DesignerHit DesignerPickAt(Camera3D cam, int w, int h, float x, float y)
+{
+    RayFrame f = MakeRayFrame(cam, w > 0 ? w : 1, h > 0 ? h : 1);
+    return DesignerPick(cam.position, RayThrough(&f, x, y));
+}
+
 DesignerAction DesignerUpdate(Designer *d, float dt)
 {
     if (d->messageTime > 0.0f) d->messageTime -= dt;
@@ -1087,7 +1182,7 @@ void DesignerFreeRequest(DesignRequest *req)
 {
     free(req->prompt);
     free(req->selected);
-    for (int i = 0; i < req->regionCount; i++) free(req->regions[i].objects);
+    for (int i = 0; i < req->regionCount; i++) DesignerFreeRegion(&req->regions[i]);
     free(req->regions);
     memset(req, 0, sizeof(*req));
 }

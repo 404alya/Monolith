@@ -282,6 +282,99 @@ static const char *ObjMaterial(MS_ObjRef o)
 // Index of an object among the objects of its kind on its map line (copy number of a repeat)
 static int ObjNth(MS_ObjRef o) { return DesignerObjNth(o); }
 
+// Where an object sits among the objects its map line made: nth (0-based) of total, and
+// for a `repeat` line the copy's index per repeat (outer first) plus the object within the
+// copy (stairs / waffle make several per copy). Splitting a repeat line needs exactly this.
+typedef struct {
+    int nth, total;
+    int repeats;            // repeat prefixes found (0..3); idx[] valid when decomposed
+    int counts[3], idx[3];
+    int perCopy, inCopy;    // objects per copy, and this one's index within its copy
+    bool decomposed;
+} CopyInfo;
+
+static const char *SkipSpace(const char *p, const char *end)
+{
+    while (p < end && (*p == ' ' || *p == '\t')) p++;
+    return p;
+}
+static const char *SkipWord(const char *p, const char *end)
+{
+    while (p < end && *p != ' ' && *p != '\t') p++;
+    return p;
+}
+
+static CopyInfo ObjCopy(MS_ObjRef o)
+{
+    CopyInfo c = { .nth = ObjNth(o), .perCopy = 1 };
+    int line = ObjLine(o), count = o.kind == MS_OBJ_MODEL ? scene->modelCount : scene->boxCount;
+    c.total = c.nth + 1;
+    for (int i = o.index + 1; i < count && MS_ObjectRef(scene, (MS_ObjRef){ o.kind, i })->line == line; i++) c.total++;
+    // The line's placement prefixes: repeat n dx dy dz (up to 3), at x y z
+    int len = 0;
+    const char *p = line > 0 ? MS_LineText(scene, line, &len) : NULL;
+    const char *end = p ? p + len : NULL;
+    while (p && p < end) {
+        p = SkipSpace(p, end);
+        const char *w = p;
+        p = SkipWord(p, end);
+        int skip;
+        if (p - w == 6 && strncmp(w, "repeat", 6) == 0) {
+            if (c.repeats == 3) break;
+            p = SkipSpace(p, end);
+            c.counts[c.repeats++] = (int)strtol(p, NULL, 10);
+            p = SkipWord(p, end);
+            skip = 3;
+        } else if (p - w == 2 && strncmp(w, "at", 2) == 0) skip = 3;
+        else break;
+        for (int k = 0; k < skip; k++) p = SkipWord(SkipSpace(p, end), end);
+    }
+    long long copies = c.repeats > 0 ? 1 : 0;
+    for (int k = 0; k < c.repeats; k++) copies *= c.counts[k] > 0 ? c.counts[k] : 0;
+    if (copies > 0 && c.total % copies == 0) {
+        c.perCopy = (int)(c.total / copies);
+        int copy = c.nth / c.perCopy;
+        c.inCopy = c.nth % c.perCopy;
+        for (int k = c.repeats - 1; k >= 0; k--) { c.idx[k] = copy % c.counts[k]; copy /= c.counts[k]; }
+        c.decomposed = true;
+    }
+    return c;
+}
+
+// "11 of 32 (i = 1, j = 3)": nth of the line's objects, then the repeat indices (outer first)
+static void MdCopy(FILE *f, MS_ObjRef o)
+{
+    CopyInfo c = ObjCopy(o);
+    fprintf(f, "%d of %d", c.nth, c.total);
+    if (!c.decomposed) return;
+    fprintf(f, " (");
+    for (int k = 0; k < c.repeats; k++) fprintf(f, "%s%c = %d", k ? ", " : "", "ijk"[k], c.idx[k]);
+    if (c.perCopy > 1) fprintf(f, "; object %d of %d in that copy", c.inCopy, c.perCopy);
+    fprintf(f, ")");
+}
+
+// "repeat 4 x 8" of the object's line, or "" (for the explanations next to MdCopy)
+static void MdRepeats(FILE *f, MS_ObjRef o)
+{
+    CopyInfo c = ObjCopy(o);
+    if (!c.decomposed) return;
+    fprintf(f, "; the line is `repeat ");
+    for (int k = 0; k < c.repeats; k++) fprintf(f, "%s%d", k ? " x " : "", c.counts[k]);
+    fprintf(f, "`, i = the first (outer) repeat%s", c.repeats > 1 ? ", j = the next" : "");
+}
+
+static void JsonCopy(FILE *f, MS_ObjRef o)
+{
+    CopyInfo c = ObjCopy(o);
+    fprintf(f, "\"nth\": %d, \"lineObjects\": %d, \"repeat\": ", c.nth, c.total);
+    if (!c.decomposed) { fprintf(f, "null"); return; }
+    fprintf(f, "{ \"counts\": [");
+    for (int k = 0; k < c.repeats; k++) fprintf(f, "%s%d", k ? ", " : "", c.counts[k]);
+    fprintf(f, "], \"copy\": [");
+    for (int k = 0; k < c.repeats; k++) fprintf(f, "%s%d", k ? ", " : "", c.idx[k]);
+    fprintf(f, "], \"objectsPerCopy\": %d, \"objectInCopy\": %d }", c.perCopy, c.inCopy);
+}
+
 static const char *const ORIGIN_NAMES[] = { "model", "bottom", "center" };
 static const char *const COLLIDE_NAMES[] = { "aabb", "none", "box" };
 
@@ -548,9 +641,9 @@ typedef struct {
 
 typedef struct {
     int group;          // -1 = boxes without a group
-    float dist;         // nearest box of the group
-    int nearCount;      // boxes of the group within NEARBY_RADIUS
-    int firstLine, lastLine;    // over all boxes of the group
+    float dist;         // nearest object (box or model) of the group
+    int nearCount;      // objects of the group within NEARBY_RADIUS
+    int firstLine, lastLine;    // over all objects of the group
 } Nearby;
 
 typedef struct {
@@ -730,7 +823,49 @@ static void MdRegionObject(FILE *f, MS_ObjRef o)
     fprintf(f, ", material \"%s\"", DesignerMaterialLabel(o));
 }
 
-#define MD_REGION_ROWS 40   // objects per region in request.md (request.json lists them all)
+#define MD_REGION_ROWS 40   // objects / map lines per region in request.md (request.json lists them all)
+#define MD_EDGE_ROWS 20     // edge objects per region in request.md
+
+// A region's objects summed per map line: one `repeat` line can be dozens of small objects
+// (stair steps, roof beams) whose shares only make sense together
+typedef struct { int line; MS_ObjRef first; int objects; float share; } LineShare;
+
+static int CompareLineShare(const void *pa, const void *pb)
+{
+    const LineShare *a = pa, *b = pb;
+    if (a->share != b->share) return a->share > b->share ? -1 : 1;
+    return a->line - b->line;
+}
+
+// Heap array (free it) of the region's map lines, largest share first; NULL with *count 0
+// when the region has no objects or memory ran out
+static LineShare *RegionLines(const DesignRegionInfo *g, int *count)
+{
+    *count = 0;
+    LineShare *ls = g->objectCount > 0 ? malloc(sizeof(LineShare) * g->objectCount) : NULL;
+    if (!ls) return NULL;
+    int n = 0;
+    for (int k = 0; k < g->objectCount; k++) {
+        MS_ObjRef o = g->objects[k].obj;
+        if (!ObjValid(o)) continue;
+        int line = ObjLine(o), j = 0;
+        while (j < n && ls[j].line != line) j++;
+        if (j == n) ls[n++] = (LineShare){ line, o, 0, 0.0f };
+        ls[j].objects++;
+        ls[j].share += g->objects[k].share;
+    }
+    if (n > 1) qsort(ls, n, sizeof(ls[0]), CompareLineShare);
+    *count = n;
+    return ls;
+}
+
+static void MdSides(FILE *f, unsigned int sides)
+{
+    static const char *const NAMES[] = { "left", "right", "top", "bottom" };
+    int n = 0;
+    for (int k = 0; k < 4; k++)
+        if (sides & (1u << k)) fprintf(f, "%s%s", n++ ? ", " : "", NAMES[k]);
+}
 
 static void WriteRegionsMd(FILE *f, const Bundle *B)
 {
@@ -744,7 +879,11 @@ static void WriteRegionsMd(FILE *f, const Bundle *B)
                "`view.png` (x, y of the top-left corner, then width x height); `view-marked.png` outlines and "
                "numbers them. *Objects* are what the region shows, from a regular grid of rays through it: "
                "share = fraction of the rays that hit that object first, sky = fraction that hit nothing. "
-               "Depth = distance from the eye over the rays that hit something. Computed at submit time.\n\n");
+               "Depth = distance from the eye over the rays that hit something. *By map line* adds the shares "
+               "up per map line (one `repeat` line can be many small objects). *Edge objects* are what rays "
+               "just outside the rect's border hit, nearest first: for a gap or an opening the region looks "
+               "through, these bound the gap, while the region's own objects are what is seen through it. "
+               "Computed at submit time.\n\n");
     for (int i = 0; i < r->regionCount; i++) {
         const DesignRegionInfo *g = &r->regions[i];
         fprintf(f, "### Region %d (`region-%d.png`)\n\n", i + 1, i + 1);
@@ -764,8 +903,46 @@ static void WriteRegionsMd(FILE *f, const Bundle *B)
         fprintf(f, "| sky | %.1f%% |\n", 100.0f * g->sky);
         fprintf(f, "| rays | %d x %d |\n\n", g->gridW, g->gridH);
 
+        // Edge objects first: they matter most when the region is all sky or far away
+        if (g->edgeSamples > 0) {
+            fprintf(f, "Edge objects (%d rays %.0f px outside the border, sky %.1f%%), nearest first:\n\n",
+                    g->edgeSamples, g->edgeOffset, 100.0f * g->edgeSky);
+            if (g->edgeCount == 0) fprintf(f, "None: only sky just outside the region.\n\n");
+            else {
+                fprintf(f, "| distance | object | group | line | sides | rays | nearest point |\n|---|---|---|---|---|---|---|\n");
+                int rows = g->edgeCount < MD_EDGE_ROWS ? g->edgeCount : MD_EDGE_ROWS;
+                for (int k = 0; k < rows; k++) {
+                    const DesignRegionEdge *e = &g->edges[k];
+                    if (!ObjValid(e->obj)) continue;
+                    fprintf(f, "| %.2f m | %s #%d", e->dist, ObjKindName(e->obj), e->obj.index);
+                    if (e->obj.kind == MS_OBJ_MODEL) fprintf(f, " `%s`", scene->modelFiles[scene->models[e->obj.index].file].path);
+                    fprintf(f, " | %s | %d | ", GroupName(ObjGroup(e->obj)), ObjLine(e->obj));
+                    MdSides(f, e->sides);
+                    fprintf(f, " | %d | ", e->samples);
+                    MdVec(f, e->point);
+                    fprintf(f, " |\n");
+                }
+                if (g->edgeCount > rows) fprintf(f, "| | %d more (see `request.json`) | | | | | |\n", g->edgeCount - rows);
+                fprintf(f, "\n");
+            }
+        } else fprintf(f, "Edge objects: none (the region fills the frame to its borders).\n\n");
+
         if (g->objectCount == 0) { fprintf(f, "No objects in this region.\n\n"); continue; }
-        fprintf(f, "| share | object | group | line | min | max |\n|---|---|---|---|---|---|\n");
+        int lineCount = 0;
+        LineShare *ls = RegionLines(g, &lineCount);
+        if (ls && lineCount > 0) {
+            fprintf(f, "By map line:\n\n| share | line | group | objects |\n|---|---|---|---|\n");
+            int rows = lineCount < MD_REGION_ROWS ? lineCount : MD_REGION_ROWS;
+            for (int k = 0; k < rows; k++) {
+                fprintf(f, "| %.1f%% | %d | %s | %d %s%s", 100.0f * ls[k].share, ls[k].line, GroupName(ObjGroup(ls[k].first)),
+                        ls[k].objects, ObjKindName(ls[k].first), ls[k].objects == 1 ? "" : ls[k].first.kind == MS_OBJ_BOX ? "es" : "s");
+                if (ls[k].first.kind == MS_OBJ_MODEL) fprintf(f, " (`%s`)", scene->modelFiles[scene->models[ls[k].first.index].file].path);
+                fprintf(f, " |\n");
+            }
+            if (lineCount > rows) fprintf(f, "| | %d more lines (see `request.json`) | | |\n", lineCount - rows);
+            fprintf(f, "\n");
+        }
+        fprintf(f, "Objects:\n\n| share | object | group | line | min | max |\n|---|---|---|---|---|---|\n");
         int rows = g->objectCount < MD_REGION_ROWS ? g->objectCount : MD_REGION_ROWS;
         for (int k = 0; k < rows; k++) {
             MS_ObjRef o = g->objects[k].obj;
@@ -783,18 +960,15 @@ static void WriteRegionsMd(FILE *f, const Bundle *B)
         }
         fprintf(f, "\n");
 
-        // The map lines behind the listed objects, each quoted once (a heap text: lines have
-        // no length limit)
-        int lines[MD_REGION_ROWS], lineCount = 0, n = 0, cap = 0;
+        // The map lines of the region, largest share first, each quoted once (a heap text:
+        // lines have no length limit)
+        int quoted = 0, n = 0, cap = 0;
         char *block = NULL;
-        for (int k = 0; k < rows; k++) {
-            if (!ObjValid(g->objects[k].obj)) continue;
-            int line = ObjLine(g->objects[k].obj), len;
-            bool seen = false;
-            for (int j = 0; j < lineCount; j++) seen |= lines[j] == line;
-            const char *text = seen || line <= 0 ? NULL : MS_LineText(scene, line, &len);
+        for (int k = 0; ls && k < lineCount && k < MD_REGION_ROWS; k++) {
+            int line = ls[k].line, len;
+            const char *text = line > 0 ? MS_LineText(scene, line, &len) : NULL;
             if (!text) continue;
-            lines[lineCount++] = line;
+            quoted++;
             char num[16];
             int nl = snprintf(num, sizeof(num), "%d: ", line);
             if (!MS_RESERVE(block, cap, n + nl + len + 2)) break;
@@ -804,11 +978,12 @@ static void WriteRegionsMd(FILE *f, const Bundle *B)
             block[n++] = '\n';
             block[n] = 0;
         }
-        if (lineCount > 0 && block) {
+        if (quoted > 0 && block) {
             fprintf(f, "Map lines of these objects:\n\n");
             MdFence(f, block, "");
         }
         free(block);
+        free(ls);
     }
 }
 
@@ -864,6 +1039,11 @@ static bool WriteRequestMd(const char *path, const Bundle *B)
                 o.kind == MS_OBJ_MODEL ? "world bounds " : "");
         MdVec(f, b.min); fprintf(f, ", max "); MdVec(f, b.max); fprintf(f, "\n");
         if (o.kind == MS_OBJ_MODEL) MdModel(f, o.index, "- ");
+        fprintf(f, "- copy: ");
+        MdCopy(f, o);
+        fprintf(f, " among the %s%s of map line %d (0-based", ObjKindName(o), o.kind == MS_OBJ_BOX ? "es" : "s", ObjLine(o));
+        MdRepeats(f, o);
+        fprintf(f, ")\n");
         fprintf(f, "- group: \"%s\", material \"%s\"\n\n", GroupName(ObjGroup(o)), DesignerMaterialLabel(o));
         MdLine(f, ObjLine(o));
     } else {
@@ -883,15 +1063,20 @@ static bool WriteRequestMd(const char *path, const Bundle *B)
                 DesignerMaterialLabel(first), sl->count, model ? "model" : "box",
                 sl->count == 1 ? "" : model ? "s" : "es");
         MdLine(f, sl->line);
+        fprintf(f, "*copy* = the object's index among the line's objects (0-based) of their total");
+        MdRepeats(f, first);
+        fprintf(f, ".\n\n");
         if (model) fprintf(f, "| model | copy | file | position | rotation (yaw pitch roll) | scale | world min | world max |\n"
                               "|---|---|---|---|---|---|---|---|\n");
-        else fprintf(f, "| box | min | max | centre | size |\n|---|---|---|---|---|\n");
+        else fprintf(f, "| box | copy | min | max | centre | size |\n|---|---|---|---|---|---|\n");
         for (int i = sl->first; i < sl->first + sl->count; i++) {
             MS_ObjRef o = B->selOrder[i];
             BoundingBox b = ObjBounds(o);
             if (o.kind == MS_OBJ_MODEL) {
                 const MS_ModelInstance *m = &scene->models[o.index];
-                fprintf(f, "| #%d | %d | `%s` | ", o.index, ObjNth(o), scene->modelFiles[m->file].path); MdVec(f, m->position);
+                fprintf(f, "| #%d | ", o.index);
+                MdCopy(f, o);
+                fprintf(f, " | `%s` | ", scene->modelFiles[m->file].path); MdVec(f, m->position);
                 fprintf(f, " | "); MdVec(f, m->rotationDeg);
                 fprintf(f, " | "); MdVec(f, m->scale);
                 fprintf(f, " | "); MdVec(f, b.min);
@@ -899,7 +1084,9 @@ static bool WriteRequestMd(const char *path, const Bundle *B)
                 fprintf(f, " |\n");
                 continue;
             }
-            fprintf(f, "| #%d | ", o.index); MdVec(f, b.min);
+            fprintf(f, "| #%d | ", o.index);
+            MdCopy(f, o);
+            fprintf(f, " | "); MdVec(f, b.min);
             fprintf(f, " | "); MdVec(f, b.max);
             fprintf(f, " | "); MdVec(f, Vector3Scale(Vector3Add(b.min, b.max), 0.5f));
             fprintf(f, " | "); MdVec(f, Vector3Subtract(b.max, b.min));
@@ -910,10 +1097,10 @@ static bool WriteRequestMd(const char *path, const Bundle *B)
 
     WriteRegionsMd(f, B);
 
-    fprintf(f, "## Nearby\n\nGroups with a box within %.0f m of the %s ", NEARBY_RADIUS, B->hit ? "hit point" : "eye");
+    fprintf(f, "## Nearby\n\nGroups with an object (box or model) within %.0f m of the %s ", NEARBY_RADIUS, B->hit ? "hit point" : "eye");
     MdVec(f, B->nearbyCenter);
     fprintf(f, ", nearest first. The map lines are the range over the whole group.\n\n");
-    fprintf(f, "| group | nearest box | boxes within %.0f m | map lines |\n|---|---|---|---|\n", NEARBY_RADIUS);
+    fprintf(f, "| group | nearest object | objects within %.0f m | map lines |\n|---|---|---|---|\n", NEARBY_RADIUS);
     for (int i = 0; i < B->nearbyCount; i++) {
         const Nearby *n = &B->nearby[i];
         fprintf(f, "| %s | %.1f m | %d | ", GroupName(n->group), n->dist, n->nearCount);
@@ -1077,6 +1264,7 @@ static bool WriteRequestJson(const char *path, const Bundle *B)
         fprintf(f, ",\n    \"max\": "); JsonVec(f, b.max);
         if (o.kind == MS_OBJ_MODEL) { fprintf(f, ",\n    \"model\": "); JsonModel(f, o.index); }
         fprintf(f, ",\n    \"group\": "); JsonStr(f, GroupName(ObjGroup(o)));
+        fprintf(f, ",\n    "); JsonCopy(f, o);
         fprintf(f, ",\n    \"line\": %d,\n    \"lineText\": ", ObjLine(o)); JsonLineText(f, ObjLine(o));
         fprintf(f, "\n  }");
     } else fprintf(f, "null");
@@ -1093,7 +1281,9 @@ static bool WriteRequestJson(const char *path, const Bundle *B)
             BoundingBox b = ObjBounds(o);
             fprintf(f, "%s\n        { \"kind\": \"%s\", \"index\": %d", i > sl->first ? "," : "", ObjKindName(o), o.index);
             if (o.kind == MS_OBJ_BOX) fprintf(f, ", \"box\": %d", o.index);
-            fprintf(f, ", \"nth\": %d, \"material\": ", ObjNth(o));
+            fprintf(f, ", ");
+            JsonCopy(f, o);
+            fprintf(f, ", \"material\": ");
             JsonMaterial(f, o);
             fprintf(f, ", \"min\": ");
             JsonVec(f, b.min);
@@ -1146,6 +1336,37 @@ static bool WriteRequestJson(const char *path, const Bundle *B)
         fprintf(f, "%s],\n      \"omittedObjects\": %d,\n      \"omittedShare\": ", listed ? "\n      " : "", g->omittedObjects);
         JsonNum(f, g->omittedShare);
         fprintf(f, ",\n      \"sky\": "); JsonNum(f, g->sky);
+        int lineCount = 0;
+        LineShare *ls = RegionLines(g, &lineCount);
+        fprintf(f, ",\n      \"lines\": [");
+        for (int k = 0; k < lineCount; k++) {
+            fprintf(f, "%s\n        { \"line\": %d, \"group\": ", k ? "," : "", ls[k].line);
+            JsonStr(f, GroupName(ObjGroup(ls[k].first)));
+            fprintf(f, ", \"objects\": %d, \"share\": ", ls[k].objects);
+            JsonNum(f, ls[k].share);
+            fprintf(f, " }");
+        }
+        fprintf(f, "%s]", lineCount ? "\n      " : "");
+        free(ls);
+        fprintf(f, ",\n      \"edge\": { \"offsetPx\": "); JsonNum(f, g->edgeOffset);
+        fprintf(f, ", \"samples\": %d, \"sky\": ", g->edgeSamples); JsonNum(f, g->edgeSky);
+        fprintf(f, ", \"objects\": [");
+        for (int k = 0; k < g->edgeCount; k++) {
+            const DesignRegionEdge *e = &g->edges[k];
+            fprintf(f, "%s\n        { \"kind\": \"%s\", \"index\": %d, \"line\": %d, \"group\": ", k ? "," : "",
+                    ObjKindName(e->obj), e->obj.index, ObjValid(e->obj) ? ObjLine(e->obj) : 0);
+            JsonStr(f, ObjValid(e->obj) ? GroupName(ObjGroup(e->obj)) : "");
+            if (e->obj.kind == MS_OBJ_MODEL && ObjValid(e->obj)) {
+                fprintf(f, ", \"file\": "); JsonStr(f, scene->modelFiles[scene->models[e->obj.index].file].path);
+            }
+            fprintf(f, ", \"distance\": "); JsonNum(f, e->dist);
+            fprintf(f, ", \"point\": "); JsonVec(f, e->point);
+            fprintf(f, ", \"samples\": %d, \"sides\": [", e->samples);
+            static const char *const SIDES[] = { "left", "right", "top", "bottom" };
+            for (int s = 0, m = 0; s < 4; s++) if (e->sides & (1u << s)) fprintf(f, "%s\"%s\"", m++ ? ", " : "", SIDES[s]);
+            fprintf(f, "] }");
+        }
+        fprintf(f, "%s] }", g->edgeCount ? "\n      " : "");
         fprintf(f, "\n    }");
     }
     fprintf(f, "%s]", r->regionCount ? "\n  " : "");
@@ -1157,7 +1378,7 @@ static bool WriteRequestJson(const char *path, const Bundle *B)
         const Nearby *n = &B->nearby[i];
         fprintf(f, "%s\n      { \"group\": ", i ? "," : ""); JsonStr(f, GroupName(n->group));
         fprintf(f, ", \"nearest\": "); JsonNum(f, n->dist);
-        fprintf(f, ", \"boxesWithinRadius\": %d, ", n->nearCount);
+        fprintf(f, ", \"objectsWithinRadius\": %d, \"boxesWithinRadius\": %d, ", n->nearCount, n->nearCount);
         if (n->lastLine > 0) fprintf(f, "\"firstLine\": %d, \"lastLine\": %d }", n->firstLine, n->lastLine);
         else fprintf(f, "\"firstLine\": null, \"lastLine\": null }");
     }
