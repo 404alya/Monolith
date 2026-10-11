@@ -35,7 +35,7 @@ a little lonely, safe near the fire.
 | `bark` | trunks, stumps, log bark | 80 64 58 |
 | `wood` | cut wood, posts, tent poles, log ends | 120 84 56 |
 | `rock`, `moss` | box terraces and low-poly rocks; moss caps | 84 82 86 / 58 74 50 |
-| `rock scan` | the Poly Haven rock faces: palette colour + the scan's own normal map (`inherit normal`) | 98 94 94 |
+| `rock scan` | the Poly Haven rock faces: palette colour + the scan's own normal map (`inherit normal`), `cull none` (the scan is an open shell; its back is seen from the ground) | 98 94 94 |
 | `canvas`, `camp stone`, `iron` | tent cloth, fire ring, the cooking frame | 150 96 62 / 86 86 92 / 40 40 44 |
 | `embers`, `lantern` | emissive fire bed (255 110 40, energy 5); the lantern model's own flat atlas (`inherit albedo`, not metallic) | |
 
@@ -51,16 +51,23 @@ a little lonely, safe near the fire.
   colour 255 164 100, energy 2.2), shadow range 100 m. It sits ahead-left of the spawn, so the
   path view is half backlit.
 - Sky: deep blue top (26 38 80), mauve horizon (152 118 140), a bright warm sun glow; the
-  sky's ground colour matches the fog so the horizon line disappears.
-- Ambient (IBL) from a brighter, bluer copy of the sky (`ambientSky.*`, ambient energy 1.5):
-  shadows are blue-violet, never black.
+  sky below the horizon starts in the same mauve (`sky.groundHorizonColor`, curve 0.5), so
+  there is no hard line where the forest ends (view 5).
+- Ambient (IBL) from a bluer copy of the sky (`ambientSky.*`: top 80 100 170, violet ground
+  84 78 104; ambient energy 1.1): shadows are blue-violet, never black (the darkest tenth of
+  a view is about sRGB 25 25 37).
 - Distance fog exp2, density 0.022, colour 62 70 102. Volumetric fog: scattering 0.012,
-  emission 0.25 in the fog colour, anisotropy 0.6 (shafts toward the sun), sun fogEnergy 1.6.
+  emission 0.15 in the fog colour, anisotropy 0.6 (shafts toward the sun), sun fogEnergy 1.6.
   If it turns orange-pink overall, lower `sun.fogEnergy` or the campfire's `fogEnergy`, not
   the sky.
 - Point lights: the campfire (255 130 50, energy 5, range 18, shadowed) and the lanterns
   (255 180 110, energy 1-1.2, range 6-8, unshadowed). New light sources follow these.
-- AgX tonemap, exposure 1.15, contrast 1.08, saturation 0.9.
+- AgX tonemap, exposure 0.95, contrast 1, saturation 1. **Keep `color.contrast` at 1**: R3D
+  applies contrast in linear space after the tonemap, so any value > 1 clips the darkest
+  shadows to pure black (1.08 turned 25% of the path view black). Make the mood darker with
+  `tonemap.exposure` or `ambient.energy` instead.
+- `bloom.offExposure 1.3`: the low quality preset turns bloom off and raises exposure by this
+  factor; 1.3 keeps the mean brightness of the 5 viewpoints within 1%.
 
 ## Rules for new content
 
