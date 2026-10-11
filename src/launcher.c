@@ -235,13 +235,17 @@ static const char *ObjMaterial(MS_ObjRef o)
 #define MAP_MATERIALS (scene->materialCount)
 #define MAP_FORMAT_VERSION (scene->formatVersion)
 
-// Index of a box among the boxes of its map line
+// Index of an object among the objects of its kind on its map line (copy number of a repeat)
 static int ObjNth(MS_ObjRef o)
 {
     int nth = 0, line = ObjLine(o);
-    for (int i = 0; i < o.index; i++) if (scene->boxRefs[i].line == line) nth++;
+    for (int i = 0; i < o.index; i++)
+        if (MS_ObjectRef(scene, (MS_ObjRef){ o.kind, i })->line == line) nth++;
     return nth;
 }
+
+static const char *const ORIGIN_NAMES[] = { "model", "bottom", "center" };
+static const char *const COLLIDE_NAMES[] = { "aabb", "none", "box" };
 
 // #endregion
 
@@ -502,11 +506,11 @@ typedef struct {
     bool hit;
     char hitLine[MS_LINE_MAX + 1];
     bool hitHasLine;
-    int sel[MAX_SELECTION];             // valid selected box indices
+    MS_ObjRef sel[MAX_SELECTION];       // valid selected objects
     int selCount;
     SelLine selLines[MAX_SELECTION];
     int selLineCount;
-    int selOrder[MAX_SELECTION];        // sel[] reordered so each line's boxes are adjacent
+    MS_ObjRef selOrder[MAX_SELECTION];  // sel[] reordered so each line's objects are adjacent
     Nearby nearby[MS_MAX_GROUPS + 1];
     int nearbyCount;
     Vector3 nearbyCenter;
@@ -536,14 +540,14 @@ static void BuildBundle(Bundle *B, const DesignRequest *req)
     B->right = (Vector3){ -cosf(req->yaw), 0.0f, sinf(req->yaw) };
     B->aspect = req->height > 0 ? (float)req->width / req->height : 0.0f;
 
-    B->hit = req->hit.box >= 0 && req->hit.box < scene->boxCount;
-    if (B->hit) B->hitHasLine = MS_GetLine(scene, scene->boxRefs[req->hit.box].line, B->hitLine, sizeof(B->hitLine));
+    B->hit = ObjValid(req->hit.obj);
+    if (B->hit) B->hitHasLine = MS_GetLine(scene, ObjLine(req->hit.obj), B->hitLine, sizeof(B->hitLine));
 
     // Selection: drop invalid references, then group by line
     for (int i = 0; i < req->selectedCount && i < MAX_SELECTION; i++)
-        if (ObjValid(req->selected[i])) B->sel[B->selCount++] = req->selected[i].index;
+        if (ObjValid(req->selected[i])) B->sel[B->selCount++] = req->selected[i];
     for (int i = 0; i < B->selCount; i++) {
-        int line = scene->boxRefs[B->sel[i]].line, k = 0;
+        int line = ObjLine(B->sel[i]), k = 0;
         while (k < B->selLineCount && B->selLines[k].line != line) k++;
         if (k == B->selLineCount) B->selLines[B->selLineCount++] = (SelLine){ line, 0, 0 };
         B->selLines[k].count++;
@@ -552,20 +556,22 @@ static void BuildBundle(Bundle *B, const DesignRequest *req)
     for (int k = 0; k < B->selLineCount; k++) {
         B->selLines[k].first = at;
         for (int i = 0; i < B->selCount; i++)
-            if (scene->boxRefs[B->sel[i]].line == B->selLines[k].line) B->selOrder[at++] = B->sel[i];
+            if (ObjLine(B->sel[i]) == B->selLines[k].line) B->selOrder[at++] = B->sel[i];
     }
 
     // Nearby groups around the hit point (or the eye if the crosshair points at the sky)
     B->nearbyCenter = B->hit ? req->hit.point : req->eye;
     for (int g = 0; g <= scene->groupCount; g++)
         B->nearby[g] = (Nearby){ g < scene->groupCount ? g : -1, 1e30f, 0, 1 << 30, 0 };
-    for (int i = 0; i < scene->boxCount; i++) {
-        int g = scene->boxRefs[i].group;
+    // (boxes and models: a model counts by its bounds)
+    for (int i = 0; i < scene->boxCount + scene->modelCount; i++) {
+        MS_ObjRef o = i < scene->boxCount ? (MS_ObjRef){ MS_OBJ_BOX, i } : (MS_ObjRef){ MS_OBJ_MODEL, i - scene->boxCount };
+        int g = ObjGroup(o);
         Nearby *n = &B->nearby[(g >= 0 && g < scene->groupCount) ? g : scene->groupCount];
-        float d = DistToBox(B->nearbyCenter, scene->boxes[i]);
+        float d = DistToBox(B->nearbyCenter, ObjBounds(o));
         if (d < n->dist) n->dist = d;
         if (d <= NEARBY_RADIUS) n->nearCount++;
-        int line = scene->boxRefs[i].line;
+        int line = ObjLine(o);
         if (line > 0 && line < n->firstLine) n->firstLine = line;
         if (line > n->lastLine) n->lastLine = line;
     }
@@ -619,9 +625,27 @@ static void MdLine(FILE *f, int line)
     } else fprintf(f, "Not from a map line.\n\n");
 }
 
+// A model instance's file and transform, as list items
+static void MdModel(FILE *f, int index, const char *bullet)
+{
+    const MS_ModelInstance *m = &scene->models[index];
+    fprintf(f, "%smodel file: `%s` (package-relative)\n", bullet, scene->modelFiles[m->file].path);
+    fprintf(f, "%sposition as written: ", bullet); MdVec(f, m->position);
+    fprintf(f, ", origin `%s` (the file's origin is at ", ORIGIN_NAMES[m->origin % 3]); MdVec(f, m->translation);
+    fprintf(f, ")\n%srotation yaw/pitch/roll (deg): ", bullet); MdVec(f, m->rotationDeg);
+    fprintf(f, ", scale: "); MdVec(f, m->scale);
+    fprintf(f, "\n%scollide `%s`, shadow %s", bullet, COLLIDE_NAMES[m->collide % 3], m->castShadow ? "on" : "off");
+    for (int k = 0; k < m->slotCount; k++) {
+        const MS_SlotMaterial *s = &scene->modelSlots[m->slotFirst + k];
+        fprintf(f, "%s material.%d \"%s\"", k ? "," : ";", s->slot, scene->materials[s->material].name);
+    }
+    fprintf(f, "\n");
+}
+
 static void MdRegionObject(FILE *f, MS_ObjRef o)
 {
     fprintf(f, "%s #%d, group \"%s\", line %d", ObjKindName(o), o.index, GroupName(ObjGroup(o)), ObjLine(o));
+    if (o.kind == MS_OBJ_MODEL) fprintf(f, ", file `%s`", scene->modelFiles[scene->models[o.index].file].path);
     if (ObjMaterial(o)) fprintf(f, ", material \"%s\"", ObjMaterial(o));
 }
 
@@ -741,31 +765,51 @@ static bool WriteRequestMd(const char *path, const Bundle *B)
 
     fprintf(f, "## Crosshair hit\n\n");
     if (B->hit) {
-        BoundingBox b = scene->boxes[r->hit.box];
-        MS_Ref ref = scene->boxRefs[r->hit.box];
+        MS_ObjRef o = r->hit.obj;
+        BoundingBox b = ObjBounds(o);
         fprintf(f, "- point: "); MdVec(f, r->hit.point); fprintf(f, "\n");
         fprintf(f, "- face normal: "); MdVec(f, r->hit.normal); fprintf(f, "\n");
         fprintf(f, "- distance from the eye: %.2f m\n", r->hit.dist);
-        fprintf(f, "- object: box #%d (kind `box`, index %d): min ", r->hit.box, r->hit.box); MdVec(f, b.min); fprintf(f, ", max "); MdVec(f, b.max); fprintf(f, "\n");
-        fprintf(f, "- group: \"%s\", material \"%s\"\n\n", GroupName(ref.group), ObjMaterial((MS_ObjRef){ MS_OBJ_BOX, r->hit.box }) ? ObjMaterial((MS_ObjRef){ MS_OBJ_BOX, r->hit.box }) : "(own)");
-        MdLine(f, ref.line);
+        fprintf(f, "- object: %s #%d (kind `%s`, index %d): %smin ", ObjKindName(o), o.index, ObjKindName(o), o.index,
+                o.kind == MS_OBJ_MODEL ? "world bounds " : "");
+        MdVec(f, b.min); fprintf(f, ", max "); MdVec(f, b.max); fprintf(f, "\n");
+        if (o.kind == MS_OBJ_MODEL) MdModel(f, o.index, "- ");
+        fprintf(f, "- group: \"%s\", material \"%s\"\n\n", GroupName(ObjGroup(o)), ObjMaterial(o) ? ObjMaterial(o) : "(own)");
+        MdLine(f, ObjLine(o));
     } else {
-        fprintf(f, "Nothing: the crosshair points at the sky (no box hit).\n\n");
+        fprintf(f, "Nothing: the crosshair points at the sky (no object hit).\n\n");
     }
 
-    fprintf(f, "## Selection (%d box%s)\n\n", B->selCount, B->selCount == 1 ? "" : "es");
+    int selModels = 0;
+    for (int i = 0; i < B->selCount; i++) selModels += B->sel[i].kind == MS_OBJ_MODEL;
+    fprintf(f, "## Selection (%d box%s, %d model%s)\n\n", B->selCount - selModels, B->selCount - selModels == 1 ? "" : "es",
+            selModels, selModels == 1 ? "" : "s");
     if (B->selCount == 0) fprintf(f, "Nothing is selected.\n\n");
     for (int k = 0; k < B->selLineCount; k++) {
         const SelLine *sl = &B->selLines[k];
-        int first = B->selOrder[sl->first];
-        fprintf(f, "### Line %d, group \"%s\", material \"%s\", %d box%s\n\n", sl->line, GroupName(scene->boxRefs[first].group),
-                ObjMaterial((MS_ObjRef){ MS_OBJ_BOX, first }) ? ObjMaterial((MS_ObjRef){ MS_OBJ_BOX, first }) : "(own)",
-                sl->count, sl->count == 1 ? "" : "es");
+        MS_ObjRef first = B->selOrder[sl->first];
+        bool model = first.kind == MS_OBJ_MODEL;
+        fprintf(f, "### Line %d, group \"%s\", material \"%s\", %d %s%s\n\n", sl->line, GroupName(ObjGroup(first)),
+                ObjMaterial(first) ? ObjMaterial(first) : "(own)", sl->count, model ? "model" : "box",
+                sl->count == 1 ? "" : model ? "s" : "es");
         MdLine(f, sl->line);
-        fprintf(f, "| box | min | max | centre | size |\n|---|---|---|---|---|\n");
+        if (model) fprintf(f, "| model | copy | file | position | rotation (yaw pitch roll) | scale | world min | world max |\n"
+                              "|---|---|---|---|---|---|---|---|\n");
+        else fprintf(f, "| box | min | max | centre | size |\n|---|---|---|---|---|\n");
         for (int i = sl->first; i < sl->first + sl->count; i++) {
-            BoundingBox b = scene->boxes[B->selOrder[i]];
-            fprintf(f, "| #%d | ", B->selOrder[i]); MdVec(f, b.min);
+            MS_ObjRef o = B->selOrder[i];
+            BoundingBox b = ObjBounds(o);
+            if (o.kind == MS_OBJ_MODEL) {
+                const MS_ModelInstance *m = &scene->models[o.index];
+                fprintf(f, "| #%d | %d | `%s` | ", o.index, ObjNth(o), scene->modelFiles[m->file].path); MdVec(f, m->position);
+                fprintf(f, " | "); MdVec(f, m->rotationDeg);
+                fprintf(f, " | "); MdVec(f, m->scale);
+                fprintf(f, " | "); MdVec(f, b.min);
+                fprintf(f, " | "); MdVec(f, b.max);
+                fprintf(f, " |\n");
+                continue;
+            }
+            fprintf(f, "| #%d | ", o.index); MdVec(f, b.min);
             fprintf(f, " | "); MdVec(f, b.max);
             fprintf(f, " | "); MdVec(f, Vector3Scale(Vector3Add(b.min, b.max), 0.5f));
             fprintf(f, " | "); MdVec(f, Vector3Subtract(b.max, b.min));
@@ -875,6 +919,26 @@ static void JsonMaterial(FILE *f, MS_ObjRef o)
     else fputs("null", f);
 }
 
+// A model instance (docs/design-v2.md 5): file, transform as written, the resulting
+// translation, origin, collision, shadow, material overrides
+static void JsonModel(FILE *f, int index)
+{
+    const MS_ModelInstance *m = &scene->models[index];
+    fprintf(f, "{ \"file\": "); JsonStr(f, scene->modelFiles[m->file].path);
+    fprintf(f, ", \"position\": "); JsonVec(f, m->position);
+    fprintf(f, ", \"rotationDeg\": "); JsonVec(f, m->rotationDeg);
+    fprintf(f, ", \"scale\": "); JsonVec(f, m->scale);
+    fprintf(f, ", \"origin\": \"%s\", \"translation\": ", ORIGIN_NAMES[m->origin % 3]); JsonVec(f, m->translation);
+    fprintf(f, ", \"collide\": \"%s\", \"shadow\": %s, \"slotMaterials\": [", COLLIDE_NAMES[m->collide % 3], m->castShadow ? "true" : "false");
+    for (int k = 0; k < m->slotCount; k++) {
+        const MS_SlotMaterial *s = &scene->modelSlots[m->slotFirst + k];
+        fprintf(f, "%s{ \"slot\": %d, \"material\": ", k ? ", " : "", s->slot);
+        JsonStr(f, scene->materials[s->material].name);
+        fprintf(f, " }");
+    }
+    fprintf(f, "] }");
+}
+
 static bool WriteRequestJson(const char *path, const Bundle *B)
 {
     const DesignRequest *r = B->req;
@@ -910,17 +974,19 @@ static bool WriteRequestJson(const char *path, const Bundle *B)
 
     fprintf(f, ",\n  \"hit\": ");
     if (B->hit) {
-        BoundingBox b = scene->boxes[r->hit.box];
-        MS_Ref ref = scene->boxRefs[r->hit.box];
-        fprintf(f, "{\n    \"kind\": \"box\",\n    \"index\": %d", r->hit.box);
-        fprintf(f, ",\n    \"material\": "); JsonMaterial(f, (MS_ObjRef){ MS_OBJ_BOX, r->hit.box });
+        MS_ObjRef o = r->hit.obj;
+        BoundingBox b = ObjBounds(o);
+        fprintf(f, "{\n    \"kind\": \"%s\",\n    \"index\": %d", ObjKindName(o), o.index);
+        fprintf(f, ",\n    \"material\": "); JsonMaterial(f, o);
         fprintf(f, ",\n    \"point\": "); JsonVec(f, r->hit.point);
         fprintf(f, ",\n    \"normal\": "); JsonVec(f, r->hit.normal);
         fprintf(f, ",\n    \"distance\": "); JsonNum(f, r->hit.dist);
-        fprintf(f, ",\n    \"box\": %d,\n    \"min\": ", r->hit.box); JsonVec(f, b.min);
+        if (o.kind == MS_OBJ_BOX) fprintf(f, ",\n    \"box\": %d", o.index);
+        fprintf(f, ",\n    \"min\": "); JsonVec(f, b.min);
         fprintf(f, ",\n    \"max\": "); JsonVec(f, b.max);
-        fprintf(f, ",\n    \"group\": "); JsonStr(f, GroupName(ref.group));
-        fprintf(f, ",\n    \"line\": %d,\n    \"lineText\": ", ref.line); JsonLineText(f, ref.line);
+        if (o.kind == MS_OBJ_MODEL) { fprintf(f, ",\n    \"model\": "); JsonModel(f, o.index); }
+        fprintf(f, ",\n    \"group\": "); JsonStr(f, GroupName(ObjGroup(o)));
+        fprintf(f, ",\n    \"line\": %d,\n    \"lineText\": ", ObjLine(o)); JsonLineText(f, ObjLine(o));
         fprintf(f, "\n  }");
     } else fprintf(f, "null");
 
@@ -929,19 +995,21 @@ static bool WriteRequestJson(const char *path, const Bundle *B)
         const SelLine *sl = &B->selLines[k];
         fprintf(f, "%s\n    {\n      \"line\": %d,\n      \"lineText\": ", k ? "," : "", sl->line);
         JsonLineText(f, sl->line);
-        fprintf(f, ",\n      \"group\": "); JsonStr(f, GroupName(scene->boxRefs[B->selOrder[sl->first]].group));
+        fprintf(f, ",\n      \"group\": "); JsonStr(f, GroupName(ObjGroup(B->selOrder[sl->first])));
         fprintf(f, ",\n      \"objects\": [");
         for (int i = sl->first; i < sl->first + sl->count; i++) {
-            MS_ObjRef o = { MS_OBJ_BOX, B->selOrder[i] };
+            MS_ObjRef o = B->selOrder[i];
             BoundingBox b = ObjBounds(o);
-            fprintf(f, "%s\n        { \"kind\": \"%s\", \"index\": %d, \"box\": %d, \"nth\": %d, \"material\": ",
-                    i > sl->first ? "," : "", ObjKindName(o), o.index, o.index, ObjNth(o));
+            fprintf(f, "%s\n        { \"kind\": \"%s\", \"index\": %d", i > sl->first ? "," : "", ObjKindName(o), o.index);
+            if (o.kind == MS_OBJ_BOX) fprintf(f, ", \"box\": %d", o.index);
+            fprintf(f, ", \"nth\": %d, \"material\": ", ObjNth(o));
             JsonMaterial(f, o);
             fprintf(f, ", \"min\": ");
             JsonVec(f, b.min);
             fprintf(f, ", \"max\": "); JsonVec(f, b.max);
             fprintf(f, ", \"center\": "); JsonVec(f, Vector3Scale(Vector3Add(b.min, b.max), 0.5f));
             fprintf(f, ", \"size\": "); JsonVec(f, Vector3Subtract(b.max, b.min));
+            if (o.kind == MS_OBJ_MODEL) { fprintf(f, ", \"model\": "); JsonModel(f, o.index); }
             fprintf(f, " }");
         }
         fprintf(f, "\n      ]\n    }");
@@ -977,6 +1045,7 @@ static bool WriteRequestJson(const char *path, const Bundle *B)
             fprintf(f, "%s\n        { \"kind\": \"%s\", \"index\": %d, \"line\": %d, \"group\": ",
                     listed++ ? "," : "", ObjKindName(o), o.index, ObjLine(o));
             JsonStr(f, GroupName(ObjGroup(o)));
+            if (o.kind == MS_OBJ_MODEL) { fprintf(f, ", \"file\": "); JsonStr(f, scene->modelFiles[scene->models[o.index].file].path); }
             fprintf(f, ", \"material\": "); JsonMaterial(f, o);
             fprintf(f, ", \"share\": "); JsonNum(f, g->objects[k].share);
             fprintf(f, ", \"min\": "); JsonVec(f, b.min);

@@ -51,6 +51,9 @@
 #define MS_MAX_MATERIALS        64
 #define MS_MAX_MODEL_FILES      64
 #define MS_MAX_MODELS           4096    // model instances
+#define MS_MAX_MODEL_COLLIDERS  16384   // collision boxes of all model instances together
+#define MS_MAX_MODEL_SLOTS      16384   // `material.N` overrides of all model instances together
+#define MS_MAX_COLLIDE_BOXES    8       // `collide box ...` boxes per model line
 #define MS_MAX_LIGHTS           64      // besides the sun
 #define MS_MAX_VIEWPOINTS       32
 #define MS_NAME_MAX             64      // group / material / viewpoint names, incl. the 0
@@ -82,23 +85,37 @@ typedef struct {
     char shader[MS_PATH_MAX];   // package-relative shader path, "" = none
 } MS_Material;
 
+// A model file (glTF/GLB, OBJ, FBX, DAE through R3D's importer), loaded once per map load
 typedef struct {
     char path[MS_PATH_MAX];     // package-relative
-    R3D_Model model;
-    BoundingBox bounds;         // model space
+    R3D_Model model;            // GPU loads only (zero in noGpu scenes)
+    bool loaded;                // false in noGpu scenes: the file was not read, bounds are a zero box
+    BoundingBox bounds;         // model space (R3D's aabb: node transforms applied, no unit scale)
     int meshCount, triangleCount, materialCount;
+    int line;                   // first map line that uses it
 } MS_ModelFile;
+
+typedef enum { MS_ORIGIN_MODEL = 0, MS_ORIGIN_BOTTOM, MS_ORIGIN_CENTER } MS_ModelOrigin;
+typedef enum { MS_COLLIDE_AABB = 0, MS_COLLIDE_NONE, MS_COLLIDE_BOXES } MS_ModelCollide;
+
+// `material.N "name"`: slot N of the model's materials is drawn with materials[material]
+typedef struct { int slot, material; } MS_SlotMaterial;
 
 typedef struct {
     int file;                   // index into modelFiles[]
     Vector3 position;           // as written (after repeat/at), before `origin` adjustment
-    Vector3 rotationDeg;        // yaw, pitch, roll
+    Vector3 rotationDeg;        // yaw, pitch, roll (R = Ry * Rx * Rz: roll first, then pitch, then yaw)
     Vector3 scale;
-    Matrix transform;           // model -> world
+    MS_ModelOrigin origin;
+    Matrix transform;           // model -> world: scale, rotate, translate (includes the origin shift)
+    Quaternion rotation;        // the rotation of transform
+    Vector3 translation;        // the translation of transform (= position + origin shift)
     BoundingBox bounds;         // world AABB of the transformed model bounds
+    MS_ModelCollide collide;
     int colliderFirst, colliderCount;   // range in colliders[] (0 count = collide none)
+    int slotFirst, slotCount;   // range in modelSlots[] (material.N overrides)
     bool castShadow;
-    MS_Ref ref;
+    MS_Ref ref;                 // ref.material: `material "x"`, else the active `use`; -1 = the model's own
 } MS_ModelInstance;
 
 typedef struct {
@@ -139,6 +156,8 @@ typedef struct {
     int modelCount;
     const MS_ModelFile *modelFiles;
     int modelFileCount;
+    const MS_SlotMaterial *modelSlots;
+    int modelSlotCount;
 
     const BoundingBox *colliders;   // boxes first (same indices as boxes[]), then model colliders
     int colliderCount;
@@ -170,7 +189,9 @@ typedef struct {
 
 typedef struct {
     bool noGpu;             // parse + geometry only, no R3D calls (e.g. a box dump without a window).
-                            // Models are still read for their bounds where possible.
+                            // Model files (and the .bin / textures a .gltf names) are only checked
+                            // for existence; their bounds are unknown (zero box, loaded = false), so
+                            // model bounds, colliders and origin bottom/center shifts are not final.
     int shadowSizeOverride; // > 0: overrides env shadow.size
     float shadowRangeOverride;  // > 0: overrides sun.range
 } MS_LoadOptions;
@@ -257,8 +278,15 @@ typedef struct {
 
 // First object along the ray within maxDist (<= 0: unlimited). Boxes that contain the
 // origin are skipped (so you can pick out of a box you are inside); models are tested
-// against their bounds, then their triangles where available.
+// against their bounds, then their triangles where available (MS_RaycastModel). On equal
+// distances the lower box index wins, and a box wins over a model.
 MS_Hit MS_Raycast(const MS_Scene *scene, Vector3 origin, Vector3 dir, float maxDist);
+
+// One model instance: its world bounds first, then its triangles (a BVH over a CPU copy of
+// the mesh). Without triangle data (noGpu scenes) the bounds are hit like a box (an origin
+// inside them is skipped). The normal faces the ray. False if missed or beyond maxDist
+// (<= 0: unlimited).
+bool MS_RaycastModel(const MS_Scene *scene, int model, Vector3 origin, Vector3 dir, float maxDist, MS_Hit *hit);
 
 // Strict overlap (touching is not a hit) of `box` with any collider
 bool MS_Collides(const MS_Scene *scene, BoundingBox box);

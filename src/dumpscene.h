@@ -1,0 +1,11 @@
+// --dump-scene: the whole loaded scene as stable text (dumpscene.c)
+#ifndef MONOLITH_DUMPSCENE_H
+#define MONOLITH_DUMPSCENE_H
+
+#include "common.h"
+
+// Writes boxes (hex floats, as --dump-boxes), model files, model instances (transform and
+// world bounds as hex floats), model colliders, materials and lights of `s` to `path`
+bool DumpScene(const MS_Scene *s, const char *path);
+
+#endif

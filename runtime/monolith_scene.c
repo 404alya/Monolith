@@ -24,8 +24,38 @@
 //   light dir   dx dy dz [key value ...]            extra directional light (no static tiles)
 //       keys: color R G B, energy f, range f, falloff f, specular f, fogEnergy f,
 //             inner deg, outer deg (spot cone), shadow on|off (default off)
-//       defaults: white, energy 1, range 16, falloff 1, specular 1, fogEnergy 1, cone 22.5/45
-//   (model "models/x.glb" ...: reserved for the models stream, docs/design-v2.md 2.5)
+//       defaults: white, energy 1, range 16 (dir: 50, its shadow distance), falloff 1, specular 1, fogEnergy 1, cone 22.5/45
+//   model "models/x.glb" x y z [key value ...]      a model file placed at x y z (glTF/GLB best;
+//                                                   also OBJ, FBX, DAE through R3D's importer)
+//       rot yawDeg pitchDeg rollDeg   yaw about +Y, pitch about +X, roll about +Z, applied roll,
+//                                     then pitch, then yaw (R = Ry * Rx * Rz); yaw 90 turns the
+//                                     model's +Z to +X (like the camera's yaw)
+//       scale s | scale sx sy sz      uniform or per-axis, > 0 (files have no unit scale: a model
+//                                     in cm needs scale 0.01). Lighting of per-axis scaled models
+//                                     is approximate (R3D rotates instance normals but does not
+//                                     re-scale them)
+//       origin model|bottom|center    model (default): the file's origin goes to x y z; bottom:
+//                                     the bottom centre of the scaled, rotated bounds (the safe
+//                                     way to stand a model on a surface); center: their centre
+//       material "name"               every material slot drawn with this map material
+//       material.N "name"             slot N only (0-based; --inspect-model lists the slots)
+//                                     Precedence: material.N, then material, then the active
+//                                     `use` (when it is not "default"), else the file's own.
+//                                     An override material with `inherit albedo|normal|orm|
+//                                     emission|all` keeps that texture of the slot's own material
+//                                     (inherit emission also keeps its colour and energy, inherit
+//                                     normal its scale); the override's colours and factors apply.
+//       collide aabb|none|box x0 y0 z0 x1 y1 z1 [box ...]   aabb (default): the world bounds
+//                                     block the player; none; or up to 8 boxes in model space
+//                                     (before scale/rotation), each turned into a world AABB
+//                                     (e.g. a tree's trunk only)
+//       shadow on|off                 casts the sun shadow (default on); always receives shadows
+//     Each file is loaded once per map load (R3D_LoadModel) and drawn instanced per (file,
+//     materials, shadow). The file's own materials keep its choices, also KHR_materials_unlit
+//     (unlit: no light or shadow on it, e.g. Kenney's kits): override with a lit material to
+//     light it. Animations and skins are ignored (static pose). Files a .gltf/.glb names
+//     (buffers, images) and an .obj's material libraries and textures must be inside the
+//     package; they are watched for hot reload like the model file.
 //
 // Placement prefixes, written before a primitive on the same line:
 //   repeat n dx dy dz          [1] n copies, copy i (0-based) shifted by i * (dx, dy, dz); up to 3
@@ -34,7 +64,7 @@
 //   at x y z                   [1] shift by (x, y, z): the primitive's own coordinates are
 //                                  relative to this point
 // Shifts apply to the position arguments only (box: all six; block: cx y0 cz; stairs:
-// cx baseY startZ; waffle: x0 x1 y0 y1 z; light: x y z, never a direction), never to sizes
+// cx baseY startZ; waffle: x0 x1 y0 y1 z; light, model: x y z, never a direction), never to sizes
 // or counts. Each position is computed as (at + i*d1 + j*d2 + k*d3) + value, in float. With
 // whole or half numbers the order doesn't matter; with values like 2.6 it can change the last
 // bit of a float ((-36 + 4.5) + 2.6 vs -33.4 + 4.5). `at` exists to reproduce the original C
@@ -83,7 +113,9 @@
 //   Cache hints (optional; derived from the map bounds without them, see "Caches"):
 //   shadow.home x y z, fogCache.region x0 y0 z0 x1 y1 z1.
 //   Every key has a built-in default (BuiltinEnvironment(): the values the default map was
-//   built with), so a v1 map renders as before apart from its material.
+//   built with), so a v1 map renders as before apart from its material. Numeric values
+//   outside sane ranges (ENV_RANGES, e.g. volumetricFog.stepSize >= 0.05) and zero
+//   directions are rejected.
 //
 // Player and cameras (format 2):
 //   spawn x y z yawDeg [pitchDeg]          player start, feet position (default 0 0 0, yaw 0)
@@ -101,6 +133,7 @@
 #include <r3d/r3d_texture.h>
 #include <raymath.h>
 #include <rlgl.h>
+#include <ctype.h>
 #include <errno.h>
 #include <math.h>
 #include <stddef.h>
@@ -129,7 +162,7 @@
 // ======================================================================================
 
 typedef struct { char name[MS_NAME_MAX]; int count; float v[4]; } MatUniform;
-typedef struct { char name[MS_NAME_MAX]; char path[MS_PATH_MAX]; } MatSampler;
+typedef struct { char name[MS_NAME_MAX]; char path[MS_PATH_MAX]; int line; } MatSampler;
 
 enum { MAP_ALBEDO, MAP_NORMAL, MAP_ORM, MAP_EMISSION, MAP_COUNT };
 enum { INHERIT_ALBEDO = 1, INHERIT_NORMAL = 2, INHERIT_ORM = 4, INHERIT_EMISSION = 8 };
@@ -142,6 +175,7 @@ typedef struct {
     MatSampler samplers[MAT_MAX_SAMPLERS];
     int samplerCount;
     unsigned inherit;                   // INHERIT_* (for model overrides)
+    int shaderLine, mapLine[MAP_COUNT];  // map lines of the keys, for load errors
 } MatDef;
 
 typedef struct {
@@ -172,6 +206,27 @@ typedef struct {
 
 typedef struct { char path[MS_PATH_MAX]; bool isColor; Texture2D tex; } TexEntry;
 
+// Picking data of a model file: a CPU copy of its triangles (model space) and a BVH over them
+typedef struct { Vector3 mn, mx; int left, first, count; } BvhNode;    // leaf: count > 0 (left = -1)
+typedef struct {
+    Vector3 *pos;
+    unsigned int *tri;          // 3 vertex indices per triangle, in BVH order
+    int triCount;
+    BvhNode *nodes;
+    int nodeCount;
+} ModelPick;
+
+// One instanced draw: the model instances of one file with the same material set and shadow flag
+typedef struct {
+    int file;
+    bool castShadow;
+    int *slotMat;               // per material slot of the file: materials[] index, -1 = the file's own
+    R3D_Model model;            // shallow copy of the file's model with its own materials[] (and meshes[] if shadow off)
+    bool ownMeshes;
+    R3D_InstanceBuffer inst;
+    int count;
+} ModelGroup;
+
 // One parsed (and possibly uploaded) map. A reload builds a new one and swaps it in.
 typedef struct {
     int formatVersion;
@@ -200,6 +255,21 @@ typedef struct {
     R3D_Light sunLight;
     BoundingBox bounds;
 
+    // Models. While parsing, an instance's colliderFirst/Count is its range in localColliders
+    // (collide box ...); ResolveModels turns it into its range in colliders[].
+    MS_ModelFile modelFiles[MS_MAX_MODEL_FILES];
+    ModelPick modelPick[MS_MAX_MODEL_FILES];
+    int modelFileCount;
+    MS_ModelInstance models[MS_MAX_MODELS];
+    int modelCount;
+    BoundingBox localColliders[MS_MAX_MODEL_COLLIDERS];     // model space
+    int localColliderCount;
+    int modelColliderCount;             // world colliders the instances will need
+    MS_SlotMaterial modelSlots[MS_MAX_MODEL_SLOTS];
+    int modelSlotCount;
+    BoundingBox colliders[MS_MAX_BOXES + MS_MAX_MODEL_COLLIDERS];   // boxes, then model colliders
+    int colliderCount;
+
     char deps[MS_MAX_DEPS][MS_PATH_MAX];    // files it depends on; [0] = the map file
     int depCount;
 
@@ -213,6 +283,8 @@ typedef struct {
     R3D_AmbientMap ambientMap;
     R3D_ShadowMap lightShadow[MS_MAX_LIGHTS];
     bool lightShadowDrawn[MS_MAX_LIGHTS];
+    ModelGroup *modelGroups;            // malloc'd
+    int modelGroupCount;
 } SceneData;
 
 typedef struct {
@@ -768,6 +840,17 @@ static bool Tokenize(Parser *P, char *line, Token *tok, int *count)
     return true;
 }
 
+// Adds a file to the scene's dependencies (hot reload watches them)
+static bool AddDep(Parser *P, const char *full)
+{
+    SceneData *d = P->d;
+    for (int i = 0; i < d->depCount; i++)
+        if (strcmp(d->deps[i], full) == 0) return true;
+    if (d->depCount >= MS_MAX_DEPS) return Fail(P, "too many files (max %s)", "256");
+    snprintf(d->deps[d->depCount++], MS_PATH_MAX, "%s", full);
+    return true;
+}
+
 // Package-relative path -> full path; rejects anything that could leave the package
 static bool PackagePath(Parser *P, Token t, char *full, int fullSize)
 {
@@ -782,12 +865,10 @@ static bool PackagePath(Parser *P, Token t, char *full, int fullSize)
     }
     if (bad) return Fail(P, "path must stay inside the package: \"%s\"", s);
     if (snprintf(full, fullSize, "%s%s", P->d->root, s) >= fullSize) return Fail(P, "path too long: \"%s\"", s);
+    // Watched before the existence check: after a failed load the watch list is this attempt's
+    // dependencies, so a file that is still missing reloads the package once it appears
+    if (!AddDep(P, full)) return false;
     if (!FileExists(full)) return Fail(P, "file not found: \"%s\" (paths are relative to the package folder)", s);
-    SceneData *d = P->d;
-    for (int i = 0; i < d->depCount; i++)
-        if (strcmp(d->deps[i], full) == 0) return true;
-    if (d->depCount >= MS_MAX_DEPS) return Fail(P, "too many files (max %s)", "256");
-    snprintf(d->deps[d->depCount++], MS_PATH_MAX, "%s", full);
     return true;
 }
 
@@ -1110,6 +1191,7 @@ static bool ParseLight(Parser *P, Token *args, int n, const Placement *pl)
         }
         t += 1 + nv;
     }
+    if (type == R3D_LIGHT_SPOT && L.innerCutOff > L.outerCutOff) return Fail(P, "spot light: inner must be <= outer", NULL);
 
     bool shifted = pl->hasAt || pl->reps > 0;
     int cnt[MS_REPEATS_MAX] = { 1, 1, 1 };
@@ -1184,6 +1266,7 @@ static bool ParseMaterial(Parser *P, Token *tok, int n)
             ONE_WORD();
             if (!PackagePath(P, v[0], full, sizeof(full))) return false;
             snprintf(M->shader, sizeof(M->shader), "%s", v[0].s);
+            D->shaderLine = P->line;
         } else if (strcmp(k, "uniform") == 0) {
             if (t + 1 >= n || v[0].quoted) return Fail(P, "uniform takes a name and 1-4 numbers: uniform u_name 1.0", NULL);
             nv = 0;
@@ -1215,6 +1298,7 @@ static bool ParseMaterial(Parser *P, Token *tok, int n)
             }
             snprintf(s->name, sizeof(s->name), "%s", v[0].s);
             snprintf(s->path, sizeof(s->path), "%s", v[1].s);
+            s->line = P->line;
             used = 2;
         } else if (strcmp(k, "albedo") == 0) {
             if (!ColorArgs(P, v, nv, &m->albedo.color)) return false;
@@ -1227,6 +1311,7 @@ static bool ParseMaterial(Parser *P, Token *tok, int n)
             if (!PackagePath(P, v[0], full, sizeof(full))) return false;
             int slot = k[0] == 'a' ? MAP_ALBEDO : k[0] == 'n' ? MAP_NORMAL : k[0] == 'o' ? MAP_ORM : MAP_EMISSION;
             snprintf(D->maps[slot], MS_PATH_MAX, "%s", v[0].s);
+            D->mapLine[slot] = P->line;
         } else if (strcmp(k, "uv_scale") == 0 || strcmp(k, "uv_offset") == 0) {
             NEED(2);
             Vector2 uv;
@@ -1282,14 +1367,55 @@ static bool ParseMaterial(Parser *P, Token *tok, int n)
     return true;
 }
 
+// Allowed ranges of numeric env values. Values outside are rejected (file:line: message)
+// rather than clamped: some make R3D's shaders loop forever or divide by zero (e.g.
+// volumetricFog.stepSize 0 hangs the GPU in vfog_radiance.frag), the rest are typos.
+typedef struct { const char *key; float lo, hi; bool loOpen; } EnvRange;
+static const EnvRange ENV_RANGES[] = {
+    { "ssao.sampleCount", 1, 128, false }, { "ssao.radius", 0, 1000, true }, { "ssao.intensity", 0, 100, false },
+    { "ssao.power", 0, 100, false },
+    { "ssil.sampleCount", 1, 128, false }, { "ssil.radius", 0, 1000, true }, { "ssil.giIntensity", 0, 100, false },
+    { "ssil.aoIntensity", 0, 100, false }, { "ssil.aoPower", 0, 100, false },
+    { "ssgi.sliceCount", 1, 64, false }, { "ssgi.denoiseSteps", 0, 64, false },
+    { "ssr.maxIterations", 1, 4096, false },
+    { "fog.start", 0, 1e9f, false }, { "fog.end", 0, 1e9f, false }, { "fog.density", 0, 1e6f, false },
+    { "volumetricFog.scatteringDensity", 0, 1e6f, false }, { "volumetricFog.absortionDensity", 0, 1e6f, false },
+    { "volumetricFog.anisotropy", -1, 1, false }, { "volumetricFog.emissionEnergy", 0, 1e6f, false },
+    { "volumetricFog.length", 0, 10000, false }, { "volumetricFog.stepSize", 0.05f, 1000, false },
+    { "dof.maxBlurSize", 0, 1000, false },
+    { "bloom.levels", 0, 1, false }, { "bloom.intensity", 0, 1e6f, false }, { "bloom.filterRadius", 0, 100, false },
+    { "tonemap.exposure", 0, 1e6f, false }, { "tonemap.white", 0, 1e6f, true },
+    { "background.energy", 0, 1e6f, false }, { "ambient.energy", 0, 1e6f, false },
+    { "sun.energy", 0, 1e6f, false }, { "sun.fogEnergy", 0, 1e6f, false }, { "sun.softness", 0, 1e6f, false },
+};
+
+static bool CheckEnvRange(Parser *P, const char *key, int type, const void *p)
+{
+    for (int i = 0; i < COUNT(ENV_RANGES); i++) {
+        const EnvRange *r = &ENV_RANGES[i];
+        if (strcmp(r->key, key) != 0) continue;
+        float v = type == T_I ? (float)*(const int *)p : *(const float *)p;
+        if (v > r->lo && v <= r->hi) return true;
+        if (v == r->lo && !r->loOpen) return true;
+        char m[160], lo[32], hi[32];
+        FormatFloat(lo, sizeof(lo), r->lo);
+        FormatFloat(hi, sizeof(hi), r->hi);
+        snprintf(m, sizeof(m), "%s must be %s %s and <= %s", key, r->loOpen ? ">" : ">=", lo, hi);
+        return Fail(P, "%s", m);
+    }
+    return true;
+}
+
 static bool ParseEnv(Parser *P, Token *tok, int n)
 {
     if (n < 3 || tok[1].quoted) return Fail(P, "env takes a key and a value: env fog.density 0.01", NULL);
     const char *key = tok[1].s;
     EnvDef *e = &P->d->env;
     for (int i = 0; i < COUNT(ENV_KEYS); i++)
-        if (strcmp(ENV_KEYS[i].key, key) == 0)
-            return ParseValue(P, ENV_KEYS[i].type, &tok[2], n - 2, (char *)&e->env + ENV_KEYS[i].off);
+        if (strcmp(ENV_KEYS[i].key, key) == 0) {
+            void *dst = (char *)&e->env + ENV_KEYS[i].off;
+            return ParseValue(P, ENV_KEYS[i].type, &tok[2], n - 2, dst) && CheckEnvRange(P, key, ENV_KEYS[i].type, dst);
+        }
     for (int i = 0; i < COUNT(DEF_KEYS); i++) {
         if (strcmp(DEF_KEYS[i].key, key) != 0) continue;
         if (!ParseValue(P, DEF_KEYS[i].type, &tok[2], n - 2, (char *)e + DEF_KEYS[i].off)) return false;
@@ -1301,7 +1427,9 @@ static bool ParseEnv(Parser *P, Token *tok, int n)
             (*(int *)((char *)e + DEF_KEYS[i].off) < 16 || *(int *)((char *)e + DEF_KEYS[i].off) > 4096))
             return Fail(P, "sky sizes must be 16..4096", NULL);
         if (strcmp(key, "sun.range") == 0 && !(e->sun.range > 0.0f)) return Fail(P, "sun.range must be > 0", NULL);
-        return true;
+        if (strcmp(key, "sun.direction") == 0 && Vector3Length(e->sun.direction) == 0.0f)
+            return Fail(P, "sun.direction must not be 0 0 0", NULL);
+        return CheckEnvRange(P, key, DEF_KEYS[i].type, (char *)e + DEF_KEYS[i].off);
     }
     bool amb = strncmp(key, "ambientSky.", 11) == 0;
     if (amb || strncmp(key, "sky.", 4) == 0) {
@@ -1309,12 +1437,293 @@ static bool ParseEnv(Parser *P, Token *tok, int n)
         if (k >= 0) {
             R3D_ProceduralSky *sky = amb ? &e->ambient : &e->sky;
             if (!ParseValue(P, SKY_KEYS[k].type, &tok[2], n - 2, (char *)sky + SKY_KEYS[k].off)) return false;
+            if (SKY_KEYS[k].type == T_V3 && Vector3Length(*(Vector3 *)((char *)sky + SKY_KEYS[k].off)) == 0.0f)
+                return Fail(P, "%s must not be 0 0 0", key);
             if (amb) e->ambientSet |= 1u << k;
             else if (strcmp(SKY_KEYS[k].key, "sunDirection") == 0) e->skySunDirSet = true;
             return true;
         }
     }
     return Fail(P, "unknown env key '%s' (see the header comment of monolith_scene.c)", key);
+}
+
+// --- Models (docs/design-v2.md 2.5)
+
+// A file that a model file refers to (`ref`, as written in it, relative to the model's
+// folder): must stay inside the package and exist; it becomes a dependency (hot reload)
+static bool ModelRefDep(Parser *P, const char *modelRel, const char *ref, int refLen)
+{
+    char dec[MS_PATH_MAX];
+    int n = 0;
+    for (int i = 0; i < refLen && n < MS_PATH_MAX - 1; i++) {
+        char c = ref[i];
+        if (c == '\\' && i + 1 < refLen && ref[i + 1] == '/') continue;            // JSON "\/"
+        if (c == '%' && i + 2 < refLen && isxdigit((unsigned char)ref[i + 1]) && isxdigit((unsigned char)ref[i + 2])) {
+            char hex[3] = { ref[i + 1], ref[i + 2], 0 };
+            c = (char)strtol(hex, NULL, 16);
+            i += 2;
+        }
+        dec[n++] = c == '\\' ? '/' : c;
+    }
+    dec[n] = 0;
+    if (n == 0 || strncmp(dec, "data:", 5) == 0) return true;                       // embedded
+    char msg[MS_PATH_MAX + 200];
+    if (strstr(dec, "://") || dec[0] == '/' || (dec[0] && dec[1] == ':')) {
+        snprintf(msg, sizeof(msg), "\"%s\" refers to \"%s\", outside the package", modelRel, dec);
+        return Fail(P, "%s", msg);
+    }
+    // modelRel's folder + dec, with "." and ".." resolved
+    char joined[2 * MS_PATH_MAX], out[MS_PATH_MAX];
+    const char *slash = strrchr(modelRel, '/');
+    snprintf(joined, sizeof(joined), "%.*s%s", slash ? (int)(slash - modelRel + 1) : 0, modelRel, dec);
+    int len = 0;
+    for (char *c = joined; *c; ) {
+        char *e = strchr(c, '/');
+        int seg = e ? (int)(e - c) : (int)strlen(c);
+        if (seg == 0 || (seg == 1 && c[0] == '.')) { /* skip */ }
+        else if (seg == 2 && c[0] == '.' && c[1] == '.') {
+            if (len == 0) {
+                snprintf(msg, sizeof(msg), "\"%s\" refers to \"%s\", outside the package", modelRel, dec);
+                return Fail(P, "%s", msg);
+            }
+            while (len > 0 && out[len - 1] != '/') len--;
+            if (len > 0) len--;     // the '/' before the dropped segment
+        } else {
+            if (len + seg + 2 >= MS_PATH_MAX) return Fail(P, "path too long: \"%s\"", dec);
+            if (len > 0) out[len++] = '/';
+            memcpy(out + len, c, seg);
+            len += seg;
+        }
+        c = e ? e + 1 : c + seg;
+    }
+    out[len] = 0;
+    char full[MS_PATH_MAX];
+    if (snprintf(full, sizeof(full), "%s%s", P->d->root, out) >= (int)sizeof(full)) return Fail(P, "path too long: \"%s\"", out);
+    if (!AddDep(P, full)) return false;
+    if (!FileExists(full)) {
+        snprintf(msg, sizeof(msg), "file not found: \"%s\" (named by \"%s\")", out, modelRel);
+        return Fail(P, "%s", msg);
+    }
+    return true;
+}
+
+// Every "uri": "..." in glTF JSON text
+static bool GltfUriDeps(Parser *P, const char *modelRel, const char *json, size_t size)
+{
+    const char *end = json + size;
+    for (const char *p = json; p + 5 < end; p++) {
+        if (memcmp(p, "\"uri\"", 5) != 0) continue;
+        const char *q = p + 5;
+        while (q < end && (*q == ' ' || *q == '\t' || *q == '\r' || *q == '\n')) q++;
+        if (q >= end || *q != ':') continue;
+        q++;
+        while (q < end && (*q == ' ' || *q == '\t' || *q == '\r' || *q == '\n')) q++;
+        if (q >= end || *q != '"') continue;
+        const char *s = ++q;
+        while (q < end && *q != '"') q += (*q == '\\' && q + 1 < end) ? 2 : 1;
+        if (q >= end) break;
+        if (q - s < MS_PATH_MAX && !ModelRefDep(P, modelRel, s, (int)(q - s))) return false;
+        p = q;
+    }
+    return true;
+}
+
+// The last whitespace-separated word of each line starting with one of `keys` (OBJ/MTL)
+static bool ObjLineDeps(Parser *P, const char *modelRel, const char *text, const char *const *keys, int keyCount,
+                        bool mtllib)
+{
+    for (const char *line = text; *line; ) {
+        const char *eol = strchr(line, '\n');
+        if (!eol) eol = line + strlen(line);
+        const char *s = line;
+        while (s < eol && (*s == ' ' || *s == '\t')) s++;
+        for (int k = 0; k < keyCount; k++) {
+            size_t kl = strlen(keys[k]);
+            if ((size_t)(eol - s) <= kl || strncmp(s, keys[k], kl) != 0 || (s[kl] != ' ' && s[kl] != '\t')) continue;
+            const char *a = s + kl, *b = eol;
+            while (b > a && (b[-1] == ' ' || b[-1] == '\t' || b[-1] == '\r')) b--;
+            if (!mtllib) {          // options (-bm 1 ...) come first: the file name is the last word
+                const char *w = b;
+                while (w > a && w[-1] != ' ' && w[-1] != '\t') w--;
+                a = w;
+            } else while (a < b && (*a == ' ' || *a == '\t')) a++;
+            if (b > a && b - a < MS_PATH_MAX) {
+                if (!ModelRefDep(P, modelRel, a, (int)(b - a))) return false;
+                if (mtllib) {
+                    // the material library's textures, relative to the library's folder
+                    char lib[MS_PATH_MAX], rel[2 * MS_PATH_MAX], full[3 * MS_PATH_MAX];
+                    snprintf(lib, sizeof(lib), "%.*s", (int)(b - a), a);
+                    const char *slash = strrchr(modelRel, '/');
+                    snprintf(rel, sizeof(rel), "%.*s%s", slash ? (int)(slash - modelRel + 1) : 0, modelRel, lib);
+                    snprintf(full, sizeof(full), "%s%s", P->d->root, rel);
+                    int size;
+                    char e[256];
+                    char *mtl = ReadWholeFile(full, &size, e, sizeof(e));
+                    if (mtl) {
+                        static const char *const MAPS[] = { "map_Kd", "map_Ka", "map_Ks", "map_Ke", "map_Bump", "map_bump",
+                                                            "bump", "map_d", "norm", "map_Pr", "map_Pm", "map_Ns", "disp" };
+                        bool ok = ObjLineDeps(P, rel, mtl, MAPS, COUNT(MAPS), false);
+                        free(mtl);
+                        if (!ok) return false;
+                    }
+                }
+            }
+        }
+        line = *eol ? eol + 1 : eol;
+    }
+    return true;
+}
+
+// The files a model file refers to: glTF buffers and images, OBJ material libraries and
+// their textures (FBX/DAE: not followed)
+static bool ModelDeps(Parser *P, const char *modelRel, const char *full)
+{
+    const char *ext = GetFileExtension(full);
+    if (!ext) return true;
+    if (TextIsEqual(TextToLower(ext), ".gltf") || TextIsEqual(TextToLower(ext), ".obj")) {
+        bool gltf = TextIsEqual(TextToLower(ext), ".gltf");
+        int size;
+        char e[256];
+        char *text = ReadWholeFile(full, &size, e, sizeof(e));
+        if (!text) return Fail(P, "cannot read the model file \"%s\" (or larger than 4 MB)", modelRel);
+        static const char *const OBJ_KEYS[] = { "mtllib" };
+        bool ok = gltf ? GltfUriDeps(P, modelRel, text, (size_t)size) : ObjLineDeps(P, modelRel, text, OBJ_KEYS, 1, true);
+        free(text);
+        return ok;
+    }
+    if (TextIsEqual(TextToLower(ext), ".glb")) {
+        // GLB: 12-byte header, then the JSON chunk (length, type "JSON", text)
+        FILE *f = fopen(full, "rb");
+        if (!f) return Fail(P, "cannot read the model file \"%s\"", modelRel);
+        unsigned char h[20];
+        bool ok = true;
+        if (fread(h, 1, 20, f) == 20 && memcmp(h, "glTF", 4) == 0 && memcmp(h + 16, "JSON", 4) == 0) {
+            uint32_t len = h[12] | (h[13] << 8) | (h[14] << 16) | ((uint32_t)h[15] << 24);
+            char *json = len <= MS_FILE_MAX ? malloc(len) : NULL;
+            if (json && fread(json, 1, len, f) == len) ok = GltfUriDeps(P, modelRel, json, len);
+            free(json);
+        }
+        fclose(f);
+        return ok;
+    }
+    return true;
+}
+
+// model "models/x.glb" x y z [rot y p r] [scale s | sx sy sz] [origin model|bottom|center]
+//       [material "m"] [material.N "m"] [collide aabb|none|box ...] [shadow on|off]
+static bool ParseModel(Parser *P, Token *args, int n, const Placement *pl)
+{
+    SceneData *d = P->d;
+    if (n < 4) return Fail(P, "model takes a file and a position: model \"models/x.glb\" x y z [rot ...] [scale ...] ...", NULL);
+    char full[MS_PATH_MAX];
+    if (!PackagePath(P, args[0], full, sizeof(full))) return false;
+    int file = -1;
+    for (int i = 0; i < d->modelFileCount; i++)
+        if (strcmp(d->modelFiles[i].path, args[0].s) == 0) file = i;
+    if (file < 0) {
+        if (d->modelFileCount >= MS_MAX_MODEL_FILES) return Fail(P, "too many model files (max 64)", NULL);
+        if (!ModelDeps(P, args[0].s, full)) return false;
+        file = d->modelFileCount++;
+        MS_ModelFile *F = &d->modelFiles[file];
+        snprintf(F->path, sizeof(F->path), "%s", args[0].s);
+        F->line = P->line;
+    }
+    float pos[3];
+    for (int i = 0; i < 3; i++)
+        if (!NumF(P, args[1 + i], &pos[i])) return false;
+
+    MS_ModelInstance M = { .file = file, .scale = { 1, 1, 1 }, .castShadow = true, .ref = P->cur };
+    M.ref.material = P->cur.material > 0 ? P->cur.material : -1;   // `use` (not "default") restyles models
+    M.slotFirst = d->modelSlotCount;
+    M.colliderFirst = d->localColliderCount;
+    for (int t = 4; t < n; ) {
+        const char *k = args[t].s;
+        if (args[t].quoted) return Fail(P, "expected a model key, got the string \"%s\"", k);
+        int nv = 0;
+        while (t + 1 + nv < n && IsNumber(args[t + 1 + nv])) nv++;
+        Token *v = &args[t + 1];
+        int used = nv;
+        if (strcmp(k, "rot") == 0) {
+            if (nv != 3) return Fail(P, "rot takes 3 numbers: rot yawDeg pitchDeg rollDeg", NULL);
+            for (int i = 0; i < 3; i++)
+                if (!NumF(P, v[i], &((float *)&M.rotationDeg)[i])) return false;
+        } else if (strcmp(k, "scale") == 0) {
+            if (nv != 1 && nv != 3) return Fail(P, "scale takes 1 or 3 numbers: scale s | scale sx sy sz", NULL);
+            for (int i = 0; i < 3; i++)
+                if (!NumF(P, v[nv == 1 ? 0 : i], &((float *)&M.scale)[i])) return false;
+            if (!(M.scale.x > 0.0f && M.scale.y > 0.0f && M.scale.z > 0.0f)) return Fail(P, "scale must be > 0", NULL);
+        } else if (strcmp(k, "origin") == 0) {
+            static const char *const ORIGINS[] = { "model", "bottom", "center" };
+            int e;
+            if (t + 1 >= n) return Fail(P, "origin takes model, bottom or center", NULL);
+            if (!Keyword(P, v[0], ORIGINS, 3, "origin", &e)) return false;
+            M.origin = (MS_ModelOrigin)e;
+            used = 1;
+        } else if (strcmp(k, "shadow") == 0) {
+            if (t + 1 >= n) return Fail(P, "shadow takes on or off", NULL);
+            if (!OnOff(P, v[0], &M.castShadow)) return false;
+            used = 1;
+        } else if (strcmp(k, "material") == 0 || strncmp(k, "material.", 9) == 0) {
+            if (t + 1 >= n || !v[0].quoted) return Fail(P, "%s takes a material name in double quotes", k);
+            int mi = FindMaterial(d, v[0].s);
+            if (mi < 0) return Fail(P, "unknown material \"%s\" (define it with 'material' before the model)", v[0].s);
+            if (k[8] == '\0') M.ref.material = mi;
+            else {
+                int slot;
+                if (!ParseInt(P, k + 9, 0, 255, &slot)) return false;
+                if (d->modelSlotCount >= MS_MAX_MODEL_SLOTS) return Fail(P, "too many material.N overrides (max 16384)", NULL);
+                d->modelSlots[d->modelSlotCount++] = (MS_SlotMaterial){ slot, mi };
+            }
+            used = 1;
+        } else if (strcmp(k, "collide") == 0) {
+            if (t + 1 >= n) return Fail(P, "collide takes aabb, none or box x0 y0 z0 x1 y1 z1 [box ...]", NULL);
+            if (!v[0].quoted && strcmp(v[0].s, "aabb") == 0) { M.collide = MS_COLLIDE_AABB; used = 1; }
+            else if (!v[0].quoted && strcmp(v[0].s, "none") == 0) { M.collide = MS_COLLIDE_NONE; used = 1; }
+            else if (!v[0].quoted && strcmp(v[0].s, "box") == 0) {
+                M.collide = MS_COLLIDE_BOXES;
+                d->localColliderCount = M.colliderFirst;    // a repeated `collide` replaces the boxes
+                used = 0;
+                while (t + 1 + used < n && !v[used].quoted && strcmp(v[used].s, "box") == 0) {
+                    float b[6];
+                    for (int i = 0; i < 6; i++) {
+                        if (t + 2 + used + i >= n) return Fail(P, "collide box takes 6 numbers: box x0 y0 z0 x1 y1 z1", NULL);
+                        if (!NumF(P, v[used + 1 + i], &b[i])) return false;
+                    }
+                    if (d->localColliderCount - M.colliderFirst >= MS_MAX_COLLIDE_BOXES)
+                        return Fail(P, "too many collide boxes (max 8 per model line)", NULL);
+                    if (d->localColliderCount >= MS_MAX_MODEL_COLLIDERS) return Fail(P, "too many model collision boxes (max 16384)", NULL);
+                    d->localColliders[d->localColliderCount++] = (BoundingBox){
+                        { fminf(b[0], b[3]), fminf(b[1], b[4]), fminf(b[2], b[5]) },
+                        { fmaxf(b[0], b[3]), fmaxf(b[1], b[4]), fmaxf(b[2], b[5]) } };
+                    used += 7;
+                }
+            } else return Fail(P, "collide takes aabb, none or box x0 y0 z0 x1 y1 z1 [box ...], not '%s'", v[0].s);
+        } else return Fail(P, "unknown model key '%s' (rot scale origin material material.N collide shadow)", k);
+        t += 1 + used;
+    }
+    M.slotCount = d->modelSlotCount - M.slotFirst;
+    M.colliderCount = M.collide == MS_COLLIDE_BOXES ? d->localColliderCount - M.colliderFirst : 0;
+    int perCopy = M.collide == MS_COLLIDE_AABB ? 1 : M.colliderCount;
+
+    bool shifted = pl->hasAt || pl->reps > 0;
+    int cnt[MS_REPEATS_MAX] = { 1, 1, 1 };
+    for (int r = 0; r < pl->reps; r++) cnt[r] = pl->repN[r];
+    for (int i0 = 0; i0 < cnt[0]; i0++)
+    for (int i1 = 0; i1 < cnt[1]; i1++)
+    for (int i2 = 0; i2 < cnt[2]; i2++) {
+        if (d->modelCount >= MS_MAX_MODELS) return Fail(P, "too many model instances (max 4096)", NULL);
+        if (d->modelColliderCount + perCopy > MS_MAX_MODEL_COLLIDERS) return Fail(P, "too many model collision boxes (max 16384)", NULL);
+        int idx[MS_REPEATS_MAX] = { i0, i1, i2 };
+        float off[3];
+        CopyOffset(pl, idx, off);
+        MS_ModelInstance c = M;
+        c.position = shifted ? (Vector3){ off[0] + pos[0], off[1] + pos[1], off[2] + pos[2] } : (Vector3){ pos[0], pos[1], pos[2] };
+        if (!isfinite(c.position.x) || !isfinite(c.position.y) || !isfinite(c.position.z))
+            return Fail(P, "coordinate out of range", NULL);
+        d->models[d->modelCount++] = c;
+        d->modelColliderCount += perCopy;
+    }
+    return true;
 }
 
 // One statement (already tokenized, at least one token)
@@ -1406,13 +1815,12 @@ static bool ParseStatement(Parser *P, Token *tok, int n)
     }
     if (strcmp(prim, "model") == 0) {
         if (!v2) return Fail(P, "'model' needs map format 2: add 'monolith 2' as the first line", NULL);
-        // Slot for the models stream (docs/design-v2.md 2.5): ParseModel(P, &tok[t + 1], n - t - 1, &pl)
-        return Fail(P, "'model' is not supported by this build of monolith_scene yet", NULL);
+        return ParseModel(P, &tok[t + 1], n - t - 1, &pl);
     }
     if (!NoStrings(P, tok, 0, n)) return false;
     for (int i = 0; i < COUNT(PRIMS); i++)
         if (strcmp(prim, PRIMS[i].name) == 0) return ParsePrimitive(P, &PRIMS[i], &tok[t + 1], n - t - 1, &pl);
-    if (v2) return Fail(P, "unknown keyword '%s' (expected group, box, block, stairs, waffle, light, material, use, env, "
+    if (v2) return Fail(P, "unknown keyword '%s' (expected group, box, block, stairs, waffle, model, light, material, use, env, "
                            "spawn, viewpoint, repeat or at)", prim);
     return Fail(P, "unknown keyword '%s' (expected group, box, block, stairs, waffle, repeat or at)", prim);
 }
@@ -1444,8 +1852,8 @@ static bool ParseText(Parser *P, const char *text, int size)
         if (!ParseStatement(P, tok, n)) return false;
     }
     P->line = 0;
-    if (P->d->boxCount == 0)
-        return Fail(P, P->d->formatVersion >= 2 ? "map is empty (no boxes)" : "map has no boxes", NULL);
+    if (P->d->boxCount == 0 && P->d->modelCount == 0)
+        return Fail(P, P->d->formatVersion >= 2 ? "map is empty (no boxes and no models)" : "map has no boxes", NULL);
     return true;
 }
 
@@ -1472,6 +1880,10 @@ static BoundingBox ContentBounds(const SceneData *d)
         if (GroundLike(d->boxes[i])) continue;
         r.min = Vector3Min(r.min, d->boxes[i].min);
         r.max = Vector3Max(r.max, d->boxes[i].max);
+    }
+    for (int i = 0; i < d->modelCount; i++) {
+        r.min = Vector3Min(r.min, d->models[i].bounds.min);
+        r.max = Vector3Max(r.max, d->models[i].bounds.max);
     }
     if (r.min.x > r.max.x) r = d->bounds;   // only ground: use everything
     return r;
@@ -1814,11 +2226,19 @@ static void FinishParse(SceneData *d, const MS_LoadOptions *opt)
         v->eye = (Vector3){ d->spawnFeet.x, d->spawnFeet.y + MS_DEFAULT_EYE_HEIGHT, d->spawnFeet.z };
         v->target = Vector3Add(v->eye, (Vector3){ (float)(cos(pitch) * sin(yaw)), (float)sin(pitch), (float)(cos(pitch) * cos(yaw)) });
     }
+}
 
+// Scene bounds (boxes, models, point/spot lights) and the collider list; after ResolveModels
+static void FinishGeometry(SceneData *d)
+{
     BoundingBox b = { { INFINITY, INFINITY, INFINITY }, { -INFINITY, -INFINITY, -INFINITY } };
     for (int i = 0; i < d->boxCount; i++) {
         b.min = Vector3Min(b.min, d->boxes[i].min);
         b.max = Vector3Max(b.max, d->boxes[i].max);
+    }
+    for (int i = 0; i < d->modelCount; i++) {
+        b.min = Vector3Min(b.min, d->models[i].bounds.min);
+        b.max = Vector3Max(b.max, d->models[i].bounds.max);
     }
     for (int i = 0; i < d->lightCount; i++)
         if (d->lights[i].light.type != R3D_LIGHT_DIR) {
@@ -1847,19 +2267,19 @@ static bool ParseScene(SceneData *d, const char *mapPath, const char *text, int 
     return true;
 }
 
-static Texture2D GetTexture(SceneData *d, const char *rel, bool isColor, char *err, int errSize)
+static Texture2D GetTexture(SceneData *d, const char *rel, bool isColor, int line, char *err, int errSize)
 {
     char full[MS_PATH_MAX + MS_PATH_MAX];
     snprintf(full, sizeof(full), "%s%s", d->root, rel);
     for (int i = 0; i < d->textureCount; i++)
         if (strcmp(d->textures[i].path, full) == 0 && d->textures[i].isColor == isColor) return d->textures[i].tex;
     if (d->textureCount >= MS_MAX_TEXTURES) {
-        snprintf(err, errSize, "%s: too many textures (max 256)", d->path);
+        snprintf(err, errSize, "%s:%d: too many textures (max 256)", d->path, line);
         return (Texture2D){ 0 };
     }
     Texture2D tex = R3D_LoadTexture(full, isColor);
     if (tex.id == 0) {
-        snprintf(err, errSize, "%s: cannot load the texture \"%s\"", d->path, rel);
+        snprintf(err, errSize, "%s:%d: cannot load the texture \"%s\"", d->path, line, rel);
         return tex;
     }
     TexEntry *e = &d->textures[d->textureCount++];
@@ -1869,9 +2289,304 @@ static Texture2D GetTexture(SceneData *d, const char *rel, bool isColor, char *e
     return tex;
 }
 
+// --- Models: load, pick data (BVH), transforms, draw groups
+
+static Vector3 TriCentroid(const ModelPick *mp, int t)
+{
+    const unsigned int *v = &mp->tri[3 * t];
+    return Vector3Scale(Vector3Add(Vector3Add(mp->pos[v[0]], mp->pos[v[1]]), mp->pos[v[2]]), 1.0f / 3.0f);
+}
+
+// Node `ni` over triangles [first, first + count): leaves of <= 4 triangles, split at the
+// middle of the longest axis of the centroids' bounds (in place: tri[] gets reordered)
+static void BvhBuild(ModelPick *mp, int ni, int first, int count, int depth)
+{
+    BvhNode *nd = &mp->nodes[ni];
+    nd->mn = (Vector3){ INFINITY, INFINITY, INFINITY };
+    nd->mx = (Vector3){ -INFINITY, -INFINITY, -INFINITY };
+    Vector3 cmn = nd->mn, cmx = nd->mx;
+    for (int t = first; t < first + count; t++) {
+        for (int k = 0; k < 3; k++) {
+            Vector3 p = mp->pos[mp->tri[3 * t + k]];
+            nd->mn = Vector3Min(nd->mn, p);
+            nd->mx = Vector3Max(nd->mx, p);
+        }
+        Vector3 c = TriCentroid(mp, t);
+        cmn = Vector3Min(cmn, c);
+        cmx = Vector3Max(cmx, c);
+    }
+    nd->left = -1;
+    nd->first = first;
+    nd->count = count;
+    if (count <= 4 || depth >= 60) return;
+    Vector3 ext = Vector3Subtract(cmx, cmn);
+    int axis = (ext.x >= ext.y && ext.x >= ext.z) ? 0 : (ext.y >= ext.z) ? 1 : 2;
+    float split = (((float *)&cmn)[axis] + ((float *)&cmx)[axis]) * 0.5f;
+    int i = first, j = first + count - 1;
+    while (i <= j) {
+        Vector3 c = TriCentroid(mp, i);
+        if (((float *)&c)[axis] < split) i++;
+        else {
+            for (int k = 0; k < 3; k++) {
+                unsigned int s = mp->tri[3 * i + k];
+                mp->tri[3 * i + k] = mp->tri[3 * j + k];
+                mp->tri[3 * j + k] = s;
+            }
+            j--;
+        }
+    }
+    int leftCount = i - first;
+    if (leftCount == 0 || leftCount == count) leftCount = count / 2;    // all centroids equal
+    int l = mp->nodeCount;
+    mp->nodeCount += 2;
+    nd->left = l;
+    nd->count = 0;
+    BvhBuild(mp, l, first, leftCount, depth + 1);
+    BvhBuild(mp, l + 1, first + leftCount, count - leftCount, depth + 1);
+}
+
+static void FreeModelPick(ModelPick *mp)
+{
+    free(mp->pos);
+    free(mp->tri);
+    free(mp->nodes);
+    memset(mp, 0, sizeof(*mp));
+}
+
+// Copies the triangles of a loaded model (R3D_IMPORT_RETAIN_MESH_DATA) into a ModelPick
+// with a BVH, then frees R3D's CPU mesh data
+static void BuildModelPick(MS_ModelFile *F, ModelPick *mp)
+{
+    R3D_Model *m = &F->model;
+    int verts = 0, tris = 0;
+    for (int i = 0; i < m->meshCount; i++) {
+        if (!m->meshData || m->meshes[i].primitiveType != R3D_PRIMITIVE_TRIANGLES) continue;
+        const R3D_MeshData *md = &m->meshData[i];
+        verts += md->vertexCount;
+        tris += md->indexCount > 0 ? md->indexCount / 3 : md->vertexCount / 3;
+    }
+    F->triangleCount = tris;
+    if (tris > 0 && (mp->pos = malloc(sizeof(Vector3) * verts)) && (mp->tri = malloc(sizeof(unsigned int) * 3 * tris)) &&
+        (mp->nodes = malloc(sizeof(BvhNode) * 2 * tris))) {
+        int v0 = 0, t = 0;
+        for (int i = 0; i < m->meshCount; i++) {
+            if (m->meshes[i].primitiveType != R3D_PRIMITIVE_TRIANGLES) continue;
+            const R3D_MeshData *md = &m->meshData[i];
+            for (int k = 0; k < md->vertexCount; k++) mp->pos[v0 + k] = md->vertices[k].position;
+            int n = md->indexCount > 0 ? md->indexCount / 3 * 3 : md->vertexCount / 3 * 3;
+            for (int k = 0; k < n; k++) mp->tri[3 * t + k] = v0 + (md->indexCount > 0 ? md->indices[k] : (unsigned int)k);
+            t += n / 3;
+            v0 += md->vertexCount;
+        }
+        mp->triCount = tris;
+        mp->nodeCount = 1;
+        BvhBuild(mp, 0, 0, tris, 0);
+    } else if (tris > 0) FreeModelPick(mp);
+    if (m->meshData) {
+        for (int i = 0; i < m->meshCount; i++) {
+            R3D_UnloadMeshData(m->meshData[i]);
+            memset(&m->meshData[i], 0, sizeof(m->meshData[i]));
+        }
+    }
+}
+
+// Loads every model file of `d` (GPU). On failure: "map:line: message"
+static bool LoadModelFiles(SceneData *d, char *err, int errSize)
+{
+    for (int i = 0; i < d->modelFileCount; i++) {
+        MS_ModelFile *F = &d->modelFiles[i];
+        char full[MS_PATH_MAX + MS_PATH_MAX];
+        snprintf(full, sizeof(full), "%s%s", d->root, F->path);
+        F->model = R3D_LoadModelEx(full, R3D_IMPORT_RETAIN_MESH_DATA);
+        if (F->model.meshCount <= 0 || !F->model.meshes) {
+            snprintf(err, errSize, "%s:%d: cannot load the model \"%s\" (unsupported or broken file; see the log; "
+                     "--inspect-model shows why)", d->path, F->line, F->path);
+            return false;
+        }
+        F->loaded = true;
+        F->bounds = F->model.aabb;
+        F->meshCount = F->model.meshCount;
+        F->materialCount = F->model.materialCount;
+        BuildModelPick(F, &d->modelPick[i]);
+        TraceLog(LOG_INFO, "monolith_scene: model %s: %d meshes, %d triangles, %d materials, size %.3f x %.3f x %.3f",
+                 F->path, F->meshCount, F->triangleCount, F->materialCount, F->bounds.max.x - F->bounds.min.x,
+                 F->bounds.max.y - F->bounds.min.y, F->bounds.max.z - F->bounds.min.z);
+    }
+    return true;
+}
+
+// World AABB of the model-space box b under the linear part of m plus `t`
+static BoundingBox TransformBox(BoundingBox b, Matrix m)
+{
+    BoundingBox r = { { INFINITY, INFINITY, INFINITY }, { -INFINITY, -INFINITY, -INFINITY } };
+    for (int i = 0; i < 8; i++) {
+        Vector3 p = { (i & 1) ? b.max.x : b.min.x, (i & 2) ? b.max.y : b.min.y, (i & 4) ? b.max.z : b.min.z };
+        p = Vector3Transform(p, m);
+        r.min = Vector3Min(r.min, p);
+        r.max = Vector3Max(r.max, p);
+    }
+    return r;
+}
+
+// Transforms, world bounds and colliders of every instance (file bounds: zero box when the
+// files were not loaded); then the collider list (boxes first)
+static void ResolveModels(SceneData *d)
+{
+    int nc = d->boxCount;
+    if (d->modelCount > 0) memcpy(d->colliders, d->boxes, sizeof(BoundingBox) * d->boxCount);
+    for (int i = 0; i < d->modelCount; i++) {
+        MS_ModelInstance *M = &d->models[i];
+        const MS_ModelFile *F = &d->modelFiles[M->file];
+        BoundingBox fb = F->loaded ? F->bounds : (BoundingBox){ 0 };
+        Quaternion qy = QuaternionFromAxisAngle((Vector3){ 0, 1, 0 }, M->rotationDeg.x * DEG2RAD);
+        Quaternion qx = QuaternionFromAxisAngle((Vector3){ 1, 0, 0 }, M->rotationDeg.y * DEG2RAD);
+        Quaternion qz = QuaternionFromAxisAngle((Vector3){ 0, 0, 1 }, M->rotationDeg.z * DEG2RAD);
+        M->rotation = QuaternionNormalize(QuaternionMultiply(QuaternionMultiply(qy, qx), qz));
+        // R * S, columns scaled (raylib matrices are column-major: m0..m2 = column 0)
+        Matrix m = QuaternionToMatrix(M->rotation);
+        m.m0 *= M->scale.x; m.m1 *= M->scale.x; m.m2 *= M->scale.x;
+        m.m4 *= M->scale.y; m.m5 *= M->scale.y; m.m6 *= M->scale.y;
+        m.m8 *= M->scale.z; m.m9 *= M->scale.z; m.m10 *= M->scale.z;
+        BoundingBox lb = TransformBox(fb, m);      // bounds around the origin
+        Vector3 shift = { 0 };
+        if (M->origin == MS_ORIGIN_BOTTOM)
+            shift = (Vector3){ -(lb.min.x + lb.max.x) * 0.5f, -lb.min.y, -(lb.min.z + lb.max.z) * 0.5f };
+        else if (M->origin == MS_ORIGIN_CENTER) shift = Vector3Scale(Vector3Add(lb.min, lb.max), -0.5f);
+        M->translation = Vector3Add(M->position, shift);
+        m.m12 = M->translation.x; m.m13 = M->translation.y; m.m14 = M->translation.z;
+        M->transform = m;
+        M->bounds = (BoundingBox){ Vector3Add(lb.min, M->translation), Vector3Add(lb.max, M->translation) };
+
+        int localFirst = M->colliderFirst, localCount = M->colliderCount;
+        M->colliderFirst = nc;
+        if (M->collide == MS_COLLIDE_AABB) d->colliders[nc++] = M->bounds;
+        else if (M->collide == MS_COLLIDE_BOXES)
+            for (int k = 0; k < localCount; k++) d->colliders[nc++] = TransformBox(d->localColliders[localFirst + k], m);
+        M->colliderCount = nc - M->colliderFirst;
+    }
+    d->colliderCount = nc;
+}
+
+static void FreeModelGroups(SceneData *d)
+{
+    for (int g = 0; g < d->modelGroupCount; g++) {
+        ModelGroup *G = &d->modelGroups[g];
+        if (G->count > 0) R3D_UnloadInstanceBuffer(G->inst);
+        free(G->slotMat);
+        free(G->model.materials);
+        if (G->ownMeshes) free(G->model.meshes);
+    }
+    free(d->modelGroups);
+    d->modelGroups = NULL;
+    d->modelGroupCount = 0;
+}
+
+// The material of slot s for instance M: material.N, then the instance's override, else -1
+static int SlotMaterial(const SceneData *d, const MS_ModelInstance *M, int s)
+{
+    int m = M->ref.material;
+    for (int k = 0; k < M->slotCount; k++)
+        if (d->modelSlots[M->slotFirst + k].slot == s) m = d->modelSlots[M->slotFirst + k].material;
+    return m;
+}
+
+// One draw group per (file, materials, shadow): instance buffers with position, rotation
+// and scale, and the R3D_Model copy it is drawn with. GPU; after ResolveModels.
+static bool BuildModelGroups(SceneData *d, char *err, int errSize)
+{
+    if (d->modelCount == 0) return true;
+    d->modelGroups = calloc(d->modelCount, sizeof(ModelGroup));
+    int *groupOf = malloc(sizeof(int) * d->modelCount);
+    int *tmp = malloc(sizeof(int) * 256);
+    if (!d->modelGroups || !groupOf || !tmp) {
+        free(groupOf); free(tmp);
+        snprintf(err, errSize, "%s: out of memory", d->path);
+        return false;
+    }
+    for (int i = 0; i < d->modelCount; i++) {
+        const MS_ModelInstance *M = &d->models[i];
+        const MS_ModelFile *F = &d->modelFiles[M->file];
+        int slots = F->materialCount < 256 ? F->materialCount : 256;
+        for (int k = 0; k < M->slotCount; k++)
+            if (d->modelSlots[M->slotFirst + k].slot >= F->materialCount && (i == 0 || d->models[i - 1].ref.line != M->ref.line))
+                TraceLog(LOG_WARNING, "monolith_scene: %s:%d: material.%d: \"%s\" has %d material slot%s (0..%d); ignored",
+                         d->path, M->ref.line, d->modelSlots[M->slotFirst + k].slot, F->path, F->materialCount,
+                         F->materialCount == 1 ? "" : "s", F->materialCount - 1);
+        for (int s = 0; s < slots; s++) tmp[s] = SlotMaterial(d, M, s);
+        int g = 0;
+        for (; g < d->modelGroupCount; g++) {
+            const ModelGroup *G = &d->modelGroups[g];
+            if (G->file == M->file && G->castShadow == M->castShadow && memcmp(G->slotMat, tmp, sizeof(int) * slots) == 0) break;
+        }
+        if (g == d->modelGroupCount) {
+            ModelGroup *G = &d->modelGroups[d->modelGroupCount++];
+            G->file = M->file;
+            G->castShadow = M->castShadow;
+            G->slotMat = malloc(sizeof(int) * (slots > 0 ? slots : 1));
+            if (G->slotMat) memcpy(G->slotMat, tmp, sizeof(int) * slots);
+        }
+        d->modelGroups[g].count++;
+        groupOf[i] = g;
+    }
+    free(tmp);
+
+    bool ok = true;
+    for (int g = 0; g < d->modelGroupCount && ok; g++) {
+        ModelGroup *G = &d->modelGroups[g];
+        const MS_ModelFile *F = &d->modelFiles[G->file];
+        G->model = F->model;
+        G->model.materials = malloc(sizeof(R3D_Material) * (F->materialCount > 0 ? F->materialCount : 1));
+        if (!G->slotMat || !G->model.materials) { ok = false; break; }
+        for (int s = 0; s < F->materialCount; s++) {
+            const R3D_Material *own = &F->model.materials[s];
+            int mi = s < 256 ? G->slotMat[s] : -1;
+            if (mi < 0) { G->model.materials[s] = *own; continue; }
+            R3D_Material m = d->materials[mi].material;
+            unsigned inh = d->matDefs[mi].inherit;
+            if (inh & INHERIT_ALBEDO) m.albedo.texture = own->albedo.texture;
+            if (inh & INHERIT_NORMAL) m.normal = own->normal;
+            if (inh & INHERIT_ORM) m.orm.texture = own->orm.texture;
+            if (inh & INHERIT_EMISSION) m.emission = own->emission;
+            G->model.materials[s] = m;
+        }
+        if (!G->castShadow) {
+            G->model.meshes = malloc(sizeof(R3D_Mesh) * F->model.meshCount);
+            if (!G->model.meshes) { G->model.meshes = F->model.meshes; ok = false; break; }
+            G->ownMeshes = true;
+            for (int k = 0; k < F->model.meshCount; k++) {
+                G->model.meshes[k] = F->model.meshes[k];
+                G->model.meshes[k].shadowCastMode = R3D_SHADOW_CAST_DISABLED;
+            }
+        }
+        int count = G->count;
+        G->inst = R3D_LoadInstanceBuffer(count, R3D_INSTANCE_POSITION | R3D_INSTANCE_ROTATION | R3D_INSTANCE_SCALE);
+        Vector3 *pos = R3D_MapInstances(G->inst, R3D_INSTANCE_POSITION, false);
+        Quaternion *rot = R3D_MapInstances(G->inst, R3D_INSTANCE_ROTATION, false);
+        Vector3 *scl = R3D_MapInstances(G->inst, R3D_INSTANCE_SCALE, false);
+        if (!pos || !rot || !scl) ok = false;
+        for (int i = 0, k = 0; i < d->modelCount && ok; i++) {
+            if (groupOf[i] != g) continue;
+            pos[k] = d->models[i].translation;
+            rot[k] = d->models[i].rotation;
+            scl[k] = d->models[i].scale;
+            k++;
+        }
+        R3D_UnmapInstances(G->inst, R3D_INSTANCE_POSITION | R3D_INSTANCE_ROTATION | R3D_INSTANCE_SCALE);
+    }
+    free(groupOf);
+    if (!ok) snprintf(err, errSize, "%s: out of memory (model instances)", d->path);
+    return ok;
+}
+
 static void FreeGpu(SceneData *d)
 {
     if (!d->gpu) return;
+    FreeModelGroups(d);
+    for (int i = 0; i < d->modelFileCount; i++)
+        if (d->modelFiles[i].model.meshes) {
+            R3D_UnloadModel(d->modelFiles[i].model, true);
+            memset(&d->modelFiles[i].model, 0, sizeof(R3D_Model));
+        }
     for (int i = 0; i < d->materialCount; i++) {
         if (d->instCount[i] > 0) R3D_UnloadInstanceBuffer(d->inst[i]);
         if (d->materials[i].material.shader) R3D_UnloadSurfaceShader(d->materials[i].material.shader);
@@ -1902,14 +2617,14 @@ static bool UploadGpu(SceneData *d, char *err, int errSize)
             snprintf(full, sizeof(full), "%s%s", d->root, M->shader);
             m->shader = R3D_LoadSurfaceShader(full);
             if (!m->shader) {
-                snprintf(err, errSize, "%s:%d: cannot load the surface shader \"%s\" (see the log)", d->path, M->line, M->shader);
+                snprintf(err, errSize, "%s:%d: cannot load the surface shader \"%s\" (see the log)", d->path, D->shaderLine, M->shader);
                 FreeGpu(d);
                 return false;
             }
             for (int u = 0; u < D->uniformCount; u++)
                 R3D_SetSurfaceShaderUniform(m->shader, D->uniforms[u].name, D->uniforms[u].v);
             for (int s = 0; s < D->samplerCount; s++) {
-                Texture2D tex = GetTexture(d, D->samplers[s].path, true, err, errSize);
+                Texture2D tex = GetTexture(d, D->samplers[s].path, true, D->samplers[s].line, err, errSize);
                 if (!tex.id) { FreeGpu(d); return false; }
                 R3D_SetSurfaceShaderSampler(m->shader, D->samplers[s].name, tex);
             }
@@ -1918,7 +2633,7 @@ static bool UploadGpu(SceneData *d, char *err, int errSize)
         Texture2D *slot[MAP_COUNT] = { &m->albedo.texture, &m->normal.texture, &m->orm.texture, &m->emission.texture };
         for (int k = 0; k < MAP_COUNT; k++) {
             if (!D->maps[k][0]) continue;
-            *slot[k] = GetTexture(d, D->maps[k], IS_COLOR[k], err, errSize);
+            *slot[k] = GetTexture(d, D->maps[k], IS_COLOR[k], D->mapLine[k], err, errSize);
             if (!slot[k]->id) { FreeGpu(d); return false; }
         }
 
@@ -1969,6 +2684,10 @@ static bool UploadGpu(SceneData *d, char *err, int errSize)
         d->lightShadowDrawn[i] = false;
         if (d->lights[i].shadow) d->lightShadow[i] = R3D_LoadShadowMap(d->lights[i].light.type);
     }
+    if (!BuildModelGroups(d, err, errSize)) {
+        FreeGpu(d);
+        return false;
+    }
     return true;
 }
 
@@ -1976,6 +2695,7 @@ static void FreeData(SceneData *d)
 {
     if (!d) return;
     FreeGpu(d);
+    for (int i = 0; i < d->modelFileCount; i++) FreeModelPick(&d->modelPick[i]);
     free(d->text);
     free(d);
 }
@@ -1992,12 +2712,15 @@ static void Publish(MS_Scene *s, SceneData *d)
     s->boxes = d->boxes;
     s->boxRefs = d->boxRefs;
     s->boxCount = d->boxCount;
-    s->models = NULL;
-    s->modelCount = 0;
-    s->modelFiles = NULL;
-    s->modelFileCount = 0;
-    s->colliders = d->boxes;        // boxes first; the models stream appends model colliders
-    s->colliderCount = d->boxCount;
+    s->models = d->models;
+    s->modelCount = d->modelCount;
+    s->modelFiles = d->modelFiles;
+    s->modelFileCount = d->modelFileCount;
+    s->modelSlots = d->modelSlots;
+    s->modelSlotCount = d->modelSlotCount;
+    // Boxes first, then the model colliders (without models: the box array itself)
+    s->colliders = d->modelCount > 0 ? d->colliders : d->boxes;
+    s->colliderCount = d->modelCount > 0 ? d->colliderCount : d->boxCount;
     s->materials = d->materials;
     s->materialCount = d->materialCount;
     s->groups = d->groups;
@@ -2043,6 +2766,14 @@ static bool LoadText(MS_Scene *s, const char *mapPath, char *text, int size, cha
     SetWatch(p, d);
     p->triedHash = CombinedHash(text, size, p->watch, p->watchCount);
     p->settleTime = 0.0f;
+    if (ok && p->gpu) {
+        d->gpu = true;                  // (so FreeData unloads what LoadModelFiles loaded)
+        ok = LoadModelFiles(d, err, errSize);
+    }
+    if (ok) {
+        ResolveModels(d);
+        FinishGeometry(d);
+    }
     if (ok && p->gpu) {
         ok = UploadGpu(d, err, errSize);
         if (ok && !p->warnedShadowSize && R3D_GetHint(R3D_HINT_SHADOW_DIR_SIZE) != d->env.sun.shadowSize) {
@@ -2128,8 +2859,8 @@ MS_Scene *MS_Load(const char *path, const MS_LoadOptions *opt, char *err, int er
         for (int i = 0; i < SUN_TILE_COUNT; i++) p->sunShadow[i] = R3D_LoadShadowMap(R3D_LIGHT_DIR);
         p->sunShadowLoaded = true;
         int mapSize = R3D_GetHint(R3D_HINT_SHADOW_DIR_SIZE);
-        TraceLog(LOG_INFO, "monolith_scene: %s: %d boxes, %d groups, %d materials, %d lights; sun shadow %d px, %.2f cm texels",
-                 s->path, s->boxCount, s->groupCount, s->materialCount, s->lightCount, mapSize,
+        TraceLog(LOG_INFO, "monolith_scene: %s: %d boxes, %d models (%d files), %d groups, %d materials, %d lights; sun shadow %d px, %.2f cm texels",
+                 s->path, s->boxCount, s->modelCount, s->modelFileCount, s->groupCount, s->materialCount, s->lightCount, mapSize,
                  100.0f * 2.0f * FitRadius(s->sun.light.range, TILE_FIT_FOVY, TILE_FIT_ASPECT) / (float)mapSize);
     }
     return s;
@@ -2328,6 +3059,10 @@ void MS_DrawGeometry(MS_Scene *s)
     SceneData *d = p->d;
     for (int i = 0; i < d->materialCount; i++)
         if (d->instCount[i] > 0) R3D_DrawMeshInstanced(p->cube, d->materials[i].material, d->inst[i], d->instCount[i]);
+    // Models: one instanced draw per (file, materials, shadow); they go into the sun's
+    // shadow tiles too, which are drawn once per map load like for the boxes
+    for (int g = 0; g < d->modelGroupCount; g++)
+        R3D_DrawModelInstanced(d->modelGroups[g].model, d->modelGroups[g].inst, d->modelGroups[g].count);
 #ifdef MS_PATCHED_R3D
     if (p->rs.sunOn && d->env.sun.enabled && d->env.sun.shadow && p->rs.fogCacheVoxel > 0.0f && p->fogCacheVersion != s->version) {
         // Fog sun visibility, baked once per map load into the shadow layer this frame
@@ -2400,8 +3135,105 @@ MS_Hit MS_Raycast(const MS_Scene *s, Vector3 origin, Vector3 dir, float maxDist)
         n[axis] = d[axis] > 0.0f ? -1.0f : 1.0f;
         best.normal = (Vector3){ n[0], n[1], n[2] };
     }
+    // Models: only strictly nearer than the best box (a box wins a tie)
+    for (int i = 0; i < s->modelCount; i++) {
+        MS_Hit h;
+        float lim = best.obj.kind != MS_OBJ_NONE ? best.dist : (maxDist > 0.0f ? maxDist : 0.0f);
+        if (MS_RaycastModel(s, i, origin, dir, lim, &h) && h.dist < best.dist) best = h;
+    }
     if (best.obj.kind == MS_OBJ_NONE) best.dist = 0.0f;
     return best;
+}
+
+// Slab test; tNear < 0 when the origin is inside. False on a miss.
+static bool RayBox(Vector3 o, Vector3 d, Vector3 mn, Vector3 mx, float *tNear, float *tFar, int *axis)
+{
+    const float O[3] = { o.x, o.y, o.z }, D[3] = { d.x, d.y, d.z };
+    const float MN[3] = { mn.x, mn.y, mn.z }, MX[3] = { mx.x, mx.y, mx.z };
+    float t0 = -INFINITY, t1 = INFINITY;
+    int ax = -1;
+    for (int a = 0; a < 3; a++) {
+        if (fabsf(D[a]) < 1e-12f) {
+            if (O[a] < MN[a] || O[a] > MX[a]) return false;
+            continue;
+        }
+        float a1 = (MN[a] - O[a]) / D[a], a2 = (MX[a] - O[a]) / D[a];
+        if (a1 > a2) { float t = a1; a1 = a2; a2 = t; }
+        if (a1 > t0) { t0 = a1; ax = a; }
+        if (a2 < t1) t1 = a2;
+        if (t0 > t1) return false;
+    }
+    *tNear = t0;
+    *tFar = t1;
+    if (axis) *axis = ax;
+    return ax >= 0 || t0 <= t1;
+}
+
+bool MS_RaycastModel(const MS_Scene *s, int mi, Vector3 origin, Vector3 dir, float maxDist, MS_Hit *hit)
+{
+    if (mi < 0 || mi >= s->modelCount) return false;
+    const SceneData *d = s->priv->d;
+    const MS_ModelInstance *M = &s->models[mi];
+    float limit = maxDist > 0.0f ? maxDist : INFINITY;
+    float tn, tf;
+    int axis;
+    if (!RayBox(origin, dir, M->bounds.min, M->bounds.max, &tn, &tf, &axis) || tf < 0.0f || tn > limit) return false;
+
+    const ModelPick *mp = &d->modelPick[M->file];
+    if (mp->triCount == 0) {
+        // No triangles (noGpu scene, or a file without any): its bounds, like a box
+        if (axis < 0 || tn < 0.0f) return false;
+        float n[3] = { 0, 0, 0 };
+        n[axis] = ((const float *)&dir)[axis] > 0.0f ? -1.0f : 1.0f;
+        *hit = (MS_Hit){ { MS_OBJ_MODEL, mi }, Vector3Add(origin, Vector3Scale(dir, tn)), { n[0], n[1], n[2] }, tn };
+        return true;
+    }
+
+    // Into model space: the same ray parameter t (affine map), so distances stay world distances
+    Matrix inv = MatrixInvert(M->transform);
+    Vector3 o = Vector3Transform(origin, inv);
+    Vector3 dd = { inv.m0 * dir.x + inv.m4 * dir.y + inv.m8 * dir.z, inv.m1 * dir.x + inv.m5 * dir.y + inv.m9 * dir.z,
+                   inv.m2 * dir.x + inv.m6 * dir.y + inv.m10 * dir.z };
+    float best = limit;
+    int bestTri = -1;
+    int stack[128], sp = 0;
+    stack[sp++] = 0;
+    while (sp > 0) {
+        const BvhNode *nd = &mp->nodes[stack[--sp]];
+        float a, b;
+        if (!RayBox(o, dd, nd->mn, nd->mx, &a, &b, NULL) || b < 0.0f || a > best) continue;
+        if (nd->count == 0) {
+            if (sp + 2 <= 128) { stack[sp++] = nd->left; stack[sp++] = nd->left + 1; }
+            continue;
+        }
+        for (int t = nd->first; t < nd->first + nd->count; t++) {
+            // Moeller-Trumbore, both faces
+            Vector3 v0 = mp->pos[mp->tri[3 * t]], v1 = mp->pos[mp->tri[3 * t + 1]], v2 = mp->pos[mp->tri[3 * t + 2]];
+            Vector3 e1 = Vector3Subtract(v1, v0), e2 = Vector3Subtract(v2, v0);
+            Vector3 pv = Vector3CrossProduct(dd, e2);
+            float det = Vector3DotProduct(e1, pv);
+            if (fabsf(det) < 1e-20f) continue;
+            float inv_det = 1.0f / det;
+            Vector3 tv = Vector3Subtract(o, v0);
+            float u = Vector3DotProduct(tv, pv) * inv_det;
+            if (u < 0.0f || u > 1.0f) continue;
+            Vector3 qv = Vector3CrossProduct(tv, e1);
+            float v = Vector3DotProduct(dd, qv) * inv_det;
+            if (v < 0.0f || u + v > 1.0f) continue;
+            float tt = Vector3DotProduct(e2, qv) * inv_det;
+            if (tt > 1e-5f && tt < best) { best = tt; bestTri = t; }
+        }
+    }
+    if (bestTri < 0) return false;
+    Vector3 v0 = mp->pos[mp->tri[3 * bestTri]], v1 = mp->pos[mp->tri[3 * bestTri + 1]], v2 = mp->pos[mp->tri[3 * bestTri + 2]];
+    Vector3 nl = Vector3CrossProduct(Vector3Subtract(v1, v0), Vector3Subtract(v2, v0));
+    // Normals transform with the inverse transpose
+    Vector3 n = { inv.m0 * nl.x + inv.m1 * nl.y + inv.m2 * nl.z, inv.m4 * nl.x + inv.m5 * nl.y + inv.m6 * nl.z,
+                  inv.m8 * nl.x + inv.m9 * nl.y + inv.m10 * nl.z };
+    n = Vector3Normalize(n);
+    if (Vector3DotProduct(n, dir) > 0.0f) n = Vector3Negate(n);
+    *hit = (MS_Hit){ { MS_OBJ_MODEL, mi }, Vector3Add(origin, Vector3Scale(dir, best)), n, best };
+    return true;
 }
 
 bool MS_Collides(const MS_Scene *s, BoundingBox a)

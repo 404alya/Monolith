@@ -11,7 +11,7 @@
 // index, as in a plain loop over all boxes, so every list gives the same hit.
 static DesignerHit PickBoxes(Vector3 origin, Vector3 dir, const int *list, const float *minDist, int n)
 {
-    DesignerHit best = { .box = -1, .dist = INFINITY };
+    DesignerHit best = { .obj = { MS_OBJ_NONE, -1 }, .dist = INFINITY };
     const float o[3] = { origin.x, origin.y, origin.z };
     const float d[3] = { dir.x, dir.y, dir.z };
 
@@ -39,50 +39,83 @@ static DesignerHit PickBoxes(Vector3 origin, Vector3 dir, const int *list, const
         // tNear < 0: the eye is inside this box. Skip it, so flying through a wall
         // still lets you pick what is beyond.
         if (miss || axis < 0 || tNear < 0.0f || tNear > best.dist) continue;
-        if (tNear == best.dist && i > best.box) continue;
+        if (tNear == best.dist && i > best.obj.index) continue;
 
-        best.box = i;
+        best.obj = (MS_ObjRef){ MS_OBJ_BOX, i };
         best.dist = tNear;
         best.point = Vector3Add(origin, Vector3Scale(dir, tNear));
         float n[3] = { 0, 0, 0 };
         n[axis] = d[axis] > 0.0f ? -1.0f : 1.0f;
         best.normal = (Vector3){ n[0], n[1], n[2] };
     }
-    if (best.box < 0) best.dist = 0.0f;
+    if (best.obj.kind == MS_OBJ_NONE) best.dist = 0.0f;
     return best;
 }
 
-// Same result as MS_Raycast for boxes. TODO (models stream): models are not picked here nor
-// in RegionPick yet; add them via MS_Raycast / their bounds when scene->models exist.
-DesignerHit DesignerPick(Vector3 origin, Vector3 dir)
+// Models list[0..n) (NULL: all models) after the boxes: a model only wins when strictly
+// nearer (as in MS_Raycast). With minDist (ascending distances to the models' bounds) the
+// loop stops at the first model that can't be nearer.
+static void PickModels(Vector3 origin, Vector3 dir, const int *list, const float *minDist, int n, DesignerHit *best)
 {
-    return PickBoxes(origin, dir, NULL, NULL, scene->boxCount);
+    float bestDist = ObjIsNone(best->obj) ? INFINITY : best->dist;
+    for (int k = 0; k < n; k++) {
+        if (minDist && minDist[k] > bestDist) break;
+        int i = list ? list[k] : k;
+        MS_Hit h;
+        if (!MS_RaycastModel(scene, i, origin, dir, isfinite(bestDist) ? bestDist : 0.0f, &h) || h.dist >= bestDist) continue;
+        *best = (DesignerHit){ h.obj, h.point, h.normal, h.dist };
+        bestDist = h.dist;
+    }
 }
 
-// Name of a box's material (the HUD and --pick show it)
-static const char *BoxMaterial(int box)
+DesignerHit DesignerPick(Vector3 origin, Vector3 dir)
 {
-    int m = scene->boxRefs[box].material;
-    return m >= 0 && m < scene->materialCount ? scene->materials[m].name : "default";
+    DesignerHit h = PickBoxes(origin, dir, NULL, NULL, scene->boxCount);
+    PickModels(origin, dir, NULL, NULL, scene->modelCount, &h);
+    return h;
+}
+
+// Name of an object's material (the HUD and --pick show it); models: "own" = the file's
+static const char *ObjMaterialName(MS_ObjRef o)
+{
+    const MS_Ref *r = MS_ObjectRef(scene, o);
+    int m = r ? r->material : -1;
+    if (m >= 0 && m < scene->materialCount) return scene->materials[m].name;
+    return o.kind == MS_OBJ_MODEL ? "(own)" : "default";
 }
 
 void DesignerPrintHit(DesignerHit hit)
 {
-    if (hit.box < 0) {
+    const MS_Ref *rp = MS_ObjectRef(scene, hit.obj);
+    if (!rp) {
         printf("pick: no hit\n");
         fflush(stdout);
         return;
     }
-    MS_Ref r = scene->boxRefs[hit.box];
-    BoundingBox b = scene->boxes[hit.box];
+    MS_Ref r = *rp;
+    BoundingBox b = MS_ObjectBounds(scene, hit.obj);
     char text[MS_LINE_MAX + 1] = "";
     if (r.line > 0) MS_GetLine(scene, r.line, text, sizeof(text));
-    printf("pick: box %d  group \"%s\"  material \"%s\"  line %d: %s\n"
-           "pick: point %.3f %.3f %.3f  normal %.0f %.0f %.0f  dist %.3f\n"
-           "pick: box min %.3f %.3f %.3f  max %.3f %.3f %.3f\n",
-           hit.box, r.group >= 0 ? scene->groups[r.group] : "", BoxMaterial(hit.box), r.line, text,
-           hit.point.x, hit.point.y, hit.point.z, hit.normal.x, hit.normal.y, hit.normal.z, hit.dist,
-           b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z);
+    if (hit.obj.kind == MS_OBJ_MODEL) {
+        const MS_ModelInstance *m = &scene->models[hit.obj.index];
+        static const char *const ORIGIN[] = { "model", "bottom", "center" };
+        printf("pick: model %d  file \"%s\"  group \"%s\"  material \"%s\"  line %d: %s\n"
+               "pick: point %.3f %.3f %.3f  normal %.3f %.3f %.3f  dist %.3f\n"
+               "pick: model position %.3f %.3f %.3f  rot %.3f %.3f %.3f  scale %.3f %.3f %.3f  origin %s  -> translation %.3f %.3f %.3f\n"
+               "pick: model bounds min %.3f %.3f %.3f  max %.3f %.3f %.3f\n",
+               hit.obj.index, scene->modelFiles[m->file].path, r.group >= 0 ? scene->groups[r.group] : "",
+               ObjMaterialName(hit.obj), r.line, text, hit.point.x, hit.point.y, hit.point.z, hit.normal.x, hit.normal.y,
+               hit.normal.z, hit.dist, m->position.x, m->position.y, m->position.z, m->rotationDeg.x, m->rotationDeg.y,
+               m->rotationDeg.z, m->scale.x, m->scale.y, m->scale.z, ORIGIN[m->origin % 3], m->translation.x,
+               m->translation.y, m->translation.z, b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z);
+    } else {
+        printf("pick: box %d  group \"%s\"  material \"%s\"  line %d: %s\n"
+               "pick: point %.3f %.3f %.3f  normal %.0f %.0f %.0f  dist %.3f\n"
+               "pick: box min %.3f %.3f %.3f  max %.3f %.3f %.3f\n",
+               hit.obj.index, r.group >= 0 ? scene->groups[r.group] : "", ObjMaterialName(hit.obj), r.line, text,
+               hit.point.x, hit.point.y, hit.point.z, hit.normal.x, hit.normal.y, hit.normal.z, hit.dist,
+               b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z);
+    }
     fflush(stdout);
 }
 
@@ -108,16 +141,18 @@ typedef struct {
     int list[MS_MAX_BOXES];
     float minDist[MS_MAX_BOXES];   // distance from the eye to the box, slightly rounded down
     int count;
+    int models[MS_MAX_MODELS];      // the same for models (by their world bounds)
+    float modelDist[MS_MAX_MODELS];
+    int modelCount;
 } RegionCull;
 
 // The one place region sampling asks the scene what a ray hits: the same hit as
-// DesignerPick (the crosshair), from the region's candidates only. With the scene runtime
-// this is where models join in (TODO models stream: test scene->models here too).
+// DesignerPick (the crosshair), from the region's candidates only (boxes, then models).
 static RegionHit RegionPick(const RegionCull *c, Vector3 origin, Vector3 dir)
 {
     DesignerHit h = PickBoxes(origin, dir, c->list, c->minDist, c->count);
-    RegionHit r = { .obj = { h.box >= 0 ? MS_OBJ_BOX : MS_OBJ_NONE, h.box }, .point = h.point,
-                    .normal = h.normal, .dist = h.dist };
+    PickModels(origin, dir, c->models, c->modelDist, c->modelCount, &h);
+    RegionHit r = { .obj = h.obj, .point = h.point, .normal = h.normal, .dist = h.dist };
     return r;
 }
 
@@ -126,6 +161,13 @@ static int CompareCull(const void *a, const void *b)
 {
     int ia = *(const int *)a, ib = *(const int *)b;
     if (boxDist[ia] != boxDist[ib]) return boxDist[ia] < boxDist[ib] ? -1 : 1;
+    return ia - ib;
+}
+static float modelDist[MS_MAX_MODELS];
+static int CompareModelCull(const void *a, const void *b)
+{
+    int ia = *(const int *)a, ib = *(const int *)b;
+    if (modelDist[ia] != modelDist[ib]) return modelDist[ia] < modelDist[ib] ? -1 : 1;
     return ia - ib;
 }
 
@@ -154,7 +196,18 @@ static Vector3 RayThrough(const RayFrame *f, float x, float y)
     return Vector3Normalize(d);
 }
 
-// Candidates of a rect (pixels): boxes not entirely outside one of the four planes through
+// True if the box lies entirely outside one of the 4 planes (normals n, through the eye)
+static bool OutsidePlanes(const Vector3 *n, Vector3 eye, BoundingBox bb)
+{
+    for (int i = 0; i < 4; i++) {
+        // The box corner furthest along the plane normal
+        Vector3 p = { n[i].x > 0 ? bb.max.x : bb.min.x, n[i].y > 0 ? bb.max.y : bb.min.y, n[i].z > 0 ? bb.max.z : bb.min.z };
+        if (Vector3DotProduct(n[i], Vector3Subtract(p, eye)) < -1e-3f) return true;     // 1 mm of slack
+    }
+    return false;
+}
+
+// Candidates of a rect (pixels): boxes (and models) not entirely outside one of the four planes through
 // the eye and the rect's edges (every ray through the rect lies inside them), nearest first.
 // in = NULL: from all boxes; else filtered from in's list (already sorted).
 static void BuildRegionCull(const RayFrame *f, Rectangle rect, const RegionCull *in, RegionCull *c)
@@ -167,18 +220,27 @@ static void BuildRegionCull(const RayFrame *f, Rectangle rect, const RegionCull 
         n[i] = Vector3Normalize(Vector3CrossProduct(corner[i], corner[(i + 1) % 4]));
         if (Vector3DotProduct(n[i], mid) < 0.0f) n[i] = Vector3Negate(n[i]);    // pointing inside
     }
+    // Models first (by their world bounds; the same test as for boxes)
+    c->modelCount = 0;
+    int mcount = in ? in->modelCount : scene->modelCount;
+    for (int k = 0; k < mcount; k++) {
+        int m = in ? in->models[k] : k;
+        if (OutsidePlanes(n, f->eye, scene->models[m].bounds)) continue;
+        if (in) c->modelDist[c->modelCount] = in->modelDist[k];
+        else modelDist[m] = BoxDistance(scene->models[m].bounds, f->eye) * (1.0f - 1e-5f) - 1e-4f;
+        c->models[c->modelCount++] = m;
+    }
+    if (!in) {
+        qsort(c->models, c->modelCount, sizeof(c->models[0]), CompareModelCull);
+        for (int k = 0; k < c->modelCount; k++) c->modelDist[k] = modelDist[c->models[k]];
+    }
+
     c->count = 0;
     int count = in ? in->count : scene->boxCount;
     for (int k = 0; k < count; k++) {
         int b = in ? in->list[k] : k;
         BoundingBox bb = scene->boxes[b];
-        bool outside = false;
-        for (int i = 0; i < 4 && !outside; i++) {
-            // The box corner furthest along the plane normal
-            Vector3 p = { n[i].x > 0 ? bb.max.x : bb.min.x, n[i].y > 0 ? bb.max.y : bb.min.y, n[i].z > 0 ? bb.max.z : bb.min.z };
-            outside = Vector3DotProduct(n[i], Vector3Subtract(p, f->eye)) < -1e-3f;     // 1 mm of slack
-        }
-        if (outside) continue;
+        if (OutsidePlanes(n, f->eye, bb)) continue;
         if (in) {
             c->minDist[c->count] = in->minDist[k];
             c->list[c->count++] = b;
@@ -305,31 +367,36 @@ void DesignerMessage(Designer *d, bool error, const char *text)
     d->messageError = error;
 }
 
-static int SelectionIndexOf(const Designer *d, int box)
+static int SelectionIndexOf(const Designer *d, MS_ObjRef o)
 {
     for (int i = 0; i < d->selectedCount; i++)
-        if (d->selected[i] == box) return i;
+        if (ObjEqual(d->selected[i], o)) return i;
     return -1;
 }
 
-static DesignerSelKey MakeKey(int box)
+// Objects of one kind: count, map line, group
+static int KindCount(MS_ObjKind k) { return k == MS_OBJ_MODEL ? scene->modelCount : scene->boxCount; }
+static const MS_Ref *KindRef(MS_ObjKind k, int i) { return k == MS_OBJ_MODEL ? &scene->models[i].ref : &scene->boxRefs[i]; }
+
+static DesignerSelKey MakeKey(MS_ObjRef o)
 {
-    DesignerSelKey k = { .box = scene->boxes[box], .line = scene->boxRefs[box].line, .group = scene->boxRefs[box].group };
-    for (int j = 0; j < box; j++)
-        if (scene->boxRefs[j].line == k.line) k.nth++;
+    const MS_Ref *r = KindRef(o.kind, o.index);
+    DesignerSelKey k = { .kind = o.kind, .box = MS_ObjectBounds(scene, o), .line = r->line, .group = r->group };
+    for (int j = 0; j < o.index; j++)
+        if (KindRef(o.kind, j)->line == k.line) k.nth++;
     if (k.group >= 0) snprintf(k.groupName, sizeof(k.groupName), "%s", scene->groups[k.group]);
     return k;
 }
 
-static bool SelectionAdd(Designer *d, int box)
+static bool SelectionAdd(Designer *d, MS_ObjRef o)
 {
-    if (SelectionIndexOf(d, box) >= 0) return true;
+    if (SelectionIndexOf(d, o) >= 0) return true;
     if (d->selectedCount >= MAX_SELECTION) {
-        DesignerMessage(d, true, TextFormat("selection full (%d boxes)", MAX_SELECTION));
+        DesignerMessage(d, true, TextFormat("selection full (%d objects)", MAX_SELECTION));
         return false;
     }
-    d->keys[d->selectedCount] = MakeKey(box);
-    d->selected[d->selectedCount++] = box;
+    d->keys[d->selectedCount] = MakeKey(o);
+    d->selected[d->selectedCount++] = o;
     return true;
 }
 
@@ -347,17 +414,19 @@ void DesignerClearSelection(Designer *d)
 
 void DesignerSelectLine(Designer *d, int line)
 {
-    for (int i = 0; i < scene->boxCount; i++)
-        if (scene->boxRefs[i].line == line && !SelectionAdd(d, i)) break;
+    for (int k = MS_OBJ_BOX; k <= MS_OBJ_MODEL; k++)
+        for (int i = 0; i < KindCount(k); i++)
+            if (KindRef(k, i)->line == line && !SelectionAdd(d, (MS_ObjRef){ k, i })) return;
 }
 
-// The box's whole group (a box without a group stands alone)
-static void SelectGroupOf(Designer *d, int box)
+// The object's whole group, boxes and models (an object without a group stands alone)
+static void SelectGroupOf(Designer *d, MS_ObjRef o)
 {
-    int g = scene->boxRefs[box].group;
-    if (g < 0) { SelectionAdd(d, box); return; }
-    for (int i = 0; i < scene->boxCount; i++)
-        if (scene->boxRefs[i].group == g && !SelectionAdd(d, i)) break;
+    int g = KindRef(o.kind, o.index)->group;
+    if (g < 0) { SelectionAdd(d, o); return; }
+    for (int k = MS_OBJ_BOX; k <= MS_OBJ_MODEL; k++)
+        for (int i = 0; i < KindCount(k); i++)
+            if (KindRef(k, i)->group == g && !SelectionAdd(d, (MS_ObjRef){ k, i })) return;
 }
 
 static bool SameBox(BoundingBox a, BoundingBox b)
@@ -377,7 +446,7 @@ void DesignerSync(Designer *d)
     if (d->version == scene->version) return;
     bool first = d->version == 0;
     d->version = scene->version;
-    d->hit.box = -1;                // re-picked on the next DesignerUpdate
+    d->hit.obj = (MS_ObjRef){ MS_OBJ_NONE, -1 };    // re-picked on the next DesignerUpdate
     if (first || d->selectedCount == 0) { d->selectedCount = 0; return; }
 
     static DesignerSelKey old[MAX_SELECTION];
@@ -387,29 +456,31 @@ void DesignerSync(Designer *d)
 
     for (int s = 0; s < oldCount; s++) {
         const DesignerSelKey *k = &old[s];
+        MS_ObjKind kind = k->kind;
         int found = -1;
-        for (int i = 0; i < scene->boxCount; i++) {
-            if (!SameBox(scene->boxes[i], k->box) || SelectionIndexOf(d, i) >= 0) continue;
-            if (found < 0 || scene->boxRefs[i].line == k->line) found = i;
-            if (scene->boxRefs[i].line == k->line) break;
+        for (int i = 0; i < KindCount(kind); i++) {
+            const MS_Ref *r = KindRef(kind, i);
+            if (!SameBox(MS_ObjectBounds(scene, (MS_ObjRef){ kind, i }), k->box) || SelectionIndexOf(d, (MS_ObjRef){ kind, i }) >= 0) continue;
+            if (found < 0 || r->line == k->line) found = i;
+            if (r->line == k->line) break;
         }
         if (found < 0) {
             int nth = 0;
-            for (int i = 0; i < scene->boxCount; i++) {
-                if (scene->boxRefs[i].line != k->line) continue;
+            for (int i = 0; i < KindCount(kind); i++) {
+                const MS_Ref *r = KindRef(kind, i);
+                if (r->line != k->line) continue;
                 if (nth++ != k->nth) continue;
-                int g = scene->boxRefs[i].group;
-                const char *name = g >= 0 ? scene->groups[g] : "";
-                if (strcmp(name, k->groupName) == 0 && SelectionIndexOf(d, i) < 0) found = i;
+                const char *name = r->group >= 0 ? scene->groups[r->group] : "";
+                if (strcmp(name, k->groupName) == 0 && SelectionIndexOf(d, (MS_ObjRef){ kind, i }) < 0) found = i;
                 break;
             }
         }
-        if (found >= 0) SelectionAdd(d, found);
+        if (found >= 0) SelectionAdd(d, (MS_ObjRef){ kind, found });
     }
 
     int lost = oldCount - d->selectedCount;
     if (lost > 0)
-        DesignerMessage(d, false, TextFormat("map reloaded: %d of %d selected boxes no longer exist", lost, oldCount));
+        DesignerMessage(d, false, TextFormat("map reloaded: %d of %d selected objects no longer exist", lost, oldCount));
 }
 
 // #endregion
@@ -844,8 +915,8 @@ DesignerAction DesignerUpdate(Designer *d, float dt)
     bool ctrl = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
     bool shift = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
     if (IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) DesignerClearSelection(d);
-    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && d->hit.box >= 0) {
-        int box = d->hit.box;
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !ObjIsNone(d->hit.obj)) {
+        MS_ObjRef box = d->hit.obj;
         if (ctrl) {
             // Ctrl: the whole group (Ctrl+Shift adds it to the selection)
             if (!shift) DesignerClearSelection(d);
@@ -875,7 +946,7 @@ void DesignerBuildRequest(const Designer *d, Camera3D cam, float yaw, float pitc
     req->height = height;
     req->hit = d->hit;
     req->selectedCount = d->selectedCount;
-    for (int i = 0; i < d->selectedCount; i++) req->selected[i] = (MS_ObjRef){ MS_OBJ_BOX, d->selected[i] };
+    for (int i = 0; i < d->selectedCount; i++) req->selected[i] = d->selected[i];
     req->mapVersion = scene->version;
 
     // Regions: what each one shows is computed now, against the map as it is at submit
@@ -884,9 +955,9 @@ void DesignerBuildRequest(const Designer *d, Camera3D cam, float yaw, float pitc
         DesignRegionInfo *r = &req->regions[i];
         DesignerAnalyzeRegion(cam, width, height, d->regions[i].rect, r);
         int objects = r->objectCount + r->omittedObjects;
-        TraceLog(LOG_INFO, "monolith: region %d: %.0fx%.0f px, %dx%d rays, %d object%s, sky %.0f%%, %.1f ms (%d boxes)",
+        TraceLog(LOG_INFO, "monolith: region %d: %.0fx%.0f px, %dx%d rays, %d object%s, sky %.0f%%, %.1f ms (%d boxes, %d models)",
                  i + 1, r->rect.width, r->rect.height, r->gridW, r->gridH, objects, objects == 1 ? "" : "s",
-                 100.0f * r->sky, r->ms, scene->boxCount);
+                 100.0f * r->sky, r->ms, scene->boxCount, scene->modelCount);
     }
 }
 
@@ -925,6 +996,8 @@ static void DrawHitMarker(DesignerHit hit, Vector3 eye, Color c)
     Vector3 n = hit.normal;
     // Two axes spanning the face
     Vector3 u = fabsf(n.x) > 0.5f ? (Vector3){ 0, 1, 0 } : (Vector3){ 1, 0, 0 };
+    // made perpendicular to n for model faces (no change for axis-aligned box normals)
+    if (Vector3DotProduct(u, n) != 0.0f) u = Vector3Normalize(Vector3Subtract(u, Vector3Scale(n, Vector3DotProduct(u, n))));
     Vector3 v = Vector3CrossProduct(n, u);
     Vector3 p = Vector3Add(hit.point, Vector3Scale(n, 0.004f + 0.0015f * dist));
     Vector3 q[4];
@@ -938,9 +1011,62 @@ static void DrawHitMarker(DesignerHit hit, Vector3 eye, Color c)
     DrawLine3D(p, Vector3Add(p, Vector3Scale(n, 4 * s)), c);
 }
 
+// The 8 corners of a model instance's oriented box (its model-space bounds under its
+// transform), pushed out a little like InflatedBox; corner i: bit 0 x, bit 1 y, bit 2 z
+static void ModelCorners(const MS_ModelInstance *m, Vector3 eye, Vector3 *out)
+{
+    BoundingBox lb = scene->modelFiles[m->file].bounds;
+    Vector3 c = Vector3Scale(Vector3Add(m->bounds.min, m->bounds.max), 0.5f);
+    float e = fminf(0.004f + 0.0015f * BoxDistance(m->bounds, eye), 0.1f);
+    for (int i = 0; i < 8; i++) {
+        Vector3 p = { (i & 1) ? lb.max.x : lb.min.x, (i & 2) ? lb.max.y : lb.min.y, (i & 4) ? lb.max.z : lb.min.z };
+        p = Vector3Transform(p, m->transform);
+        Vector3 dir = Vector3Subtract(p, c);
+        float len = Vector3Length(dir);
+        out[i] = len > 0.0f ? Vector3Add(p, Vector3Scale(dir, e / len)) : p;
+    }
+}
+
+// Outline of an object: a box's (inflated) AABB, a model's oriented box
+static void DrawObjWires(MS_ObjRef o, Vector3 eye, Color col)
+{
+    if (o.kind == MS_OBJ_MODEL) {
+        Vector3 q[8];
+        ModelCorners(&scene->models[o.index], eye, q);
+        for (int i = 0; i < 8; i++)
+            for (int b = 1; b < 8; b <<= 1)
+                if (!(i & b)) DrawLine3D(q[i], q[i | b], col);
+        return;
+    }
+    Vector3 c, s;
+    InflatedBox(scene->boxes[o.index], eye, &c, &s);
+    DrawCubeWiresV(c, s, col);
+}
+
+// Translucent faces of an object
+static void DrawObjTint(MS_ObjRef o, Vector3 eye, Color col)
+{
+    if (o.kind == MS_OBJ_MODEL) {
+        static const int FACES[6][4] = { { 0, 2, 6, 4 }, { 1, 5, 7, 3 }, { 0, 4, 5, 1 }, { 2, 3, 7, 6 }, { 0, 1, 3, 2 }, { 4, 6, 7, 5 } };
+        Vector3 q[8];
+        ModelCorners(&scene->models[o.index], eye, q);
+        rlDisableBackfaceCulling();
+        for (int f = 0; f < 6; f++) {
+            DrawTriangle3D(q[FACES[f][0]], q[FACES[f][1]], q[FACES[f][2]], col);
+            DrawTriangle3D(q[FACES[f][0]], q[FACES[f][2]], q[FACES[f][3]], col);
+        }
+        rlDrawRenderBatchActive();
+        rlEnableBackfaceCulling();
+        return;
+    }
+    Vector3 c, s;
+    InflatedBox(scene->boxes[o.index], eye, &c, &s);
+    DrawCubeV(c, s, col);
+}
+
 void DesignerDrawOverlay(const Designer *d, Camera3D cam, bool hover)
 {
-    if (d->selectedCount == 0 && d->hit.box < 0) return;
+    if (d->selectedCount == 0 && ObjIsNone(d->hit.obj)) return;
     Vector3 eye = cam.position;
 
     BeginMode3D(cam);
@@ -959,40 +1085,25 @@ void DesignerDrawOverlay(const Designer *d, Camera3D cam, bool hover)
     proj.m14 -= bias * proj.m15;
     rlSetMatrixProjection(proj);
 
-    // Selected boxes: a faint always-on-top outline, so selected boxes behind walls
+    // Selected objects: a faint always-on-top outline, so selected objects behind walls
     // stay findable...
     rlDisableDepthTest();
-    for (int i = 0; i < d->selectedCount; i++) {
-        Vector3 c, s;
-        InflatedBox(scene->boxes[d->selected[i]], eye, &c, &s);
-        DrawCubeWiresV(c, s, Fade(SEL_COLOR, 0.22f));
-    }
+    for (int i = 0; i < d->selectedCount; i++) DrawObjWires(d->selected[i], eye, Fade(SEL_COLOR, 0.22f));
     rlDrawRenderBatchActive();
 
     // ...then, depth-tested, a translucent tint (no depth writes, so it can't hide the
-    // outlines) and a strong outline
+    // outlines) and a strong outline. Models get their oriented box (their bounds under
+    // their transform).
     rlEnableDepthTest();
     rlDisableDepthMask();
-    for (int i = 0; i < d->selectedCount; i++) {
-        Vector3 c, s;
-        InflatedBox(scene->boxes[d->selected[i]], eye, &c, &s);
-        DrawCubeV(c, s, Fade(SEL_COLOR, 0.16f));
-    }
+    for (int i = 0; i < d->selectedCount; i++) DrawObjTint(d->selected[i], eye, Fade(SEL_COLOR, 0.16f));
     rlDrawRenderBatchActive();
-    for (int i = 0; i < d->selectedCount; i++) {
-        Vector3 c, s;
-        InflatedBox(scene->boxes[d->selected[i]], eye, &c, &s);
-        DrawCubeWiresV(c, s, Fade(SEL_COLOR, 0.95f));
-    }
+    for (int i = 0; i < d->selectedCount; i++) DrawObjWires(d->selected[i], eye, Fade(SEL_COLOR, 0.95f));
 
-    if (d->hit.box >= 0) {
+    if (!ObjIsNone(d->hit.obj)) {
         // Hover: a subtle white outline (not for view-marked.png, where only the selection
         // and the hit point should stand out)
-        if (hover && SelectionIndexOf(d, d->hit.box) < 0) {
-            Vector3 c, s;
-            InflatedBox(scene->boxes[d->hit.box], eye, &c, &s);
-            DrawCubeWiresV(c, s, (Color){ 255, 255, 255, 110 });
-        }
+        if (hover && SelectionIndexOf(d, d->hit.obj) < 0) DrawObjWires(d->hit.obj, eye, (Color){ 255, 255, 255, 110 });
         DrawHitMarker(d->hit, eye, HIT_COLOR);
     }
     rlDrawRenderBatchActive();
@@ -1036,12 +1147,17 @@ int DesignerDrawHud(const Designer *d, int x, int y)
     } else {
         // Distinct group names, in selection order
         static char text[512];
-        int n = snprintf(text, sizeof(text), "selected: %d box%s  [", d->selectedCount, d->selectedCount == 1 ? "" : "es");
+        int models = 0;
+        for (int i = 0; i < d->selectedCount; i++) models += d->selected[i].kind == MS_OBJ_MODEL;
+        int boxes = d->selectedCount - models, n;
+        if (models == 0) n = snprintf(text, sizeof(text), "selected: %d box%s  [", boxes, boxes == 1 ? "" : "es");
+        else n = snprintf(text, sizeof(text), "selected: %d box%s, %d model%s  [", boxes, boxes == 1 ? "" : "es",
+                          models, models == 1 ? "" : "s");
         bool seen[MS_MAX_GROUPS] = { false };
         int shown = 0, more = 0;
         bool ungrouped = false;
         for (int i = 0; i < d->selectedCount; i++) {
-            int g = scene->boxRefs[d->selected[i]].group;
+            int g = MS_ObjectRef(scene, d->selected[i])->group;
             if (g < 0) { ungrouped = true; continue; }
             if (seen[g]) continue;
             seen[g] = true;
@@ -1057,11 +1173,22 @@ int DesignerDrawHud(const Designer *d, int x, int y)
     }
     y += 20;
 
-    if (d->hit.box >= 0) {
-        MS_Ref r = scene->boxRefs[d->hit.box];
-        HudText(TextFormat("crosshair: %s  |  material %s  |  line %d  |  box %d  |  %.1f m",
-                r.group >= 0 ? scene->groups[r.group] : "(no group)", BoxMaterial(d->hit.box), r.line, d->hit.box, d->hit.dist),
-                x, y, main);
+    if (!ObjIsNone(d->hit.obj)) {
+        MS_Ref r = *MS_ObjectRef(scene, d->hit.obj);
+        const char *group = r.group >= 0 ? scene->groups[r.group] : "(no group)";
+        if (d->hit.obj.kind == MS_OBJ_MODEL) {
+            const MS_ModelInstance *m = &scene->models[d->hit.obj.index];
+            HudText(TextFormat("crosshair: %s  |  model %s  |  material %s  |  line %d  |  model %d  |  %.1f m", group,
+                    scene->modelFiles[m->file].path, ObjMaterialName(d->hit.obj), r.line, d->hit.obj.index, d->hit.dist),
+                    x, y, main);
+            y += 20;
+            HudText(TextFormat("  at %.2f %.2f %.2f  rot %.1f %.1f %.1f  scale %.2f %.2f %.2f", m->position.x, m->position.y,
+                    m->position.z, m->rotationDeg.x, m->rotationDeg.y, m->rotationDeg.z, m->scale.x, m->scale.y, m->scale.z),
+                    x, y, dim);
+        } else
+            HudText(TextFormat("crosshair: %s  |  material %s  |  line %d  |  box %d  |  %.1f m",
+                    group, ObjMaterialName(d->hit.obj), r.line, d->hit.obj.index, d->hit.dist),
+                    x, y, main);
         y += 20;
         char line[MS_LINE_MAX + 1];
         if (r.line > 0 && MS_GetLine(scene, r.line, line, sizeof(line))) {
@@ -1182,7 +1309,7 @@ void DesignerDrawPrompt(Designer *d, int w, int h)
         char regions[32] = "";
         if (d->regionCount > 0) snprintf(regions, sizeof(regions), " + %d region%s", d->regionCount, d->regionCount == 1 ? "" : "s");
         DrawText(TextFormat("Request for Claude   (%d selected%s%s)   Enter send  |  Shift+Enter new line  |  Ctrl+V paste  |  Esc %s",
-                 d->selectedCount, d->hit.box >= 0 ? " + crosshair point" : "", regions,
+                 d->selectedCount, !ObjIsNone(d->hit.obj) ? " + crosshair point" : "", regions,
                  d->snipping ? "back to snip" : "cancel"), tx, ty, 16, (Color){ 230, 230, 230, 140 });
         const char *counter = TextFormat("%d / %d", d->promptLen, PROMPT_MAX - 1);
         Color counterColor = d->promptLen >= PROMPT_MAX - 1 ? (Color){ 255, 110, 90, 230 } : (Color){ 230, 230, 230, 140 };

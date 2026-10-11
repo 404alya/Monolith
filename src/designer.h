@@ -10,16 +10,19 @@
 #define REGION_MAX_SAMPLES 4096 // rays per region at most (a regular grid, see DesignerAnalyzeRegion)
 #define REGION_MAX_OBJECTS 256  // objects listed per region (the rest is summed up as "omitted")
 
-// Objects are MS_ObjRef (runtime/monolith_scene.h, docs/design-v2.md section 5): for now
-// only boxes (index into scene->boxes); models come with the models stream.
+// Objects are MS_ObjRef (runtime/monolith_scene.h, docs/design-v2.md section 5): a box
+// (index into scene->boxes) or a model instance (index into scene->models).
 
-// What the crosshair points at. box = index into scene->boxes, -1 = nothing hit.
+// What the crosshair points at. obj.kind MS_OBJ_NONE = nothing hit (sky).
 typedef struct {
-    int box;
+    MS_ObjRef obj;
     Vector3 point;          // world-space hit point
-    Vector3 normal;         // axis-aligned face normal
+    Vector3 normal;         // face normal (boxes: axis-aligned; models: the triangle's)
     float dist;             // from the eye, metres
 } DesignerHit;
+
+static inline bool ObjIsNone(MS_ObjRef o) { return o.kind == MS_OBJ_NONE; }
+static inline bool ObjEqual(MS_ObjRef a, MS_ObjRef b) { return a.kind == b.kind && a.index == b.index; }
 
 // A screen region (snip mode): pixels of the frame the request is made from (= view.png),
 // top-left origin. Tied to the camera frozen while it was drawn.
@@ -70,9 +73,10 @@ typedef struct {
 
 // What a selected box was, so the selection survives a map hot reload (see DesignerSync)
 typedef struct {
-    BoundingBox box;
-    int line;               // map line of the box
-    int nth;                // index among the boxes of that line
+    MS_ObjKind kind;
+    BoundingBox box;        // world AABB (boxes: the box; models: their bounds)
+    int line;               // map line of the object
+    int nth;                // index among the objects of that kind on that line
     int group;              // group index at selection time (compared by name after a reload)
     char groupName[MS_NAME_MAX];
 } DesignerSelKey;
@@ -82,7 +86,7 @@ typedef struct {
 
     DesignerHit hit;        // under the crosshair (refreshed by DesignerPick / DesignerUpdate)
 
-    int selected[MAX_SELECTION];    // indices into scene->boxes, no duplicates
+    MS_ObjRef selected[MAX_SELECTION];  // boxes and models, no duplicates
     DesignerSelKey keys[MAX_SELECTION];
     int selectedCount;
     unsigned int version;   // scene->version the indices refer to
@@ -115,8 +119,9 @@ typedef enum {
     DESIGNER_SUBMIT,        // Enter in the prompt box: main() renders the images and calls LauncherSubmit
 } DesignerAction;
 
-// Casts a ray against scene->boxes (slab test); hit.box = -1 when nothing is hit.
-// Boxes that contain the ray origin are ignored (you can pick out of a box you're inside).
+// Casts a ray against scene->boxes (slab test) and models (MS_RaycastModel); obj.kind
+// MS_OBJ_NONE when nothing is hit. Same result as MS_Raycast. Boxes that contain the ray
+// origin are ignored (you can pick out of a box you're inside).
 DesignerHit DesignerPick(Vector3 origin, Vector3 dir);
 
 // Call once per frame before anything reads selected[]: after a map reload it remaps the

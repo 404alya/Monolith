@@ -92,6 +92,7 @@ if [[ $WIN == 1 ]]; then
     -I"$R3D_DIR/include" \
     -I"$R3D_WIN/generated/include" \
     -I"$R3D_WIN/external/raylib/raylib/include" \
+    -I"$R3D_DIR/external/assimp/include" -I"$R3D_WIN/external/assimp/include" \
     -DR3D_BUILD_TYPE_NAME='"Release"' \
     -I"$ROOT/runtime" -DMS_PATCHED_R3D \
     "$ROOT"/src/*.c "$ROOT"/runtime/*.c -o "$OUT/monolith.exe" \
@@ -135,6 +136,9 @@ INCLUDES=(
   -I"$R3D_DIR/include"
   -I"$R3D_LINUX/generated/include"
   -I"$R3D_LINUX/external/raylib/raylib/include"
+  # assimp's headers: --inspect-model (src/inspect.c) reads model files with assimp directly
+  -I"$R3D_DIR/external/assimp/include"
+  -I"$R3D_LINUX/external/assimp/include"
 )
 
 CFLAGS=(-std=c11 -Wall -Wextra -Wno-missing-field-initializers -O2)

@@ -69,6 +69,8 @@ monolith/
 │   ├── newmap.c/.h              # --new-map: creates a map package
 │   ├── export.c/.h              # --export / F9: package + runtime + README for other projects (§6.3)
 │   ├── import.c/.h              # --import: new package + an import request for Claude Code (§6.3)
+│   ├── inspect.c/.h             # --inspect-model: what a model file contains (assimp directly, no window)
+│   ├── dumpscene.c/.h           # --dump-scene: boxes, models, colliders, materials, lights as text
 │   ├── bench.c/.h               # --bench statistics and Markdown report
 │   └── glibc_compat.c           # Linux only: binds a few symbols to old glibc versions (§4)
 └── submodules/
@@ -185,7 +187,9 @@ Selected boxes get an orange tint and outline, plus a faint always-on-top outlin
 | `--new-map <name>` | Create the package `maps/<name>/` (`<name>.map` with a ground slab, the default material, the built-in environment written out, a spawn and two viewpoints; a `MAP.md` template; empty `shaders/ models/ textures/` and `ASSETS.md`), check that it loads, and exit without a window. Refuses to overwrite. |
 | `--export <dir>` | Write the map (`--map` or the default) for use in another raylib + R3D project and exit **without a window**: `<dir>/<name>/` (the package with every file the map references, `MAP.md`, `ASSETS.md`, model sidecars and the files model files refer to), `monolith_scene.h/.c`, `viewer.c` (= `examples/01_minimal/main.c`) and `README.md`. Refuses a non-empty `<dir>`; checks that the copy loads. §6.3. |
 | `--import <project dir> <name>` | Create `maps/<name>/` (as `--new-map`) and open a Claude Code **import session** on a bundle `requests/<stamp>_import-<name>/` (`request.md` with an *Import* section, `request.json` `kind: "import"` + `import` object, heavy model tier); no window. Same terminal, permission flags and workspace as edit requests. The session follows `AI-MAP-TOOL.md` §9. |
-| `--dump-boxes <file>` | Load the map, write every box as hex floats (`%a`, one `min max` line per box) to `<file>` and exit **without opening a window**. Use it to check that an edit keeps the exact box list, and as a quick parse check (a broken map prints `file:line: message` and exits 1). |
+| `--dump-boxes <file>` | Load the map, write every box as hex floats (`%a`, one `min max` line per box) to `<file>` and exit **without opening a window**. Use it to check that an edit keeps the exact box list, and as a quick parse check (a broken map prints `file:line: message` and exits 1). Model files are only checked for existence. |
+| `--dump-scene <file>` | Like `--dump-boxes`, plus model files, model instances (transform and world bounds as hex floats), model colliders, materials and lights (format: `src/dumpscene.c`). No window without models; a map with models loads them in a hidden window. Diff two dumps to check a model edit. |
+| `--inspect-model <file>` | Print what a model file contains and exit, no window: bounds, size, origin, mesh/triangle counts, materials (the slots for `material.N`) and textures (embedded/external, sizes), up axis and unit hints, glTF extensions, warnings (unlit or fully metallic materials, > 50k triangles, textures > 2K, unsupported extensions), a placement line. |
 | `--shot <file>` | Render 30 frames offscreen, save the image to `<file>` (full path OK, 1600×900 unless `--shot-size w h`), exit. Uses a **hidden window** (`FLAG_WINDOW_HIDDEN`), so the window manager (i3) never maps, shows or focuses it. Hot reload and request polling are off during shots. |
 | `--shadow <size> <range>` | Sun shadow map size (px) and shadow distance (m). Default `8192 100` (clamped to 256–16384 px, 10–2000 m). |
 | `--shadow-camera` | Sun shadow from R3D's camera-fitted map, re-rendered only when the cached map no longer covers the view (the pre-2026-10-10 path, §7.3). The default is static world-fixed tiles drawn once per map load (R3D patch 7). For A/B benchmarks and debugging. |
@@ -205,8 +209,8 @@ Selected boxes get an orange tint and outline, plus a faint always-on-top outlin
 
 | Flag | Meaning |
 |---|---|
-| `--pick` | With `--shot`: print what the crosshair (screen centre) hits on the shot frame: box index, group, map line + its text, point, normal, distance, box min/max. Works in walk mode too. |
-| `--select <line>` | Select every box made by this map line (repeatable, up to 64) |
+| `--pick` | With `--shot`: print what the crosshair (screen centre) hits on the shot frame: box or model index, group, map line + its text, point, normal, distance, min/max (models: file, position, rotation, scale, origin, world bounds). Works in walk mode too. |
+| `--select <line>` | Select every box or model made by this map line (repeatable, up to 64) |
 | `--region x y w h` | Attach a screen region (pixels of the shot, top-left origin) as if dragged in snip mode (repeatable, up to 16). Drawn with `--shot-hud`, sent with `--submit`. |
 | `--submit "text"` | With `--shot`: after saving the shot, run the real submit path. It renders `view.png` + `view-marked.png` offscreen and calls `LauncherSubmit` with the centre pick, the `--select` boxes and the `--region` regions, then prints `submit: ok/failed: <message>`. **It writes a real bundle into `requests/` and launches a real terminal + Claude Code**, so for tests set `MONOLITH_TERMINAL` to a stub script that only logs its arguments, and move the bundle to the trash afterwards (`gio trash requests/<id>`, never `rm`). |
 | `--type "text"` | Open the prompt box with this text (cursor at the end) |

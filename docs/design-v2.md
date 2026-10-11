@@ -186,6 +186,8 @@ so later changes to the defaults never change it.
 
 `MS_MAX_BOXES` 8192, groups 256, materials 64, model files 64, model instances 4096,
 lights 64 (plus the sun), viewpoints 32; 1024 characters / 64 words per line, 4 MB file.
+Models (stream B): 16384 model collision boxes and 16384 `material.N` overrides in total,
+8 `collide box` boxes per line.
 
 ---
 
@@ -345,8 +347,7 @@ default map's box dump and the verification shots are unchanged.
 - **Parsing:** every referenced file (shader, texture, panorama) must exist at parse time
   (`file:line: file not found: "..."`), also for `noGpu` loads, so `--dump-boxes` is a full
   package check. A v2 map without boxes is rejected (`map is empty`); the models stream
-  relaxes that to "no boxes and no models". `model` lines are recognised and rejected with
-  "not supported by this build" (slot marked in `ParseStatement`). A `monolith N` line after
+  relaxes that to "no boxes and no models" (done, §9; `model` lines are parsed since stream B). A `monolith N` line after
   another statement is an error.
 - **Material keys beyond §2.2:** `sampler <name> "path"` (sampler2D uniform of the material's
   shader), `specular f` (`orm.specular`), `blend alpha|additive|add_alpha|multiply|premultiplied`,
@@ -398,3 +399,61 @@ default map's box dump and the verification shots are unchanged.
   (with an inventory of the project's files), *Verify*, *Map at creation*.
 - **Capture shim:** `runtime/monolith_capture.h` (header-only, `MONOLITH_CAPTURE_IMPLEMENTATION`
   in one file, needs `monolith_scene.c` linked). Not used by the game.
+
+
+## 10. Stream B implementation notes (models, Phase 2.1)
+
+- **Statement** as in §2.5; details (the reference is the header comment of
+  `monolith_scene.c`): `scale` values must be > 0 (mirroring would flip the winding);
+  `collide box` takes up to 8 boxes; a `use` overrides models only when it is not
+  `"default"` (`use "default"` means "own materials" for models); precedence `material.N` >
+  `material` > `use` > the file's own. `material.N` beyond the file's slot count is a logged
+  warning (ignored), not an error, because noGpu loads can't know the slot count.
+  `inherit` copies the slot's own texture (`albedo`, `orm`), its whole normal map incl. scale
+  (`normal`) or its whole emission incl. colour and energy (`emission`); the override's
+  colours and factors apply otherwise. Model lines need format 2.
+- **Runtime API additions:** `MS_RaycastModel(scene, model, origin, dir, maxDist, &hit)`;
+  `MS_ModelFile.loaded`, `.line`; `MS_ModelInstance.origin`, `.rotation` (quaternion),
+  `.translation` (position + origin shift), `.collide`, `.slotFirst/.slotCount`; scene
+  `modelSlots[]` / `modelSlotCount` (`MS_SlotMaterial { slot, material }`); enums
+  `MS_ModelOrigin`, `MS_ModelCollide`; limits `MS_MAX_MODEL_COLLIDERS`, `MS_MAX_MODEL_SLOTS`,
+  `MS_MAX_COLLIDE_BOXES`. `ref.material` of a model = the whole-model override, -1 = own.
+- **Loading:** `R3D_LoadModelEx(path, R3D_IMPORT_RETAIN_MESH_DATA)` once per file per load (new
+  scene's models load while the old scene is still alive). The CPU positions/indices are
+  copied into a BVH for picking, then R3D's mesh data is freed. A noGpu load (main.c's
+  peek, `--dump-boxes`) does not read model files: bounds are a zero box (`loaded = false`),
+  so origin shifts, model bounds and colliders are only final in GPU loads; `--dump-scene`
+  therefore opens a hidden window when the map has models.
+- **Drawing:** one `R3D_DrawModelInstanced` per (file, per-slot material set, shadow flag), with
+  POSITION | ROTATION | SCALE instance buffers. The group's `R3D_Model` is a shallow copy with
+  its own `materials[]` (and `meshes[]` with `R3D_SHADOW_CAST_DISABLED` for `shadow off`).
+  R3D does not frustum-cull instanced groups (neither boxes nor models). R3D rotates instance
+  normals but does not inverse-scale them, so per-axis scaled models light approximately.
+- **Unlit:** the file's material choices are kept, including KHR_materials_unlit (R3D maps it to
+  `unlit`); an override material (lit unless `unlit on`) relights it. Finding: the Kenney
+  Nature Kit GLBs list `KHR_materials_unlit` in `extensionsUsed` but no material uses it; they
+  are lit PBR with `metallicFactor 1` (dark tinted metal). `--inspect-model` warns about both.
+- **Picking:** boxes first (lowest index wins ties), then models, which win only when strictly
+  nearer; `DesignerPick`, `RegionPick` (models culled per region/tile frustum by their world
+  bounds, nearest first) and `MS_Raycast` give the same hit. Model hits report the triangle's
+  normal (facing the ray). The overlay outlines models with their oriented box.
+- **Collision:** `colliders[]` = boxes, then per instance: `aabb` its world bounds, `box ...` each
+  model-space box's transformed AABB, `none` nothing. Without models `colliders` is still the
+  box array itself.
+- **Caches:** model world bounds count towards `bounds` and the cache content bounds; the sun
+  shadow tiles include models (drawn in the same pass, once per map load).
+- **Hot reload deps:** the model file plus every `uri` of a `.gltf` / `.glb` JSON (buffers,
+  images; `data:` URIs skipped) and an `.obj`'s `mtllib` files and their `map_*` textures; they
+  must stay inside the package (`file:line: "models/x.gltf" refers to "...", outside the
+  package`) and exist. FBX/DAE references are not followed.
+- **Bundles:** `hit.model` and `selection[].objects[].model` = `{ file, position, rotationDeg,
+  scale, origin, translation, collide, shadow, slotMaterials }`; region objects of kind model
+  carry `file`; `"box"` keys only on boxes. request.md: a model table per selected model line.
+- **Fixes from the verifier of stream A (in this stream):** (1) a missing referenced file is
+  watched (added to the dependencies before the existence check), so the package reloads when
+  it appears; (2) numeric `env` values are range-checked and rejected with `file:line: key
+  must be ...` (`ENV_RANGES` in `monolith_scene.c`; e.g. `volumetricFog.stepSize >= 0.05`, which
+  used to hang the GPU at 0); (3) zero `sun.direction` / `sky.sunDirection` /
+  `ambientSky.sunDirection` are rejected; (4) a spot light with `inner > outer` is rejected,
+  the header comment states the `dir` light's default range (50), and shader / texture load
+  errors cite the map line of the key that names the file.

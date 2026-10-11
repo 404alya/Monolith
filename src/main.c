@@ -30,9 +30,10 @@
 //   G              move the player here
 //
 // Map designer (spectator mode, see designer.c / launcher.c):
-//   crosshair      the box under it is outlined; the HUD shows its group and map line
-//   LMB            select the box under the crosshair (replaces the selection)
-//   SHIFT+LMB      add/remove that box          CTRL+LMB   select the box's whole group
+//   crosshair      the box or model under it is outlined (models: their rotated bounds); the
+//                  HUD shows its group and map line (models: file and transform too)
+//   LMB            select the object under the crosshair (replaces the selection)
+//   SHIFT+LMB      add/remove that object       CTRL+LMB   select its whole group
 //   CTRL+SHIFT+LMB add the whole group          RMB        clear the selection
 //   ENTER          open the request prompt box. In the box: type, BACKSPACE/DELETE
 //                  (CTRL+BACKSPACE: word), LEFT/RIGHT/UP/DOWN, HOME/END (CTRL: whole
@@ -49,8 +50,9 @@
 //   R              fly back to the camera of the last finished request
 //   The HUD lists open requests ("running", "waiting for result.md") and, for 20 s,
 //   finished ones with the first line of their result.md.
-//   The selection survives map hot reloads: boxes are matched by identical geometry,
-//   else by the same map line + index within it + group; the HUD says if any got lost.
+//   The selection survives map hot reloads: objects are matched by identical geometry (models:
+//   world bounds), else by the same map line + index within it + group; the HUD says if any
+//   got lost.
 //
 // Command line:
 //   --shot <file>  render 30 frames offscreen (1600x900) in a hidden window (never mapped,
@@ -115,7 +117,17 @@
 //   --dump-boxes <file>   load the map, write every box as hex floats (%a) to <file> and
 //                  exit without opening a window (for checking that edits to the loader
 //                  or the map keep the exact box list). Any map that fails to parse (with
-//                  or without this flag) prints file:line: message and exits with status 1
+//                  or without this flag) prints file:line: message and exits with status 1.
+//                  Model files are only checked for existence here (no window, no GPU)
+//   --dump-scene <file>   like --dump-boxes, plus model files, model instances (transform and
+//                  world bounds as hex floats), model colliders, materials and lights
+//                  (format: src/dumpscene.c). Maps with models load them in a hidden window
+//   --inspect-model <file>   print what a model file contains and exit, without a window:
+//                  bounds, size, origin, mesh/triangle/vertex counts, materials (= the slots
+//                  for material.N) and their textures (embedded or external, sizes), up axis
+//                  and unit hints, glTF extensions, warnings (unlit or fully metallic
+//                  materials, > 50k triangles, textures > 2K, unsupported extensions) and a
+//                  placement line (src/inspect.c)
 //   --new-map <name>   create the map package maps/<name>/ (<name>.map with a ground slab,
 //                  the default material and the default environment written out, a MAP.md
 //                  template, empty shaders/ models/ textures/ and ASSETS.md) and exit without
@@ -131,8 +143,9 @@
 //
 // Designer debug flags (for testing without a visible window):
 //   --pick         with --shot: print what the crosshair (screen centre) hits on the shot
-//                  frame: box index, group, map line + its text, point, normal, distance
-//   --select <line>  select every box made by this map line (repeatable, up to 64)
+//                  frame: box or model index, group, map line + its text, point, normal,
+//                  distance (models: file, position, rotation, scale, origin, bounds)
+//   --select <line>  select every box / model made by this map line (repeatable, up to 64)
 //   --region x y w h   attach a screen region (pixels of the shot, top-left origin), as if
 //                  dragged out in snip mode (repeatable, up to 16); with --shot-hud the shot
 //                  shows the snip-mode drawing, with --submit the bundle gets the regions
@@ -178,6 +191,8 @@
 #include "newmap.h"
 #include "export.h"
 #include "import.h"
+#include "inspect.h"
+#include "dumpscene.h"
 
 // Only needed for glEnable(GL_DEPTH_CLAMP), see main(), and glFinish() for --headless.
 // Declared by hand rather than via <GL/gl.h> / <windows.h> (which clashes with raylib).
@@ -464,6 +479,7 @@ int main(int argc, char **argv)
     const char *benchNote = NULL;
     const char *mapPath = NULL;
     const char *dumpPath = NULL;
+    const char *dumpScenePath = NULL;   // --dump-scene
     const char *reloadTestPath = NULL;
     bool eyeSet = false, lookSet = false;   // --eye / --look given (they override --view)
     Vector3 eye = { 0 };
@@ -514,6 +530,8 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--note") == 0 && i + 1 < argc) benchNote = argv[++i];
         else if (strcmp(argv[i], "--map") == 0 && i + 1 < argc) mapPath = argv[++i];
         else if (strcmp(argv[i], "--dump-boxes") == 0 && i + 1 < argc) dumpPath = argv[++i];
+        else if (strcmp(argv[i], "--dump-scene") == 0 && i + 1 < argc) dumpScenePath = argv[++i];
+        else if (strcmp(argv[i], "--inspect-model") == 0 && i + 1 < argc) return InspectModel(argv[++i]);
         else if (strcmp(argv[i], "--reload-test") == 0 && i + 1 < argc) reloadTestPath = argv[++i];
         else if (strcmp(argv[i], "--pick") == 0) pickFlag = true;
         else if (strcmp(argv[i], "--shot-hud") == 0) shotHud = true;
@@ -624,6 +642,13 @@ int main(int argc, char **argv)
             MS_Unload(peek);
             return ok ? 0 : 1;
         }
+        if (dumpScenePath && peek->modelCount == 0) {
+            // Without models nothing needs the GPU: no window at all
+            bool ok = DumpScene(peek, dumpScenePath);
+            fprintf(ok ? stdout : stderr, ok ? "monolith: wrote the scene to %s\n" : "monolith: cannot write %s\n", dumpScenePath);
+            MS_Unload(peek);
+            return ok ? 0 : 1;
+        }
         // The spawn's angles in double, so 180 degrees lands exactly on the float PI
         if (!posSet && !eyeSet) player.feet = peek->spawnFeet;
         if (!lookSet) {
@@ -637,7 +662,8 @@ int main(int argc, char **argv)
     unsigned int windowFlags = FLAG_MSAA_4X_HINT;   // no vsync, uncapped
     // --shot: hidden window, never mapped, so i3 & co. never show or focus it
     // --bench --headless too: then nothing ever appears on screen
-    bool hidden = shotPath || (bench && headless);
+    // --dump-scene of a map with models: model files load through R3D, which needs GL
+    bool hidden = shotPath || (bench && headless) || dumpScenePath;
     windowFlags |= hidden ? FLAG_WINDOW_HIDDEN : FLAG_WINDOW_RESIZABLE;
     SetConfigFlags(windowFlags);
     // Distinct titles let the window manager route automated runs elsewhere, e.g. i3:
@@ -646,7 +672,7 @@ int main(int argc, char **argv)
     // their numbers line up with the visible runs.
     bool headlessBench = bench && headless;
     InitWindow(headlessBench ? 1920 : shotPath ? shotW : 1600, headlessBench ? 1006 : shotPath ? shotH : 900,
-               bench ? "monolith-bench" : shotPath ? "monolith-shot" : "monolith");
+               bench ? "monolith-bench" : (shotPath || dumpScenePath) ? "monolith-shot" : "monolith");
     SetTargetFPS(0);
     // Esc must close the prompt box without quitting, so quitting on Esc is done by hand
     // in the main loop (the window's close button still ends WindowShouldClose())
@@ -685,6 +711,14 @@ int main(int argc, char **argv)
             R3D_Close();
             CloseWindow();
             return 1;
+        }
+        if (dumpScenePath) {
+            bool ok = DumpScene(scene, dumpScenePath);
+            fprintf(ok ? stdout : stderr, ok ? "monolith: wrote the scene to %s\n" : "monolith: cannot write %s\n", dumpScenePath);
+            MS_Unload(scene);
+            R3D_Close();
+            CloseWindow();
+            return ok ? 0 : 1;
         }
     }
     MS_RenderSettings renderSettings = MS_GetRenderSettings(scene);
@@ -832,7 +866,9 @@ int main(int argc, char **argv)
                 // instance buffer names) and its caches key on scene->version. The map's
                 // environment applies again, then the overrides and the current toggles.
                 ApplyEnvironment(&effects);
-                snprintf(mapMessage, sizeof(mapMessage), "map reloaded (%d boxes)", scene->boxCount);
+                if (scene->modelCount > 0)
+                    snprintf(mapMessage, sizeof(mapMessage), "map reloaded (%d boxes, %d models)", scene->boxCount, scene->modelCount);
+                else snprintf(mapMessage, sizeof(mapMessage), "map reloaded (%d boxes)", scene->boxCount);
                 mapMessageTime = 3.0f;
                 mapMessageError = false;
                 TraceLog(LOG_INFO, "monolith: %s", mapMessage);
