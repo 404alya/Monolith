@@ -49,7 +49,14 @@
 //                  ends it. The bundle lists what each region shows (designer.c)
 //   R              fly back to the camera of the last finished request
 //   The HUD lists open requests ("running", "waiting for result.md") and, for 20 s,
-//   finished ones with the first line of their result.md.
+//   finished ones with the first line of their result.md (after that a dim line while
+//   their terminal is still open). Each has a number [n], kept while it is listed.
+//   K              close the terminal window of the last finished request
+//   SHIFT+K        close the terminals of all finished requests
+//   CTRL+K, n      close request [n] (1-9, 0 = 10), also a running one: then press n again
+//                  within 3 s. ESC cancels; the digits don't toggle effects meanwhile.
+//                  Closed requests leave the list, their bundles stay (launcher.c, region
+//                  "Closing request windows": i3/sway mark + kill, else SIGTERM/SIGKILL)
 //   The selection survives map hot reloads: objects are matched by identical geometry (models:
 //   world bounds), else by the same map line + index within it + group; the HUD says if any
 //   got lost.
@@ -157,6 +164,11 @@
 //   --type "text"  open the prompt box with this text (cursor at the end)
 //   --shot-hud     with --shot: draw the HUD, crosshair, selection overlay, regions and prompt box
 //                  into the shot (to look at the UI; plain shots never contain it)
+//   --submit-wait <s>   with --submit: keep polling the request (result.md, terminal process)
+//                  for <s> seconds before exiting
+//   --close-submitted   with --submit: then close the submitted request like CTRL+K n (twice
+//                  if it is still running) and wait up to 10 s for its terminal process to go;
+//                  prints "close [n]: ..." and "close: terminal process gone after X s"
 //   --classify "text"   print the model the launcher would choose for this prompt (tier,
 //                  model, reason; launcher.c "Model choice") and exit without opening a
 //                  window. Context: the loaded map (empty? MAP.md?), the --select lines, the
@@ -179,6 +191,9 @@
 //                       @opus) in the prompt picks it and is stripped from the bundle's prompt
 //   MONOLITH_CLAUDE_SAFE=1   drop those two permission flags
 //   MONOLITH_WORKSPACE  i3/sway workspace for the terminal (default 10, empty = don't move)
+//   MONOLITH_CLOSE_ON_EXIT=1   close the terminals of finished requests when the game quits
+//   MONOLITH_CLOSE_METHOD   wm / signal: close terminals only through i3/sway or only by
+//                       signals (tests; default both, WM first)
 //   __GL_SYNC_TO_VBLANK=0 (NVIDIA) / vblank_mode=0 (Mesa)   driver vsync off, for --bench
 
 #include "common.h"
@@ -484,6 +499,8 @@ int main(int argc, char **argv)
     bool pickFlag = false, shotHud = false;
     int frameReuseFlag = -1;    // --no-frame-reuse 0, --frame-reuse 1, default -1 (see below)
     const char *submitText = NULL, *typeText = NULL;
+    float submitWait = -1.0f;       // --submit-wait: keep polling the request this long
+    bool closeSubmitted = false;    // --close-submitted
     const char *classifyText = NULL, *classifyKind = "edit";
     const char *aoMode = "full", *bloomMode = "on";
     const char *fxSettings[16];
@@ -536,6 +553,8 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--no-frame-reuse") == 0) frameReuseFlag = 0;
         else if (strcmp(argv[i], "--frame-reuse") == 0) frameReuseFlag = 1;
         else if (strcmp(argv[i], "--submit") == 0 && i + 1 < argc) submitText = argv[++i];
+        else if (strcmp(argv[i], "--submit-wait") == 0 && i + 1 < argc) submitWait = (float)atof(argv[++i]);
+        else if (strcmp(argv[i], "--close-submitted") == 0) closeSubmitted = true;
         else if (strcmp(argv[i], "--type") == 0 && i + 1 < argc) typeText = argv[++i];
         else if (strcmp(argv[i], "--classify") == 0 && i + 1 < argc) classifyText = argv[++i];
         else if (strcmp(argv[i], "--classify-kind") == 0 && i + 1 < argc) classifyKind = argv[++i];
@@ -799,6 +818,7 @@ int main(int argc, char **argv)
         }
     }
     bool offApplied = false;  // --off toggles are applied on the first frame only
+    float closePickTime = 0.0f; // CTRL+K: seconds left to press a request's number
 
     while (!WindowShouldClose())
     {
@@ -807,17 +827,48 @@ int main(int argc, char **argv)
         if (IsWindowResized()) R3D_SetResolution(GetScreenWidth(), GetScreenHeight());
 
         // Esc quits, unless the prompt box is open or snip mode is on (the designer handles it)
-        if (IsKeyPressed(KEY_ESCAPE) && !designer.promptOpen && !designer.snipping) break;
+        if (IsKeyPressed(KEY_ESCAPE) && !designer.promptOpen && !designer.snipping && closePickTime <= 0.0f) break;
 
         // While the prompt box is open (and a couple of frames after it closed) every
         // game key and the camera are frozen: the keys are text now
         bool typing = DesignerCapturesInput(&designer);
 
+        // Closing request terminals (launcher.c): K = the last finished request, SHIFT+K =
+        // all finished ones, CTRL+K then 1-9 / 0 (= 10) = request [n] of the HUD list, also
+        // a running one (then its number twice). While CTRL+K waits for the number, the
+        // digits don't toggle effects and ESC cancels instead of quitting.
+        bool closeKeys = spec.active && !typing && !shotPath && !bench;
+        bool picking = closeKeys && closePickTime > 0.0f;   // digits belong to the close
+        closePickTime = picking ? closePickTime - GetFrameTime() : 0.0f;
+        if (closeKeys) {
+            char msg[256] = "";
+            bool ctrl = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
+            bool shift = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+            int number = 0;
+            for (int k = 0; k < 10; k++)
+                if (IsKeyPressed(KEY_ZERO + k) || IsKeyPressed(KEY_KP_0 + k)) number = k ? k : 10;
+            if (IsKeyPressed(KEY_K)) {
+                closePickTime = 0.0f;
+                if (ctrl) {
+                    closePickTime = 3.0f;
+                    snprintf(msg, sizeof(msg), "close which request? press its number (ESC cancels)");
+                } else if (shift) LauncherCloseAllDone(msg, sizeof(msg));
+                else LauncherCloseLatestDone(msg, sizeof(msg));
+            } else if (picking && IsKeyPressed(KEY_ESCAPE)) {
+                closePickTime = 0.0f;
+                snprintf(msg, sizeof(msg), "nothing closed");
+            } else if (picking && number) {
+                // a running request asks for its number again: keep waiting for it
+                closePickTime = LauncherCloseNumber(number, msg, sizeof(msg)) == 0 ? 3.0f : 0.0f;
+            }
+            if (msg[0]) SpectatorMessage(&spec, msg);
+        }
+
         // Effect toggles, to see what each one contributes (1 volumetric fog, 2 fog, 3 SSAO,
         // 4 SSIL, 5 bloom, 6 sun; --off applies them on the first frame)
         bool first = !offApplied, toggled = false;
         for (int k = 0; k < 6; k++) {
-            if ((!typing && IsKeyPressed(KEY_ONE + k)) || (first && strchr(offKeys, '1' + k))) {
+            if ((!typing && !picking && IsKeyPressed(KEY_ONE + k)) || (first && strchr(offKeys, '1' + k))) {
                 effects.flip[k] = !effects.flip[k];
                 toggled = true;
             }
@@ -985,7 +1036,7 @@ int main(int argc, char **argv)
                          12, 10, 16, (Color){ 230, 230, 230, 160 });
 
                 if (spec.active) {
-                    DrawText(TextFormat("speed %.1f m/s (wheel)  |  <- -> viewpoints  |  P copy view  |  G drop player  |  TAB exit",
+                    DrawText(TextFormat("speed %.1f m/s (wheel)  |  <- -> viewpoints  |  P copy view  |  G drop player  |  TAB exit  |  K / SHIFT+K / CTRL+K n close terminals",
                              spec.speed), 12, 32, 16, (Color){ 230, 230, 230, 120 });
                     DrawText("LMB select  |  SHIFT+LMB add/remove  |  CTRL+LMB group  |  RMB clear  |  C snip regions  |  ENTER request  |  R fly to last result",
                              12, 52, 16, (Color){ 230, 230, 230, 120 });
@@ -1041,6 +1092,23 @@ int main(int argc, char **argv)
                 bool ok = Submit(&designer, camera, yaw, pitch, shotTarget, msg, sizeof(msg));
                 printf("submit: %s: %s\n", ok ? "ok" : "failed", msg);
                 fflush(stdout);
+                // --submit-wait / --close-submitted: poll the request (result.md, the
+                // terminal process) for a while, then close it the way CTRL+K n does
+                if (ok && (submitWait > 0.0f || closeSubmitted)) {
+                    for (double t0 = GetTime(); GetTime() - t0 < submitWait; ) { WaitTime(0.1); LauncherUpdate(0.1f); }
+                    if (closeSubmitted) {
+                        int n = LauncherNewestNumber();
+                        for (int tries = 0; tries < 2; tries++) {   // a running request asks twice
+                            int r = LauncherCloseNumber(n, msg, sizeof(msg));
+                            printf("close [%d]: %s\n", n, msg);
+                            if (r != 0) break;
+                        }
+                        double t0 = GetTime();
+                        while (LauncherClosing() && GetTime() - t0 < 10.0) { WaitTime(0.1); LauncherUpdate(0.1f); }
+                        printf("close: terminal process %s after %.1f s\n", LauncherClosing() ? "STILL RUNNING" : "gone", GetTime() - t0);
+                    }
+                    fflush(stdout);
+                }
             }
             break;
         }
@@ -1051,6 +1119,7 @@ int main(int argc, char **argv)
         WriteBenchReport(benchTimes, benchShadowUpdates, shadowSize, shadowRange, shadowMode != MS_SHADOW_ALWAYS, headless, benchNote, argc, argv);
     }
 
+    LauncherCloseOnExit();          // MONOLITH_CLOSE_ON_EXIT=1: close finished requests' terminals
     R3D_SetProfilerEnabled(false);  // frees its GL queries
     if (hidden) UnloadRenderTexture(shotTarget);
     if (reuse.rt.id) UnloadRenderTexture(reuse.rt);

@@ -39,7 +39,13 @@
 //     still flash up for a moment where it opened: an i3 `for_window` rule on the title
 //     (terminals set it before the window is mapped) avoids that, and the IPC move then
 //     finds it already there. Other window managers: i3-msg finds no i3 (exit 1) and the
-//     helper stops at once.
+//     helper stops at once. The same command also gives the window an i3 mark,
+//     _monolith_<id> (also with MONOLITH_WORKSPACE empty), for closing it later.
+//   - closing (region "Closing request windows"): the HUD list numbers the requests;
+//     K / SHIFT+K / CTRL+K n in the game close a request's terminal through the mark
+//     (`i3-msg [con_mark=...] kill`), else by SIGTERM / SIGKILL to the terminal's process
+//     group, and take it off the list (the bundle stays). MONOLITH_CLOSE_ON_EXIT=1 closes
+//     the finished ones when the game quits.
 //
 // Windows: the same bundle, then `cmd /c start "monolith-claude: <slug>" /D <root> cmd /k
 // "<claude>" <permission flags> --model <name> ...` via _spawnvp (no workspace move) (<process.h>, so no <windows.h> clash with raylib). Only
@@ -65,6 +71,7 @@
 extern int CloseHandle(void *handle);
 #else
 #   include <fcntl.h>
+#   include <signal.h>
 #   include <sys/stat.h>
 #   include <sys/types.h>
 #   include <sys/wait.h>
@@ -1106,12 +1113,17 @@ typedef struct {
     bool launched;              // false: launching failed, the developer runs it by hand
     bool exited;                // the terminal process is gone (result may still come)
     bool done;
+    bool closed;                // closed from the game: off the list, the bundle stays
+    int number;                 // [n] in the HUD list, stable while listed (1..MAX_OPEN_REQUESTS)
     long resultSize;            // size of result.md at the last poll (wait until it settles)
     char summary[160];          // first line of result.md
     Vector3 eye;
     float yaw, pitch;
 #ifndef _WIN32
-    pid_t pid;
+    pid_t pid;                  // the terminal (session + process group leader, setsid)
+    char mark[160];             // i3/sway mark set on its window by the workspace helper
+    int killStage;              // after a close: 1 = WM closed it, wait; 2 = SIGTERM sent, wait
+    double killTime;            // clockTime of the next escalation step
 #endif
 } OpenRequest;
 
@@ -1123,6 +1135,8 @@ static long lastDoneSeq;        // most recently finished request (by finish ord
 static long doneCounter;
 static Vector3 lastDoneEye;
 static float lastDoneYaw, lastDonePitch;
+static long confirmSeq;         // running request whose close waits for a second key press
+static double confirmUntil;     // ... until this clockTime
 
 #ifndef _WIN32
 // Every child is reaped with waitpid(pid, WNOHANG) from LauncherUpdate. Not waitpid(-1):
@@ -1133,10 +1147,20 @@ static float lastDoneYaw, lastDonePitch;
 static pid_t children[MAX_CHILDREN];
 #endif
 
+static bool Listed(const OpenRequest *q) { return q->used && !q->closed; }
+
 static OpenRequest *NewSlot(void)
 {
     OpenRequest *pick = NULL;
     for (int i = 0; i < MAX_OPEN_REQUESTS && !pick; i++) if (!reqs[i].used) pick = &reqs[i];
+    // Closed requests next (preferably ones whose terminal is no longer being shut down)
+    for (int pass = 0; pass < 2 && !pick; pass++)
+        for (int i = 0; i < MAX_OPEN_REQUESTS && !pick; i++)
+#ifndef _WIN32
+            if (reqs[i].closed && (pass == 1 || reqs[i].killStage == 0)) pick = &reqs[i];
+#else
+            if (reqs[i].closed) pick = &reqs[i];
+#endif
     // Full: recycle the oldest finished request, else the oldest one at all
     for (int pass = 0; pass < 2 && !pick; pass++)
         for (int i = 0; i < MAX_OPEN_REQUESTS; i++)
@@ -1144,8 +1168,34 @@ static OpenRequest *NewSlot(void)
     memset(pick, 0, sizeof(*pick));
     pick->used = true;
     pick->seq = nextSeq++;
+    // Lowest number no listed request has, so the numbers in the HUD don't shift
+    for (int n = 1; !pick->number; n++) {
+        bool taken = false;
+        for (int i = 0; i < MAX_OPEN_REQUESTS; i++) if (&reqs[i] != pick && Listed(&reqs[i]) && reqs[i].number == n) taken = true;
+        if (!taken) pick->number = n;
+    }
     return pick;
 }
+
+#ifndef _WIN32
+// Is this child of ours still running? Reaps it (and marks its requests exited) if not.
+// While a child is unreaped its pid, and so its process group id, can't be reused: that
+// is what makes kill(-pid) safe in CloseRequest.
+static bool ChildAlive(pid_t pid)
+{
+    if (pid <= 0) return false;
+    int slot = -1;
+    for (int i = 0; i < MAX_CHILDREN; i++) if (children[i] == pid) slot = i;
+    if (slot < 0) return false;             // reaped already (or never tracked)
+    if (waitpid(pid, NULL, WNOHANG) == 0) return true;
+    for (int k = 0; k < MAX_OPEN_REQUESTS; k++)
+        if (reqs[k].used && reqs[k].pid == pid) reqs[k].exited = true;
+    children[slot] = 0;                     // reaped (or not ours any more: ECHILD)
+    return false;
+}
+
+static void CloseEscalate(void);
+#endif
 
 // Reads the first non-empty line of result.md, without leading '#'s and blanks
 static bool ReadResult(OpenRequest *q)
@@ -1198,14 +1248,8 @@ void LauncherUpdate(float dt)
     pollTimer = 0.0f;
 
 #ifndef _WIN32
-    for (int i = 0; i < MAX_CHILDREN; i++) {
-        if (children[i] <= 0) continue;
-        pid_t r = waitpid(children[i], NULL, WNOHANG);
-        if (r == 0) continue;               // still running
-        for (int k = 0; k < MAX_OPEN_REQUESTS; k++)
-            if (reqs[k].used && reqs[k].pid == children[i]) reqs[k].exited = true;
-        children[i] = 0;                    // reaped (or not ours any more: ECHILD)
-    }
+    for (int i = 0; i < MAX_CHILDREN; i++) if (children[i] > 0) ChildAlive(children[i]);
+    CloseEscalate();
 #endif
 
     for (int i = 0; i < MAX_OPEN_REQUESTS; i++) {
@@ -1223,6 +1267,13 @@ void LauncherUpdate(float dt)
     }
 }
 
+// The terminal window may still be open (the process we started is still running). Unknown
+// for terminals that hand the window to a daemon and exit (kitty --single-instance, wezterm)
+static bool WindowMaybeOpen(const OpenRequest *q)
+{
+    return q->launched && !q->exited;
+}
+
 int LauncherDrawHud(int x, int y)
 {
     const int size = 18, step = 22, maxRows = 6;
@@ -1231,7 +1282,7 @@ int LauncherDrawHud(int x, int y)
     while (rows < maxRows) {
         OpenRequest *q = NULL;
         for (int i = 0; i < MAX_OPEN_REQUESTS; i++)
-            if (reqs[i].used && reqs[i].seq < below && (!q || reqs[i].seq > q->seq)) q = &reqs[i];
+            if (Listed(&reqs[i]) && reqs[i].seq < below && (!q || reqs[i].seq > q->seq)) q = &reqs[i];
         if (!q) break;
         below = q->seq;
 
@@ -1239,20 +1290,28 @@ int LauncherDrawHud(int x, int y)
         Color c = { 235, 232, 225, 220 };
         if (q->done) {
             float age = (float)(clockTime - q->doneTime);
-            if (age > DONE_SHOW_TIME) continue;
-            c = Fade((Color){ 150, 230, 150, 255 }, fminf((DONE_SHOW_TIME - age) / DONE_FADE_TIME, 1.0f));
-            text = TextFormat("[done] %s: %s", q->slug, q->summary);
+            if (age > DONE_SHOW_TIME) {
+                // After its 20 s a finished request stays as a dim line while its terminal
+                // is still open, so it can still be closed by number (K / CTRL+K n)
+                if (!WindowMaybeOpen(q)) continue;
+                c = (Color){ 150, 230, 150, 110 };
+                text = TextFormat("[%d] done %s (terminal open)", q->number, q->slug);
+            } else {
+                c = Fade((Color){ 150, 230, 150, 255 }, fminf((DONE_SHOW_TIME - age) / DONE_FADE_TIME, 1.0f));
+                if (WindowMaybeOpen(q)) c.a = (unsigned char)fmaxf(c.a, 110.0f);
+                text = TextFormat("[%d] [done] %s: %s", q->number, q->slug, q->summary);
+            }
         } else {
             int t = (int)(clockTime - q->submitTime);
             if (!q->launched) {
                 c = (Color){ 255, 170, 110, 230 };
-                text = TextFormat("[!] %s not launched, run it by hand (see log), waiting (%02d:%02d)", q->slug, t / 60, t % 60);
+                text = TextFormat("[%d] [!] %s not launched, run it by hand (see log), waiting (%02d:%02d)", q->number, q->slug, t / 60, t % 60);
             } else if (q->exited)
                 // Not necessarily a failure: some terminals hand the window to a daemon
                 // and exit right away (kitty --single-instance, wezterm with a mux)
-                text = TextFormat("... %s waiting for result.md, terminal process gone (%02d:%02d)", q->slug, t / 60, t % 60);
+                text = TextFormat("[%d] ... %s waiting for result.md, terminal process gone (%02d:%02d)", q->number, q->slug, t / 60, t % 60);
             else
-                text = TextFormat("... %s running (%02d:%02d)", q->slug, t / 60, t % 60);
+                text = TextFormat("[%d] ... %s running (%02d:%02d)", q->number, q->slug, t / 60, t % 60);
         }
         DrawText(text, x, y + rows * step, size, c);
         rows++;
@@ -1399,30 +1458,42 @@ static const TermSyntax TERMINALS[] = {
 #define TERMINAL_COUNT ((int)(sizeof(TERMINALS) / sizeof(TERMINALS[0])))
 static const TermSyntax UNKNOWN_TERMINAL = { NULL, NULL, NULL, NULL, "-e" };
 
-// Moves the window titled `title` to workspace $MONOLITH_WORKSPACE (default 10) on i3 or
-// sway without waiting for it: a detached /bin/sh retries `i3-msg <criteria> move
-// container to workspace ...` every 0.1 s for up to 10 s. i3-msg / swaymsg exit with 2
-// while no window matches (keep trying), 0 once it moved, 1 when there is no i3 / sway to
-// talk to (stop). The command reaches the shell as a positional parameter, never as
-// script text. Best effort: nothing is reported back.
-static void MoveToWorkspace(const char *title)
+// i3-msg, or swaymsg when $SWAYSOCK is set; false if neither is installed
+static bool WmTool(char *out, int outSize, const char **name)
+{
+    const char *sway = getenv("SWAYSOCK");
+    *name = sway && *sway ? "swaymsg" : "i3-msg";
+    return FindProgram(*name, out, outSize);
+}
+
+// On i3 or sway, marks the window titled `title` with `mark` (for closing it later, see
+// CloseRequest) and moves it to workspace $MONOLITH_WORKSPACE (default 10; empty = mark
+// only), without waiting for it: a detached /bin/sh retries `i3-msg <criteria> mark --add
+// <mark>, move container to workspace ...` every 0.1 s for up to 10 s. i3-msg / swaymsg
+// exit with 2 while no window matches (keep trying), 0 once it worked, 1 when there is no
+// i3 / sway to talk to (stop). The command reaches the shell as a positional parameter,
+// never as script text. Best effort: nothing is reported back.
+// Why a mark: Claude Code retitles its terminal (OSC title) once it runs, so the title is
+// only reliable in the first second or so, when the window appears. Marks starting with
+// '_' are never drawn in title bars.
+static void MarkAndMove(const char *title, const char *mark)
 {
     const char *ws = getenv("MONOLITH_WORKSPACE");
     if (!ws) ws = "10";
-    if (!*ws) return;
     if (strpbrk(ws, "\"\\")) {
         TraceLog(LOG_WARNING, "monolith: MONOLITH_WORKSPACE has quotes or backslashes, terminal not moved");
-        return;
+        ws = "";
     }
-    const char *sway = getenv("SWAYSOCK");
-    const char *tool = sway && *sway ? "swaymsg" : "i3-msg";
+    const char *tool;
     char toolPath[4096];
-    if (!FindProgram(tool, toolPath, sizeof(toolPath))) return;     // no i3 / sway here
+    if (!WmTool(toolPath, sizeof(toolPath), &tool)) return;     // no i3 / sway here
     bool number = ws[strspn(ws, "0123456789")] == 0;
-    // The title is "monolith-claude: <slug>" with a [a-z0-9-] slug: no regex specials
-    char cmd[512];
-    if (number) snprintf(cmd, sizeof(cmd), "[title=\"^%s$\"] move container to workspace number %s", title, ws);
-    else snprintf(cmd, sizeof(cmd), "[title=\"^%s$\"] move container to workspace \"%s\"", title, ws);
+    // The title is "monolith-claude: <slug>" with a [a-z0-9-] slug, the mark "_monolith_<id>"
+    // (id: [0-9_a-z-]): no regex specials, no quotes
+    char cmd[640];
+    int len = snprintf(cmd, sizeof(cmd), "[title=\"^%s$\"] mark --add \"%s\"", title, mark);
+    if (*ws && number) snprintf(cmd + len, sizeof(cmd) - len, ", move container to workspace number %s", ws);
+    else if (*ws) snprintf(cmd + len, sizeof(cmd) - len, ", move container to workspace \"%s\"", ws);
     static const char script[] =
         "i=0; while [ $i -lt 100 ]; do \"$0\" \"$1\" >/dev/null 2>&1; r=$?; "
         "[ $r -eq 2 ] || exit $r; sleep 0.1; i=$((i + 1)); done; exit 2";
@@ -1438,7 +1509,8 @@ static void MoveToWorkspace(const char *title)
     }
     for (int i = 0; i < MAX_CHILDREN; i++)      // reaped by LauncherUpdate like the terminals
         if (children[i] <= 0) { children[i] = pid; break; }
-    TraceLog(LOG_INFO, "monolith: moving '%s' to workspace %s via %s (pid %d)", title, ws, tool, (int)pid);
+    if (*ws) TraceLog(LOG_INFO, "monolith: moving '%s' to workspace %s via %s (pid %d)", title, ws, tool, (int)pid);
+    else TraceLog(LOG_INFO, "monolith: marking '%s' via %s (pid %d)", title, tool, (int)pid);
 }
 
 static bool Launch(const char *id, const char *slug, const char *prompt, const char *model, OpenRequest *q, char *err, int errSize)
@@ -1551,11 +1623,213 @@ static bool Launch(const char *id, const char *slug, const char *prompt, const c
     // All slots busy (64 terminals still open): it gets reaped by init after we exit
     if (!tracked) TraceLog(LOG_WARNING, "monolith: too many open terminals, pid %d not tracked", (int)pid);
     TraceLog(LOG_INFO, "monolith: launched %s (pid %d) for request %s", termPath, (int)pid, id);
-    MoveToWorkspace(title);
+    // (an id is [0-9_a-z-] for edit requests; keep the mark free of quotes in any case)
+    snprintf(q->mark, sizeof(q->mark), "_monolith_%s", id);
+    for (char *c = q->mark; *c; c++) if (!isalnum((unsigned char)*c) && *c != '-' && *c != '_') *c = '_';
+    MarkAndMove(title, q->mark);
     return true;
 }
 
 #endif
+
+// #endregion
+
+// ======================================================================================
+// #region Closing request windows (K / SHIFT+K / CTRL+K n, MONOLITH_CLOSE_ON_EXIT)
+// ======================================================================================
+// Linux, in this order:
+//   1. i3 / sway: `i3-msg [con_mark="^_monolith_<id>$"] kill` (swaymsg on sway). The mark
+//      was set by MarkAndMove when the window appeared, so it still matches after Claude
+//      Code retitled the terminal. `kill` asks the window to close (WM_DELETE_WINDOW); it
+//      closes exactly that window and changes neither focus nor the visible workspace. If
+//      our terminal process still runs CLOSE_GRACE seconds later, step 2.
+//   2. Signals: the terminal was started with setsid, so its pid is also its process group
+//      id: SIGTERM to the group, SIGKILL CLOSE_GRACE seconds later if it is still alive.
+//      Only while that pid is our own unreaped child (ChildAlive), so the pid / group can't
+//      belong to anything else. Claude Code runs on the terminal's pty and gets SIGHUP when
+//      the terminal goes. This is the route on other window managers and when the mark is
+//      missing (the window appeared after Claude Code had already retitled it).
+// Terminals that hand the window to a daemon and exit at once (kitty --single-instance,
+// wezterm with a mux) leave no process to signal: only step 1 can close those.
+// MONOLITH_CLOSE_METHOD=wm / signal restricts closing to one of the two (for tests).
+// Windows: `cmd /c start` leaves no handle to the window, so a close only takes the entry
+// off the list and says to close the window by hand.
+
+#define CLOSE_GRACE         3.0     // seconds before escalating (WM close -> SIGTERM -> SIGKILL)
+#define CONFIRM_TIME        3.0     // seconds to press again to stop a running request
+
+typedef enum { CLOSED_WINDOW, CLOSED_GONE, CLOSED_LISTED } CloseOutcome;
+
+#ifndef _WIN32
+// 1: the WM closed a window with the request's mark, 0: no such window, -1: no i3 / sway
+static int WmCloseMarked(const OpenRequest *q)
+{
+    if (!q->mark[0]) return 0;
+    const char *tool;
+    char toolPath[4096];
+    if (!WmTool(toolPath, sizeof(toolPath), &tool)) return -1;
+    // `kill` alone reports success even when nothing matches; re-adding the mark first
+    // fails (exit 2) when no window has it, so the exit status says whether one was closed
+    char cmd[400];
+    snprintf(cmd, sizeof(cmd), "[con_mark=\"^%s$\"] mark --add \"%s\", kill", q->mark, q->mark);
+    char *argv[] = { toolPath, cmd, NULL };
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        int nul = open("/dev/null", O_RDWR);
+        if (nul >= 0) { dup2(nul, 0); dup2(nul, 1); dup2(nul, 2); if (nul > 2) close(nul); }
+        execve(toolPath, argv, environ);
+        _exit(127);
+    }
+    // i3-msg answers within milliseconds; this only runs on a key press
+    int st = 0;
+    pid_t r;
+    do r = waitpid(pid, &st, 0); while (r < 0 && errno == EINTR);
+    if (r != pid || !WIFEXITED(st)) return -1;
+    return WEXITSTATUS(st) == 0 ? 1 : WEXITSTATUS(st) == 2 ? 0 : -1;
+}
+
+static void SignalGroup(const OpenRequest *q, int sig)
+{
+    if (ChildAlive(q->pid) && kill(-q->pid, sig) == 0)
+        TraceLog(LOG_INFO, "monolith: %s sent to the terminal of %s (process group %d)",
+                 sig == SIGKILL ? "SIGKILL" : "SIGTERM", q->id, (int)q->pid);
+}
+
+// From LauncherUpdate: WM close -> SIGTERM -> SIGKILL for terminals that linger
+static void CloseEscalate(void)
+{
+    for (int i = 0; i < MAX_OPEN_REQUESTS; i++) {
+        OpenRequest *q = &reqs[i];
+        if (!q->used || !q->killStage || clockTime < q->killTime) continue;
+        if (!ChildAlive(q->pid)) { q->killStage = 0; continue; }
+        if (q->killStage == 1) { SignalGroup(q, SIGTERM); q->killStage = 2; q->killTime = clockTime + CLOSE_GRACE; }
+        else { SignalGroup(q, SIGKILL); q->killStage = 0; }
+    }
+}
+#endif
+
+static CloseOutcome CloseRequest(OpenRequest *q)
+{
+    q->closed = true;
+    if (confirmSeq == q->seq) confirmSeq = 0;
+    if (!q->launched) return CLOSED_LISTED;
+#ifdef _WIN32
+    return CLOSED_LISTED;
+#else
+    const char *method = getenv("MONOLITH_CLOSE_METHOD");
+    bool useWm = !method || strcmp(method, "signal") != 0;
+    bool useSignal = !method || strcmp(method, "wm") != 0;
+    int wm = useWm ? WmCloseMarked(q) : -1;
+    bool alive = ChildAlive(q->pid);
+    TraceLog(LOG_INFO, "monolith: closing %s: window manager %s, terminal process %s", q->id,
+             wm == 1 ? "closed its window" : wm == 0 ? "found no window" : "not used", alive ? "running" : "gone");
+    if (wm == 1) {
+        if (alive && useSignal) { q->killStage = 1; q->killTime = clockTime + CLOSE_GRACE; }
+        return CLOSED_WINDOW;
+    }
+    if (alive && useSignal) {
+        SignalGroup(q, SIGTERM);
+        q->killStage = 2;
+        q->killTime = clockTime + CLOSE_GRACE;
+        return CLOSED_WINDOW;
+    }
+    return CLOSED_GONE;
+#endif
+}
+
+static void CloseMessage(const OpenRequest *q, CloseOutcome o, char *msg, int msgSize)
+{
+    if (o == CLOSED_WINDOW) snprintf(msg, msgSize, "closed %s", q->slug);
+#ifdef _WIN32
+    else if (q->launched) snprintf(msg, msgSize, "%s off the list; close its window by hand (not supported on Windows)", q->slug);
+#endif
+    else if (o == CLOSED_LISTED) snprintf(msg, msgSize, "%s off the list (it was never launched)", q->slug);
+    else snprintf(msg, msgSize, "%s: window already gone", q->slug);
+    TraceLog(LOG_INFO, "monolith: %s", msg);
+}
+
+bool LauncherCloseLatestDone(char *msg, int msgSize)
+{
+    OpenRequest *q = NULL;
+    bool running = false;
+    for (int i = 0; i < MAX_OPEN_REQUESTS; i++) {
+        if (!Listed(&reqs[i])) continue;
+        if (!reqs[i].done) running = true;
+        else if (!q || reqs[i].doneTime > q->doneTime) q = &reqs[i];
+    }
+    if (!q) {
+        snprintf(msg, msgSize, "no finished request to close%s", running ? " (CTRL+K, then its number, stops a running one)" : "");
+        return false;
+    }
+    CloseMessage(q, CloseRequest(q), msg, msgSize);
+    return true;
+}
+
+int LauncherCloseAllDone(char *msg, int msgSize)
+{
+    int count = 0, gone = 0;
+    OpenRequest *last = NULL;
+    CloseOutcome lastOutcome = CLOSED_GONE;
+    for (int i = 0; i < MAX_OPEN_REQUESTS; i++) {
+        OpenRequest *q = &reqs[i];
+        if (!Listed(q) || !q->done) continue;
+        lastOutcome = CloseRequest(q);
+        last = q;
+        count++;
+        if (lastOutcome == CLOSED_GONE) gone++;
+    }
+    if (!last) snprintf(msg, msgSize, "no finished request to close");
+    else if (count == 1) CloseMessage(last, lastOutcome, msg, msgSize);
+    else {
+        snprintf(msg, msgSize, "closed %d finished requests", count);
+        if (gone) snprintf(msg + strlen(msg), msgSize - strlen(msg), " (%d window%s already gone)", gone, gone == 1 ? "" : "s");
+        TraceLog(LOG_INFO, "monolith: %s", msg);
+    }
+    return count;
+}
+
+int LauncherCloseNumber(int number, char *msg, int msgSize)
+{
+    OpenRequest *q = NULL;
+    for (int i = 0; i < MAX_OPEN_REQUESTS; i++) if (Listed(&reqs[i]) && reqs[i].number == number) q = &reqs[i];
+    if (!q) { snprintf(msg, msgSize, "no request [%d] in the list", number); return -1; }
+    // A request without result.md may still be working: ask for a second press first
+    if (!q->done && !(confirmSeq == q->seq && clockTime <= confirmUntil)) {
+        confirmSeq = q->seq;
+        confirmUntil = clockTime + CONFIRM_TIME;
+        snprintf(msg, msgSize, "press %d again to stop running request %s", number % 10, q->slug);
+        return 0;
+    }
+    CloseMessage(q, CloseRequest(q), msg, msgSize);
+    return 1;
+}
+
+int LauncherNewestNumber(void)
+{
+    OpenRequest *q = NULL;
+    for (int i = 0; i < MAX_OPEN_REQUESTS; i++) if (Listed(&reqs[i]) && (!q || reqs[i].seq > q->seq)) q = &reqs[i];
+    return q ? q->number : 0;
+}
+
+bool LauncherClosing(void)
+{
+#ifndef _WIN32
+    for (int i = 0; i < MAX_OPEN_REQUESTS; i++)
+        if (reqs[i].used && reqs[i].closed && reqs[i].launched && ChildAlive(reqs[i].pid)) return true;
+#endif
+    return false;
+}
+
+void LauncherCloseOnExit(void)
+{
+    const char *e = getenv("MONOLITH_CLOSE_ON_EXIT");
+    if (!e || !*e || strcmp(e, "0") == 0) return;
+    // No escalation after this (the game is gone): the WM close, or SIGTERM where the WM
+    // route isn't available, is all there is
+    char msg[256];
+    if (LauncherCloseAllDone(msg, sizeof(msg)) > 0) TraceLog(LOG_INFO, "monolith: on exit: %s", msg);
+}
 
 // #endregion
 

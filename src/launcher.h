@@ -58,6 +58,23 @@ void LauncherUpdate(float dt);
 // Draws the open/finished request list at (x, y); returns the height used in pixels
 int LauncherDrawHud(int x, int y);
 
+// Closing request terminals (launcher.c, region "Closing request windows"). Each fills msg
+// with a one-line HUD text ("closed <slug>", "<slug>: window already gone", ...). A closed
+// request leaves the HUD list; its bundle stays on disk.
+// The most recently finished request:
+bool LauncherCloseLatestDone(char *msg, int msgSize);
+// Every finished request; returns how many were taken off the list
+int LauncherCloseAllDone(char *msg, int msgSize);
+// Request [number] of the HUD list, running ones too: a request without result.md needs a
+// second call within 3 s (the first returns 0 and asks for it). 1 = closed, -1 = no such number
+int LauncherCloseNumber(int number, char *msg, int msgSize);
+// Number of the newest listed request (0 if none)
+int LauncherNewestNumber(void);
+// A closed request's terminal process is still running (being shut down)
+bool LauncherClosing(void);
+// MONOLITH_CLOSE_ON_EXIT=1: close every finished request's terminal (call when quitting)
+void LauncherCloseOnExit(void);
+
 // Camera of the most recently finished request, for "fly back" (false if none)
 bool LauncherLastDone(Vector3 *eye, float *yaw, float *pitch);
 
