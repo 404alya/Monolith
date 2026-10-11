@@ -78,4 +78,7 @@ void LauncherCloseOnExit(void);
 // Camera of the most recently finished request, for "fly back" (false if none)
 bool LauncherLastDone(Vector3 *eye, float *yaw, float *pitch);
 
+// Frees the request list (call once at exit; requests started later are tracked anew)
+void LauncherShutdown(void);
+
 #endif

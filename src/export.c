@@ -32,17 +32,22 @@
 #   define PROJECT_PATH ""
 #endif
 
-#define EXPORT_MAX_FILES 512
-
 // ======================================================================================
 // #region Files
 // ======================================================================================
 
 typedef struct {
-    char rel[EXPORT_MAX_FILES][MS_PATH_MAX];    // package-relative paths already copied
-    int count;
+    char **rel;             // package-relative paths already copied (heap strings)
+    int count, cap;
     int errors;
 } CopyList;
+
+static void FreeCopyList(CopyList *L)
+{
+    for (int i = 0; i < L->count; i++) free(L->rel[i]);
+    free(L->rel);
+    memset(L, 0, sizeof(*L));
+}
 
 static bool CopyFile(const char *from, const char *to)
 {
@@ -82,8 +87,10 @@ static void CopyRel(CopyList *L, const char *srcRoot, const char *dstRoot, const
 {
     if (!dstRel) dstRel = rel;
     for (int i = 0; i < L->count; i++) if (strcmp(L->rel[i], dstRel) == 0) return;
-    if (L->count >= EXPORT_MAX_FILES) { fprintf(stderr, "monolith: export: more than %d files\n", EXPORT_MAX_FILES); L->errors++; return; }
-    snprintf(L->rel[L->count++], MS_PATH_MAX, "%s", dstRel);
+    char *copy = MS_StrDup(dstRel);
+    char **slot = copy ? MS_PUSH(L->rel, L->count, L->cap) : NULL;
+    if (!slot) { free(copy); fprintf(stderr, "monolith: export: out of memory\n"); L->errors++; return; }
+    *slot = copy;
     char from[MS_PATH_MAX * 2], to[MS_PATH_MAX * 2];
     snprintf(from, sizeof(from), "%s%s", srcRoot, rel);
     snprintf(to, sizeof(to), "%s%s", dstRoot, dstRel);
@@ -372,10 +379,10 @@ bool ExportScene(const MS_Scene *s, const char *outDirIn, char *msg, int msgSize
     }
 
     // Package name = the map file's name, so <dir>/<name>/<name>.map loads by folder
-    char name[MS_NAME_MAX];
+    char name[MS_PATH_MAX];
     snprintf(name, sizeof(name), "%s", GetFileNameWithoutExt(s->path));
     for (char *c = name; *c; c++) if (!(isalnum((unsigned char)*c) || *c == '-' || *c == '_')) *c = '_';
-    char pkgDir[MS_PATH_MAX + 128];
+    char pkgDir[2 * MS_PATH_MAX + 8];
     snprintf(pkgDir, sizeof(pkgDir), "%s/%s/", outDir, name);
     MakeDirectory(pkgDir);
     if (!DirectoryExists(pkgDir)) {
@@ -383,13 +390,12 @@ bool ExportScene(const MS_Scene *s, const char *outDirIn, char *msg, int msgSize
         return false;
     }
 
-    static CopyList L;
-    memset(&L, 0, sizeof(L));
+    CopyList L = { 0 };
     const char *root = s->root;
     size_t rootLen = strlen(root);
 
     // The map file (renamed to <name>.map), then every referenced file + model parts
-    char mapRel[MS_PATH_MAX];
+    char mapRel[MS_PATH_MAX + 8];
     snprintf(mapRel, sizeof(mapRel), "%s.map", name);
     CopyRel(&L, "", pkgDir, s->path, mapRel);
     for (int i = 1; i < MS_DependencyCount(s); i++) {
@@ -420,7 +426,7 @@ bool ExportScene(const MS_Scene *s, const char *outDirIn, char *msg, int msgSize
         if (!CopyFile(TextFormat("%s%s", rtDir, RT[i]), TextFormat("%s/%s", outDir, RT[i]))) L.errors++;
     if (!CopyFile(viewer, TextFormat("%s/viewer.c", outDir))) L.errors++;
 
-    char assets[MS_PATH_MAX * 2];
+    char assets[sizeof(pkgDir) + 16];
     snprintf(assets, sizeof(assets), "%sASSETS.md", pkgDir);
     if (!WriteReadme(TextFormat("%s/README.md", outDir), s, name, assets, L.count)) L.errors++;
 
@@ -450,17 +456,17 @@ bool ExportScene(const MS_Scene *s, const char *outDirIn, char *msg, int msgSize
     MS_Scene *check = MS_Load(pkgDir, &(MS_LoadOptions){ .noGpu = true }, err, sizeof(err));
     if (!check) {
         snprintf(msg, msgSize, "export: the exported package does not load: %s", err);
+        FreeCopyList(&L);
         return false;
     }
     bool same = check->boxCount == s->boxCount && check->modelCount == s->modelCount;
     MS_Unload(check);
-    if (!same || L.errors) {
-        snprintf(msg, msgSize, "export: %s written with %d error(s)%s (see the log)", outDir, L.errors,
-                 same ? "" : ", and the copy has a different object count");
-        return false;
-    }
-    snprintf(msg, msgSize, "exported %s: %d package files + runtime + README.md", outDir, L.count);
-    return true;
+    bool ok = same && !L.errors;
+    if (!ok) snprintf(msg, msgSize, "export: %s written with %d error(s)%s (see the log)", outDir, L.errors,
+                      same ? "" : ", and the copy has a different object count");
+    else snprintf(msg, msgSize, "exported %s: %d package files + runtime + README.md", outDir, L.count);
+    FreeCopyList(&L);
+    return ok;
 }
 
 void ExportDefaultDir(const MS_Scene *s, char *out, int outSize)

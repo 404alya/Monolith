@@ -83,13 +83,14 @@ extern char **environ;
 #   define PROJECT_PATH ""
 #endif
 
-#define MAX_OPEN_REQUESTS   16
+// Memory: the open requests, the tracked child processes, a bundle's selection / nearby
+// tables and the split command lines are heap arrays (MS_RESERVE / MS_PUSH); no count
+// limits. Bundles are built and freed per submit; LauncherShutdown frees the rest.
 #define POLL_INTERVAL       0.5f    // seconds between result.md checks
 #define DONE_SHOW_TIME      20.0f   // finished requests stay in the HUD this long
 #define DONE_FADE_TIME      3.0f    // ... fading out over the last seconds
 #define NEARBY_RADIUS       30.0f   // "nearby context" radius around the hit point, metres
 #define SLUG_MAX            40
-#define CLAUDE_ARGS_MAX     24
 
 // ======================================================================================
 // #region Paths and small helpers
@@ -146,20 +147,32 @@ static int MakeDir(const char *path)
 #endif
 }
 
-// Splits s on whitespace into up to max tokens, stored in buf (modified copy of s)
-static int SplitWords(const char *s, char *buf, int bufSize, char **tok, int max)
+// Words of a command line (an environment variable): a heap copy of the text, split in place
+typedef struct { char *buf; char **tok; int count, cap; } ArgList;
+
+static void FreeArgs(ArgList *a)
 {
-    snprintf(buf, bufSize, "%s", s ? s : "");
-    int n = 0;
-    char *p = buf;
-    while (*p && n < max) {
+    free(a->buf);
+    free(a->tok);
+    memset(a, 0, sizeof(*a));
+}
+
+// Splits s on whitespace (s NULL = no words). False when out of memory (a is empty then).
+static bool SplitArgs(const char *s, ArgList *a)
+{
+    memset(a, 0, sizeof(*a));
+    if (!(a->buf = MS_StrDup(s ? s : ""))) return false;
+    char *p = a->buf;
+    while (*p) {
         while (*p && isspace((unsigned char)*p)) p++;
         if (!*p) break;
-        tok[n++] = p;
+        char **slot = MS_PUSH(a->tok, a->count, a->cap);
+        if (!slot) { FreeArgs(a); return false; }
+        *slot = p;
         while (*p && !isspace((unsigned char)*p)) p++;
         if (*p) *p++ = 0;
     }
-    return n;
+    return true;
 }
 
 #ifndef _WIN32
@@ -243,13 +256,7 @@ static const char *ObjMaterial(MS_ObjRef o)
 #define MAP_FORMAT_VERSION (scene->formatVersion)
 
 // Index of an object among the objects of its kind on its map line (copy number of a repeat)
-static int ObjNth(MS_ObjRef o)
-{
-    int nth = 0, line = ObjLine(o);
-    for (int i = 0; i < o.index; i++)
-        if (MS_ObjectRef(scene, (MS_ObjRef){ o.kind, i })->line == line) nth++;
-    return nth;
-}
+static int ObjNth(MS_ObjRef o) { return DesignerObjNth(o); }
 
 static const char *const ORIGIN_NAMES[] = { "model", "bottom", "center" };
 static const char *const COLLIDE_NAMES[] = { "aabb", "none", "box" };
@@ -318,20 +325,23 @@ static const char *const KW_CREATE[] = {
     "add", "put", "place", "insert", "new", "open", "opening", "connect", "attach", "fill",
     "replace", "convert", "turn", "row", "grid", "array", "pattern", NULL };
 
-#define CLASSIFY_MAX_WORDS 1024
+typedef char Word[24];      // lowercase; letters, or a number ("2.5"); longer words are cut
+                            // (no keyword is that long, so a cut word never matches by accident)
 typedef struct {
-    char w[CLASSIFY_MAX_WORDS][24];     // lowercase; letters, or a number ("2.5")
-    int n;
+    Word *w;                // heap: every word of the prompt
+    int n, cap;
 } Words;
 
-static void SplitPromptWords(const char *s, Words *W)
+// False when out of memory (W then holds the words found so far)
+static bool SplitPromptWords(const char *s, Words *W)
 {
     W->n = 0;
     const unsigned char *p = (const unsigned char *)s;
-    while (*p && W->n < CLASSIFY_MAX_WORDS) {
+    while (*p) {
         bool alpha = *p < 128 && isalpha(*p), digit = *p < 128 && isdigit(*p);
         if (!alpha && !digit) { p++; continue; }
         int len = 0;
+        if (!MS_RESERVE(W->w, W->cap, W->n + 1)) return false;
         char *w = W->w[W->n++];
         while (*p < 128 && (alpha ? isalpha(*p) : (isdigit(*p) || (*p == '.' && isdigit(p[1]))))) {
             if (len < 23) w[len++] = (char)tolower(*p);
@@ -339,6 +349,7 @@ static void SplitPromptWords(const char *s, Words *W)
         }
         w[len] = 0;
     }
+    return true;
 }
 
 static bool WordIs(const char *w, const char *k)
@@ -377,11 +388,21 @@ static int CountSentences(const char *s)
     return count;
 }
 
+static ModelTier Classify(const ModelQuery *q, const Words *wordsIn, char *reason, int reasonSize);
+
 ModelTier ClassifyRequest(const ModelQuery *q, char *reason, int reasonSize)
 {
-    static Words W;
+    Words W = { 0 };
+    SplitPromptWords(q->prompt ? q->prompt : "", &W);
+    ModelTier t = Classify(q, &W, reason, reasonSize);
+    free(W.w);
+    return t;
+}
+
+static ModelTier Classify(const ModelQuery *q, const Words *wordsIn, char *reason, int reasonSize)
+{
+    const Words W = *wordsIn;
     const char *prompt = q->prompt ? q->prompt : "";
-    SplitPromptWords(prompt, &W);
     int bytes = (int)strlen(prompt), sentences = CountSentences(prompt);
     const char *k;
 
@@ -469,8 +490,10 @@ void LauncherChooseModel(const ModelQuery *q, ModelChoice *out)
         out->source = "MONOLITH_MODEL";
     }
     // A --model (or --model=x) in MONOLITH_CLAUDE_ARGS wins; no second --model then
-    char buf[1024], *tok[CLAUDE_ARGS_MAX];
-    int n = SplitWords(getenv("MONOLITH_CLAUDE_ARGS"), buf, sizeof(buf), tok, CLAUDE_ARGS_MAX);
+    ArgList args;
+    SplitArgs(getenv("MONOLITH_CLAUDE_ARGS"), &args);
+    char **tok = args.tok;
+    int n = args.count;
     for (int i = 0; i < n; i++) {
         const char *m = NULL;
         if (strcmp(tok[i], "--model") == 0 && i + 1 < n) m = tok[i + 1];
@@ -482,6 +505,7 @@ void LauncherChooseModel(const ModelQuery *q, ModelChoice *out)
         out->addFlag = false;
         break;
     }
+    FreeArgs(&args);
 }
 
 // #endregion
@@ -511,14 +535,12 @@ typedef struct {
     Vector3 fwd, right;
     float yawDeg, pitchDeg, aspect;
     bool hit;
-    char hitLine[MS_LINE_MAX + 1];
-    bool hitHasLine;
-    MS_ObjRef sel[MAX_SELECTION];       // valid selected objects
+    MS_ObjRef *sel;                     // valid selected objects (heap, like the tables below)
     int selCount;
-    SelLine selLines[MAX_SELECTION];
-    int selLineCount;
-    MS_ObjRef selOrder[MAX_SELECTION];  // sel[] reordered so each line's objects are adjacent
-    Nearby nearby[MS_MAX_GROUPS + 1];
+    SelLine *selLines;
+    int selLineCount, selLineCap;
+    MS_ObjRef *selOrder;                // sel[] reordered so each line's objects are adjacent
+    Nearby *nearby;                     // per group + one for objects without a group
     int nearbyCount;
     Vector3 nearbyCenter;
     char binary[1024], mapPath[1024], prompt[256];
@@ -537,7 +559,17 @@ static int CompareNearby(const void *a, const void *b)
     return d < 0 ? -1 : d > 0 ? 1 : 0;
 }
 
-static void BuildBundle(Bundle *B, const DesignRequest *req)
+static void FreeBundle(Bundle *B)
+{
+    free(B->sel);
+    free(B->selLines);
+    free(B->selOrder);
+    free(B->nearby);
+    free(B);
+}
+
+// False when out of memory
+static bool BuildBundle(Bundle *B, const DesignRequest *req)
 {
     B->req = req;
     B->stale = req->mapVersion != scene->version;
@@ -548,15 +580,23 @@ static void BuildBundle(Bundle *B, const DesignRequest *req)
     B->aspect = req->height > 0 ? (float)req->width / req->height : 0.0f;
 
     B->hit = ObjValid(req->hit.obj);
-    if (B->hit) B->hitHasLine = MS_GetLine(scene, ObjLine(req->hit.obj), B->hitLine, sizeof(B->hitLine));
 
     // Selection: drop invalid references, then group by line
-    for (int i = 0; i < req->selectedCount && i < MAX_SELECTION; i++)
+    int n = req->selectedCount > 0 ? req->selectedCount : 1;
+    B->sel = malloc(sizeof(MS_ObjRef) * n);
+    B->selOrder = malloc(sizeof(MS_ObjRef) * n);
+    B->nearby = malloc(sizeof(Nearby) * (scene->groupCount + 1));
+    if (!B->sel || !B->selOrder || !B->nearby) return false;
+    for (int i = 0; i < req->selectedCount; i++)
         if (ObjValid(req->selected[i])) B->sel[B->selCount++] = req->selected[i];
     for (int i = 0; i < B->selCount; i++) {
         int line = ObjLine(B->sel[i]), k = 0;
         while (k < B->selLineCount && B->selLines[k].line != line) k++;
-        if (k == B->selLineCount) B->selLines[B->selLineCount++] = (SelLine){ line, 0, 0 };
+        if (k == B->selLineCount) {
+            SelLine *sl = MS_PUSH(B->selLines, B->selLineCount, B->selLineCap);
+            if (!sl) return false;
+            *sl = (SelLine){ line, 0, 0 };
+        }
         B->selLines[k].count++;
     }
     int at = 0;
@@ -596,6 +636,7 @@ static void BuildBundle(Bundle *B, const DesignRequest *req)
     snprintf(B->shotCmd, sizeof(B->shotCmd), "%s --shot requests/%s/before.png --shot-size %d %d --eye %.6f %.6f %.6f --look %.6f %.6f --map %s",
              B->binaryQ, B->id, req->width, req->height, req->eye.x, req->eye.y, req->eye.z, B->yawDeg, B->pitchDeg, B->mapPathQ);
     snprintf(B->prompt, sizeof(B->prompt), "Map edit request: read requests/%s/request.md and carry it out.", B->id);
+    return true;
 }
 
 // #endregion
@@ -623,13 +664,22 @@ static void MdFence(FILE *f, const char *text, const char *info)
 
 static void MdVec(FILE *f, Vector3 v) { fprintf(f, "(%.3f, %.3f, %.3f)", v.x, v.y, v.z); }
 
+// Map line `line` as a heap string (free it), NULL if there is none
+static char *LineDup(int line)
+{
+    int len;
+    const char *text = line > 0 ? MS_LineText(scene, line, &len) : NULL;
+    return text ? MS_StrNDup(text, len) : NULL;
+}
+
 static void MdLine(FILE *f, int line)
 {
-    char text[MS_LINE_MAX + 1];
-    if (line > 0 && MS_GetLine(scene, line, text, sizeof(text))) {
+    char *text = LineDup(line);
+    if (text) {
         fprintf(f, "Map line %d:\n\n", line);
         MdFence(f, text, "");
     } else fprintf(f, "Not from a map line.\n\n");
+    free(text);
 }
 
 // A model instance's file and transform, as list items
@@ -709,23 +759,32 @@ static void WriteRegionsMd(FILE *f, const Bundle *B)
         }
         fprintf(f, "\n");
 
-        // The map lines behind the listed objects, each quoted once
-        static char text[MS_LINE_MAX + 1], block[16384];
-        int lines[MD_REGION_ROWS], lineCount = 0, n = 0;
-        block[0] = 0;
+        // The map lines behind the listed objects, each quoted once (a heap text: lines have
+        // no length limit)
+        int lines[MD_REGION_ROWS], lineCount = 0, n = 0, cap = 0;
+        char *block = NULL;
         for (int k = 0; k < rows; k++) {
             if (!ObjValid(g->objects[k].obj)) continue;
-            int line = ObjLine(g->objects[k].obj);
+            int line = ObjLine(g->objects[k].obj), len;
             bool seen = false;
             for (int j = 0; j < lineCount; j++) seen |= lines[j] == line;
-            if (seen || line <= 0 || !MS_GetLine(scene, line, text, sizeof(text))) continue;
+            const char *text = seen || line <= 0 ? NULL : MS_LineText(scene, line, &len);
+            if (!text) continue;
             lines[lineCount++] = line;
-            if (n < (int)sizeof(block) - 1) n += snprintf(block + n, sizeof(block) - n, "%d: %s\n", line, text);
+            char num[16];
+            int nl = snprintf(num, sizeof(num), "%d: ", line);
+            if (!MS_RESERVE(block, cap, n + nl + len + 2)) break;
+            memcpy(block + n, num, nl);
+            memcpy(block + n + nl, text, len);
+            n += nl + len;
+            block[n++] = '\n';
+            block[n] = 0;
         }
-        if (lineCount > 0) {
+        if (lineCount > 0 && block) {
             fprintf(f, "Map lines of these objects:\n\n");
             MdFence(f, block, "");
         }
+        free(block);
     }
 }
 
@@ -915,9 +974,10 @@ static void JsonVec(FILE *f, Vector3 v)
 
 static void JsonLineText(FILE *f, int line)
 {
-    char text[MS_LINE_MAX + 1];
-    if (line > 0 && MS_GetLine(scene, line, text, sizeof(text))) JsonStr(f, text);
+    char *text = LineDup(line);
+    if (text) JsonStr(f, text);
     else fputs("null", f);
+    free(text);
 }
 
 static void JsonMaterial(FILE *f, MS_ObjRef o)
@@ -1114,7 +1174,7 @@ typedef struct {
     bool exited;                // the terminal process is gone (result may still come)
     bool done;
     bool closed;                // closed from the game: off the list, the bundle stays
-    int number;                 // [n] in the HUD list, stable while listed (1..MAX_OPEN_REQUESTS)
+    int number;                 // [n] in the HUD list, stable while listed (the lowest free number)
     long resultSize;            // size of result.md at the last poll (wait until it settles)
     char summary[160];          // first line of result.md
     Vector3 eye;
@@ -1127,7 +1187,8 @@ typedef struct {
 #endif
 } OpenRequest;
 
-static OpenRequest reqs[MAX_OPEN_REQUESTS];
+static OpenRequest *reqs;       // heap; a retired entry (Retired) is reused by the next request
+static int reqCount, reqCap;
 static long nextSeq = 1;
 static double clockTime;        // sum of LauncherUpdate dt, the HUD's time base
 static float pollTimer;
@@ -1142,39 +1203,70 @@ static double confirmUntil;     // ... until this clockTime
 // Every child is reaped with waitpid(pid, WNOHANG) from LauncherUpdate. Not waitpid(-1):
 // that would also collect children some other code might start and wait for. Not a
 // SIGCHLD handler: it would interrupt raylib's and the driver's system calls. Children
-// are tracked here separately from reqs[], whose slots get recycled.
-#define MAX_CHILDREN 64
-static pid_t children[MAX_CHILDREN];
+// are tracked here separately from reqs[] (a heap list; reaped ones are removed).
+static pid_t *children;
+static int childCount, childCap;
+
+static void TrackChild(pid_t pid)
+{
+    pid_t *slot = MS_PUSH(children, childCount, childCap);
+    if (slot) *slot = pid;
+    // out of memory: not tracked, init reaps it after we exit
+    else TraceLog(LOG_WARNING, "monolith: out of memory, pid %d not tracked", (int)pid);
+}
 #endif
 
 static bool Listed(const OpenRequest *q) { return q->used && !q->closed; }
 
+// The terminal window may still be open (the process we started is still running). Unknown
+// for terminals that hand the window to a daemon and exit (kitty --single-instance, wezterm)
+static bool WindowMaybeOpen(const OpenRequest *q)
+{
+    return q->launched && !q->exited;
+}
+
+// An entry nobody needs any more: closed and its terminal shut down, or finished, off the
+// HUD and its terminal gone. Its slot is reused (the list only grows to the most requests
+// that were alive at once).
+static bool Retired(const OpenRequest *q)
+{
+    if (!q->used) return true;
+#ifndef _WIN32
+    if (q->closed) return q->killStage == 0;
+#else
+    if (q->closed) return true;
+#endif
+    return q->done && clockTime - q->doneTime > DONE_SHOW_TIME && !WindowMaybeOpen(q);
+}
+
+// A new request entry (pointer valid until the next NewSlot); NULL when out of memory
 static OpenRequest *NewSlot(void)
 {
     OpenRequest *pick = NULL;
-    for (int i = 0; i < MAX_OPEN_REQUESTS && !pick; i++) if (!reqs[i].used) pick = &reqs[i];
-    // Closed requests next (preferably ones whose terminal is no longer being shut down)
-    for (int pass = 0; pass < 2 && !pick; pass++)
-        for (int i = 0; i < MAX_OPEN_REQUESTS && !pick; i++)
-#ifndef _WIN32
-            if (reqs[i].closed && (pass == 1 || reqs[i].killStage == 0)) pick = &reqs[i];
-#else
-            if (reqs[i].closed) pick = &reqs[i];
-#endif
-    // Full: recycle the oldest finished request, else the oldest one at all
-    for (int pass = 0; pass < 2 && !pick; pass++)
-        for (int i = 0; i < MAX_OPEN_REQUESTS; i++)
-            if ((pass == 1 || reqs[i].done) && (!pick || reqs[i].seq < pick->seq)) pick = &reqs[i];
+    for (int i = 0; i < reqCount && !pick; i++) if (Retired(&reqs[i])) pick = &reqs[i];
+    if (!pick && !(pick = MS_PUSH(reqs, reqCount, reqCap))) return NULL;
     memset(pick, 0, sizeof(*pick));
     pick->used = true;
     pick->seq = nextSeq++;
     // Lowest number no listed request has, so the numbers in the HUD don't shift
     for (int n = 1; !pick->number; n++) {
         bool taken = false;
-        for (int i = 0; i < MAX_OPEN_REQUESTS; i++) if (&reqs[i] != pick && Listed(&reqs[i]) && reqs[i].number == n) taken = true;
+        for (int i = 0; i < reqCount; i++) if (&reqs[i] != pick && Listed(&reqs[i]) && reqs[i].number == n) taken = true;
         if (!taken) pick->number = n;
     }
     return pick;
+}
+
+void LauncherShutdown(void)
+{
+    free(reqs);
+    reqs = NULL;
+    reqCount = reqCap = 0;
+#ifndef _WIN32
+    free(children);
+    children = NULL;
+    childCount = childCap = 0;
+#endif
 }
 
 #ifndef _WIN32
@@ -1185,12 +1277,12 @@ static bool ChildAlive(pid_t pid)
 {
     if (pid <= 0) return false;
     int slot = -1;
-    for (int i = 0; i < MAX_CHILDREN; i++) if (children[i] == pid) slot = i;
+    for (int i = 0; i < childCount; i++) if (children[i] == pid) slot = i;
     if (slot < 0) return false;             // reaped already (or never tracked)
     if (waitpid(pid, NULL, WNOHANG) == 0) return true;
-    for (int k = 0; k < MAX_OPEN_REQUESTS; k++)
+    for (int k = 0; k < reqCount; k++)
         if (reqs[k].used && reqs[k].pid == pid) reqs[k].exited = true;
-    children[slot] = 0;                     // reaped (or not ours any more: ECHILD)
+    children[slot] = children[--childCount];    // reaped (or not ours any more: ECHILD)
     return false;
 }
 
@@ -1248,11 +1340,12 @@ void LauncherUpdate(float dt)
     pollTimer = 0.0f;
 
 #ifndef _WIN32
-    for (int i = 0; i < MAX_CHILDREN; i++) if (children[i] > 0) ChildAlive(children[i]);
+    // (a reaped child leaves the list: its slot then holds another one, so don't advance)
+    for (int i = 0; i < childCount; ) if (ChildAlive(children[i])) i++;
     CloseEscalate();
 #endif
 
-    for (int i = 0; i < MAX_OPEN_REQUESTS; i++) {
+    for (int i = 0; i < reqCount; i++) {
         OpenRequest *q = &reqs[i];
         if (!q->used || q->done) continue;
         if (ReadResult(q)) {
@@ -1267,13 +1360,6 @@ void LauncherUpdate(float dt)
     }
 }
 
-// The terminal window may still be open (the process we started is still running). Unknown
-// for terminals that hand the window to a daemon and exit (kitty --single-instance, wezterm)
-static bool WindowMaybeOpen(const OpenRequest *q)
-{
-    return q->launched && !q->exited;
-}
-
 int LauncherDrawHud(int x, int y)
 {
     const int size = 18, step = 22, maxRows = 6;
@@ -1281,7 +1367,7 @@ int LauncherDrawHud(int x, int y)
     long below = 1L << 30;      // walk the list from the newest request down
     while (rows < maxRows) {
         OpenRequest *q = NULL;
-        for (int i = 0; i < MAX_OPEN_REQUESTS; i++)
+        for (int i = 0; i < reqCount; i++)
             if (Listed(&reqs[i]) && reqs[i].seq < below && (!q || reqs[i].seq > q->seq)) q = &reqs[i];
         if (!q) break;
         below = q->seq;
@@ -1388,8 +1474,10 @@ static bool Launch(const char *id, const char *slug, const char *prompt, const c
 
     // msvcrt joins the argv with spaces and adds no quotes, so quote here. cmd /k strips
     // the outer pair of quotes of its command when it contains more than two.
-    char argsBuf[1024], *extra[CLAUDE_ARGS_MAX];
-    int extraCount = SplitWords(getenv("MONOLITH_CLAUDE_ARGS"), argsBuf, sizeof(argsBuf), extra, CLAUDE_ARGS_MAX);
+    ArgList args;
+    if (!SplitArgs(getenv("MONOLITH_CLAUDE_ARGS"), &args)) { snprintf(err, errSize, "out of memory"); return false; }
+    char **extra = args.tok;
+    int extraCount = args.count;
     char cmd[4096];
     int len = snprintf(cmd, sizeof(cmd), "\"\"%s\"", claude);
     for (int i = 0; i < SKIP_PERMISSION_COUNT && !ClaudeSafe(); i++)
@@ -1397,6 +1485,7 @@ static bool Launch(const char *id, const char *slug, const char *prompt, const c
     if (model && len < (int)sizeof(cmd)) len += snprintf(cmd + len, sizeof(cmd) - len, " --model \"%s\"", model);
     for (int i = 0; i < extraCount && len < (int)sizeof(cmd); i++) len += snprintf(cmd + len, sizeof(cmd) - len, " %s", extra[i]);
     if (len < (int)sizeof(cmd)) snprintf(cmd + len, sizeof(cmd) - len, " \"%s\"\"", prompt);
+    FreeArgs(&args);
     char title[128], dirArg[1100];
     snprintf(title, sizeof(title), "\"monolith-claude: %s\"", slug);
     snprintf(dirArg, sizeof(dirArg), "\"%s\"", dir);
@@ -1507,8 +1596,7 @@ static void MarkAndMove(const char *title, const char *mark)
         execve("/bin/sh", argv, environ);
         _exit(127);
     }
-    for (int i = 0; i < MAX_CHILDREN; i++)      // reaped by LauncherUpdate like the terminals
-        if (children[i] <= 0) { children[i] = pid; break; }
+    TrackChild(pid);    // reaped by LauncherUpdate like the terminals
     if (*ws) TraceLog(LOG_INFO, "monolith: moving '%s' to workspace %s via %s (pid %d)", title, ws, tool, (int)pid);
     else TraceLog(LOG_INFO, "monolith: marking '%s' via %s (pid %d)", title, tool, (int)pid);
 }
@@ -1517,31 +1605,40 @@ static bool Launch(const char *id, const char *slug, const char *prompt, const c
 {
     (void)id;
     // Terminal: env override (program + extra args) or the first known one in PATH
-    char termBuf[1024], *termTok[16], termPath[4096];
-    int termCount = 0;
+    ArgList term = { 0 }, args = { 0 };
+    char termPath[4096];
     const char *envVar = NULL;
     const char *env = getenv("MONOLITH_TERMINAL");
     if (env && *env) envVar = "MONOLITH_TERMINAL";
     else if ((env = getenv("TERMINAL")) && *env) envVar = "TERMINAL";
     if (envVar) {
-        termCount = SplitWords(env, termBuf, sizeof(termBuf), termTok, 16);
-        if (termCount == 0 || !FindProgram(termTok[0], termPath, sizeof(termPath))) {
-            snprintf(err, errSize, "terminal '%s' from $%s not found", termCount ? termTok[0] : "", envVar);
+        if (!SplitArgs(env, &term)) { snprintf(err, errSize, "out of memory"); return false; }
+        if (term.count == 0 || !FindProgram(term.tok[0], termPath, sizeof(termPath))) {
+            snprintf(err, errSize, "terminal '%s' from $%s not found", term.count ? term.tok[0] : "", envVar);
+            FreeArgs(&term);
             return false;
         }
     } else {
-        for (int i = 0; i < TERMINAL_COUNT && !termCount; i++)
-            if (FindProgram(TERMINALS[i].name, termPath, sizeof(termPath)))
-                termCount = SplitWords(TERMINALS[i].name, termBuf, sizeof(termBuf), termTok, 16);
-        if (!termCount) {
+        for (int i = 0; i < TERMINAL_COUNT && !term.count; i++)
+            if (FindProgram(TERMINALS[i].name, termPath, sizeof(termPath))) {
+                FreeArgs(&term);
+                if (!SplitArgs(TERMINALS[i].name, &term)) { snprintf(err, errSize, "out of memory"); return false; }
+            }
+        if (!term.count) {
+            FreeArgs(&term);
             snprintf(err, errSize, "no terminal found (tried alacritty kitty foot wezterm xterm; set MONOLITH_TERMINAL)");
             return false;
         }
     }
+    char **termTok = term.tok;
+    int termCount = term.count;
     const TermSyntax *ts = &UNKNOWN_TERMINAL;
     for (int i = 0; i < TERMINAL_COUNT; i++)
         if (strcmp(BaseName(termTok[0]), TERMINALS[i].name) == 0) ts = &TERMINALS[i];
 
+    // From here on every return goes through `fail` / the end, which free term, args, argv
+    char **argv = NULL;
+    bool ok = false;
     char claude[4096];
     bool found = FindProgram("claude", claude, sizeof(claude));
     if (!found && getenv("HOME")) {
@@ -1551,17 +1648,21 @@ static bool Launch(const char *id, const char *slug, const char *prompt, const c
     }
     if (!found) {
         snprintf(err, errSize, "claude not found in PATH or ~/.local/bin");
-        return false;
+        goto fail;
     }
 
     // argv: terminal [its extra args] [pre] [title] [dir] [exec] claude [claude args] prompt
-    char title[128], dir[1024], argsBuf[1024], *extra[CLAUDE_ARGS_MAX];
+    char title[128], dir[1024];
     snprintf(title, sizeof(title), "monolith-claude: %s", slug);
     snprintf(dir, sizeof(dir), "%s", rootDir);
     size_t dl = strlen(dir);
     if (dl > 1 && dir[dl - 1] == '/') dir[dl - 1] = 0;
-    int extraCount = SplitWords(getenv("MONOLITH_CLAUDE_ARGS"), argsBuf, sizeof(argsBuf), extra, CLAUDE_ARGS_MAX);
-    char *argv[16 + 8 + SKIP_PERMISSION_COUNT + 2 + CLAUDE_ARGS_MAX + 4];
+    if (!SplitArgs(getenv("MONOLITH_CLAUDE_ARGS"), &args)) { snprintf(err, errSize, "out of memory"); goto fail; }
+    char **extra = args.tok;
+    int extraCount = args.count;
+    // (allocated before the fork: the child may only call async-signal-safe functions)
+    argv = malloc(sizeof(char *) * (termCount + 8 + SKIP_PERMISSION_COUNT + 2 + extraCount + 4));
+    if (!argv) { snprintf(err, errSize, "out of memory"); goto fail; }
     int n = 0;
     for (int i = 0; i < termCount; i++) argv[n++] = termTok[i];
     if (ts->pre) argv[n++] = (char *)ts->pre;
@@ -1579,14 +1680,14 @@ static bool Launch(const char *id, const char *slug, const char *prompt, const c
     // exec closes it (the parent reads EOF), a failed one writes errno first. The read
     // only waits for the exec itself, not for the terminal.
     int fds[2];
-    if (pipe(fds) != 0) { snprintf(err, errSize, "pipe: %s", strerror(errno)); return false; }
+    if (pipe(fds) != 0) { snprintf(err, errSize, "pipe: %s", strerror(errno)); goto fail; }
     fcntl(fds[0], F_SETFD, FD_CLOEXEC);
     fcntl(fds[1], F_SETFD, FD_CLOEXEC);
     pid_t pid = fork();
     if (pid < 0) {
         close(fds[0]); close(fds[1]);
         snprintf(err, errSize, "fork: %s", strerror(errno));
-        return false;
+        goto fail;
     }
     if (pid == 0) {
         // Child: only async-signal-safe calls from here on. setsid: own session, so the
@@ -1613,21 +1714,22 @@ static bool Launch(const char *id, const char *slug, const char *prompt, const c
     if (r == (ssize_t)sizeof(childErr)) {
         waitpid(pid, NULL, 0);      // it has _exit()ed already
         snprintf(err, errSize, "cannot run %s: %s", termPath, strerror(childErr));
-        return false;
+        goto fail;
     }
 
     q->pid = pid;
-    bool tracked = false;
-    for (int i = 0; i < MAX_CHILDREN && !tracked; i++)
-        if (children[i] <= 0) { children[i] = pid; tracked = true; }
-    // All slots busy (64 terminals still open): it gets reaped by init after we exit
-    if (!tracked) TraceLog(LOG_WARNING, "monolith: too many open terminals, pid %d not tracked", (int)pid);
+    TrackChild(pid);
     TraceLog(LOG_INFO, "monolith: launched %s (pid %d) for request %s", termPath, (int)pid, id);
     // (an id is [0-9_a-z-] for edit requests; keep the mark free of quotes in any case)
     snprintf(q->mark, sizeof(q->mark), "_monolith_%s", id);
     for (char *c = q->mark; *c; c++) if (!isalnum((unsigned char)*c) && *c != '-' && *c != '_') *c = '_';
     MarkAndMove(title, q->mark);
-    return true;
+    ok = true;
+fail:
+    free(argv);
+    FreeArgs(&args);
+    FreeArgs(&term);
+    return ok;
 }
 
 #endif
@@ -1699,7 +1801,7 @@ static void SignalGroup(const OpenRequest *q, int sig)
 // From LauncherUpdate: WM close -> SIGTERM -> SIGKILL for terminals that linger
 static void CloseEscalate(void)
 {
-    for (int i = 0; i < MAX_OPEN_REQUESTS; i++) {
+    for (int i = 0; i < reqCount; i++) {
         OpenRequest *q = &reqs[i];
         if (!q->used || !q->killStage || clockTime < q->killTime) continue;
         if (!ChildAlive(q->pid)) { q->killStage = 0; continue; }
@@ -1753,7 +1855,7 @@ bool LauncherCloseLatestDone(char *msg, int msgSize)
 {
     OpenRequest *q = NULL;
     bool running = false;
-    for (int i = 0; i < MAX_OPEN_REQUESTS; i++) {
+    for (int i = 0; i < reqCount; i++) {
         if (!Listed(&reqs[i])) continue;
         if (!reqs[i].done) running = true;
         else if (!q || reqs[i].doneTime > q->doneTime) q = &reqs[i];
@@ -1771,7 +1873,7 @@ int LauncherCloseAllDone(char *msg, int msgSize)
     int count = 0, gone = 0;
     OpenRequest *last = NULL;
     CloseOutcome lastOutcome = CLOSED_GONE;
-    for (int i = 0; i < MAX_OPEN_REQUESTS; i++) {
+    for (int i = 0; i < reqCount; i++) {
         OpenRequest *q = &reqs[i];
         if (!Listed(q) || !q->done) continue;
         lastOutcome = CloseRequest(q);
@@ -1792,7 +1894,7 @@ int LauncherCloseAllDone(char *msg, int msgSize)
 int LauncherCloseNumber(int number, char *msg, int msgSize)
 {
     OpenRequest *q = NULL;
-    for (int i = 0; i < MAX_OPEN_REQUESTS; i++) if (Listed(&reqs[i]) && reqs[i].number == number) q = &reqs[i];
+    for (int i = 0; i < reqCount; i++) if (Listed(&reqs[i]) && reqs[i].number == number) q = &reqs[i];
     if (!q) { snprintf(msg, msgSize, "no request [%d] in the list", number); return -1; }
     // A request without result.md may still be working: ask for a second press first
     if (!q->done && !(confirmSeq == q->seq && clockTime <= confirmUntil)) {
@@ -1808,14 +1910,14 @@ int LauncherCloseNumber(int number, char *msg, int msgSize)
 int LauncherNewestNumber(void)
 {
     OpenRequest *q = NULL;
-    for (int i = 0; i < MAX_OPEN_REQUESTS; i++) if (Listed(&reqs[i]) && (!q || reqs[i].seq > q->seq)) q = &reqs[i];
+    for (int i = 0; i < reqCount; i++) if (Listed(&reqs[i]) && (!q || reqs[i].seq > q->seq)) q = &reqs[i];
     return q ? q->number : 0;
 }
 
 bool LauncherClosing(void)
 {
 #ifndef _WIN32
-    for (int i = 0; i < MAX_OPEN_REQUESTS; i++)
+    for (int i = 0; i < reqCount; i++)
         if (reqs[i].used && reqs[i].closed && reqs[i].launched && ChildAlive(reqs[i].pid)) return true;
 #endif
     return false;
@@ -1840,8 +1942,10 @@ void LauncherCloseOnExit(void)
 bool LauncherSubmit(const DesignRequest *req, Image view, Image marked, char *msg, int msgSize)
 {
     InitPaths();
-    static Bundle B;    // ~10 KB of tables, and only one submit runs at a time
-    memset(&B, 0, sizeof(B));
+    Bundle *Bp = calloc(1, sizeof(Bundle));
+    if (!Bp) { snprintf(msg, msgSize, "out of memory"); return false; }
+    bool result = false;
+#define B (*Bp)
 
     // Folder name: local time stamp + slug, made unique if a request with the same
     // name was submitted within the same second
@@ -1873,11 +1977,14 @@ bool LauncherSubmit(const DesignRequest *req, Image view, Image marked, char *ms
     if (!made) {
         snprintf(msg, msgSize, "cannot create a request folder in %s: %s", requestsDir, strerror(errno));
         TraceLog(LOG_WARNING, "monolith: %s", msg);
-        return false;
+        goto done;
     }
     strcat(dir, "/");
 
-    BuildBundle(&B, req);
+    if (!BuildBundle(&B, req)) {
+        snprintf(msg, msgSize, "out of memory (bundle %s not written)", dir);
+        goto done;
+    }
 
     bool ok = true;
     char path[1400];
@@ -1903,10 +2010,11 @@ bool LauncherSubmit(const DesignRequest *req, Image view, Image marked, char *ms
     if (!ok) {
         snprintf(msg, msgSize, "cannot write the request bundle %s (disk full?)", dir);
         TraceLog(LOG_WARNING, "monolith: %s", msg);
-        return false;
+        goto done;
     }
 
     OpenRequest *q = NewSlot();
+    if (!q) { snprintf(msg, msgSize, "out of memory. Bundle kept: %s", dir); goto done; }
     snprintf(q->id, sizeof(q->id), "%s", B.id);
     snprintf(q->slug, sizeof(q->slug), "%s", B.slug);
     snprintf(q->dir, sizeof(q->dir), "%s", dir);
@@ -1921,16 +2029,21 @@ bool LauncherSubmit(const DesignRequest *req, Image view, Image marked, char *ms
         snprintf(msg, msgSize, "launch failed: %s. Bundle kept: %s", err, dir);
         TraceLog(LOG_WARNING, "monolith: %s", msg);
         TraceLog(LOG_WARNING, "monolith: run it by hand: cd '%s' && claude --model %s \"%s\"", rootDir, B.model.name, B.prompt);
-        return false;
+        goto done;
     }
     snprintf(msg, msgSize, "request sent (%s): %s (Claude Code opens in a new terminal)", B.model.name, B.id);
-    return true;
+    result = true;
+done:
+#undef B
+    FreeBundle(Bp);
+    return result;
 }
 
 bool LauncherStartBundle(const char *id, const char *slug, const char *claudePrompt, const char *model, char *msg, int msgSize)
 {
     InitPaths();
     OpenRequest *q = NewSlot();
+    if (!q) { snprintf(msg, msgSize, "out of memory"); return false; }
     snprintf(q->id, sizeof(q->id), "%s", id);
     snprintf(q->slug, sizeof(q->slug), "%s", slug);
     snprintf(q->dir, sizeof(q->dir), "%s%s/", requestsDir, id);

@@ -9,7 +9,7 @@
 //                                  the file is format 1 (only the v1 statements marked [1]
 //                                  below; everything else uses the built-in defaults)
 //   group "name"               [1] following primitives (boxes, lights, models) belong to this
-//                                  group, until the next `group` (names: up to 63 chars, no '"')
+//                                  group, until the next `group` (names: any length, no '"')
 //
 // Primitives (meters; +Y is up; numbers are plain decimals, e.g. 12, -4.5, 0.75):
 //   box    x0 y0 z0 x1 y1 z1                    [1] two opposite corners, any order
@@ -46,7 +46,7 @@
 //                                     (inherit emission also keeps its colour and energy, inherit
 //                                     normal its scale); the override's colours and factors apply.
 //       collide aabb|none|box x0 y0 z0 x1 y1 z1 [box ...]   aabb (default): the world bounds
-//                                     block the player; none; or up to 8 boxes in model space
+//                                     block the player; none; or any number of boxes in model space
 //                                     (before scale/rotation), each turned into a world AABB
 //                                     (e.g. a tree's trunk only)
 //       shadow on|off                 casts the sun shadow (default on); always receives shadows
@@ -126,6 +126,9 @@
 //
 // Paths are relative to the package root (the folder of the map file). Absolute paths and
 // ".." components are rejected, so a package can be copied anywhere.
+// Limits: none on content (any number of objects, groups, materials, lights, viewpoints; lines
+// and names of any length). Sanity caps against runaway input: MS_MAX_OBJECTS (1000000 boxes +
+// models + lights; a `repeat` grid multiplying to more fails), MS_MAX_FILE_BYTES (4 MB file).
 // Every box remembers the map line of the statement that made it (boxRefs[]).
 // Errors are reported as "file:line: message" and the previous scene is kept.
 //
@@ -143,18 +146,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define MS_FILE_MAX         (4 * 1024 * 1024)
-#define MS_TOKENS_MAX       64
-#define MS_REPEATS_MAX      3
+#define MS_FILE_MAX         MS_MAX_FILE_BYTES
+#define MS_REPEATS_MAX      3       // `repeat` prefixes per line (the grammar: a 3D grid at most)
 #define MS_POLL_INTERVAL    0.5f
 // After an mtime change, keep re-reading for this long: GetFileModTime has 1 s resolution,
 // and editors that truncate + write (or rename) can leave an empty or partial file for a
 // moment, then finish within the same second (same mtime).
 #define MS_SETTLE_TIME      2.0f
-#define MS_MAX_DEPS         256     // files a scene depends on (map + shaders + textures + ...)
-#define MS_MAX_TEXTURES     256
-#define MAT_MAX_UNIFORMS    16
-#define MAT_MAX_SAMPLERS    4
 #define SUN_TILE_COUNT      2       // = the 2 layers R3D allocates for directional shadows anyway
 // --fog-cache without a region hint: at most this many voxels (bytes of VRAM)
 #define FOG_CACHE_BUDGET    (64.0 * 1024.0 * 1024.0)
@@ -169,19 +167,27 @@
 // #region Types
 // ======================================================================================
 
-typedef struct { char name[MS_NAME_MAX]; int count; float v[4]; } MatUniform;
-typedef struct { char name[MS_NAME_MAX]; char path[MS_PATH_MAX]; int line; } MatSampler;
+// Memory rule (docs/design-v2.md 2.7): everything sized by the map is a heap array grown with
+// MS_RESERVE / MS_PUSH and every name or path stored per element is a heap string; all of it
+// belongs to the SceneData of one load and is freed with it (FreeData). Fixed char arrays are
+// left only for one-off values bounded by the loader (EnvDef.skyPanorama: a package path,
+// <= MS_PATH_MAX), the last error message and stack scratch for formatting one path or message.
+// Allocation happens while parsing / uploading a load and in MS_Poll when a file changed;
+// drawing, picking and collision never allocate.
+
+typedef struct { char *name; int count; float v[4]; } MatUniform;
+typedef struct { char *name; char *path; int line; } MatSampler;
 
 enum { MAP_ALBEDO, MAP_NORMAL, MAP_ORM, MAP_EMISSION, MAP_COUNT };
 enum { INHERIT_ALBEDO = 1, INHERIT_NORMAL = 2, INHERIT_ORM = 4, INHERIT_EMISSION = 8 };
 
 // What a material line says beyond the plain R3D_Material values (files, uniforms)
 typedef struct {
-    char maps[MAP_COUNT][MS_PATH_MAX];  // package-relative, "" = none
-    MatUniform uniforms[MAT_MAX_UNIFORMS];
-    int uniformCount;
-    MatSampler samplers[MAT_MAX_SAMPLERS];
-    int samplerCount;
+    char *maps[MAP_COUNT];              // package-relative, NULL = none
+    MatUniform *uniforms;
+    int uniformCount, uniformCap;
+    MatSampler *samplers;
+    int samplerCount, samplerCap;
     unsigned inherit;                   // INHERIT_* (for model overrides)
     int shaderLine, mapLine[MAP_COUNT];  // map lines of the keys, for load errors
     int wrap;                           // texture wrapping: 0 repeat (default), 1 clamp, 2 mirror
@@ -213,7 +219,7 @@ typedef struct {
     BoundingBox fogRegion;
 } EnvDef;
 
-typedef struct { char path[MS_PATH_MAX]; bool isColor; int wrap; Texture2D tex; } TexEntry;
+typedef struct { char *path; bool isColor; int wrap; Texture2D tex; } TexEntry;
 
 // Picking data of a model file: a CPU copy of its triangles (model space) and a BVH over them
 typedef struct { Vector3 mn, mx; int left, first, count; } BvhNode;    // leaf: count > 0 (left = -1)
@@ -239,24 +245,25 @@ typedef struct {
 // One parsed (and possibly uploaded) map. A reload builds a new one and swaps it in.
 typedef struct {
     int formatVersion;
-    char path[MS_PATH_MAX], root[MS_PATH_MAX], brief[MS_PATH_MAX];
+    char *path, *root, *brief;          // brief: "" when the package has no MAP.md
     unsigned long long hash;            // FNV-1a 64 of the map file
     long mtime;
     char *text;                         // the map file, for MS_GetLine
     int textSize;
 
-    BoundingBox boxes[MS_MAX_BOXES];
-    MS_Ref boxRefs[MS_MAX_BOXES];
-    int boxCount;
-    char groups[MS_MAX_GROUPS][MS_NAME_MAX];
-    int groupCount;
-    MS_Material materials[MS_MAX_MATERIALS];
-    MatDef matDefs[MS_MAX_MATERIALS];
-    int materialCount;
-    MS_LightDef lights[MS_MAX_LIGHTS];
-    int lightCount;
-    MS_Viewpoint viewpoints[MS_MAX_VIEWPOINTS];
-    int viewpointCount;
+    // Heap arrays: count = used, cap = allocated (MS_RESERVE / MS_PUSH)
+    BoundingBox *boxes;
+    MS_Ref *boxRefs;
+    int boxCount, boxCap, boxRefCap;
+    char **groups;
+    int groupCount, groupCap;
+    MS_Material *materials;
+    MatDef *matDefs;                    // parallel to materials[]
+    int materialCount, materialCap, matDefCap;
+    MS_LightDef *lights;
+    int lightCount, lightCap;
+    MS_Viewpoint *viewpoints;
+    int viewpointCount, viewpointCap;
     bool hasSpawn;
     Vector3 spawnFeet;
     float spawnYawDeg, spawnPitchDeg;
@@ -266,33 +273,33 @@ typedef struct {
 
     // Models. While parsing, an instance's colliderFirst/Count is its range in localColliders
     // (collide box ...); ResolveModels turns it into its range in colliders[].
-    MS_ModelFile modelFiles[MS_MAX_MODEL_FILES];
-    ModelPick modelPick[MS_MAX_MODEL_FILES];
-    int modelFileCount;
-    MS_ModelInstance models[MS_MAX_MODELS];
-    int modelCount;
-    BoundingBox localColliders[MS_MAX_MODEL_COLLIDERS];     // model space
-    int localColliderCount;
+    MS_ModelFile *modelFiles;
+    ModelPick *modelPick;               // parallel to modelFiles[]
+    int modelFileCount, modelFileCap, modelPickCap;
+    MS_ModelInstance *models;
+    int modelCount, modelCap;
+    BoundingBox *localColliders;        // model space
+    int localColliderCount, localColliderCap;
     int modelColliderCount;             // world colliders the instances will need
-    MS_SlotMaterial modelSlots[MS_MAX_MODEL_SLOTS];
-    int modelSlotCount;
-    BoundingBox colliders[MS_MAX_BOXES + MS_MAX_MODEL_COLLIDERS];   // boxes, then model colliders
+    MS_SlotMaterial *modelSlots;
+    int modelSlotCount, modelSlotCap;
+    BoundingBox *colliders;             // boxes, then model colliders (only with models)
     int colliderCount;
 
-    char deps[MS_MAX_DEPS][MS_PATH_MAX];    // files it depends on; [0] = the map file
-    int depCount;
+    char **deps;                        // files it depends on; [0] = the map file
+    int depCount, depCap;
 
     // GPU (when uploaded)
     bool gpu;
-    R3D_InstanceBuffer inst[MS_MAX_MATERIALS];
-    int instCount[MS_MAX_MATERIALS];
-    TexEntry textures[MS_MAX_TEXTURES];
-    int textureCount;
+    R3D_InstanceBuffer *inst;           // per material (materialCount)
+    int *instCount;
+    TexEntry *textures;
+    int textureCount, textureCap;
     R3D_Cubemap sky;
     R3D_AmbientMap ambientMap;
-    R3D_ShadowMap lightShadow[MS_MAX_LIGHTS];
-    bool lightShadowDrawn[MS_MAX_LIGHTS];
-    ModelGroup *modelGroups;            // malloc'd
+    R3D_ShadowMap *lightShadow;         // per light (lightCount)
+    bool *lightShadowDrawn;
+    ModelGroup *modelGroups;
     int modelGroupCount;
 } SceneData;
 
@@ -330,9 +337,9 @@ struct MS_Private {
 
     // Hot reload: the files of the last load attempt and their mtimes, the combined hash
     // of the last attempt's contents
-    char watch[MS_MAX_DEPS][MS_PATH_MAX];
-    long watchMtime[MS_MAX_DEPS];
-    int watchCount;
+    char **watch;
+    long *watchMtime;
+    int watchCount, watchCap, watchMtimeCap;
     float pollTimer, settleTime;
     unsigned long long triedHash;
 
@@ -351,8 +358,40 @@ struct MS_Private {
 // #endregion
 
 // ======================================================================================
-// #region Small helpers: hashing, files, paths
+// #region Small helpers: growable arrays, strings, hashing, files, paths
 // ======================================================================================
+
+bool MS_ArrayReserve(void *arrayPtr, int *cap, int need, size_t elemSize)
+{
+    if (need <= *cap) return true;
+    if (need < 0 || elemSize == 0) return false;
+    long long n = *cap > 0 ? *cap : 16;
+    while (n < need) n *= 2;
+    if (n > 0x7fffffff) n = 0x7fffffff;
+    if ((unsigned long long)n > (unsigned long long)SIZE_MAX / elemSize) return false;
+    void *old;
+    memcpy(&old, arrayPtr, sizeof(old));        // (the T * as a void *, without type punning)
+    void *p = realloc(old, (size_t)n * elemSize);
+    if (!p) return false;
+    memset((char *)p + (size_t)*cap * elemSize, 0, (size_t)(n - *cap) * elemSize);
+    memcpy(arrayPtr, &p, sizeof(p));
+    *cap = (int)n;
+    return true;
+}
+
+char *MS_StrNDup(const char *s, size_t n)
+{
+    char *d = malloc(n + 1);
+    if (!d) return NULL;
+    memcpy(d, s, n);
+    d[n] = '\0';
+    return d;
+}
+
+char *MS_StrDup(const char *s)
+{
+    return MS_StrNDup(s, strlen(s));
+}
 
 static unsigned long long Fnv1a64Update(unsigned long long h, const void *data, size_t size)
 {
@@ -388,7 +427,7 @@ static char *ReadWholeFile(const char *path, int *size, char *err, int errSize)
 }
 
 // Map text + the bytes of every other watched file: changes when any file of the package does
-static unsigned long long CombinedHash(const char *text, int size, char (*files)[MS_PATH_MAX], int count)
+static unsigned long long CombinedHash(const char *text, int size, char *const *files, int count)
 {
     unsigned long long h = Fnv1a64Update(FNV_OFFSET, text, (size_t)size);
     for (int i = 1; i < count; i++) {
@@ -763,7 +802,12 @@ typedef struct {
     MS_Ref cur;                 // stamped on every object (line, statement, group, material)
     int prim;                   // statement counter
     bool badNumber;             // the last failed Box() overflowed float, rather than the scene being full
+    bool outOfMemory;           // the last failed Box() could not grow the arrays
     bool sawStatement;          // the version line must come first
+    char *lineBuf;              // the current line (tokenized in place), grown to the longest line
+    int lineCap;
+    Token *tok;                 // its tokens, grown to the most words on a line
+    int tokCap;
 } Parser;
 
 static bool Fail(Parser *P, const char *fmt, const char *arg)
@@ -821,16 +865,17 @@ static bool IsNumber(Token t)
     return end != t.s && *end == '\0';
 }
 
-// Splits a line into whitespace-separated tokens, in place. "..." is one token (no
-// escapes); '#' outside quotes ends the line.
-static bool Tokenize(Parser *P, char *line, Token *tok, int *count)
+// Splits a line into whitespace-separated tokens (into P->tok), in place. "..." is one
+// token (no escapes); '#' outside quotes ends the line.
+static bool Tokenize(Parser *P, char *line, int *count)
 {
     int n = 0;
     char *p = line;
     for (;;) {
         while (*p == ' ' || *p == '\t') p++;
         if (*p == '\0' || *p == '#') break;
-        if (n == MS_TOKENS_MAX) return Fail(P, "too many words on one line", NULL);
+        if (!MS_RESERVE(P->tok, P->tokCap, n + 1)) return Fail(P, "out of memory", NULL);
+        Token *tok = P->tok;
         if (*p == '"') {
             char *close = strchr(p + 1, '"');
             if (!close) return Fail(P, "unterminated string", NULL);
@@ -856,8 +901,17 @@ static bool AddDep(Parser *P, const char *full)
     SceneData *d = P->d;
     for (int i = 0; i < d->depCount; i++)
         if (strcmp(d->deps[i], full) == 0) return true;
-    if (d->depCount >= MS_MAX_DEPS) return Fail(P, "too many files (max %s)", "256");
-    snprintf(d->deps[d->depCount++], MS_PATH_MAX, "%s", full);
+    char *copy = MS_StrDup(full);
+    char **slot = copy ? MS_PUSH(d->deps, d->depCount, d->depCap) : NULL;
+    if (!slot) { free(copy); return Fail(P, "out of memory", NULL); }
+    *slot = copy;
+    return true;
+}
+
+// A heap copy of s for the scene (names, paths); "out of memory" on failure
+static bool Dup(Parser *P, const char *s, char **out)
+{
+    if (!(*out = MS_StrDup(s))) return Fail(P, "out of memory", NULL);
     return true;
 }
 
@@ -882,7 +936,8 @@ static bool PackagePath(Parser *P, Token t, char *full, int fullSize)
     return true;
 }
 
-static bool Name(Parser *P, Token *tok, int n, const char *what, char *out)
+// The name token of a `group` / `material` / `use` / `viewpoint` line (points into the line)
+static bool Name(Parser *P, Token *tok, int n, const char *what, const char **out)
 {
     if (n < 2 || !tok[1].quoted) {
         char m[160];
@@ -890,8 +945,7 @@ static bool Name(Parser *P, Token *tok, int n, const char *what, char *out)
         return Fail(P, "%s", m);
     }
     if (tok[1].s[0] == '\0') return Fail(P, "empty name", NULL);
-    if (strlen(tok[1].s) >= MS_NAME_MAX) return Fail(P, "name too long (max 63 characters)", NULL);
-    snprintf(out, MS_NAME_MAX, "%s", tok[1].s);
+    *out = tok[1].s;
     return true;
 }
 
@@ -991,7 +1045,7 @@ static bool ParseValue(Parser *P, int type, Token *v, int nv, void *dst)
 static bool Box(Parser *P, float x0, float y0, float z0, float x1, float y1, float z1)
 {
     SceneData *d = P->d;
-    if (d->boxCount >= MS_MAX_BOXES) return false;
+    if (d->boxCount + d->modelCount + d->lightCount >= MS_MAX_OBJECTS) return false;
     BoundingBox b = {
         { fminf(x0, x1), fminf(y0, y1), fminf(z0, z1) },
         { fmaxf(x0, x1), fmaxf(y0, y1), fmaxf(z0, z1) },
@@ -1002,6 +1056,10 @@ static bool Box(Parser *P, float x0, float y0, float z0, float x1, float y1, flo
         !isfinite(b.max.x) || !isfinite(b.max.y) || !isfinite(b.max.z) ||
         !isfinite(b.max.x - b.min.x) || !isfinite(b.max.y - b.min.y) || !isfinite(b.max.z - b.min.z)) {
         P->badNumber = true;
+        return false;
+    }
+    if (!MS_RESERVE(d->boxes, d->boxCap, d->boxCount + 1) || !MS_RESERVE(d->boxRefs, d->boxRefCap, d->boxCount + 1)) {
+        P->outOfMemory = true;
         return false;
     }
     d->boxes[d->boxCount] = b;
@@ -1027,7 +1085,7 @@ static bool Stairs(Parser *P, float cx, float baseY, float startZ, float width, 
 
 // Facade with a grid of deep window recesses ("waffle" facade): a back wall plus vertical
 // fins and horizontal ledges in front of it. Every loop iteration adds a box, so
-// MS_MAX_BOXES bounds the loops even for silly input.
+// MS_MAX_OBJECTS bounds the loops even for silly input.
 static bool WaffleFacade(Parser *P, float x0, float x1, float y0, float y1, float z, float depth, float bayW, float floorH)
 {
     if (!Box(P, x0, y0, z - 1.0f, x1, y1, z)) return false;                // back wall
@@ -1072,12 +1130,12 @@ static bool ParsePlacement(Parser *P, Token *tok, int n, int *tIn, Placement *pl
         if (strcmp(tok[t].s, "repeat") == 0 && !tok[t].quoted) {
             if (pl->reps == MS_REPEATS_MAX) return Fail(P, "at most 3 repeats per line", NULL);
             if (t + 4 >= n) return Fail(P, "repeat takes 4 numbers: repeat n dx dy dz", NULL);
-            if (!NumI(P, tok[t + 1], 0, MS_MAX_BOXES, &pl->repN[pl->reps])) return false;
+            if (!NumI(P, tok[t + 1], 0, MS_MAX_OBJECTS, &pl->repN[pl->reps])) return false;
             for (int a = 0; a < 3; a++)
                 if (!NumF(P, tok[t + 2 + a], &pl->repD[pl->reps][a])) return false;
             total *= pl->repN[pl->reps] > 0 ? pl->repN[pl->reps] : 1;
             // Bounds the work even for primitives that make no boxes (stairs with 0 steps)
-            if (total > MS_MAX_BOXES) return Fail(P, "too many copies (max 8192 boxes)", NULL);
+            if (total > MS_MAX_OBJECTS) return Fail(P, "too many copies (a map makes at most 1000000 objects)", NULL);
             pl->reps++;
             t += 5;
         } else if (strcmp(tok[t].s, "at") == 0 && !tok[t].quoted) {
@@ -1113,7 +1171,7 @@ static bool ParsePrimitive(Parser *P, const PrimDef *def, Token *args, int argc,
     int steps = 0;
     for (int a = 0; a < argc; a++) {
         if (def->kind[a] == AX_INT) {
-            if (!NumI(P, args[a], 0, MS_MAX_BOXES, &steps)) return false;
+            if (!NumI(P, args[a], 0, MS_MAX_OBJECTS, &steps)) return false;
             v[a] = 0.0f;
         } else if (!NumF(P, args[a], &v[a])) return false;
     }
@@ -1142,7 +1200,8 @@ static bool ParsePrimitive(Parser *P, const PrimDef *def, Token *args, int argc,
             default: ok = (def == &PRIMS[0]) ? Box(P, p[0], p[1], p[2], p[3], p[4], p[5])
                                              : Block(P, p[0], p[1], p[2], p[3], p[4], p[5]); break;
         }
-        if (!ok) return Fail(P, P->badNumber ? "coordinate or size out of range" : "too many boxes (max 8192)", NULL);
+        if (!ok) return Fail(P, P->badNumber ? "coordinate or size out of range" : P->outOfMemory ? "out of memory"
+                                : "too many objects (a map makes at most 1000000 boxes, models and lights)", NULL);
     }
     return true;
 }
@@ -1210,13 +1269,16 @@ static bool ParseLight(Parser *P, Token *args, int n, const Placement *pl)
     for (int i1 = 0; i1 < cnt[1]; i1++)
     for (int i2 = 0; i2 < cnt[2]; i2++) {
         SceneData *d = P->d;
-        if (d->lightCount >= MS_MAX_LIGHTS) return Fail(P, "too many lights (max 64)", NULL);
+        if (d->boxCount + d->modelCount + d->lightCount >= MS_MAX_OBJECTS)
+            return Fail(P, "too many objects (a map makes at most 1000000 boxes, models and lights)", NULL);
         int idx[MS_REPEATS_MAX] = { i0, i1, i2 };
         float off[3];
         CopyOffset(pl, idx, off);
         R3D_Light c = L;
         if (shifted && nPos) c.position = (Vector3){ off[0] + pos.x, off[1] + pos.y, off[2] + pos.z };
-        d->lights[d->lightCount++] = (MS_LightDef){ c, shadow, P->cur };
+        MS_LightDef *slot = MS_PUSH(d->lights, d->lightCount, d->lightCap);
+        if (!slot) return Fail(P, "out of memory", NULL);
+        *slot = (MS_LightDef){ c, shadow, P->cur };
     }
     return true;
 }
@@ -1228,34 +1290,39 @@ static int FindMaterial(const SceneData *d, const char *name)
     return -1;
 }
 
-// The built-in "default" material (docs/design-v2.md 2.2)
-static void DefaultMaterial(SceneData *d)
+// A new material `name` with R3D's defaults: its index, or -1 when out of memory
+static int AddMaterial(SceneData *d, const char *name)
 {
+    char *copy = MS_StrDup(name);
+    if (!copy || !MS_RESERVE(d->matDefs, d->matDefCap, d->materialCount + 1) ||
+        !MS_RESERVE(d->materials, d->materialCap, d->materialCount + 1)) {
+        free(copy);
+        return -1;
+    }
+    int mi = d->materialCount++;
+    d->materials[mi] = (MS_Material){ .name = copy, .material = R3D_MATERIAL_BASE };
+    d->matDefs[mi] = (MatDef){ 0 };
+    return mi;
+}
+
+// The built-in "default" material (docs/design-v2.md 2.2)
+static bool DefaultMaterial(SceneData *d)
+{
+    if (AddMaterial(d, "default") != 0) return false;
     MS_Material *m = &d->materials[0];
-    memset(m, 0, sizeof(*m));
-    memset(&d->matDefs[0], 0, sizeof(d->matDefs[0]));
-    snprintf(m->name, sizeof(m->name), "default");
-    m->material = R3D_MATERIAL_BASE;
     m->material.albedo.color = (Color){ 180, 180, 180, 255 };
     m->material.orm.roughness = 0.9f;
     m->material.orm.metalness = 0.0f;
-    d->materialCount = 1;
+    return true;
 }
 
 static bool ParseMaterial(Parser *P, Token *tok, int n)
 {
     SceneData *d = P->d;
-    char name[MS_NAME_MAX];
-    if (!Name(P, tok, n, "material", name)) return false;
+    const char *name;
+    if (!Name(P, tok, n, "material", &name)) return false;
     int mi = FindMaterial(d, name);
-    if (mi < 0) {
-        if (d->materialCount >= MS_MAX_MATERIALS) return Fail(P, "too many materials (max 64)", NULL);
-        mi = d->materialCount++;
-        memset(&d->materials[mi], 0, sizeof(d->materials[mi]));
-        memset(&d->matDefs[mi], 0, sizeof(d->matDefs[mi]));
-        snprintf(d->materials[mi].name, MS_NAME_MAX, "%s", name);
-        d->materials[mi].material = R3D_MATERIAL_BASE;
-    }
+    if (mi < 0 && (mi = AddMaterial(d, name)) < 0) return Fail(P, "out of memory", NULL);
     MS_Material *M = &d->materials[mi];
     MatDef *D = &d->matDefs[mi];
     R3D_Material *m = &M->material;
@@ -1275,39 +1342,41 @@ static bool ParseMaterial(Parser *P, Token *tok, int n)
         if (strcmp(k, "shader") == 0) {
             ONE_WORD();
             if (!PackagePath(P, v[0], full, sizeof(full))) return false;
-            snprintf(M->shader, sizeof(M->shader), "%s", v[0].s);
+            char *copy;
+            if (!Dup(P, v[0].s, &copy)) return false;
+            free((char *)M->shader);
+            M->shader = copy;
             D->shaderLine = P->line;
         } else if (strcmp(k, "uniform") == 0) {
             if (t + 1 >= n || v[0].quoted) return Fail(P, "uniform takes a name and 1-4 numbers: uniform u_name 1.0", NULL);
             nv = 0;
             while (t + 2 + nv < n && IsNumber(tok[t + 2 + nv])) nv++;
             if (nv < 1 || nv > 4) return Fail(P, "uniform '%s' takes 1 to 4 numbers", v[0].s);
-            if (strlen(v[0].s) >= MS_NAME_MAX) return Fail(P, "uniform name too long", NULL);
             MatUniform *u = NULL;
             for (int i = 0; i < D->uniformCount; i++)
                 if (strcmp(D->uniforms[i].name, v[0].s) == 0) u = &D->uniforms[i];
             if (!u) {
-                if (D->uniformCount >= MAT_MAX_UNIFORMS) return Fail(P, "too many uniforms (max 16 per material)", NULL);
-                u = &D->uniforms[D->uniformCount++];
+                if (!(u = MS_PUSH(D->uniforms, D->uniformCount, D->uniformCap))) return Fail(P, "out of memory", NULL);
+                if (!Dup(P, v[0].s, &u->name)) { D->uniformCount--; return false; }
             }
-            snprintf(u->name, sizeof(u->name), "%s", v[0].s);
             u->count = nv;
             for (int i = 0; i < nv; i++)
                 if (!NumF(P, tok[t + 2 + i], &u->v[i])) return false;
             used = 1 + nv;
         } else if (strcmp(k, "sampler") == 0) {
             if (t + 2 >= n || v[0].quoted) return Fail(P, "sampler takes a name and a path: sampler u_tex \"textures/x.png\"", NULL);
-            if (strlen(v[0].s) >= MS_NAME_MAX) return Fail(P, "sampler name too long", NULL);
             if (!PackagePath(P, v[1], full, sizeof(full))) return false;
             MatSampler *s = NULL;
             for (int i = 0; i < D->samplerCount; i++)
                 if (strcmp(D->samplers[i].name, v[0].s) == 0) s = &D->samplers[i];
             if (!s) {
-                if (D->samplerCount >= MAT_MAX_SAMPLERS) return Fail(P, "too many samplers (max 4 per material)", NULL);
-                s = &D->samplers[D->samplerCount++];
+                if (!(s = MS_PUSH(D->samplers, D->samplerCount, D->samplerCap))) return Fail(P, "out of memory", NULL);
+                if (!Dup(P, v[0].s, &s->name)) { D->samplerCount--; return false; }
             }
-            snprintf(s->name, sizeof(s->name), "%s", v[0].s);
-            snprintf(s->path, sizeof(s->path), "%s", v[1].s);
+            char *copy;
+            if (!Dup(P, v[1].s, &copy)) return false;
+            free(s->path);
+            s->path = copy;
             s->line = P->line;
             used = 2;
         } else if (strcmp(k, "albedo") == 0) {
@@ -1320,7 +1389,10 @@ static bool ParseMaterial(Parser *P, Token *tok, int n)
             ONE_WORD();
             if (!PackagePath(P, v[0], full, sizeof(full))) return false;
             int slot = k[0] == 'a' ? MAP_ALBEDO : k[0] == 'n' ? MAP_NORMAL : k[0] == 'o' ? MAP_ORM : MAP_EMISSION;
-            snprintf(D->maps[slot], MS_PATH_MAX, "%s", v[0].s);
+            char *copy;
+            if (!Dup(P, v[0].s, &copy)) return false;
+            free(D->maps[slot]);
+            D->maps[slot] = copy;
             D->mapLine[slot] = P->line;
         } else if (strcmp(k, "uv_scale") == 0 || strcmp(k, "uv_offset") == 0) {
             NEED(2);
@@ -1635,11 +1707,17 @@ static bool ParseModel(Parser *P, Token *args, int n, const Placement *pl)
     for (int i = 0; i < d->modelFileCount; i++)
         if (strcmp(d->modelFiles[i].path, args[0].s) == 0) file = i;
     if (file < 0) {
-        if (d->modelFileCount >= MS_MAX_MODEL_FILES) return Fail(P, "too many model files (max 64)", NULL);
         if (!ModelDeps(P, args[0].s, full)) return false;
+        char *copy;
+        if (!Dup(P, args[0].s, &copy)) return false;
+        if (!MS_RESERVE(d->modelPick, d->modelPickCap, d->modelFileCount + 1) ||
+            !MS_RESERVE(d->modelFiles, d->modelFileCap, d->modelFileCount + 1)) {
+            free(copy);
+            return Fail(P, "out of memory", NULL);
+        }
         file = d->modelFileCount++;
         MS_ModelFile *F = &d->modelFiles[file];
-        snprintf(F->path, sizeof(F->path), "%s", args[0].s);
+        F->path = copy;
         F->line = P->line;
     }
     float pos[3];
@@ -1684,9 +1762,10 @@ static bool ParseModel(Parser *P, Token *args, int n, const Placement *pl)
             if (k[8] == '\0') M.ref.material = mi;
             else {
                 int slot;
-                if (!ParseInt(P, k + 9, 0, 255, &slot)) return false;
-                if (d->modelSlotCount >= MS_MAX_MODEL_SLOTS) return Fail(P, "too many material.N overrides (max 16384)", NULL);
-                d->modelSlots[d->modelSlotCount++] = (MS_SlotMaterial){ slot, mi };
+                if (!ParseInt(P, k + 9, 0, MS_MAX_OBJECTS, &slot)) return false;
+                MS_SlotMaterial *sm = MS_PUSH(d->modelSlots, d->modelSlotCount, d->modelSlotCap);
+                if (!sm) return Fail(P, "out of memory", NULL);
+                *sm = (MS_SlotMaterial){ slot, mi };
             }
             used = 1;
         } else if (strcmp(k, "collide") == 0) {
@@ -1703,10 +1782,9 @@ static bool ParseModel(Parser *P, Token *args, int n, const Placement *pl)
                         if (t + 2 + used + i >= n) return Fail(P, "collide box takes 6 numbers: box x0 y0 z0 x1 y1 z1", NULL);
                         if (!NumF(P, v[used + 1 + i], &b[i])) return false;
                     }
-                    if (d->localColliderCount - M.colliderFirst >= MS_MAX_COLLIDE_BOXES)
-                        return Fail(P, "too many collide boxes (max 8 per model line)", NULL);
-                    if (d->localColliderCount >= MS_MAX_MODEL_COLLIDERS) return Fail(P, "too many model collision boxes (max 16384)", NULL);
-                    d->localColliders[d->localColliderCount++] = (BoundingBox){
+                    BoundingBox *lc = MS_PUSH(d->localColliders, d->localColliderCount, d->localColliderCap);
+                    if (!lc) return Fail(P, "out of memory", NULL);
+                    *lc = (BoundingBox){
                         { fminf(b[0], b[3]), fminf(b[1], b[4]), fminf(b[2], b[5]) },
                         { fmaxf(b[0], b[3]), fmaxf(b[1], b[4]), fmaxf(b[2], b[5]) } };
                     used += 7;
@@ -1725,8 +1803,9 @@ static bool ParseModel(Parser *P, Token *args, int n, const Placement *pl)
     for (int i0 = 0; i0 < cnt[0]; i0++)
     for (int i1 = 0; i1 < cnt[1]; i1++)
     for (int i2 = 0; i2 < cnt[2]; i2++) {
-        if (d->modelCount >= MS_MAX_MODELS) return Fail(P, "too many model instances (max 4096)", NULL);
-        if (d->modelColliderCount + perCopy > MS_MAX_MODEL_COLLIDERS) return Fail(P, "too many model collision boxes (max 16384)", NULL);
+        if (d->boxCount + d->modelCount + d->lightCount >= MS_MAX_OBJECTS)
+            return Fail(P, "too many objects (a map makes at most 1000000 boxes, models and lights)", NULL);
+        if (d->modelColliderCount + perCopy > MS_MAX_OBJECTS) return Fail(P, "too many model collision boxes (max 1000000)", NULL);
         int idx[MS_REPEATS_MAX] = { i0, i1, i2 };
         float off[3];
         CopyOffset(pl, idx, off);
@@ -1734,7 +1813,9 @@ static bool ParseModel(Parser *P, Token *args, int n, const Placement *pl)
         c.position = shifted ? (Vector3){ off[0] + pos[0], off[1] + pos[1], off[2] + pos[2] } : (Vector3){ pos[0], pos[1], pos[2] };
         if (!isfinite(c.position.x) || !isfinite(c.position.y) || !isfinite(c.position.z))
             return Fail(P, "coordinate out of range", NULL);
-        d->models[d->modelCount++] = c;
+        MS_ModelInstance *slot = MS_PUSH(d->models, d->modelCount, d->modelCap);
+        if (!slot) return Fail(P, "out of memory", NULL);
+        *slot = c;
         d->modelColliderCount += perCopy;
     }
     return true;
@@ -1764,13 +1845,16 @@ static bool ParseStatement(Parser *P, Token *tok, int n)
     P->sawStatement = true;
 
     if (strcmp(kw, "group") == 0) {
-        char name[MS_NAME_MAX];
+        const char *name;
         if (n != 2) return Fail(P, "group takes one name in double quotes: group \"name\"", NULL);
         if (!tok[1].quoted) return Fail(P, "group name must be in double quotes: group \"%s\"", tok[1].s);
-        if (!Name(P, tok, n, "group", name)) return false;
-        if (d->groupCount >= MS_MAX_GROUPS) return Fail(P, "too many groups (max 256)", NULL);
-        snprintf(d->groups[d->groupCount], MS_NAME_MAX, "%s", name);
-        P->cur.group = d->groupCount++;
+        if (!Name(P, tok, n, "group", &name)) return false;
+        char *copy;
+        if (!Dup(P, name, &copy)) return false;
+        char **slot = MS_PUSH(d->groups, d->groupCount, d->groupCap);
+        if (!slot) { free(copy); return Fail(P, "out of memory", NULL); }
+        *slot = copy;
+        P->cur.group = d->groupCount - 1;
         return true;
     }
 
@@ -1781,9 +1865,9 @@ static bool ParseStatement(Parser *P, Token *tok, int n)
 
     if (strcmp(kw, "material") == 0) return ParseMaterial(P, tok, n);
     if (strcmp(kw, "use") == 0) {
-        char name[MS_NAME_MAX];
+        const char *name;
         if (n != 2) return Fail(P, "use takes one material name: use \"name\"", NULL);
-        if (!Name(P, tok, n, "use", name)) return false;
+        if (!Name(P, tok, n, "use", &name)) return false;
         int mi = FindMaterial(d, name);
         if (mi < 0) return Fail(P, "unknown material \"%s\" (define it with 'material' before using it)", name);
         P->cur.material = mi;
@@ -1803,16 +1887,21 @@ static bool ParseStatement(Parser *P, Token *tok, int n)
     }
     if (strcmp(kw, "viewpoint") == 0) {
         MS_Viewpoint vp = { 0 };
+        const char *name;
         if (n != 8) return Fail(P, "viewpoint takes a name and 6 numbers: viewpoint \"Name\" ex ey ez tx ty tz", NULL);
-        if (!Name(P, tok, n, "viewpoint", vp.name)) return false;
+        if (!Name(P, tok, n, "viewpoint", &name)) return false;
         float v[6];
         for (int i = 0; i < 6; i++)
             if (!NumF(P, tok[2 + i], &v[i])) return false;
         vp.eye = (Vector3){ v[0], v[1], v[2] };
         vp.target = (Vector3){ v[3], v[4], v[5] };
         if (Vector3Equals(vp.eye, vp.target)) return Fail(P, "viewpoint eye and target must differ", NULL);
-        if (d->viewpointCount >= MS_MAX_VIEWPOINTS) return Fail(P, "too many viewpoints (max 32)", NULL);
-        d->viewpoints[d->viewpointCount++] = vp;
+        char *copy;
+        if (!Dup(P, name, &copy)) return false;
+        vp.name = copy;
+        MS_Viewpoint *slot = MS_PUSH(d->viewpoints, d->viewpointCount, d->viewpointCap);
+        if (!slot) { free(copy); return Fail(P, "out of memory", NULL); }
+        *slot = vp;
         return true;
     }
 
@@ -1842,8 +1931,6 @@ static bool ParseStatement(Parser *P, Token *tok, int n)
 static bool ParseText(Parser *P, const char *text, int size)
 {
     int lineNo = 0, pos = 0;
-    char line[MS_LINE_MAX + 2];
-    Token tok[MS_TOKENS_MAX];
     P->cur = (MS_Ref){ 0, -1, -1, 0 };
     while (pos < size) {
         int start = pos;
@@ -1852,7 +1939,8 @@ static bool ParseText(Parser *P, const char *text, int size)
         pos++;                              // skip '\n'
         P->line = ++lineNo;
         if (len > 0 && text[start + len - 1] == '\r') len--;
-        if (len > MS_LINE_MAX) return Fail(P, "line too long (max 1024 characters)", NULL);
+        if (!MS_RESERVE(P->lineBuf, P->lineCap, len + 1)) return Fail(P, "out of memory", NULL);
+        char *line = P->lineBuf;
         memcpy(line, text + start, len);
         line[len] = '\0';
         if ((int)strlen(line) != len) return Fail(P, "unexpected NUL byte", NULL);
@@ -1860,10 +1948,10 @@ static bool ParseText(Parser *P, const char *text, int size)
             if ((unsigned char)line[i] < 32 && line[i] != '\t') return Fail(P, "unexpected control character", NULL);
 
         int n;
-        if (!Tokenize(P, line, tok, &n)) return false;
+        if (!Tokenize(P, line, &n)) return false;
         if (n == 0) continue;
         P->cur.line = lineNo;
-        if (!ParseStatement(P, tok, n)) return false;
+        if (!ParseStatement(P, P->tok, n)) return false;
     }
     P->line = 0;
     if (P->d->boxCount == 0 && P->d->modelCount == 0)
@@ -2300,7 +2388,7 @@ static bool SunShadowNeedsUpdate(SunShadowCache *c, Vector3 sunDir, float range,
 // #region Parse + upload (GPU) + swap
 // ======================================================================================
 
-static void FinishParse(SceneData *d, const MS_LoadOptions *opt)
+static bool FinishParse(SceneData *d, const MS_LoadOptions *opt)
 {
     SunDef *sun = &d->env.sun;
     if (opt->shadowSizeOverride > 0) sun->shadowSize = opt->shadowSizeOverride;
@@ -2318,11 +2406,14 @@ static void FinishParse(SceneData *d, const MS_LoadOptions *opt)
     }
     if (d->viewpointCount == 0) {
         double yaw = d->spawnYawDeg * (3.14159265358979323846 / 180.0), pitch = d->spawnPitchDeg * (3.14159265358979323846 / 180.0);
-        MS_Viewpoint *v = &d->viewpoints[d->viewpointCount++];
-        snprintf(v->name, sizeof(v->name), "Spawn");
+        char *name = MS_StrDup("Spawn");
+        MS_Viewpoint *v = name ? MS_PUSH(d->viewpoints, d->viewpointCount, d->viewpointCap) : NULL;
+        if (!v) { free(name); return false; }
+        v->name = name;
         v->eye = (Vector3){ d->spawnFeet.x, d->spawnFeet.y + MS_DEFAULT_EYE_HEIGHT, d->spawnFeet.z };
         v->target = Vector3Add(v->eye, (Vector3){ (float)(cos(pitch) * sin(yaw)), (float)sin(pitch), (float)(cos(pitch) * cos(yaw)) });
     }
+    return true;
 }
 
 // Scene bounds (boxes, models, point/spot lights) and the collider list; after ResolveModels
@@ -2348,20 +2439,30 @@ static void FinishGeometry(SceneData *d)
 static bool ParseScene(SceneData *d, const char *mapPath, const char *text, int size, const MS_LoadOptions *opt,
                        char *err, int errSize)
 {
-    snprintf(d->path, sizeof(d->path), "%s", mapPath);
-    RootOf(mapPath, d->root, sizeof(d->root));
-    if (snprintf(d->brief, sizeof(d->brief), "%sMAP.md", d->root) >= (int)sizeof(d->brief) || !FileExists(d->brief))
-        d->brief[0] = '\0';
+    char root[MS_PATH_MAX + 2], brief[MS_PATH_MAX + 16];
+    RootOf(mapPath, root, sizeof(root));
+    snprintf(brief, sizeof(brief), "%sMAP.md", root);
+    d->path = MS_StrDup(mapPath);
+    d->root = MS_StrDup(root);
+    d->brief = MS_StrDup(FileExists(brief) ? brief : "");
+    char **dep0 = MS_PUSH(d->deps, d->depCount, d->depCap);
+    if (dep0) *dep0 = MS_StrDup(mapPath);
     d->formatVersion = 1;
-    snprintf(d->deps[0], MS_PATH_MAX, "%s", mapPath);
-    d->depCount = 1;
     BuiltinEnvironment(&d->env);
-    DefaultMaterial(d);
+    if (!d->path || !d->root || !d->brief || !dep0 || !*dep0 || !DefaultMaterial(d)) {
+        snprintf(err, errSize, "%s: out of memory", mapPath);
+        return false;
+    }
 
     Parser P = { .d = d, .path = mapPath, .err = err, .errSize = errSize };
-    if (!ParseText(&P, text, size)) return false;
-    FinishParse(d, opt);
-    return true;
+    bool ok = ParseText(&P, text, size);
+    free(P.lineBuf);
+    free(P.tok);
+    if (ok && !FinishParse(d, opt)) {
+        snprintf(err, errSize, "%s: out of memory", mapPath);
+        ok = false;
+    }
+    return ok;
 }
 
 static Texture2D GetTexture(SceneData *d, const char *rel, bool isColor, int wrap, int line, char *err, int errSize)
@@ -2370,8 +2471,10 @@ static Texture2D GetTexture(SceneData *d, const char *rel, bool isColor, int wra
     snprintf(full, sizeof(full), "%s%s", d->root, rel);
     for (int i = 0; i < d->textureCount; i++)
         if (strcmp(d->textures[i].path, full) == 0 && d->textures[i].isColor == isColor && d->textures[i].wrap == wrap) return d->textures[i].tex;
-    if (d->textureCount >= MS_MAX_TEXTURES) {
-        snprintf(err, errSize, "%s:%d: too many textures (max 256)", d->path, line);
+    char *path = MS_StrDup(full);
+    if (!path || !MS_RESERVE(d->textures, d->textureCap, d->textureCount + 1)) {
+        free(path);
+        snprintf(err, errSize, "%s:%d: out of memory", d->path, line);
         return (Texture2D){ 0 };
     }
     // R3D's default wrap is clamp, which would make uv_scale > 1 useless; map materials repeat
@@ -2379,11 +2482,12 @@ static Texture2D GetTexture(SceneData *d, const char *rel, bool isColor, int wra
     static const TextureWrap WRAPS[] = { TEXTURE_WRAP_REPEAT, TEXTURE_WRAP_CLAMP, TEXTURE_WRAP_MIRROR_REPEAT };
     Texture2D tex = R3D_LoadTextureEx(full, WRAPS[wrap % 3], TEXTURE_FILTER_TRILINEAR, isColor);
     if (tex.id == 0) {
+        free(path);
         snprintf(err, errSize, "%s:%d: cannot load the texture \"%s\"", d->path, line, rel);
         return tex;
     }
     TexEntry *e = &d->textures[d->textureCount++];
-    if (snprintf(e->path, sizeof(e->path), "%s", full) >= (int)sizeof(e->path)) e->path[0] = '\0';   // (not shared then)
+    e->path = path;
     e->isColor = isColor;
     e->wrap = wrap;
     e->tex = tex;
@@ -2531,10 +2635,17 @@ static BoundingBox TransformBox(BoundingBox b, Matrix m)
 
 // Transforms, world bounds and colliders of every instance (file bounds: zero box when the
 // files were not loaded); then the collider list (boxes first)
-static void ResolveModels(SceneData *d)
+static bool ResolveModels(SceneData *d, char *err, int errSize)
 {
     int nc = d->boxCount;
-    if (d->modelCount > 0) memcpy(d->colliders, d->boxes, sizeof(BoundingBox) * d->boxCount);
+    if (d->modelCount > 0) {
+        d->colliders = malloc(sizeof(BoundingBox) * ((size_t)d->boxCount + (size_t)d->modelColliderCount));
+        if (!d->colliders) {
+            snprintf(err, errSize, "%s: out of memory", d->path);
+            return false;
+        }
+        memcpy(d->colliders, d->boxes, sizeof(BoundingBox) * d->boxCount);
+    }
     for (int i = 0; i < d->modelCount; i++) {
         MS_ModelInstance *M = &d->models[i];
         const MS_ModelFile *F = &d->modelFiles[M->file];
@@ -2566,6 +2677,7 @@ static void ResolveModels(SceneData *d)
         M->colliderCount = nc - M->colliderFirst;
     }
     d->colliderCount = nc;
+    return true;
 }
 
 static void FreeModelGroups(SceneData *d)
@@ -2596,9 +2708,12 @@ static int SlotMaterial(const SceneData *d, const MS_ModelInstance *M, int s)
 static bool BuildModelGroups(SceneData *d, char *err, int errSize)
 {
     if (d->modelCount == 0) return true;
+    int maxSlots = 1;
+    for (int f = 0; f < d->modelFileCount; f++)
+        if (d->modelFiles[f].materialCount > maxSlots) maxSlots = d->modelFiles[f].materialCount;
     d->modelGroups = calloc(d->modelCount, sizeof(ModelGroup));
     int *groupOf = malloc(sizeof(int) * d->modelCount);
-    int *tmp = malloc(sizeof(int) * 256);
+    int *tmp = malloc(sizeof(int) * maxSlots);
     if (!d->modelGroups || !groupOf || !tmp) {
         free(groupOf); free(tmp);
         snprintf(err, errSize, "%s: out of memory", d->path);
@@ -2607,7 +2722,7 @@ static bool BuildModelGroups(SceneData *d, char *err, int errSize)
     for (int i = 0; i < d->modelCount; i++) {
         const MS_ModelInstance *M = &d->models[i];
         const MS_ModelFile *F = &d->modelFiles[M->file];
-        int slots = F->materialCount < 256 ? F->materialCount : 256;
+        int slots = F->materialCount;
         for (int k = 0; k < M->slotCount; k++)
             if (d->modelSlots[M->slotFirst + k].slot >= F->materialCount && (i == 0 || d->models[i - 1].ref.line != M->ref.line))
                 TraceLog(LOG_WARNING, "monolith_scene: %s:%d: material.%d: \"%s\" has %d material slot%s (0..%d); ignored",
@@ -2640,7 +2755,7 @@ static bool BuildModelGroups(SceneData *d, char *err, int errSize)
         if (!G->slotMat || !G->model.materials) { ok = false; break; }
         for (int s = 0; s < F->materialCount; s++) {
             const R3D_Material *own = &F->model.materials[s];
-            int mi = s < 256 ? G->slotMat[s] : -1;
+            int mi = G->slotMat[s];
             if (mi < 0) { G->model.materials[s] = *own; continue; }
             R3D_Material m = d->materials[mi].material;
             unsigned inh = d->matDefs[mi].inherit;
@@ -2689,17 +2804,31 @@ static void FreeGpu(SceneData *d)
             memset(&d->modelFiles[i].model, 0, sizeof(R3D_Model));
         }
     for (int i = 0; i < d->materialCount; i++) {
-        if (d->instCount[i] > 0) R3D_UnloadInstanceBuffer(d->inst[i]);
+        if (d->instCount && d->instCount[i] > 0) R3D_UnloadInstanceBuffer(d->inst[i]);
         if (d->materials[i].material.shader) R3D_UnloadSurfaceShader(d->materials[i].material.shader);
         d->materials[i].material.shader = NULL;
-        d->instCount[i] = 0;
     }
-    for (int i = 0; i < d->textureCount; i++) R3D_UnloadTexture(d->textures[i].tex);
-    d->textureCount = 0;
+    free(d->inst);
+    free(d->instCount);
+    d->inst = NULL;
+    d->instCount = NULL;
+    for (int i = 0; i < d->textureCount; i++) {
+        R3D_UnloadTexture(d->textures[i].tex);
+        free(d->textures[i].path);
+    }
+    free(d->textures);
+    d->textures = NULL;
+    d->textureCount = d->textureCap = 0;
     if (d->sky.texture) R3D_UnloadCubemap(d->sky);
     if (d->ambientMap.irradiance || d->ambientMap.prefilter) R3D_UnloadAmbientMap(d->ambientMap);
-    for (int i = 0; i < d->lightCount; i++)
+    d->sky = (R3D_Cubemap){ 0 };
+    d->ambientMap = (R3D_AmbientMap){ 0 };
+    for (int i = 0; d->lightShadow && i < d->lightCount; i++)
         if (d->lights[i].shadow && d->lightShadow[i].handle) R3D_UnloadShadowMap(d->lightShadow[i]);
+    free(d->lightShadow);
+    free(d->lightShadowDrawn);
+    d->lightShadow = NULL;
+    d->lightShadowDrawn = NULL;
     d->gpu = false;
 }
 
@@ -2708,12 +2837,21 @@ static void FreeGpu(SceneData *d)
 static bool UploadGpu(SceneData *d, char *err, int errSize)
 {
     d->gpu = true;
+    d->inst = calloc(d->materialCount, sizeof(R3D_InstanceBuffer));
+    d->instCount = calloc(d->materialCount, sizeof(int));
+    d->lightShadow = calloc(d->lightCount > 0 ? d->lightCount : 1, sizeof(R3D_ShadowMap));
+    d->lightShadowDrawn = calloc(d->lightCount > 0 ? d->lightCount : 1, sizeof(bool));
+    if (!d->inst || !d->instCount || !d->lightShadow || !d->lightShadowDrawn) {
+        snprintf(err, errSize, "%s: out of memory", d->path);
+        FreeGpu(d);
+        return false;
+    }
     for (int i = 0; i < d->materialCount; i++) {
         MS_Material *M = &d->materials[i];
         MatDef *D = &d->matDefs[i];
         R3D_Material *m = &M->material;
         m->shader = NULL;
-        if (M->shader[0]) {
+        if (M->shader) {
             char full[MS_PATH_MAX + MS_PATH_MAX];
             snprintf(full, sizeof(full), "%s%s", d->root, M->shader);
             m->shader = R3D_LoadSurfaceShader(full);
@@ -2733,7 +2871,7 @@ static bool UploadGpu(SceneData *d, char *err, int errSize)
         static const bool IS_COLOR[MAP_COUNT] = { true, false, false, true };
         Texture2D *slot[MAP_COUNT] = { &m->albedo.texture, &m->normal.texture, &m->orm.texture, &m->emission.texture };
         for (int k = 0; k < MAP_COUNT; k++) {
-            if (!D->maps[k][0]) continue;
+            if (!D->maps[k]) continue;
             *slot[k] = GetTexture(d, D->maps[k], IS_COLOR[k], D->wrap, D->mapLine[k], err, errSize);
             if (!slot[k]->id) { FreeGpu(d); return false; }
         }
@@ -2796,7 +2934,40 @@ static void FreeData(SceneData *d)
 {
     if (!d) return;
     FreeGpu(d);
-    for (int i = 0; i < d->modelFileCount; i++) FreeModelPick(&d->modelPick[i]);
+    for (int i = 0; i < d->modelFileCount; i++) {
+        FreeModelPick(&d->modelPick[i]);
+        free((char *)d->modelFiles[i].path);
+    }
+    free(d->modelPick);
+    free(d->modelFiles);
+    free(d->models);
+    free(d->localColliders);
+    free(d->modelSlots);
+    free(d->colliders);
+    for (int i = 0; i < d->materialCount; i++) {
+        free((char *)d->materials[i].name);
+        free((char *)d->materials[i].shader);
+        MatDef *D = &d->matDefs[i];
+        for (int k = 0; k < MAP_COUNT; k++) free(D->maps[k]);
+        for (int k = 0; k < D->uniformCount; k++) free(D->uniforms[k].name);
+        for (int k = 0; k < D->samplerCount; k++) { free(D->samplers[k].name); free(D->samplers[k].path); }
+        free(D->uniforms);
+        free(D->samplers);
+    }
+    free(d->materials);
+    free(d->matDefs);
+    for (int i = 0; i < d->groupCount; i++) free(d->groups[i]);
+    free(d->groups);
+    for (int i = 0; i < d->viewpointCount; i++) free((char *)d->viewpoints[i].name);
+    free(d->viewpoints);
+    for (int i = 0; i < d->depCount; i++) free(d->deps[i]);
+    free(d->deps);
+    free(d->boxes);
+    free(d->boxRefs);
+    free(d->lights);
+    free(d->path);
+    free(d->root);
+    free(d->brief);
     free(d->text);
     free(d);
 }
@@ -2805,9 +2976,9 @@ static void FreeData(SceneData *d)
 static void Publish(MS_Scene *s, SceneData *d)
 {
     s->formatVersion = d->formatVersion;
-    snprintf(s->path, sizeof(s->path), "%s", d->path);
-    snprintf(s->root, sizeof(s->root), "%s", d->root);
-    snprintf(s->brief, sizeof(s->brief), "%s", d->brief);
+    s->path = d->path;
+    s->root = d->root;
+    s->brief = d->brief;
     s->hash = d->hash;
     s->mtime = d->mtime;
     s->boxes = d->boxes;
@@ -2824,7 +2995,7 @@ static void Publish(MS_Scene *s, SceneData *d)
     s->colliderCount = d->modelCount > 0 ? d->colliderCount : d->boxCount;
     s->materials = d->materials;
     s->materialCount = d->materialCount;
-    s->groups = d->groups;
+    s->groups = (const char *const *)d->groups;
     s->groupCount = d->groupCount;
     s->lights = d->lights;
     s->lightCount = d->lightCount;
@@ -2839,12 +3010,21 @@ static void Publish(MS_Scene *s, SceneData *d)
     s->bounds = d->bounds;
 }
 
+static void FreeWatch(MS_Private *p)
+{
+    for (int i = 0; i < p->watchCount; i++) free(p->watch[i]);
+    p->watchCount = 0;
+}
+
+// The watch list becomes the files of this attempt (on out of memory: as many as fit)
 static void SetWatch(MS_Private *p, const SceneData *d)
 {
-    p->watchCount = d->depCount;
+    FreeWatch(p);
+    if (!MS_RESERVE(p->watch, p->watchCap, d->depCount) || !MS_RESERVE(p->watchMtime, p->watchMtimeCap, d->depCount)) return;
     for (int i = 0; i < d->depCount; i++) {
-        snprintf(p->watch[i], MS_PATH_MAX, "%s", d->deps[i]);
+        if (!(p->watch[i] = MS_StrDup(d->deps[i]))) break;
         p->watchMtime[i] = GetFileModTime(d->deps[i]);
+        p->watchCount = i + 1;
     }
 }
 
@@ -2871,10 +3051,8 @@ static bool LoadText(MS_Scene *s, const char *mapPath, char *text, int size, cha
         d->gpu = true;                  // (so FreeData unloads what LoadModelFiles loaded)
         ok = LoadModelFiles(d, err, errSize);
     }
-    if (ok) {
-        ResolveModels(d);
-        FinishGeometry(d);
-    }
+    if (ok) ok = ResolveModels(d, err, errSize);
+    if (ok) FinishGeometry(d);
     if (ok && p->gpu) {
         ok = UploadGpu(d, err, errSize);
         if (ok && !p->warnedShadowSize && R3D_GetHint(R3D_HINT_SHADOW_DIR_SIZE) != d->env.sun.shadowSize) {
@@ -2983,6 +3161,9 @@ void MS_Unload(MS_Scene *s)
                 for (int i = 0; i < SUN_TILE_COUNT; i++) R3D_UnloadShadowMap(p->sunShadow[i]);
             R3D_UnloadMesh(p->cube);
         }
+        FreeWatch(p);
+        free(p->watch);
+        free(p->watchMtime);
         free(p);
     }
     free(s);
@@ -2990,9 +3171,14 @@ void MS_Unload(MS_Scene *s)
 
 MS_ReloadResult MS_Reload(MS_Scene *s, const char *path, char *err, int errSize)
 {
-    char cur[MS_PATH_MAX];
-    snprintf(cur, sizeof(cur), "%s", path ? path : s->path);
-    return LoadPath(s, cur, err, errSize) ? MS_RELOADED : MS_RELOAD_FAILED;
+    char *cur = MS_StrDup(path ? path : s->path);     // (s->path is freed by a successful load)
+    if (!cur) {
+        snprintf(err, errSize, "out of memory");
+        return MS_RELOAD_FAILED;
+    }
+    bool ok = LoadPath(s, cur, err, errSize);
+    free(cur);
+    return ok ? MS_RELOADED : MS_RELOAD_FAILED;
 }
 
 MS_ReloadResult MS_Poll(MS_Scene *s, float dt)
@@ -3041,22 +3227,31 @@ const char *MS_Error(const MS_Scene *s)
     return s->priv->error;
 }
 
-bool MS_GetLine(const MS_Scene *s, int line, char *out, int outSize)
+const char *MS_LineText(const MS_Scene *s, int line, int *length)
 {
     const SceneData *d = s->priv->d;
-    if (!d || !d->text || line < 1 || outSize <= 0) return false;
+    if (!d || !d->text || line < 1) return NULL;
     int pos = 0;
     for (int l = 1; l < line; l++) {
         while (pos < d->textSize && d->text[pos] != '\n') pos++;
-        if (pos >= d->textSize) return false;
+        if (pos >= d->textSize) return NULL;
         pos++;
     }
-    if (pos >= d->textSize) return false;
+    if (pos >= d->textSize) return NULL;
     int len = 0;
     while (pos + len < d->textSize && d->text[pos + len] != '\n') len++;
     if (len > 0 && d->text[pos + len - 1] == '\r') len--;
+    *length = len;
+    return d->text + pos;
+}
+
+bool MS_GetLine(const MS_Scene *s, int line, char *out, int outSize)
+{
+    int len;
+    const char *text = outSize > 0 ? MS_LineText(s, line, &len) : NULL;
+    if (!text) return false;
     if (len > outSize - 1) len = outSize - 1;
-    memcpy(out, d->text + pos, len);
+    memcpy(out, text, len);
     out[len] = '\0';
     return true;
 }

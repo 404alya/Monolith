@@ -117,11 +117,11 @@ repeat 11 6 0 0 block -200 0 -84 1 180 2                   # 11 fins 6 m apart
 
 **Why `at` exists.** Each position is computed as `(at + i·d) + value` in float. `at` reproduces the original C loops, which computed `(start + i·step) + 2.6`, bit for bit (needed for identical box lists). With whole or half numbers the order doesn't matter. **For new content, don't use `at`**: write the first copy's real coordinates and a `repeat`.
 
-**Groups.** A primitive belongs to the most recent `group` above it. Each `group` statement creates a new group, even when the name repeats, so **don't reuse a group name** in a second place: add the lines to the existing block instead. In-game Ctrl+click selects one group statement's boxes. Group names can be up to 63 characters and can't contain `"`.
+**Groups.** A primitive belongs to the most recent `group` above it. Each `group` statement creates a new group, even when the name repeats, so **don't reuse a group name** in a second place: add the lines to the existing block instead. In-game Ctrl+click selects one group statement's boxes. Group names can be any length but can't contain `"`.
 
 The **groups of the default map**, in file order: `ground`, `entry canyon: walls`, `entry canyon: roof`, `entry canyon: back wall`, `hypostyle hall: pillars`, `hypostyle hall: roof`, `hypostyle hall: cantilever`, `monumental stairs`, `upper terrace`, `tower`, `terrace pillar`, `megastructures`, `bridge`.
 
-**Limits.** At most 8192 boxes in total (`MAX_BOXES`; the default map has 279), 256 groups, 1024 characters and 64 words per line, and a 4 MB file. **Errors** (unknown keyword, wrong argument count, bad number, too many boxes, a map with no boxes) are reported as `file:line: message`.
+**Limits.** None on content: any number of boxes, models, groups, materials, lights and viewpoints, and lines of any length (everything is allocated as needed). Sanity caps only: at most 1 000 000 objects (boxes + models + lights) per map, so a `repeat` grid that multiplies to millions fails with a clear message (the default map has 290 boxes), and a 4 MB map file. **Errors** (unknown keyword, wrong argument count, bad number, too many boxes, a map with no boxes) are reported as `file:line: message`.
 
 ## 6. Editing rules
 
@@ -132,7 +132,7 @@ The **groups of the default map**, in file order: `ground`, `entry canyon: walls
 - **Solid steps in another direction** (stairs only climb toward −Z): repeat a box whose bottom stays buried in the floor below. For example, `repeat 10 0.75 0.3 0 box 0 -3 0 0.75 0.3 4` makes 10 steps climbing toward +X, each 0.3 m higher.
 - **Faces:** exactly coplanar overlapping faces are harmless here, because the concrete shader is computed from world position and both faces shade identically. Faces that are *nearly* coplanar (a few mm to cm apart) can flicker, so either align them exactly or separate them clearly.
 - **Models and textures** (finding, licensing, downloading, normalising, recording and restyling them): §11. Never place a file whose licence isn't recorded.
-- **Keep the box count under `MAX_BOXES`** (8192), and watch what a `repeat` grid multiplies to.
+- **Watch what a `repeat` grid multiplies to**: the loader accepts up to 1 000 000 objects, but every box costs drawing, picking and collision time (tens of thousands are fine, a million is slow).
 - **Real scale.** Think in metres (§4). Keep walkways ≥ 2.2 m high and steps ≤ 0.45 m. New boxes should rest on something (ground y = 0, terrace y = 12, a roof) unless the request wants them floating.
 - **Engine changes are allowed when a request needs them**: a new primitive type in `runtime/monolith_scene.c`, lighting or atmosphere as `env` / `light` lines in the map (the built-in defaults are in `BuiltinEnvironment()` in `runtime/monolith_scene.c`), shader work. They must follow `PROMPT-INSTRUCTIONS.md` (§7 pitfalls, R3D changes recorded in `submodules/r3d/patches.md`), keep the look unless the request is about the look, and build with **zero warnings on both targets** (`./build.sh` and `./build.sh --win`). If you add a primitive, document it in the `map.c` header comment and in §5 here.
 

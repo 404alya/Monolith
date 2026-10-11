@@ -18,12 +18,40 @@ bool benchProfile = true;
 #   define R3D_BUILD_TYPE_NAME "unknown"   // set by build.sh
 #endif
 
-// Per-viewpoint sums over the timed frames
-static double profPassMs[MS_MAX_VIEWPOINTS][R3D_PROFILER_PASS_COUNT];
-static double profTotalMs[MS_MAX_VIEWPOINTS];
-static int profFrames[MS_MAX_VIEWPOINTS];
-static double cpuSeconds[MS_MAX_VIEWPOINTS];
-static double r3dEndSeconds[MS_MAX_VIEWPOINTS];
+// Per-viewpoint sums over the timed frames (heap: BenchInit)
+static double (*profPassMs)[R3D_PROFILER_PASS_COUNT];
+static double *profTotalMs;
+static int *profFrames;
+static double *cpuSeconds;
+static double *r3dEndSeconds;
+static int benchViews;
+
+void BenchFree(void)
+{
+    free(profPassMs);
+    free(profTotalMs);
+    free(profFrames);
+    free(cpuSeconds);
+    free(r3dEndSeconds);
+    profPassMs = NULL;
+    profTotalMs = cpuSeconds = r3dEndSeconds = NULL;
+    profFrames = NULL;
+    benchViews = 0;
+}
+
+bool BenchInit(int viewCount)
+{
+    BenchFree();
+    int n = viewCount > 0 ? viewCount : 1;
+    profPassMs = calloc(n, sizeof(*profPassMs));
+    profTotalMs = calloc(n, sizeof(double));
+    profFrames = calloc(n, sizeof(int));
+    cpuSeconds = calloc(n, sizeof(double));
+    r3dEndSeconds = calloc(n, sizeof(double));
+    if (!profPassMs || !profTotalMs || !profFrames || !cpuSeconds || !r3dEndSeconds) { BenchFree(); return false; }
+    benchViews = viewCount;
+    return true;
+}
 
 void BenchCollectProfile(bool flush)
 {
@@ -31,8 +59,8 @@ void BenchCollectProfile(bool flush)
     R3D_ProfilerFrame pf;
     while (R3D_PopProfilerFrame(&pf)) {
         if (pf.tag < 0) continue;   // warmup
-        int v = pf.tag / BENCH_FRAMES;
-        if (v >= scene->viewpointCount) continue;
+        int v = pf.tag / benchFrames;
+        if (v >= benchViews) continue;
         for (int p = 0; p < R3D_PROFILER_PASS_COUNT; p++) profPassMs[v][p] += pf.passMs[p];
         profTotalMs[v] += pf.totalMs;
         profFrames[v]++;
@@ -41,6 +69,7 @@ void BenchCollectProfile(bool flush)
 
 void BenchAddCpuTime(int view, double frameSeconds, double r3dEndSecs)
 {
+    if (view < 0 || view >= benchViews) return;
     cpuSeconds[view] += frameSeconds;
     r3dEndSeconds[view] += r3dEndSecs;
 }
@@ -87,7 +116,8 @@ static void WriteProfileTable(FILE *f, bool md, const double *frameMs, double al
         for (int v = 0; v < scene->viewpointCount; v++) ran |= profPassMs[v][p] > 0.0;
         if (ran) ROW(R3D_GetProfilerPassName((R3D_ProfilerPass)p), false, PER_FRAME(profPassMs[v][p]));
     }
-    double sum[MS_MAX_VIEWPOINTS];
+    double *sum = calloc(scene->viewpointCount > 0 ? scene->viewpointCount : 1, sizeof(double));
+    if (!sum) return;
     for (int v = 0; v < scene->viewpointCount; v++) {
         sum[v] = 0.0;
         for (int p = 0; p < R3D_PROFILER_PASS_COUNT; p++) sum[v] += profPassMs[v][p];
@@ -99,6 +129,7 @@ static void WriteProfileTable(FILE *f, bool md, const double *frameMs, double al
     ROW("CPU in R3D_End", false, r3dEndSeconds[v] * 1000.0 / benchFrames);
     #undef PER_FRAME
     #undef ROW
+    free(sum);
 
     // Frame time: the regular bench average (frame-weighted over the same timed frames)
     if (md) {
@@ -124,7 +155,8 @@ typedef struct {
 
 static BenchStats ComputeBenchStats(const double *times, int n)
 {
-    static double sorted[BENCH_FRAMES];
+    double *sorted = malloc(sizeof(double) * (n > 0 ? n : 1));
+    if (!sorted) return (BenchStats){ 0 };
     double sum = 0.0;
     for (int i = 0; i < n; i++) { sum += times[i]; sorted[i] = times[i]; }
 
@@ -138,22 +170,32 @@ static BenchStats ComputeBenchStats(const double *times, int n)
     slow /= lowCount;
 
     double avg = sum / n;
-    return (BenchStats){ avg * 1000.0, 1.0 / avg, 1.0 / slow, sorted[0] * 1000.0 };
+    BenchStats st = { avg * 1000.0, 1.0 / avg, 1.0 / slow, sorted[0] * 1000.0 };
+    free(sorted);
+    return st;
 }
 
 // Prints the results and writes them as Markdown to benchmarkDir/<timestamp>_shadow-<size>-<range>[_still].md
-void WriteBenchReport(double times[][BENCH_FRAMES], const int *shadowUpdates, int shadowSize,
+void WriteBenchReport(const double *times, const int *shadowUpdates, int shadowSize,
                              float shadowRange, bool shadowReuse, bool headless, const char *note, int argc, char **argv)
 {
-    BenchStats stats[MS_MAX_VIEWPOINTS];
+    int views = scene->viewpointCount > 0 ? scene->viewpointCount : 1;
+    BenchStats *stats = calloc(views, sizeof(BenchStats));
+    double *viewMs = calloc(views, sizeof(double));
+    if (!stats || !viewMs) {
+        free(stats);
+        free(viewMs);
+        fprintf(stderr, "bench: out of memory\n");
+        return;
+    }
     double total = 0.0;
     for (int v = 0; v < scene->viewpointCount; v++) {
-        stats[v] = ComputeBenchStats(times[v], benchFrames);
-        for (int f = 0; f < benchFrames; f++) total += times[v][f];
+        const double *t = times + (size_t)v * benchFrames;
+        stats[v] = ComputeBenchStats(t, benchFrames);
+        for (int f = 0; f < benchFrames; f++) total += t[f];
     }
     int frames = scene->viewpointCount * benchFrames;
     double allMs = total / frames * 1000.0, allFps = frames / total;
-    double viewMs[MS_MAX_VIEWPOINTS];
     for (int v = 0; v < scene->viewpointCount; v++) viewMs[v] = stats[v].avgMs;
     bool haveProfile = benchProfile && R3D_IsProfilerAvailable();
 
@@ -181,12 +223,12 @@ void WriteBenchReport(double times[][BENCH_FRAMES], const int *shadowUpdates, in
     if (snprintf(path, sizeof(path), "%s%s_shadow-%d-%.0f%s%s.md", benchmarkDir, stamp, shadowSize, shadowRange,
                  benchStill ? "_still" : "", benchFrameReuse ? "_reuse" : "") >= (int)sizeof(path)) {
         fprintf(stderr, "bench: report path too long: %s\n", benchmarkDir);
-        return;
+        goto done;
     }
 
     if (!DirectoryExists(benchmarkDir)) MakeDirectory(benchmarkDir);
     FILE *f = fopen(path, "w");
-    if (!f) { perror(path); return; }
+    if (!f) { perror(path); goto done; }
 
     const char *vsyncEnv = getenv("__GL_SYNC_TO_VBLANK");
     const char *vblankEnv = getenv("vblank_mode");
@@ -262,6 +304,9 @@ void WriteBenchReport(double times[][BENCH_FRAMES], const int *shadowUpdates, in
 
     printf("report: %s\n", path);
     fflush(stdout);
+done:
+    free(stats);
+    free(viewMs);
 }
 
 // #endregion

@@ -61,14 +61,16 @@ static bool WriteText(const char *path, const char *fmt, const char *a, const ch
 
 bool NewMap(const char *mapsDir, const char *name)
 {
+    // A folder and file name: letters, digits, '_' and '-', short enough for any file system
+    // once ".map" is appended
     size_t len = strlen(name);
-    bool ok = len > 0 && len < MS_NAME_MAX;
+    bool ok = len > 0 && len <= 200;
     for (size_t i = 0; i < len; i++) {
         char c = name[i];
         ok &= (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-';
     }
     if (!ok) {
-        fprintf(stderr, "monolith: --new-map: the name may only use letters, digits, '_' and '-' (max 63)\n");
+        fprintf(stderr, "monolith: --new-map: the name may only use letters, digits, '_' and '-' (max 200)\n");
         return false;
     }
     char dir[1200], path[1300];

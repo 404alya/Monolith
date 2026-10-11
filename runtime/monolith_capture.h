@@ -77,44 +77,65 @@ void MSC_DrawModelInstanced(R3D_Model model, R3D_InstanceBuffer instances, int c
 #include <stdlib.h>
 #include <string.h>
 
-#define MSC_MAX 1024
-
+// Every list below is a heap array (MS_RESERVE / MS_PUSH of monolith_scene.h) with heap
+// strings: no count limits. Resources are only recorded while a capture is pending or
+// running (MONOLITH_CAPTURE set), and everything is freed once the package is written.
 typedef struct { int vo, io; Vector3 size; } MscCube;                     // a generated cube mesh
 typedef struct { Color albedo; float rough, metal; bool unlit; } MscMatState;
-typedef struct { const void *meshes; char path[1024]; MscMatState mats[8]; int matCount; } MscModelFile;   // a loaded model
-typedef struct { uint32_t tex; R3D_ProceduralSky p; int size; char panorama[1024]; } MscSky;
-typedef struct { const void *shader; char path[1024]; } MscShader;
+typedef struct { const void *meshes; char *path; MscMatState *mats; int matCount; } MscModelFile;   // a loaded model
+typedef struct { uint32_t tex; R3D_ProceduralSky p; int size; char *panorama; } MscSky;    // panorama NULL = procedural
+typedef struct { const void *shader; char *path; } MscShader;
 typedef struct { Color albedo, emission; float rough, metal, emit; bool unlit; Texture2D tex[4]; const void *shader; } MscMatKey;
+typedef struct { char *text; int count; } MscNoteEntry;
 
 static struct {
     int state;                  // 0 = not checked, 1 = off, 2 = waiting, 3 = recording, 4 = done
     int frame, target;
     char dir[1024], name[256];
-    MscCube cubes[MSC_MAX]; int cubeCount;
-    MscModelFile files[64]; int fileCount;
-    MscSky skies[16]; int skyCount;
-    MscShader shaders[64]; int shaderCount;
+    MscCube *cubes; int cubeCount, cubeCap;
+    MscModelFile *files; int fileCount, fileCap;
+    MscSky *skies; int skyCount, skyCap;
+    MscShader *shaders; int shaderCount, shaderCap;
     char *geo;                  // the frame's geometry lines (written to the map at R3D_End)
     size_t geoSize, geoCap;
-    MscMatKey mats[64]; int matCount, curMat;
+    MscMatKey *mats; int matCount, matCap, curMat;
     int boxes, models, lights, approx;
     bool sunTaken;
     R3D_Light sun; R3D_ShadowMap sunMap; bool hasSun;
-    char lightLines[64][256]; int lightLineCount;
+    char **lightLines; int lightLineCount, lightLineCap;
     Vector3 camPos, camTarget; double fovy; bool hasCam;
-    char notes[64][256]; int noteCounts[64], noteCount, noteDropped;
+    MscNoteEntry *notes; int noteCount, noteCap;
 } msc;
+
+static void MscFreeAll(void)
+{
+    for (int i = 0; i < msc.fileCount; i++) { free(msc.files[i].path); free(msc.files[i].mats); }
+    for (int i = 0; i < msc.skyCount; i++) free(msc.skies[i].panorama);
+    for (int i = 0; i < msc.shaderCount; i++) free(msc.shaders[i].path);
+    for (int i = 0; i < msc.lightLineCount; i++) free(msc.lightLines[i]);
+    for (int i = 0; i < msc.noteCount; i++) free(msc.notes[i].text);
+    free(msc.cubes); free(msc.files); free(msc.skies); free(msc.shaders); free(msc.geo);
+    free(msc.mats); free(msc.lightLines); free(msc.notes);
+    msc.cubes = NULL; msc.files = NULL; msc.skies = NULL; msc.shaders = NULL; msc.geo = NULL;
+    msc.mats = NULL; msc.lightLines = NULL; msc.notes = NULL;
+    msc.cubeCount = msc.cubeCap = msc.fileCount = msc.fileCap = msc.skyCount = msc.skyCap = 0;
+    msc.shaderCount = msc.shaderCap = msc.matCount = msc.matCap = msc.lightLineCount = msc.lightLineCap = 0;
+    msc.noteCount = msc.noteCap = 0;
+    msc.geoSize = msc.geoCap = 0;
+}
 
 // "Not translated" lines for CAPTURE.md; the same text is counted, not repeated
 static void MscNote(const char *fmt, const char *a, int n)
 {
-    char text[256];
+    char text[512];
     snprintf(text, sizeof(text), fmt, a);
     for (int i = 0; i < msc.noteCount; i++)
-        if (strcmp(msc.notes[i], text) == 0) { msc.noteCounts[i] += n; return; }
-    if (msc.noteCount >= 64) { msc.noteDropped++; return; }
-    snprintf(msc.notes[msc.noteCount], 256, "%s", text);
-    msc.noteCounts[msc.noteCount++] = n;
+        if (strcmp(msc.notes[i].text, text) == 0) { msc.notes[i].count += n; return; }
+    char *copy = MS_StrDup(text);
+    MscNoteEntry *e = copy ? MS_PUSH(msc.notes, msc.noteCount, msc.noteCap) : NULL;
+    if (!e) { free(copy); return; }
+    e->text = copy;
+    e->count = n;
 }
 
 // Appends to the frame's geometry text (a growing buffer; plain C, no open_memstream)
@@ -122,22 +143,26 @@ static void MscGeo(const char *fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
-    char line[512];
-    int n = vsnprintf(line, sizeof(line), fmt, ap);
+    int n = vsnprintf(NULL, 0, fmt, ap);
     va_end(ap);
     if (n < 0) return;
-    if ((size_t)n >= sizeof(line)) n = sizeof(line) - 1;
+    char *line = malloc((size_t)n + 1);
+    if (!line) return;
+    va_start(ap, fmt);
+    vsnprintf(line, (size_t)n + 1, fmt, ap);
+    va_end(ap);
     if (msc.geoSize + n + 1 > msc.geoCap) {
         size_t cap = msc.geoCap ? msc.geoCap * 2 : 65536;
         while (cap < msc.geoSize + n + 1) cap *= 2;
         char *g = realloc(msc.geo, cap);
-        if (!g) return;
+        if (!g) { free(line); return; }
         msc.geo = g;
         msc.geoCap = cap;
     }
     memcpy(msc.geo + msc.geoSize, line, n);
     msc.geoSize += n;
     msc.geo[msc.geoSize] = 0;
+    free(line);
 }
 
 static bool MscRecording(void)
@@ -156,56 +181,69 @@ static bool MscRecording(void)
     return msc.state == 3;
 }
 
+// Resources are recorded only while a capture is pending or running
+static bool MscWants(void)
+{
+    MscRecording();
+    return msc.state == 2 || msc.state == 3;
+}
+
 // #region Recording resources (always, so the frame can refer to them)
 R3D_Model MSC_LoadModel(const char *filePath)
 {
     R3D_Model m = R3D_LoadModel(filePath);
-    if (msc.fileCount < 64) {
-        MscModelFile *mf = &msc.files[msc.fileCount++];
-        mf->meshes = m.meshes;
-        snprintf(mf->path, sizeof(mf->path), "%s", filePath);
-        // the file's own material values, to see later whether the program changed them
-        mf->matCount = m.materialCount < 8 ? m.materialCount : 8;
-        for (int i = 0; i < mf->matCount; i++)
-            mf->mats[i] = (MscMatState){ m.materials[i].albedo.color, m.materials[i].orm.roughness,
-                                         m.materials[i].orm.metalness, m.materials[i].unlit };
-    }
+    if (!MscWants()) return m;
+    char *path = MS_StrDup(filePath);
+    MscMatState *mats = m.materialCount > 0 ? malloc(sizeof(MscMatState) * m.materialCount) : NULL;
+    MscModelFile *mf = path && (mats || m.materialCount <= 0) ? MS_PUSH(msc.files, msc.fileCount, msc.fileCap) : NULL;
+    if (!mf) { free(path); free(mats); return m; }
+    mf->meshes = m.meshes;
+    mf->path = path;
+    mf->mats = mats;
+    // the file's own material values, to see later whether the program changed them
+    mf->matCount = m.materialCount > 0 ? m.materialCount : 0;
+    for (int i = 0; i < mf->matCount; i++)
+        mf->mats[i] = (MscMatState){ m.materials[i].albedo.color, m.materials[i].orm.roughness,
+                                     m.materials[i].orm.metalness, m.materials[i].unlit };
     return m;
 }
 
 R3D_Mesh MSC_GenMeshCube(float width, float height, float length)
 {
     R3D_Mesh m = R3D_GenMeshCube(width, height, length);
-    if (msc.cubeCount < MSC_MAX) msc.cubes[msc.cubeCount++] = (MscCube){ m.vertexOffset, m.indexOffset, { width, height, length } };
+    MscCube *c = MscWants() ? MS_PUSH(msc.cubes, msc.cubeCount, msc.cubeCap) : NULL;
+    if (c) *c = (MscCube){ m.vertexOffset, m.indexOffset, { width, height, length } };
     return m;
 }
 
 R3D_Cubemap MSC_GenProceduralSky(int size, R3D_ProceduralSky params)
 {
     R3D_Cubemap c = R3D_GenProceduralSky(size, params);
-    if (msc.skyCount < 16) msc.skies[msc.skyCount++] = (MscSky){ c.texture, params, size, "" };
+    MscSky *k = MscWants() ? MS_PUSH(msc.skies, msc.skyCount, msc.skyCap) : NULL;
+    if (k) *k = (MscSky){ c.texture, params, size, NULL };
     return c;
 }
 
 R3D_Cubemap MSC_LoadCubemap(const char *fileName, R3D_CubemapLayout layout)
 {
     R3D_Cubemap c = R3D_LoadCubemap(fileName, layout);
-    if (msc.skyCount < 16) {
-        memset(&msc.skies[msc.skyCount], 0, sizeof(MscSky));
-        msc.skies[msc.skyCount].tex = c.texture;
-        msc.skies[msc.skyCount].size = c.size;
-        snprintf(msc.skies[msc.skyCount++].panorama, 1024, "%s", fileName);
-    }
+    char *path = MscWants() ? MS_StrDup(fileName) : NULL;
+    MscSky *k = path ? MS_PUSH(msc.skies, msc.skyCount, msc.skyCap) : NULL;
+    if (!k) { free(path); return c; }
+    k->tex = c.texture;
+    k->size = c.size;
+    k->panorama = path;
     return c;
 }
 
 R3D_SurfaceShader *MSC_LoadSurfaceShader(const char *filePath)
 {
     R3D_SurfaceShader *s = R3D_LoadSurfaceShader(filePath);
-    if (msc.shaderCount < 64) {
-        msc.shaders[msc.shaderCount].shader = s;
-        snprintf(msc.shaders[msc.shaderCount++].path, 1024, "%s", filePath);
-    }
+    char *path = MscWants() ? MS_StrDup(filePath) : NULL;
+    MscShader *k = path ? MS_PUSH(msc.shaders, msc.shaderCount, msc.shaderCap) : NULL;
+    if (!k) { free(path); return s; }
+    k->shader = s;
+    k->path = path;
     return s;
 }
 // #endregion
@@ -277,19 +315,22 @@ static void MscLight(R3D_Light l, bool shadow)
 {
     if (!MscRecording()) return;
     if (l.type == R3D_LIGHT_DIR && shadow && !msc.hasSun) { msc.sun = l; msc.hasSun = true; return; }
-    if (msc.lightLineCount >= 64) { MscNote("lights beyond 64%s", "", 1); return; }
-    char *s = msc.lightLines[msc.lightLineCount++];
+    char s[512];        // one `light` line: a fixed number of keys, each a short number
     int n = 0;
-    if (l.type == R3D_LIGHT_OMNI) n = snprintf(s, 256, "light point %s %s %s", MscFmt(l.position.x), MscFmt(l.position.y), MscFmt(l.position.z));
+    if (l.type == R3D_LIGHT_OMNI) n = snprintf(s, sizeof(s), "light point %s %s %s", MscFmt(l.position.x), MscFmt(l.position.y), MscFmt(l.position.z));
     else if (l.type == R3D_LIGHT_SPOT)
-        n = snprintf(s, 256, "light spot %s %s %s %s %s %s inner %s outer %s", MscFmt(l.position.x), MscFmt(l.position.y),
+        n = snprintf(s, sizeof(s), "light spot %s %s %s %s %s %s inner %s outer %s", MscFmt(l.position.x), MscFmt(l.position.y),
                      MscFmt(l.position.z), MscFmt(l.direction.x), MscFmt(l.direction.y), MscFmt(l.direction.z),
                      MscFmt(l.innerCutOff), MscFmt(l.outerCutOff));
-    else n = snprintf(s, 256, "light dir %s %s %s", MscFmt(l.direction.x), MscFmt(l.direction.y), MscFmt(l.direction.z));
-    n += snprintf(s + n, 256 - n, " color %d %d %d energy %s specular %s fogEnergy %s", l.color.r, l.color.g, l.color.b,
+    else n = snprintf(s, sizeof(s), "light dir %s %s %s", MscFmt(l.direction.x), MscFmt(l.direction.y), MscFmt(l.direction.z));
+    n += snprintf(s + n, sizeof(s) - n, " color %d %d %d energy %s specular %s fogEnergy %s", l.color.r, l.color.g, l.color.b,
                   MscFmt(l.energy), MscFmt(l.specular), MscFmt(l.fogEnergy));
-    if (l.type != R3D_LIGHT_DIR) n += snprintf(s + n, 256 - n, " range %s falloff %s", MscFmt(l.range), MscFmt(l.falloff));
-    snprintf(s + n, 256 - n, " shadow %s", shadow ? "on" : "off");
+    if (l.type != R3D_LIGHT_DIR) n += snprintf(s + n, sizeof(s) - n, " range %s falloff %s", MscFmt(l.range), MscFmt(l.falloff));
+    snprintf(s + n, sizeof(s) - n, " shadow %s", shadow ? "on" : "off");
+    char *copy = MS_StrDup(s);
+    char **slot = copy ? MS_PUSH(msc.lightLines, msc.lightLineCount, msc.lightLineCap) : NULL;
+    if (slot) *slot = copy;
+    else free(copy);
 }
 
 void MSC_PushLight(R3D_Light light) { MscLight(light, false); R3D_PushLight(light); }
@@ -303,14 +344,20 @@ void MSC_PushLightEx(R3D_Light light, R3D_ShadowMap map, bool updateShadow)
 // Index of the material (deduplicated by its plain values); writes `use` when it changes
 static void MscUse(R3D_Material m)
 {
-    MscMatKey k = { m.albedo.color, m.emission.color, m.orm.roughness, m.orm.metalness, m.emission.energy, m.unlit,
-                    { m.albedo.texture, m.normal.texture, m.orm.texture, m.emission.texture }, m.shader };
+    // Compared bytewise: zero the padding first (an initializer list leaves it indeterminate)
+    MscMatKey k;
+    memset(&k, 0, sizeof(k));
+    k.albedo = m.albedo.color; k.emission = m.emission.color; k.rough = m.orm.roughness; k.metal = m.orm.metalness;
+    k.emit = m.emission.energy; k.unlit = m.unlit; k.shader = m.shader;
+    k.tex[0] = m.albedo.texture; k.tex[1] = m.normal.texture; k.tex[2] = m.orm.texture; k.tex[3] = m.emission.texture;
     int i = 0;
     while (i < msc.matCount && memcmp(&msc.mats[i], &k, sizeof(k)) != 0) i++;
     if (i == msc.matCount) {
-        if (msc.matCount >= 64) { MscNote("materials beyond 64%s: drawn with the last one", "", 1); i = 63; }
-        else { memset(&msc.mats[i], 0, sizeof(k)); msc.mats[i] = k; msc.matCount++; }
+        MscMatKey *slot = MS_PUSH(msc.mats, msc.matCount, msc.matCap);
+        if (!slot) { MscNote("materials beyond memory%s: drawn with the last one", "", 1); i = msc.matCount - 1; }
+        else memcpy(slot, &k, sizeof(k));
         // textures are read back when the map is written; keep the GL ids for that
+        if (i < 0) return;
     }
     if (i != msc.curMat) MscGeo("use \"m%d\"\n", i);
     msc.curMat = i;
@@ -481,7 +528,7 @@ static void MscWrite(void)
     R3D_Environment *env = R3D_GetEnvironment();
     int sky = -1;
     for (int i = 0; i < msc.skyCount; i++) if (env->background.sky.texture && msc.skies[i].tex == env->background.sky.texture) sky = i;
-    if (sky >= 0 && !msc.skies[sky].panorama[0]) {
+    if (sky >= 0 && !msc.skies[sky].panorama) {
         R3D_ProceduralSky *p = &msc.skies[sky].p;
         fprintf(f, "env sky.mode procedural\nenv sky.size %d\n", msc.skies[sky].size);
         fprintf(f, "env sky.skyTopColor %d %d %d\nenv sky.skyHorizonColor %d %d %d\nenv sky.skyHorizonCurve %s\nenv sky.skyEnergy %s\n",
@@ -530,8 +577,6 @@ static void MscWrite(void)
     fprintf(f, "\n# --- Geometry, in draw order\ngroup \"captured\"\n");
     if (msc.geo) fwrite(msc.geo, 1, msc.geoSize, f);
     fclose(f);
-    free(msc.geo);
-    msc.geo = NULL;
 
     // Model files (as loaded; their sidecar and licence are for the import session to fill in)
     for (int i = 0; i < msc.fileCount; i++)
@@ -557,8 +602,7 @@ static void MscWrite(void)
                    "%d materials, %d lights + %s sun, the environment.\n\n## Not translated (count, what)\n\n",
                 msc.name, msc.target, msc.boxes, msc.approx, msc.models, msc.fileCount, msc.matCount, msc.lightLineCount,
                 msc.hasSun ? "a" : "no");
-        for (int i = 0; i < msc.noteCount; i++) fprintf(f, "- %d x %s\n", msc.noteCounts[i], msc.notes[i]);
-        if (msc.noteDropped) fprintf(f, "- ... %d more kinds\n", msc.noteDropped);
+        for (int i = 0; i < msc.noteCount; i++) fprintf(f, "- %d x %s\n", msc.notes[i].count, msc.notes[i].text);
         if (!msc.noteCount) fprintf(f, "- nothing seen in R3D's draw calls\n");
         fprintf(f, "\nNever seen by a capture: gameplay, input, animation state, custom render passes outside R3D, "
                    "and anything the program draws in other frames.\n");
@@ -571,7 +615,7 @@ static void MscWrite(void)
 void MSC_End(void)
 {
     R3D_End();
-    if (MscRecording()) { MscWrite(); msc.state = 4; }
+    if (MscRecording()) { MscWrite(); msc.state = 4; MscFreeAll(); }
 }
 // #endregion
 

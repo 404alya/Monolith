@@ -67,7 +67,7 @@ bool DumpScene(const MS_Scene *s, const char *path)
     }
     for (int i = 0; i < s->materialCount; i++) {
         const MS_Material *m = &s->materials[i];
-        fprintf(f, "material %d \"%s\" line %d shader \"%s\" unlit %s\n", i, m->name, m->line, m->shader,
+        fprintf(f, "material %d \"%s\" line %d shader \"%s\" unlit %s\n", i, m->name, m->line, m->shader ? m->shader : "",
                 m->material.unlit ? "on" : "off");
     }
     for (int i = 0; i < s->lightCount; i++) {

@@ -1,6 +1,11 @@
 #include "designer.h"
 #include <math.h>
 
+// Memory: the selection, regions and prompt live in the Designer (heap arrays, freed by
+// DesignerFree); per-frame drawing and picking reuse file-level scratch arrays that only grow
+// (to the scene's box / group count, the prompt's line count), so a steady frame allocates
+// nothing. Region analysis and the request snapshot allocate at submit time only.
+
 // ======================================================================================
 // #region Picking
 // ======================================================================================
@@ -94,25 +99,26 @@ void DesignerPrintHit(DesignerHit hit)
     }
     MS_Ref r = *rp;
     BoundingBox b = MS_ObjectBounds(scene, hit.obj);
-    char text[MS_LINE_MAX + 1] = "";
-    if (r.line > 0) MS_GetLine(scene, r.line, text, sizeof(text));
+    int textLen = 0;
+    const char *text = r.line > 0 ? MS_LineText(scene, r.line, &textLen) : NULL;
+    if (!text) text = "";
     if (hit.obj.kind == MS_OBJ_MODEL) {
         const MS_ModelInstance *m = &scene->models[hit.obj.index];
         static const char *const ORIGIN[] = { "model", "bottom", "center" };
-        printf("pick: model %d  file \"%s\"  group \"%s\"  material \"%s\"  line %d: %s\n"
+        printf("pick: model %d  file \"%s\"  group \"%s\"  material \"%s\"  line %d: %.*s\n"
                "pick: point %.3f %.3f %.3f  normal %.3f %.3f %.3f  dist %.3f\n"
                "pick: model position %.3f %.3f %.3f  rot %.3f %.3f %.3f  scale %.3f %.3f %.3f  origin %s  -> translation %.3f %.3f %.3f\n"
                "pick: model bounds min %.3f %.3f %.3f  max %.3f %.3f %.3f\n",
                hit.obj.index, scene->modelFiles[m->file].path, r.group >= 0 ? scene->groups[r.group] : "",
-               ObjMaterialName(hit.obj), r.line, text, hit.point.x, hit.point.y, hit.point.z, hit.normal.x, hit.normal.y,
+               ObjMaterialName(hit.obj), r.line, textLen, text, hit.point.x, hit.point.y, hit.point.z, hit.normal.x, hit.normal.y,
                hit.normal.z, hit.dist, m->position.x, m->position.y, m->position.z, m->rotationDeg.x, m->rotationDeg.y,
                m->rotationDeg.z, m->scale.x, m->scale.y, m->scale.z, ORIGIN[m->origin % 3], m->translation.x,
                m->translation.y, m->translation.z, b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z);
     } else {
-        printf("pick: box %d  group \"%s\"  material \"%s\"  line %d: %s\n"
+        printf("pick: box %d  group \"%s\"  material \"%s\"  line %d: %.*s\n"
                "pick: point %.3f %.3f %.3f  normal %.0f %.0f %.0f  dist %.3f\n"
                "pick: box min %.3f %.3f %.3f  max %.3f %.3f %.3f\n",
-               hit.obj.index, r.group >= 0 ? scene->groups[r.group] : "", ObjMaterialName(hit.obj), r.line, text,
+               hit.obj.index, r.group >= 0 ? scene->groups[r.group] : "", ObjMaterialName(hit.obj), r.line, textLen, text,
                hit.point.x, hit.point.y, hit.point.z, hit.normal.x, hit.normal.y, hit.normal.z, hit.dist,
                b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z);
     }
@@ -138,13 +144,29 @@ typedef struct {
 // first (see PickBoxes). Without it a region costs 4096 rays x all boxes (~300 ms at 8192
 // boxes); with it, rays stop at the first hit's distance and boxes outside are never tested.
 typedef struct {
-    int list[MS_MAX_BOXES];
-    float minDist[MS_MAX_BOXES];   // distance from the eye to the box, slightly rounded down
-    int count;
-    int models[MS_MAX_MODELS];      // the same for models (by their world bounds)
-    float modelDist[MS_MAX_MODELS];
-    int modelCount;
+    int *list;
+    float *minDist;         // distance from the eye to the box, slightly rounded down
+    int count, listCap, minDistCap;
+    int *models;            // the same for models (by their world bounds)
+    float *modelDist;
+    int modelCount, modelsCap, modelDistCap;
 } RegionCull;
+
+// Room for n boxes and m models
+static bool CullReserve(RegionCull *c, int n, int m)
+{
+    return MS_RESERVE(c->list, c->listCap, n) && MS_RESERVE(c->minDist, c->minDistCap, n) &&
+           MS_RESERVE(c->models, c->modelsCap, m) && MS_RESERVE(c->modelDist, c->modelDistCap, m);
+}
+
+static void CullFree(RegionCull *c)
+{
+    free(c->list);
+    free(c->minDist);
+    free(c->models);
+    free(c->modelDist);
+    memset(c, 0, sizeof(*c));
+}
 
 // The one place region sampling asks the scene what a ray hits: the same hit as
 // DesignerPick (the crosshair), from the region's candidates only (boxes, then models).
@@ -156,14 +178,15 @@ static RegionHit RegionPick(const RegionCull *c, Vector3 origin, Vector3 dir)
     return r;
 }
 
-static float boxDist[MS_MAX_BOXES];    // per box index, for CompareCull (qsort has no context)
+// Per box / model index, for CompareCull (qsort has no context); grown to the scene's counts
+static float *boxDist, *modelDist;
+static int boxDistCap, modelDistCap;
 static int CompareCull(const void *a, const void *b)
 {
     int ia = *(const int *)a, ib = *(const int *)b;
     if (boxDist[ia] != boxDist[ib]) return boxDist[ia] < boxDist[ib] ? -1 : 1;
     return ia - ib;
 }
-static float modelDist[MS_MAX_MODELS];
 static int CompareModelCull(const void *a, const void *b)
 {
     int ia = *(const int *)a, ib = *(const int *)b;
@@ -209,9 +232,13 @@ static bool OutsidePlanes(const Vector3 *n, Vector3 eye, BoundingBox bb)
 
 // Candidates of a rect (pixels): boxes (and models) not entirely outside one of the four planes through
 // the eye and the rect's edges (every ray through the rect lies inside them), nearest first.
-// in = NULL: from all boxes; else filtered from in's list (already sorted).
-static void BuildRegionCull(const RayFrame *f, Rectangle rect, const RegionCull *in, RegionCull *c)
+// in = NULL: from all boxes; else filtered from in's list (already sorted). False when out of memory.
+static bool BuildRegionCull(const RayFrame *f, Rectangle rect, const RegionCull *in, RegionCull *c)
 {
+    c->count = c->modelCount = 0;
+    if (!CullReserve(c, in ? in->count : scene->boxCount, in ? in->modelCount : scene->modelCount)) return false;
+    if (!in && (!MS_RESERVE(boxDist, boxDistCap, scene->boxCount) || !MS_RESERVE(modelDist, modelDistCap, scene->modelCount)))
+        return false;
     float x0 = rect.x, y0 = rect.y, x1 = rect.x + rect.width, y1 = rect.y + rect.height;
     Vector3 corner[4] = { RayThrough(f, x0, y0), RayThrough(f, x1, y0), RayThrough(f, x1, y1), RayThrough(f, x0, y1) };
     Vector3 mid = RayThrough(f, (x0 + x1) * 0.5f, (y0 + y1) * 0.5f);
@@ -250,23 +277,22 @@ static void BuildRegionCull(const RayFrame *f, Rectangle rect, const RegionCull 
         boxDist[b] = BoxDistance(bb, f->eye) * (1.0f - 1e-5f) - 1e-4f;
         c->list[c->count++] = b;
     }
-    if (in) return;
+    if (in) return true;
     qsort(c->list, c->count, sizeof(c->list[0]), CompareCull);
     for (int k = 0; k < c->count; k++) c->minDist[k] = boxDist[c->list[k]];
+    return true;
 }
 
 #define REGION_TILE 8   // rays per tile side in DesignerAnalyzeRegion
 
-// Samples per object: open addressing over (kind, index). A region has at most
-// REGION_MAX_SAMPLES samples, so at most that many distinct objects.
-#define TALLY_SIZE (2 * REGION_MAX_SAMPLES)
+// Samples per object: open addressing over (kind, index), size = 2 x the region's samples
+// (so at most half full: a region can't hit more distinct objects than it has samples)
 typedef struct { MS_ObjRef obj; int samples; } TallySlot;
-static TallySlot tally[TALLY_SIZE];
 
-static void TallyAdd(MS_ObjRef obj)
+static void TallyAdd(TallySlot *tally, unsigned int size, MS_ObjRef obj)
 {
     unsigned int h = ((unsigned int)obj.index * 2654435761u) ^ (unsigned int)obj.kind;
-    for (unsigned int i = h % TALLY_SIZE; ; i = (i + 1) % TALLY_SIZE) {
+    for (unsigned int i = h % size; ; i = (i + 1) % size) {
         if (tally[i].samples == 0) { tally[i].obj = obj; tally[i].samples = 1; return; }
         if (tally[i].obj.kind == obj.kind && tally[i].obj.index == obj.index) { tally[i].samples++; return; }
     }
@@ -283,15 +309,15 @@ static int CompareRegionObjects(const void *pa, const void *pb)
 void DesignerAnalyzeRegion(Camera3D cam, int w, int h, Rectangle rect, DesignRegionInfo *out)
 {
     double t0 = GetTime();
-    static DesignRegionObject all[REGION_MAX_SAMPLES];
     memset(out, 0, sizeof(*out));
     out->rect = rect;
     out->centerObj = (MS_ObjRef){ MS_OBJ_NONE, -1 };
     int rw = (int)rect.width, rh = (int)rect.height;
     if (rw <= 0 || rh <= 0 || w <= 0 || h <= 0) return;
     RayFrame f = MakeRayFrame(cam, w, h);
-    static RegionCull cull, tileCull;
-    BuildRegionCull(&f, rect, NULL, &cull);
+    RegionCull cull = { 0 }, tileCull = { 0 };
+    TallySlot *tally = NULL;
+    if (!BuildRegionCull(&f, rect, NULL, &cull)) goto oom;
 
     RegionHit c = RegionPick(&cull, f.eye, RayThrough(&f, rect.x + rect.width * 0.5f, rect.y + rect.height * 0.5f));
     out->centerObj = c.obj;
@@ -299,20 +325,21 @@ void DesignerAnalyzeRegion(Camera3D cam, int w, int h, Rectangle rect, DesignReg
     out->centerNormal = c.normal;
     out->centerDist = c.dist;
 
-    // Grid: every pixel centre while that is at most REGION_MAX_SAMPLES rays, else a
+    // Grid: every pixel centre while that is at most REGION_SAMPLES rays, else a
     // regular grid of about square cells, sampled at the cell centres
     int gx = rw, gy = rh;
-    if (rw * rh > REGION_MAX_SAMPLES) {
-        float cell = sqrtf((float)rw * rh / REGION_MAX_SAMPLES);
+    if ((long long)rw * rh > REGION_SAMPLES) {
+        float cell = sqrtf((float)rw * rh / REGION_SAMPLES);
         gx = (int)fmaxf(1.0f, floorf(rw / cell));
         gy = (int)fmaxf(1.0f, floorf(rh / cell));
-        while (gx * gy > REGION_MAX_SAMPLES) { if (gx > gy) gx--; else gy--; }
+        while (gx * gy > REGION_SAMPLES) { if (gx > gy) gx--; else gy--; }
     }
     out->gridW = gx;
     out->gridH = gy;
 
-    memset(tally, 0, sizeof(tally));
     int sky = 0, total = gx * gy;
+    unsigned int tallySize = 2u * (unsigned int)total;
+    if (!(tally = calloc(tallySize, sizeof(TallySlot)))) goto oom;
     out->depthMin = INFINITY;
     out->depthMax = 0.0f;
     // Tiles of REGION_TILE x REGION_TILE rays, each with the region's candidates that touch
@@ -322,15 +349,15 @@ void DesignerAnalyzeRegion(Camera3D cam, int w, int h, Rectangle rect, DesignReg
     for (int tj = 0; tj < gy; tj += T) {
         for (int ti = 0; ti < gx; ti += T) {
             int i1 = ti + T < gx ? ti + T : gx, j1 = tj + T < gy ? tj + T : gy;
-            BuildRegionCull(&f, (Rectangle){ rect.x + ti * cellW, rect.y + tj * cellH, (i1 - ti) * cellW, (j1 - tj) * cellH },
-                            &cull, &tileCull);
+            if (!BuildRegionCull(&f, (Rectangle){ rect.x + ti * cellW, rect.y + tj * cellH, (i1 - ti) * cellW, (j1 - tj) * cellH },
+                                 &cull, &tileCull)) goto oom;
             for (int j = tj; j < j1; j++) {
                 float y = rect.y + (j + 0.5f) * cellH;
                 for (int i = ti; i < i1; i++) {
                     float x = rect.x + (i + 0.5f) * cellW;
                     RegionHit r = RegionPick(&tileCull, f.eye, RayThrough(&f, x, y));
                     if (r.obj.kind == MS_OBJ_NONE) { sky++; continue; }
-                    TallyAdd(r.obj);
+                    TallyAdd(tally, tallySize, r.obj);
                     out->depthMin = fminf(out->depthMin, r.dist);
                     out->depthMax = fmaxf(out->depthMax, r.dist);
                 }
@@ -342,16 +369,24 @@ void DesignerAnalyzeRegion(Camera3D cam, int w, int h, Rectangle rect, DesignReg
     out->sky = (float)sky / total;
 
     int n = 0;
-    for (int i = 0; i < TALLY_SIZE; i++)
-        if (tally[i].samples > 0) all[n++] = (DesignRegionObject){ tally[i].obj, tally[i].samples, (float)tally[i].samples / total };
-    qsort(all, n, sizeof(all[0]), CompareRegionObjects);
-    out->objectCount = n < REGION_MAX_OBJECTS ? n : REGION_MAX_OBJECTS;
-    memcpy(out->objects, all, out->objectCount * sizeof(all[0]));
-    for (int i = out->objectCount; i < n; i++) {
-        out->omittedObjects++;
-        out->omittedShare += all[i].share;
-    }
+    for (unsigned int i = 0; i < tallySize; i++) n += tally[i].samples > 0;
+    if (n > 0 && !(out->objects = malloc(sizeof(DesignRegionObject) * n))) goto oom;
+    n = 0;
+    for (unsigned int i = 0; i < tallySize; i++)
+        if (tally[i].samples > 0) out->objects[n++] = (DesignRegionObject){ tally[i].obj, tally[i].samples, (float)tally[i].samples / total };
+    qsort(out->objects, n, sizeof(out->objects[0]), CompareRegionObjects);
+    out->objectCount = n;
     out->ms = (GetTime() - t0) * 1000.0;
+    free(tally);
+    CullFree(&cull);
+    CullFree(&tileCull);
+    return;
+oom:
+    TraceLog(LOG_WARNING, "monolith: region analysis: out of memory");
+    free(tally);
+    CullFree(&cull);
+    CullFree(&tileCull);
+    out->objectCount = 0;
 }
 
 // #endregion
@@ -367,48 +402,84 @@ void DesignerMessage(Designer *d, bool error, const char *text)
     d->messageError = error;
 }
 
+// selected[] position + 1 of an object, 0 = not selected (d->selPos, grown on demand)
 static int SelectionIndexOf(const Designer *d, MS_ObjRef o)
 {
-    for (int i = 0; i < d->selectedCount; i++)
-        if (ObjEqual(d->selected[i], o)) return i;
-    return -1;
+    if ((o.kind != MS_OBJ_BOX && o.kind != MS_OBJ_MODEL) || o.index < 0 || o.index >= d->selPosCap[o.kind]) return -1;
+    return d->selPos[o.kind][o.index] - 1;
+}
+
+static bool SetSelPos(Designer *d, MS_ObjRef o, int pos)
+{
+    if (o.kind != MS_OBJ_BOX && o.kind != MS_OBJ_MODEL) return false;
+    if (pos == 0 && o.index >= d->selPosCap[o.kind]) return true;
+    if (!MS_RESERVE(d->selPos[o.kind], d->selPosCap[o.kind], o.index + 1)) return false;
+    d->selPos[o.kind][o.index] = pos;
+    return true;
 }
 
 // Objects of one kind: count, map line, group
 static int KindCount(MS_ObjKind k) { return k == MS_OBJ_MODEL ? scene->modelCount : scene->boxCount; }
 static const MS_Ref *KindRef(MS_ObjKind k, int i) { return k == MS_OBJ_MODEL ? &scene->models[i].ref : &scene->boxRefs[i]; }
 
+int DesignerObjNth(MS_ObjRef o)
+{
+    const MS_Ref *r = MS_ObjectRef(scene, o);
+    if (!r) return 0;
+    // Consecutive calls along one line (selecting a whole `repeat` line) count on from the last
+    static struct { unsigned int version; MS_ObjKind kind; int line, index, nth; } last;
+    int nth = 0;
+    if (last.version == scene->version && last.kind == o.kind && last.line == r->line && last.index == o.index - 1)
+        nth = last.nth + 1;
+    else
+        for (int i = o.index - 1; i >= 0 && KindRef(o.kind, i)->line == r->line; i--) nth++;
+    last.version = scene->version;
+    last.kind = o.kind;
+    last.line = r->line;
+    last.index = o.index;
+    last.nth = nth;
+    return nth;
+}
+
 static DesignerSelKey MakeKey(MS_ObjRef o)
 {
     const MS_Ref *r = KindRef(o.kind, o.index);
     DesignerSelKey k = { .kind = o.kind, .box = MS_ObjectBounds(scene, o), .line = r->line, .group = r->group };
-    for (int j = 0; j < o.index; j++)
-        if (KindRef(o.kind, j)->line == k.line) k.nth++;
-    if (k.group >= 0) snprintf(k.groupName, sizeof(k.groupName), "%s", scene->groups[k.group]);
+    k.nth = DesignerObjNth(o);
+    if (k.group >= 0) k.groupName = MS_StrDup(scene->groups[k.group]);
     return k;
 }
 
 static bool SelectionAdd(Designer *d, MS_ObjRef o)
 {
     if (SelectionIndexOf(d, o) >= 0) return true;
-    if (d->selectedCount >= MAX_SELECTION) {
-        DesignerMessage(d, true, TextFormat("selection full (%d objects)", MAX_SELECTION));
+    int n = d->selectedCount;
+    if (!MS_RESERVE(d->selected, d->selectedCap, n + 1) || !MS_RESERVE(d->keys, d->keyCap, n + 1) || !SetSelPos(d, o, n + 1)) {
+        DesignerMessage(d, true, TextFormat("out of memory: selection stopped at %d objects", n));
         return false;
     }
-    d->keys[d->selectedCount] = MakeKey(o);
-    d->selected[d->selectedCount++] = o;
+    d->keys[n] = MakeKey(o);
+    d->selected[n] = o;
+    d->selectedCount = n + 1;
     return true;
 }
 
 static void SelectionRemoveAt(Designer *d, int at)
 {
+    SetSelPos(d, d->selected[at], 0);
+    free(d->keys[at].groupName);
     d->selectedCount--;
     memmove(&d->selected[at], &d->selected[at + 1], (d->selectedCount - at) * sizeof(d->selected[0]));
     memmove(&d->keys[at], &d->keys[at + 1], (d->selectedCount - at) * sizeof(d->keys[0]));
+    for (int i = at; i < d->selectedCount; i++) SetSelPos(d, d->selected[i], i + 1);
 }
 
 void DesignerClearSelection(Designer *d)
 {
+    for (int i = 0; i < d->selectedCount; i++) {
+        SetSelPos(d, d->selected[i], 0);
+        free(d->keys[i].groupName);
+    }
     d->selectedCount = 0;
 }
 
@@ -435,6 +506,51 @@ static bool SameBox(BoundingBox a, BoundingBox b)
            a.max.x == b.max.x && a.max.y == b.max.y && a.max.z == b.max.z;
 }
 
+// Objects of one kind bucketed by their exact bounds (for DesignerSync): chains in index order
+typedef struct { int *head, *next; unsigned int mask; } GeoIndex;
+
+static unsigned int GeoHash(BoundingBox b)
+{
+    const float *f = (const float *)&b;
+    unsigned int h = 2166136261u;
+    for (int i = 0; i < 6; i++) {
+        float v = f[i] == 0.0f ? 0.0f : f[i];       // -0 and 0 compare equal
+        unsigned int u;
+        memcpy(&u, &v, sizeof(u));
+        h = (h ^ u) * 16777619u;
+    }
+    return h;
+}
+
+static bool GeoIndexBuild(GeoIndex *g, MS_ObjKind kind)
+{
+    int n = KindCount(kind);
+    unsigned int size = 16;
+    while (size < 2u * (unsigned int)n) size *= 2;
+    g->head = malloc(sizeof(int) * size);
+    g->next = malloc(sizeof(int) * (n > 0 ? n : 1));
+    if (!g->head || !g->next) return false;
+    g->mask = size - 1;
+    for (unsigned int i = 0; i < size; i++) g->head[i] = -1;
+    for (int i = n - 1; i >= 0; i--) {      // backwards, so every chain ends up ascending
+        unsigned int b = GeoHash(MS_ObjectBounds(scene, (MS_ObjRef){ kind, i })) & g->mask;
+        g->next[i] = g->head[b];
+        g->head[b] = i;
+    }
+    return true;
+}
+
+// First object of `kind` made by map line `line` (objects are in map-line order), or -1
+static int FirstOfLine(MS_ObjKind kind, int line)
+{
+    int lo = 0, hi = KindCount(kind);
+    while (lo < hi) {
+        int mid = lo + (hi - lo) / 2;
+        if (KindRef(kind, mid)->line < line) lo = mid + 1; else hi = mid;
+    }
+    return lo < KindCount(kind) && KindRef(kind, lo)->line == line ? lo : -1;
+}
+
 // After a map reload the box indices mean nothing. Remap each selected box:
 //  1. a box with exactly the same min/max (unchanged geometry, even if lines moved),
 //     preferring one from the same line;
@@ -447,36 +563,45 @@ void DesignerSync(Designer *d)
     bool first = d->version == 0;
     d->version = scene->version;
     d->hit.obj = (MS_ObjRef){ MS_OBJ_NONE, -1 };    // re-picked on the next DesignerUpdate
-    if (first || d->selectedCount == 0) { d->selectedCount = 0; return; }
+    if (first || d->selectedCount == 0) { DesignerClearSelection(d); return; }
 
-    static DesignerSelKey old[MAX_SELECTION];
+    // The old indices mean nothing now: take the keys out and start over
+    DesignerSelKey *old = d->keys;
     int oldCount = d->selectedCount;
-    memcpy(old, d->keys, oldCount * sizeof(old[0]));
+    for (int i = 0; i < oldCount; i++) SetSelPos(d, d->selected[i], 0);
+    d->keys = NULL;
+    d->keyCap = 0;
     d->selectedCount = 0;
 
+    GeoIndex geo[3] = { 0 };
+    bool geoOk[3] = { false };
     for (int s = 0; s < oldCount; s++) {
         const DesignerSelKey *k = &old[s];
         MS_ObjKind kind = k->kind;
         int found = -1;
-        for (int i = 0; i < KindCount(kind); i++) {
-            const MS_Ref *r = KindRef(kind, i);
-            if (!SameBox(MS_ObjectBounds(scene, (MS_ObjRef){ kind, i }), k->box) || SelectionIndexOf(d, (MS_ObjRef){ kind, i }) >= 0) continue;
-            if (found < 0 || r->line == k->line) found = i;
-            if (r->line == k->line) break;
+        if (!geoOk[kind] && !geo[kind].head) geoOk[kind] = GeoIndexBuild(&geo[kind], kind);
+        if (geoOk[kind]) {
+            for (int i = geo[kind].head[GeoHash(k->box) & geo[kind].mask]; i >= 0; i = geo[kind].next[i]) {
+                const MS_Ref *r = KindRef(kind, i);
+                if (!SameBox(MS_ObjectBounds(scene, (MS_ObjRef){ kind, i }), k->box) || SelectionIndexOf(d, (MS_ObjRef){ kind, i }) >= 0) continue;
+                if (found < 0 || r->line == k->line) found = i;
+                if (r->line == k->line) break;
+            }
         }
         if (found < 0) {
-            int nth = 0;
-            for (int i = 0; i < KindCount(kind); i++) {
+            int i = FirstOfLine(kind, k->line);
+            if (i >= 0) i += k->nth;
+            if (i >= 0 && i < KindCount(kind) && KindRef(kind, i)->line == k->line) {
                 const MS_Ref *r = KindRef(kind, i);
-                if (r->line != k->line) continue;
-                if (nth++ != k->nth) continue;
                 const char *name = r->group >= 0 ? scene->groups[r->group] : "";
-                if (strcmp(name, k->groupName) == 0 && SelectionIndexOf(d, (MS_ObjRef){ kind, i }) < 0) found = i;
-                break;
+                if (strcmp(name, k->groupName ? k->groupName : "") == 0 && SelectionIndexOf(d, (MS_ObjRef){ kind, i }) < 0) found = i;
             }
         }
         if (found >= 0) SelectionAdd(d, (MS_ObjRef){ kind, found });
     }
+    for (int i = 0; i < 3; i++) { free(geo[i].head); free(geo[i].next); }
+    for (int s = 0; s < oldCount; s++) free(old[s].groupName);
+    free(old);
 
     int lost = oldCount - d->selectedCount;
     if (lost > 0)
@@ -499,7 +624,8 @@ void DesignerSync(Designer *d)
 #define PROMPT_MAX_LINES 10
 
 typedef struct { int start, end; } PromptLine;     // byte range, end excludes the '\n'
-static PromptLine promptLines[PROMPT_MAX + 1];
+static PromptLine *promptLines;     // the last layout (grows to the most lines the prompt had)
+static int promptLineCap;
 
 static bool IsCont(unsigned char c) { return (c & 0xC0) == 0x80; }
 
@@ -542,12 +668,15 @@ static float TextSpanWidth(const char *s, int from, int to)
     return w;
 }
 
-// Word wrap into promptLines; returns the line count (at least 1)
+// Word wrap into promptLines; returns the line count (at least 1; out of memory: the text
+// is laid out as far as it fits, the rest is not shown)
 static int PromptLayout(const Designer *d, float maxW)
 {
-    const char *s = d->prompt;
+    const char *s = d->prompt ? d->prompt : "";
     int len = d->promptLen, count = 0, pos = 0;
+    if (!MS_RESERVE(promptLines, promptLineCap, 1)) return 0;
     for (;;) {
+        if (!MS_RESERVE(promptLines, promptLineCap, count + 1)) return count;
         int start = pos, p = pos, lastBreak = -1;
         float w = 0.0f;
         for (;;) {
@@ -619,15 +748,16 @@ static float PromptTextWidth(int screenW)
     return (float)(screenW - 2 * PROMPT_MARGIN - 2 * PROMPT_PAD);
 }
 
-// Inserts n bytes at the cursor, truncated to the free space at a codepoint boundary
+// Inserts n bytes at the cursor, truncated at a codepoint boundary to PROMPT_LIMIT (or to
+// what memory allows)
 static void PromptInsert(Designer *d, const char *bytes, int n)
 {
-    int room = PROMPT_MAX - 1 - d->promptLen;
+    int room = PROMPT_LIMIT - 1 - d->promptLen;
     if (n > room) {
         n = room;
         while (n > 0 && IsCont((unsigned char)bytes[n])) n--;
     }
-    if (n <= 0) return;
+    if (n <= 0 || !MS_RESERVE(d->prompt, d->promptCap, d->promptLen + n + 1)) return;
     memmove(d->prompt + d->cursor + n, d->prompt + d->cursor, d->promptLen - d->cursor + 1);
     memcpy(d->prompt + d->cursor, bytes, n);
     d->promptLen += n;
@@ -647,9 +777,12 @@ static void PromptPaste(Designer *d)
 {
     const char *clip = GetClipboardText();
     if (!clip) return;
-    static char buf[PROMPT_MAX];
+    size_t clipLen = strlen(clip);
+    if (clipLen > PROMPT_LIMIT) clipLen = PROMPT_LIMIT;
+    char *buf = malloc(clipLen + 1);
+    if (!buf) return;
     int n = 0;
-    for (const char *c = clip; *c && n < PROMPT_MAX - 1; c++) {
+    for (const char *c = clip; *c && n < (int)clipLen; c++) {
         unsigned char ch = (unsigned char)*c;
         if (ch == '\r') continue;
         if (ch == '\t') ch = ' ';
@@ -659,7 +792,8 @@ static void PromptPaste(Designer *d)
     }
     int before = d->promptLen;
     PromptInsert(d, buf, n);
-    if (d->promptLen - before < n) DesignerMessage(d, true, TextFormat("prompt limit: %d characters", PROMPT_MAX - 1));
+    free(buf);
+    if (d->promptLen - before < n) DesignerMessage(d, true, TextFormat("prompt limit: %d bytes", PROMPT_LIMIT - 1));
 }
 
 static bool PromptBlank(const Designer *d)
@@ -673,13 +807,14 @@ void DesignerOpenPrompt(Designer *d, const char *text)
 {
     if (text) {
         // Cut to the limit without splitting a codepoint (same rule as PromptInsert)
-        int n = (int)strlen(text);
-        if (n > PROMPT_MAX - 1) {
-            n = PROMPT_MAX - 1;
-            while (n > 0 && IsCont((unsigned char)text[n])) n--;
+        size_t len = strlen(text);
+        int n = len > PROMPT_LIMIT - 1 ? PROMPT_LIMIT - 1 : (int)len;
+        while (n > 0 && (size_t)n < len && IsCont((unsigned char)text[n])) n--;
+        if (!MS_RESERVE(d->prompt, d->promptCap, n + 1)) n = 0;
+        if (d->prompt) {
+            memcpy(d->prompt, text, n);
+            d->prompt[n] = 0;
         }
-        memcpy(d->prompt, text, n);
-        d->prompt[n] = 0;
         d->promptLen = d->cursor = n;
         d->scroll = 0;
     }
@@ -692,7 +827,7 @@ static void ClosePrompt(Designer *d, bool clear)
 {
     d->promptOpen = false;
     if (clear) {
-        d->prompt[0] = 0;
+        if (d->prompt) d->prompt[0] = 0;
         d->promptLen = d->cursor = d->scroll = 0;
     }
     // GLFW can report one big mouse jump when the cursor is captured again
@@ -742,7 +877,7 @@ static DesignerAction PromptInput(Designer *d)
         typed += n;
         d->wantX = -1.0f;
     }
-    if (typed > d->promptLen - before) DesignerMessage(d, true, TextFormat("prompt limit: %d characters", PROMPT_MAX - 1));
+    if (typed > d->promptLen - before) DesignerMessage(d, true, TextFormat("prompt limit: %d bytes", PROMPT_LIMIT - 1));
 
     if (ctrl && KeyRepeat(KEY_V)) { PromptPaste(d); d->wantX = -1.0f; }
 
@@ -805,7 +940,7 @@ bool DesignerCapturesInput(const Designer *d)
 // #region Snip mode
 // ======================================================================================
 // C in spectator mode: the camera freezes and the cursor is free. Drag = a new region
-// (replaces the others), Shift+drag = add one (up to MAX_REGIONS), Enter = the prompt box
+// (replaces the others), Shift+drag = add one, Enter = the prompt box
 // with the regions attached (plus the box selection, made before C). RMB, Esc or C again
 // leave snip mode and drop its regions: they only mean something for this frozen camera.
 // Esc in the prompt box closes the box (discarding the text, as always) and returns to
@@ -843,11 +978,12 @@ bool DesignerAddRegion(Designer *d, Rectangle rect, int w, int h)
 {
     Rectangle r = ClampRect(rect, w, h);
     if (r.width < 1.0f || r.height < 1.0f) return false;
-    if (d->regionCount >= MAX_REGIONS) {
-        DesignerMessage(d, true, TextFormat("at most %d regions per request", MAX_REGIONS));
+    DesignRegion *slot = MS_PUSH(d->regions, d->regionCount, d->regionCap);
+    if (!slot) {
+        DesignerMessage(d, true, "out of memory: region not added");
         return false;
     }
-    d->regions[d->regionCount++].rect = r;
+    slot->rect = r;
     return true;
 }
 
@@ -933,11 +1069,26 @@ DesignerAction DesignerUpdate(Designer *d, float dt)
     return DESIGNER_NONE;
 }
 
-void DesignerBuildRequest(const Designer *d, Camera3D cam, float yaw, float pitch,
+void DesignerFreeRequest(DesignRequest *req)
+{
+    free(req->prompt);
+    free(req->selected);
+    for (int i = 0; i < req->regionCount; i++) free(req->regions[i].objects);
+    free(req->regions);
+    memset(req, 0, sizeof(*req));
+}
+
+bool DesignerBuildRequest(const Designer *d, Camera3D cam, float yaw, float pitch,
                           int width, int height, DesignRequest *req)
 {
     memset(req, 0, sizeof(*req));
-    snprintf(req->prompt, sizeof(req->prompt), "%s", d->prompt);
+    req->prompt = MS_StrNDup(d->prompt ? d->prompt : "", d->promptLen);
+    req->selected = malloc(sizeof(MS_ObjRef) * (d->selectedCount > 0 ? d->selectedCount : 1));
+    req->regions = calloc(d->regionCount > 0 ? d->regionCount : 1, sizeof(DesignRegionInfo));
+    if (!req->prompt || !req->selected || !req->regions) {
+        DesignerFreeRequest(req);
+        return false;
+    }
     req->eye = cam.position;
     req->yaw = yaw;
     req->pitch = pitch;
@@ -959,6 +1110,7 @@ void DesignerBuildRequest(const Designer *d, Camera3D cam, float yaw, float pitc
                  i + 1, r->rect.width, r->rect.height, r->gridW, r->gridH, objects, objects == 1 ? "" : "s",
                  100.0f * r->sky, r->ms, scene->boxCount, scene->modelCount);
     }
+    return true;
 }
 
 // #endregion
@@ -966,6 +1118,16 @@ void DesignerBuildRequest(const Designer *d, Camera3D cam, float yaw, float pitc
 // ======================================================================================
 // #region Drawing
 // ======================================================================================
+
+// Scratch arrays of the per-frame drawing code: grown to what the scene / regions / prompt
+// need, never shrunk, so steady frames allocate nothing; freed by DesignerFree
+static struct {
+    unsigned char *seen; int seenCap;   // DesignerDrawHud: groups already named
+    float *ys; int ysCap;               // DimOutside: band edges
+    Vector2 *xs; int xsCap;             // DimOutside: rectangles in a band
+    Rectangle *rects; int rectsCap;     // DesignerDrawRegions
+    char *line; int lineCap;            // DesignerDrawPrompt: one wrapped line
+} scratch;
 
 #define SEL_COLOR   (Color){ 255, 160, 40, 255 }
 #define HIT_COLOR   (Color){ 90, 220, 255, 255 }
@@ -1153,7 +1315,9 @@ int DesignerDrawHud(const Designer *d, int x, int y)
         if (models == 0) n = snprintf(text, sizeof(text), "selected: %d box%s  [", boxes, boxes == 1 ? "" : "es");
         else n = snprintf(text, sizeof(text), "selected: %d box%s, %d model%s  [", boxes, boxes == 1 ? "" : "es",
                           models, models == 1 ? "" : "s");
-        bool seen[MS_MAX_GROUPS] = { false };
+        unsigned char *seen = MS_RESERVE(scratch.seen, scratch.seenCap, scene->groupCount) ? scratch.seen : NULL;
+        if (!seen) return 0;
+        memset(seen, 0, scene->groupCount);
         int shown = 0, more = 0;
         bool ungrouped = false;
         for (int i = 0; i < d->selectedCount; i++) {
@@ -1190,7 +1354,7 @@ int DesignerDrawHud(const Designer *d, int x, int y)
                     group, ObjMaterialName(d->hit.obj), r.line, d->hit.obj.index, d->hit.dist),
                     x, y, main);
         y += 20;
-        char line[MS_LINE_MAX + 1];
+        char line[128];     // (cut below anyway)
         if (r.line > 0 && MS_GetLine(scene, r.line, line, sizeof(line))) {
             // Long lines are cut to keep the HUD on screen
             if (strlen(line) > 110) strcpy(line + 107, "...");
@@ -1208,7 +1372,9 @@ int DesignerDrawHud(const Designer *d, int x, int y)
 // rectangles' y edges, and in each band the gaps between the rectangles spanning it
 static void DimOutside(const Rectangle *rects, int n, int w, int h, Color c)
 {
-    float ys[2 * (MAX_REGIONS + 1) + 2];
+    if (!MS_RESERVE(scratch.ys, scratch.ysCap, 2 * n + 2) || !MS_RESERVE(scratch.xs, scratch.xsCap, n)) return;
+    float *ys = scratch.ys;
+    Vector2 *xs = scratch.xs;       // x = left, y = right edge of each rectangle in a band
     int ny = 0;
     ys[ny++] = 0.0f;
     ys[ny++] = (float)h;
@@ -1219,7 +1385,6 @@ static void DimOutside(const Rectangle *rects, int n, int w, int h, Color c)
     for (int b = 0; b + 1 < ny; b++) {
         float y0 = ys[b], y1 = ys[b + 1];
         if (y1 <= y0) continue;
-        Vector2 xs[MAX_REGIONS + 1];    // x = left, y = right edge of each rectangle in the band
         int nx = 0;
         for (int i = 0; i < n; i++) {
             if (rects[i].y > y0 || rects[i].y + rects[i].height < y1) continue;
@@ -1264,7 +1429,8 @@ void DesignerDrawRegions(const Designer *d, int w, int h, bool marked)
     if (!d->snipping) return;
 
     // A plain drag replaces the regions, so while it runs only the new one shows
-    Rectangle rects[MAX_REGIONS + 1];
+    if (!MS_RESERVE(scratch.rects, scratch.rectsCap, d->regionCount + 1)) return;
+    Rectangle *rects = scratch.rects;
     int n = 0;
     bool replacing = d->dragging && !d->dragAdd;
     if (!replacing) for (int i = 0; i < d->regionCount; i++) rects[n++] = d->regions[i].rect;
@@ -1275,13 +1441,13 @@ void DesignerDrawRegions(const Designer *d, int w, int h, bool marked)
     if (!replacing)
         for (int i = 0; i < d->regionCount; i++) DrawRegionFrame(d->regions[i].rect, i + 1, true, w);
     if (d->dragging && drag.width > 0.0f && drag.height > 0.0f) {
-        int number = replacing ? 1 : d->regionCount < MAX_REGIONS ? d->regionCount + 1 : 0;
+        int number = replacing ? 1 : d->regionCount + 1;
         DrawRegionFrame(drag, number, true, w);
     }
 
     if (!d->promptOpen) {
         const char *help = TextFormat("SNIP   drag: new region  |  SHIFT+drag: add  |  ENTER: request  |  RMB / ESC / C: cancel"
-                                      "   (%d/%d)", d->regionCount, MAX_REGIONS);
+                                      "   (%d region%s)", d->regionCount, d->regionCount == 1 ? "" : "s");
         int tw = MeasureText(help, 18);
         DrawRectangle((w - tw) / 2 - 10, h - 64, tw + 20, 28, (Color){ 16, 16, 18, 200 });
         DrawText(help, (w - tw) / 2, h - 59, 18, (Color){ 240, 238, 232, 230 });
@@ -1311,8 +1477,8 @@ void DesignerDrawPrompt(Designer *d, int w, int h)
         DrawText(TextFormat("Request for Claude   (%d selected%s%s)   Enter send  |  Shift+Enter new line  |  Ctrl+V paste  |  Esc %s",
                  d->selectedCount, !ObjIsNone(d->hit.obj) ? " + crosshair point" : "", regions,
                  d->snipping ? "back to snip" : "cancel"), tx, ty, 16, (Color){ 230, 230, 230, 140 });
-        const char *counter = TextFormat("%d / %d", d->promptLen, PROMPT_MAX - 1);
-        Color counterColor = d->promptLen >= PROMPT_MAX - 1 ? (Color){ 255, 110, 90, 230 } : (Color){ 230, 230, 230, 140 };
+        const char *counter = TextFormat("%d bytes", d->promptLen);
+        Color counterColor = d->promptLen >= PROMPT_LIMIT - 1 ? (Color){ 255, 110, 90, 230 } : (Color){ 230, 230, 230, 140 };
         DrawText(counter, (int)(box.x + box.width) - PROMPT_PAD - MeasureText(counter, 16), ty, 16, counterColor);
         ty += PROMPT_HEADER_H;
 
@@ -1324,10 +1490,11 @@ void DesignerDrawPrompt(Designer *d, int w, int h)
                        : "Describe the change. The crosshair point and the selected boxes are sent along.",
                        (Vector2){ (float)tx, (float)ty }, PROMPT_FONT, PROMPT_SPACING, (Color){ 240, 238, 232, 90 });
         }
-        static char buf[PROMPT_MAX];
         for (int i = d->scroll; i < lines && i < d->scroll + visible; i++) {
             PromptLine l = promptLines[i];
             int n = l.end - l.start;
+            if (!MS_RESERVE(scratch.line, scratch.lineCap, n + 1)) break;
+            char *buf = scratch.line;
             memcpy(buf, d->prompt + l.start, n);
             buf[n] = 0;
             int ly = ty + (i - d->scroll) * PROMPT_LINE_H;
@@ -1352,3 +1519,33 @@ void DesignerDrawPrompt(Designer *d, int w, int h)
 }
 
 // #endregion
+
+void DesignerFree(Designer *d)
+{
+    DesignerClearSelection(d);
+    free(d->selected);
+    free(d->keys);
+    for (int k = 0; k < 3; k++) free(d->selPos[k]);
+    free(d->regions);
+    free(d->prompt);
+    d->selected = NULL;
+    d->keys = NULL;
+    d->regions = NULL;
+    d->prompt = NULL;
+    d->selectedCap = d->keyCap = d->regionCount = d->regionCap = d->promptLen = d->promptCap = d->cursor = 0;
+    for (int k = 0; k < 3; k++) { d->selPos[k] = NULL; d->selPosCap[k] = 0; }
+    // The file-level scratch (one designer per process)
+    free(scratch.seen);
+    free(scratch.ys);
+    free(scratch.xs);
+    free(scratch.rects);
+    free(scratch.line);
+    memset(&scratch, 0, sizeof(scratch));
+    free(promptLines);
+    promptLines = NULL;
+    promptLineCap = 0;
+    free(boxDist);
+    free(modelDist);
+    boxDist = modelDist = NULL;
+    boxDistCap = modelDistCap = 0;
+}

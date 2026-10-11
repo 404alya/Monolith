@@ -133,11 +133,26 @@ static void Warn(const char *fmt, ...)
     warnings++;
 }
 
+// The warning lines collected while printing (a heap text: a model can have any number)
+typedef struct { char *s; int len, cap; } WarnText;
+
+static void WarnAdd(WarnText *w, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(NULL, 0, fmt, ap);
+    va_end(ap);
+    if (n < 0 || !MS_RESERVE(w->s, w->cap, w->len + n + 1)) return;
+    va_start(ap, fmt);
+    vsnprintf(w->s + w->len, n + 1, fmt, ap);
+    va_end(ap);
+    w->len += n;
+}
+
 // One texture slot of a material: where it comes from and its size
 typedef struct { const char *name; enum aiTextureType types[3]; } SlotDef;
 
-static void PrintTexture(const struct aiScene *sc, const char *modelDir, const char *path, char *warnBuf, int warnSize,
-                         int *warnLen)
+static void PrintTexture(const struct aiScene *sc, const char *modelDir, const char *path, WarnText *warn)
 {
     int w = 0, h = 0;
     const char *kind;
@@ -166,18 +181,16 @@ static void PrintTexture(const struct aiScene *sc, const char *modelDir, const c
             w = img.width; h = img.height;
             UnloadImage(img);
             snprintf(where, sizeof(where), "\"%s\"", path);
-            if (w == 0) *warnLen += snprintf(warnBuf + *warnLen, warnSize - *warnLen,
-                                             "  - texture \"%s\" cannot be decoded (R3D loads PNG, JPG, HDR, DDS, GIF, QOI; not TGA/BMP/PSD/KTX/WebP)\n", path);
+            if (w == 0) WarnAdd(warn, "  - texture \"%s\" cannot be decoded (R3D loads PNG, JPG, HDR, DDS, GIF, QOI; not TGA/BMP/PSD/KTX/WebP)\n", path);
         } else {
             snprintf(where, sizeof(where), "\"%s\" (NOT FOUND next to the model)", path);
-            *warnLen += snprintf(warnBuf + *warnLen, warnSize - *warnLen, "  - external texture \"%s\" not found\n", path);
+            WarnAdd(warn, "  - external texture \"%s\" not found\n", path);
         }
     }
     if (w > 0) printf("%s %s, %d x %d\n", kind, where, w, h);
     else printf("%s %s, size unknown\n", kind, where);
     if (w > TEX_BUDGET || h > TEX_BUDGET)
-        *warnLen += snprintf(warnBuf + *warnLen, warnSize - *warnLen, "  - texture %s is %d x %d, larger than %d (project budget)\n",
-                             where, w, h, TEX_BUDGET);
+        WarnAdd(warn, "  - texture %s is %d x %d, larger than %d (project budget)\n", where, w, h, TEX_BUDGET);
 }
 
 static const char *ShadingName(int m)
@@ -211,9 +224,7 @@ int InspectModel(const char *path)
     char modelDir[1100];
     snprintf(modelDir, sizeof(modelDir), "%s", GetDirectoryPath(path));
     char *json = GltfJson(path);
-    char warn[8192];
-    int wl = 0;
-    warn[0] = 0;
+    WarnText warn = { 0 };
     warnings = 0;
 
     printf("inspect-model: %s\n", path);
@@ -301,12 +312,12 @@ int InspectModel(const char *path)
                                "so 1 = the numbers are cm -> scale 0.01, 100 = metres)\n", unit);
         else printf("units: unknown (no metadata; R3D applies no unit scale: judge by the size)\n");
         if (sz > 1.5f * sy && sz > 1.5f * sx)
-            wl += snprintf(warn + wl, sizeof(warn) - wl, "  - the model is tallest in Z: probably Z-up; use rot 0 -90 0 (pitch) or re-export Y-up\n");
+            WarnAdd(&warn, "  - the model is tallest in Z: probably Z-up; use rot 0 -90 0 (pitch) or re-export Y-up\n");
     }
     if (big > 0.0f && big < 0.05f)
-        wl += snprintf(warn + wl, sizeof(warn) - wl, "  - largest size %.4f: tiny; the file may be in other units or a kit in tile units (use scale)\n", big);
+        WarnAdd(&warn, "  - largest size %.4f: tiny; the file may be in other units or a kit in tile units (use scale)\n", big);
     if (big > 500.0f)
-        wl += snprintf(warn + wl, sizeof(warn) - wl, "  - largest size %.1f: huge; the file is probably in centimetres (scale 0.01)\n", big);
+        WarnAdd(&warn, "  - largest size %.1f: huge; the file is probably in centimetres (scale 0.01)\n", big);
 
     // Materials (= the slots for material.N)
     printf("materials: %u (slots for material.N, 0-based)\n", sc->mNumMaterials);
@@ -342,7 +353,7 @@ int InspectModel(const char *path)
             printf("      metallic: %g\n", f);
             struct aiString mt;
             if (f >= 0.99f && !isUnlit && aiGetMaterialTexture(m, aiTextureType_METALNESS, 0, &mt, NULL, NULL, NULL, NULL, NULL, NULL) != AI_SUCCESS)
-                metal++, wl += snprintf(warn + wl, sizeof(warn) - wl, "  - material [%u] \"%s\" is fully metallic (metallic 1, no metalness map): "
+                metal++, WarnAdd(&warn, "  - material [%u] \"%s\" is fully metallic (metallic 1, no metalness map): "
                                "unless it is metal it renders as dark tinted metal (common in kits exported with the glTF default); "
                                "override it with a lit map material (metalness 0)\n", i, name.data);
         }
@@ -356,7 +367,7 @@ int InspectModel(const char *path)
                 struct aiString tp;
                 if (aiGetMaterialTexture(m, SLOTS[s].types[k], 0, &tp, NULL, NULL, NULL, NULL, NULL, NULL) != AI_SUCCESS) continue;
                 printf("      %s map: ", SLOTS[s].name);
-                PrintTexture(sc, modelDir, tp.data, warn, sizeof(warn), &wl);
+                PrintTexture(sc, modelDir, tp.data, &warn);
                 textures++;
                 break;
             }
@@ -377,10 +388,11 @@ int InspectModel(const char *path)
     for (int i = 0; i < 5; i++)
         if (strstr(used, BAD_EXT[i])) Warn("extension %s: not supported by R3D's importer (re-export without it)", BAD_EXT[i]);
     if (strstr(used, "KHR_texture_transform")) Warn("extension KHR_texture_transform: ignored by R3D (UV offsets/scales in the file are lost)");
-    if (wl > 0) {
-        printf("%s", warn);
-        for (const char *c = warn; *c; c++) warnings += *c == '\n';
+    if (warn.len > 0) {
+        printf("%s", warn.s);
+        for (const char *c = warn.s; *c; c++) warnings += *c == '\n';
     }
+    free(warn.s);
     if (warnings == 0) printf("  (none)\n");
 
     // How to place it

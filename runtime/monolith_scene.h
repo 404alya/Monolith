@@ -47,19 +47,13 @@
 
 #define MS_FORMAT_VERSION       2       // newest map format this runtime reads
 
-#define MS_MAX_BOXES            8192
-#define MS_MAX_GROUPS           256
-#define MS_MAX_MATERIALS        64
-#define MS_MAX_MODEL_FILES      64
-#define MS_MAX_MODELS           4096    // model instances
-#define MS_MAX_MODEL_COLLIDERS  16384   // collision boxes of all model instances together
-#define MS_MAX_MODEL_SLOTS      16384   // `material.N` overrides of all model instances together
-#define MS_MAX_COLLIDE_BOXES    8       // `collide box ...` boxes per model line
-#define MS_MAX_LIGHTS           64      // besides the sun
-#define MS_MAX_VIEWPOINTS       32
-#define MS_NAME_MAX             64      // group / material / viewpoint names, incl. the 0
-#define MS_PATH_MAX             1024
-#define MS_LINE_MAX             1024    // longest accepted map line (characters)
+// No content limits: boxes, models, groups, materials, lights, viewpoints, dependencies,
+// names and map lines live in heap arrays sized to the map. The remaining caps only stop
+// runaway input (a `repeat` grid of 100 M boxes, a 1 GB file) with a clear error:
+#define MS_MAX_OBJECTS          1000000 // boxes + model instances + lights a map may make (and
+                                        // model collision boxes, counted separately)
+#define MS_MAX_FILE_BYTES       (4 * 1024 * 1024)   // map file (and a .gltf/.obj read for its references)
+#define MS_PATH_MAX             1024    // longest path the loader builds (package root + relative path)
 #define MS_DEFAULT_EYE_HEIGHT   1.62f   // eye above the spawn's feet (for the viewpoint made from the spawn)
 
 // ======================================================================================
@@ -79,16 +73,17 @@ typedef struct {
     int material;           // index into materials[] (boxes: the material; models: the override, -1 = own)
 } MS_Ref;
 
+// Strings in scene contents (names, paths) are heap strings owned by the scene
 typedef struct {
-    char name[MS_NAME_MAX];
+    const char *name;
     int line;               // first map line that defines it, 0 = built-in
     R3D_Material material;  // ready to draw (shader, textures loaded)
-    char shader[MS_PATH_MAX];   // package-relative shader path, "" = none
+    const char *shader;     // package-relative shader path, NULL = none
 } MS_Material;
 
 // A model file (glTF/GLB, OBJ, FBX, DAE through R3D's importer), loaded once per map load
 typedef struct {
-    char path[MS_PATH_MAX];     // package-relative
+    const char *path;           // package-relative
     R3D_Model model;            // GPU loads only (zero in noGpu scenes)
     bool loaded;                // false in noGpu scenes: the file was not read, bounds are a zero box
     BoundingBox bounds;         // model space (R3D's aabb: node transforms applied, no unit scale)
@@ -126,7 +121,7 @@ typedef struct {
 } MS_LightDef;
 
 typedef struct {
-    char name[MS_NAME_MAX];
+    const char *name;
     Vector3 eye, target;
 } MS_Viewpoint;
 
@@ -142,9 +137,9 @@ typedef struct MS_Private MS_Private;
 
 typedef struct {
     int formatVersion;              // 1 or 2 (of the loaded file)
-    char path[MS_PATH_MAX];         // the map file
-    char root[MS_PATH_MAX];         // package root (folder of the map file), trailing '/'
-    char brief[MS_PATH_MAX];        // root + "MAP.md" if it exists, else ""
+    const char *path;               // the map file
+    const char *root;               // package root (folder of the map file), trailing '/'
+    const char *brief;              // root + "MAP.md" if it exists, else "" (never NULL)
     unsigned int version;           // +1 on every successful (re)load
     unsigned long long hash;        // FNV-1a 64 of the map file bytes
     long mtime;
@@ -166,7 +161,7 @@ typedef struct {
     const MS_Material *materials;   // [0] = "default"
     int materialCount;
 
-    char (*groups)[MS_NAME_MAX];
+    const char *const *groups;      // group names
     int groupCount;
 
     const MS_LightDef *lights;
@@ -231,8 +226,13 @@ void MS_SetInitHints(const MS_Scene *scene);
 // geometry closer than the camera's near plane (1 cm) is clamped rather than cut away.
 void MS_InitRenderer(void);
 
-// Line `line` (1-based) of the loaded map's text, without the newline
+// Line `line` (1-based) of the loaded map's text, without the newline (cut to outSize - 1 bytes)
 bool MS_GetLine(const MS_Scene *scene, int line, char *out, int outSize);
+
+// The same line without copying: a pointer into the scene's copy of the map file, *length
+// bytes, not NUL-terminated (print it with "%.*s"); NULL if there is no such line. Valid
+// until the next reload. Lines have no length limit.
+const char *MS_LineText(const MS_Scene *scene, int line, int *length);
 
 // ======================================================================================
 // Environment and drawing
@@ -333,5 +333,22 @@ const char *MS_Dependency(const MS_Scene *scene, int index);   // NULL when out 
 // number formatting as MS_WriteEnvironment; no sky.*, ambientSky.*, sun.* or cache keys,
 // which are not part of R3D_Environment). For tools that translate a running R3D program.
 bool MS_WriteR3DEnvironment(const R3D_Environment *env, FILE *f);
+
+// ======================================================================================
+// Growable arrays and strings (plain heap memory; the runtime's own helpers, also used by
+// the monolith editor so that both follow one rule: content-sized data is never a fixed array)
+// ======================================================================================
+
+// `arrayPtr` is the address of a `T *` with room for *cap elements of elemSize bytes. Makes
+// room for at least `need` elements (the capacity doubles, at least 16; the new room is
+// zeroed). False when out of memory or the size would overflow: the array is unchanged then.
+bool MS_ArrayReserve(void *arrayPtr, int *cap, int need, size_t elemSize);
+#define MS_RESERVE(arr, cap, need) ((need) <= (cap) || MS_ArrayReserve(&(arr), &(cap), (need), sizeof(*(arr))))
+// Appends one zeroed element: a pointer to it (count + 1), or NULL when out of memory
+#define MS_PUSH(arr, count, cap) (MS_RESERVE(arr, cap, (count) + 1) ? &(arr)[(count)++] : (void *)0)
+
+// malloc'd copy of s (of its first n bytes for MS_StrNDup); NULL when out of memory
+char *MS_StrDup(const char *s);
+char *MS_StrNDup(const char *s, size_t n);
 
 #endif

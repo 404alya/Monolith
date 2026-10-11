@@ -4,11 +4,11 @@
 
 #include "common.h"
 
-#define MAX_SELECTION   512
-#define PROMPT_MAX      4096    // bytes, including the terminating 0
-#define MAX_REGIONS     16      // screen regions per request (snip mode, --region)
-#define REGION_MAX_SAMPLES 4096 // rays per region at most (a regular grid, see DesignerAnalyzeRegion)
-#define REGION_MAX_OBJECTS 256  // objects listed per region (the rest is summed up as "omitted")
+// The selection, the screen regions, the prompt text and what a region shows are heap arrays
+// (MS_RESERVE / MS_PUSH from runtime/monolith_scene.h): no count limits. Only sanity caps:
+#define PROMPT_LIMIT    (1024 * 1024)   // bytes of prompt text (a runaway paste stops here)
+#define REGION_SAMPLES  4096    // rays per region at most (a regular grid, see DesignerAnalyzeRegion):
+                                // the analysis cost, not a storage limit
 
 // Objects are MS_ObjRef (runtime/monolith_scene.h, docs/design-v2.md section 5): a box
 // (index into scene->boxes) or a model instance (index into scene->models).
@@ -37,15 +37,15 @@ typedef struct {
 // What a region shows, computed at submit time by DesignerAnalyzeRegion (ray sampling)
 typedef struct {
     Rectangle rect;         // clamped to the frame, whole pixels
-    int gridW, gridH;       // sample grid (gridW * gridH <= REGION_MAX_SAMPLES)
+    int gridW, gridH;       // sample grid (gridW * gridH <= REGION_SAMPLES)
     MS_ObjRef centerObj;    // under the rect's centre; kind MS_OBJ_NONE = sky
     Vector3 centerPoint, centerNormal;
     float centerDist;       // from the eye, metres
     bool hasDepth;          // any sample hit something
     float depthMin, depthMax;   // distance from the eye over the samples that hit, metres
-    DesignRegionObject objects[REGION_MAX_OBJECTS];     // by samples, descending
+    DesignRegionObject *objects;    // every object hit, by samples descending (heap; DesignerFreeRequest)
     int objectCount;
-    int omittedObjects;     // objects hit but not listed (more than REGION_MAX_OBJECTS)
+    int omittedObjects;     // objects hit but not listed: always 0 now (kept for the bundle format)
     float omittedShare;
     float sky;              // share of samples that hit nothing
     double ms;              // time the analysis took
@@ -53,16 +53,17 @@ typedef struct {
 
 // One request as it is submitted: a snapshot of everything the launcher writes into the
 // bundle. Object indices refer to the scene at submit time (scene->version tells which load).
+// Its arrays are heap copies: DesignerFreeRequest releases them.
 typedef struct {
-    char prompt[PROMPT_MAX];
+    char *prompt;
     Vector3 eye;
     float yaw, pitch;       // radians, project convention (yaw 0 looks toward +Z)
     float fovy;             // degrees
     int width, height;      // render size of view.png
     DesignerHit hit;
-    MS_ObjRef selected[MAX_SELECTION];
+    MS_ObjRef *selected;
     int selectedCount;
-    DesignRegionInfo regions[MAX_REGIONS];
+    DesignRegionInfo *regions;
     int regionCount;
     unsigned int mapVersion;
 } DesignRequest;
@@ -78,7 +79,7 @@ typedef struct {
     int line;               // map line of the object
     int nth;                // index among the objects of that kind on that line
     int group;              // group index at selection time (compared by name after a reload)
-    char groupName[MS_NAME_MAX];
+    char *groupName;        // heap copy, NULL = no group
 } DesignerSelKey;
 
 typedef struct {
@@ -86,24 +87,27 @@ typedef struct {
 
     DesignerHit hit;        // under the crosshair (refreshed by DesignerPick / DesignerUpdate)
 
-    MS_ObjRef selected[MAX_SELECTION];  // boxes and models, no duplicates
-    DesignerSelKey keys[MAX_SELECTION];
-    int selectedCount;
+    MS_ObjRef *selected;    // boxes and models, no duplicates (heap)
+    DesignerSelKey *keys;   // parallel to selected[]
+    int selectedCount, selectedCap, keyCap;
+    int *selPos[3];         // per kind (MS_OBJ_BOX, MS_OBJ_MODEL): object index -> position in
+    int selPosCap[3];       // selected[] + 1, 0 = not selected (O(1) membership for big selections)
     unsigned int version;   // scene->version the indices refer to
 
     // Snip mode (C): screen regions dragged out over a frozen camera. Regions are
     // screen-space, so a map reload leaves them alone (what they show is computed at submit).
     bool snipping;          // snip mode on: camera frozen, cursor free, LMB drags regions
-    DesignRegion regions[MAX_REGIONS];
-    int regionCount;
+    DesignRegion *regions;  // heap
+    int regionCount, regionCap;
     bool dragging;
     bool dragAdd;           // Shift was down at the drag start: add instead of replace
     Vector2 dragStart, dragEnd;
 
     // Prompt box
     bool promptOpen;
-    char prompt[PROMPT_MAX];
+    char *prompt;           // heap, NUL-terminated once anything was typed (NULL = empty)
     int promptLen;          // bytes, excluding the terminating 0
+    int promptCap;
     int cursor;             // byte offset, always on a UTF-8 codepoint boundary
     float wantX;            // Up/Down keep this x (pixels); < 0 = take it from the cursor
     int scroll;             // first visible wrapped line
@@ -143,11 +147,12 @@ bool DesignerCapturesInput(const Designer *d);
 // Snip mode. Enter: freezes the camera, frees the cursor. Leave: drops the regions.
 void DesignerSnipBegin(Designer *d);
 void DesignerSnipEnd(Designer *d);
-// Adds a region (pixels, clamped to a w x h frame; --region). False if full or empty.
+// Adds a region (pixels, clamped to a w x h frame; --region). False if empty (or out of memory).
 bool DesignerAddRegion(Designer *d, Rectangle rect, int w, int h);
 
 // What region `rect` (pixels of a w x h frame rendered with `cam`) shows: a regular grid of
-// at most REGION_MAX_SAMPLES rays through pixel centres, plus one through the rect's centre
+// at most REGION_SAMPLES rays through pixel centres, plus one through the rect's centre.
+// out->objects is heap memory (free(out->objects), or DesignerFreeRequest for a request).
 void DesignerAnalyzeRegion(Camera3D cam, int w, int h, Rectangle rect, DesignRegionInfo *out);
 
 void DesignerOpenPrompt(Designer *d, const char *text);
@@ -161,9 +166,18 @@ void DesignerSelectLine(Designer *d, int line);
 void DesignerSubmitDone(Designer *d, bool ok, const char *msg);
 
 // Fills the request from the designer and the camera (prompt, hit, selection, view,
-// regions: analysed here, so this takes as long as DesignerAnalyzeRegion per region)
-void DesignerBuildRequest(const Designer *d, Camera3D cam, float yaw, float pitch,
+// regions: analysed here, so this takes as long as DesignerAnalyzeRegion per region).
+// False when out of memory (req is then empty). Release it with DesignerFreeRequest.
+bool DesignerBuildRequest(const Designer *d, Camera3D cam, float yaw, float pitch,
                           int width, int height, DesignRequest *req);
+void DesignerFreeRequest(DesignRequest *req);
+
+// Index of an object among the objects of its kind made by its map line (the copy number
+// of a `repeat`); objects of one line are consecutive, so this walks back over that line only
+int DesignerObjNth(MS_ObjRef o);
+
+// Frees everything the designer allocated (selection, regions, prompt, scratch buffers)
+void DesignerFree(Designer *d);
 
 // 3D overlay on top of the R3D frame (call after R3D_End, with the frame's target bound,
 // i.e. inside BeginDrawing or BeginTextureMode). Depth-tested against R3D's depth, which

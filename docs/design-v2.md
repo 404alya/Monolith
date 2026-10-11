@@ -185,10 +185,28 @@ so later changes to the defaults never change it.
 
 ### 2.7 Limits
 
-`MS_MAX_BOXES` 8192, groups 256, materials 64, model files 64, model instances 4096,
-lights 64 (plus the sun), viewpoints 32; 1024 characters / 64 words per line, 4 MB file.
-Models (stream B): 16384 model collision boxes and 16384 `material.N` overrides in total,
-8 `collide box` boxes per line.
+**No content limits** (stream M): boxes, groups, materials, model files, model instances,
+model collision boxes, `material.N` overrides, `collide box` boxes per line, lights,
+viewpoints, uniforms / samplers per material, textures, dependencies, names (any length)
+and map lines (any length, any number of words) are heap arrays and heap strings sized to
+the map. Only sanity caps against runaway input remain, each with a `file:line: message`:
+
+| Cap | Value | Why |
+|---|---|---|
+| `MS_MAX_OBJECTS` | 1 000 000 boxes + model instances + lights together (and, separately, 1 000 000 model collision boxes) | a `repeat` grid (or `stairs` count) that multiplies to 100 M boxes; also the largest `repeat` / `stairs` count |
+| `MS_MAX_FILE_BYTES` | 4 MB map file (and a `.gltf` / `.obj` read for its references) | a wrong file passed as a map |
+| `MS_PATH_MAX` | 1024 bytes for a path the loader builds (package root + relative path) | stack scratch, `path too long` |
+| `repeat` per line | 3 | the grammar (a 3D grid) |
+
+**Memory rule (editor and runtime):** anything whose size depends on the content (the map,
+the selection, the regions, the prompt, open requests, child processes, bench frames, export
+file lists, ...) is a heap array grown with `MS_RESERVE` / `MS_PUSH` (declared in
+`runtime/monolith_scene.h`, used by `src/` too) or a heap string. Fixed `char` arrays remain
+only for stack scratch that formats one message or one path, and for single values bounded
+by the loader (the environment's sky panorama path, the last error message). The per-frame
+path (drawing, picking, HUD, collision) never allocates: its scratch arrays grow to the
+largest size seen and are reused; allocation happens on (re)load, on input events (selection,
+paste, regions), at submit / export / bench report time.
 
 ---
 
@@ -247,9 +265,8 @@ Object references are `{kind, index}`: `kind` is `box` or `model`, `index` is in
 
 ```c
 typedef struct { MS_ObjKind kind; int index; } MS_ObjRef;     // runtime header
-#define MAX_REGIONS 16
 typedef struct { Rectangle rect; } DesignRegion;               // pixels of view.png, top-left origin
-// DesignRequest gains: MS_ObjRef selected[]; DesignRegion regions[MAX_REGIONS]; int regionCount;
+// DesignRequest gains: MS_ObjRef *selected; DesignRegionInfo *regions; int regionCount;  (heap, stream M)
 ```
 
 `request.json`, `"format": 2` (format 1 bundles stay readable; `AI-MAP-TOOL.md` describes both):
@@ -299,7 +316,8 @@ tile's frustum, nearest first) and returns exactly the crosshair pick's hit; ~6 
 full-screen region at 8192 boxes. Extra keys beyond the schema above: `images.regions`;
 `hit.box` and selection `objects[].box` (format 1 names, = `index`); `regions[].center.line`
 / `.group`; `regions[].samples`, `.grid` `[w, h]`, `.omittedObjects` / `.omittedShare`
-(objects beyond the 256 listed per region); `regions[].objects[].min` / `.max`. `depth` is the
+(objects beyond the 256 listed per region; since stream M every object is listed and both are 0);
+`regions[].objects[].min` / `.max`. `depth` is the
 distance from the eye.
 
 ---
@@ -406,7 +424,7 @@ default map's box dump and the verification shots are unchanged.
 
 - **Statement** as in §2.5; details (the reference is the header comment of
   `monolith_scene.c`): `scale` values must be > 0 (mirroring would flip the winding);
-  `collide box` takes up to 8 boxes; a `use` overrides models only when it is not
+  `collide box` takes any number of boxes (8 before stream M); a `use` overrides models only when it is not
   `"default"` (`use "default"` means "own materials" for models); precedence `material.N` >
   `material` > `use` > the file's own. `material.N` beyond the file's slot count is a logged
   warning (ignored), not an error, because noGpu loads can't know the slot count.
@@ -418,7 +436,7 @@ default map's box dump and the verification shots are unchanged.
   `.translation` (position + origin shift), `.collide`, `.slotFirst/.slotCount`; scene
   `modelSlots[]` / `modelSlotCount` (`MS_SlotMaterial { slot, material }`); enums
   `MS_ModelOrigin`, `MS_ModelCollide`; limits `MS_MAX_MODEL_COLLIDERS`, `MS_MAX_MODEL_SLOTS`,
-  `MS_MAX_COLLIDE_BOXES`. `ref.material` of a model = the whole-model override, -1 = own.
+  `MS_MAX_COLLIDE_BOXES` (removed by stream M, §2.7). `ref.material` of a model = the whole-model override, -1 = own.
 - **Loading:** `R3D_LoadModelEx(path, R3D_IMPORT_RETAIN_MESH_DATA)` once per file per load (new
   scene's models load while the old scene is still alive). The CPU positions/indices are
   copied into a BVH for picking, then R3D's mesh data is freed. A noGpu load (main.c's

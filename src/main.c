@@ -42,7 +42,7 @@
 //                  and the camera are frozen and the mouse cursor is free. If sending
 //                  fails, the box stays open with the text.
 //   C              snip mode: the camera freezes and the cursor is free. Drag = a screen
-//                  region (replaces the others), SHIFT+drag = add one (up to 16), ENTER =
+//                  region (replaces the others), SHIFT+drag = add one, ENTER =
 //                  prompt box with the regions (and the box selection made before C)
 //                  attached, RMB / ESC / C = leave snip mode and drop the regions. ESC in the
 //                  prompt box returns to snip mode with the regions; a successful submit
@@ -107,7 +107,7 @@
 //                  Markdown report to benchmark/<timestamp>_shadow-<size>-<range>.md and exit
 //   --headless     with --bench: hidden window + offscreen target + glFinish per frame,
 //                  so nothing appears on screen (compare headless runs only with each other)
-//   --bench-frames <n>   timed frames per viewpoint (10..600, default 600); fewer = quick
+//   --bench-frames <n>   timed frames per viewpoint (at least 10, default 600); fewer = quick
 //                  screening runs (the camera spins faster, so the shadow map updates more)
 //   --bench-still  like --bench, but the camera doesn't spin (the still-camera ideal: no
 //                  shadow-map re-renders); the report gets a _still suffix
@@ -166,9 +166,9 @@
 //   --pick         with --shot: print what the crosshair (screen centre) hits on the shot
 //                  frame: box or model index, group, map line + its text, point, normal,
 //                  distance (models: file, position, rotation, scale, origin, bounds)
-//   --select <line>  select every box / model made by this map line (repeatable, up to 64)
+//   --select <line>  select every box / model made by this map line (repeatable)
 //   --region x y w h   attach a screen region (pixels of the shot, top-left origin), as if
-//                  dragged out in snip mode (repeatable, up to 16); with --shot-hud the shot
+//                  dragged out in snip mode (repeatable); with --shot-hud the shot
 //                  shows the snip-mode drawing, with --submit the bundle gets the regions
 //   --submit "text"  with --shot: after saving the shot, run the real submit path (render
 //                  view + view-marked offscreen, LauncherSubmit with the centre pick,
@@ -299,7 +299,7 @@ static bool DrawScene(Camera3D camera, RenderTexture target)
 
 typedef struct {
     const char *aoMode, *bloomMode;
-    const char *fx[16];
+    const char **fx;            // the --fx arguments (argv strings)
     int fxCount;
     bool flip[6];               // keys 1-6: volumetric fog, fog, SSAO, SSIL, bloom, sun
 } EffectState;
@@ -441,11 +441,15 @@ static bool Submit(Designer *d, Camera3D cam, float yaw, float pitch, RenderText
                    char *msg, int msgSize)
 {
     // Window mode: an offscreen target at R3D's resolution (the window size), like --shot
+    DesignRequest req;
+    if (!DesignerBuildRequest(d, cam, yaw, pitch, rt.id ? rt.texture.width : GetScreenWidth(),
+                              rt.id ? rt.texture.height : GetScreenHeight(), &req)) {
+        snprintf(msg, msgSize, "out of memory: request not sent");
+        DesignerSubmitDone(d, false, msg);
+        return false;
+    }
     bool own = rt.id == 0;
     if (own) rt = LoadRenderTexture(GetScreenWidth(), GetScreenHeight());
-
-    static DesignRequest req;
-    DesignerBuildRequest(d, cam, yaw, pitch, rt.texture.width, rt.texture.height, &req);
     DrawScene(cam, rt);
     Image view = ReadTarget(rt);
     BeginTextureMode(rt);
@@ -457,6 +461,7 @@ static bool Submit(Designer *d, Camera3D cam, float yaw, float pitch, RenderText
 
     bool ok = LauncherSubmit(&req, view, marked, msg, msgSize);
     TraceLog(ok ? LOG_INFO : LOG_WARNING, "monolith: submit: %s", msg);
+    DesignerFreeRequest(&req);
     UnloadImage(view);
     UnloadImage(marked);
     if (own) UnloadRenderTexture(rt);
@@ -464,12 +469,14 @@ static bool Submit(Designer *d, Camera3D cam, float yaw, float pitch, RenderText
     return ok;
 }
 
-// Command line text for --submit / --type: a literal \n becomes a new line
-static const char *Unescape(const char *in)
+// Command line text for --submit / --type: a literal \n becomes a new line. A heap string
+// (free it); on out of memory the text as given (a copy as well), or NULL
+static char *Unescape(const char *in)
 {
-    static char out[PROMPT_MAX];
+    char *out = malloc(strlen(in) + 1);
+    if (!out) return NULL;
     int n = 0;
-    for (const char *c = in; *c && n < PROMPT_MAX - 1; c++) {
+    for (const char *c = in; *c; c++) {
         if (c[0] == '\\' && c[1] == 'n') { out[n++] = '\n'; c++; }
         else out[n++] = *c;
     }
@@ -477,11 +484,41 @@ static const char *Unescape(const char *in)
     return out;
 }
 
+// Heap memory of main() that lives until it returns (freed by main for every return path):
+// the repeatable command-line arguments (sized by argc) and the --bench tables
+static struct {
+    const char **fx;            // --fx key=value
+    int *selectLines;           // --select <line>
+    Rectangle *regions;         // --region x y w h
+    double *benchTimes;         // [view * benchFrames + frame]
+    int *benchShadowUpdates;    // per view
+} mainHeap;
+
+static void FreeMainHeap(void)
+{
+    free(mainHeap.fx);
+    free(mainHeap.selectLines);
+    free(mainHeap.regions);
+    free(mainHeap.benchTimes);
+    free(mainHeap.benchShadowUpdates);
+    memset(&mainHeap, 0, sizeof(mainHeap));
+}
+
+static int Run(int argc, char **argv);
+
+int main(int argc, char **argv)
+{
+    int status = Run(argc, argv);
+    FreeMainHeap();
+    LauncherShutdown();
+    return status;
+}
+
 // ======================================================================================
 // #region Main
 // ======================================================================================
 
-int main(int argc, char **argv)
+static int Run(int argc, char **argv)
 {
     InitDataPaths();
 
@@ -523,10 +560,18 @@ int main(int argc, char **argv)
     bool closeSubmitted = false;    // --close-submitted
     const char *classifyText = NULL, *classifyKind = "edit";
     const char *aoMode = "full", *bloomMode = "on";
-    const char *fxSettings[16];
+    // Repeatable arguments: at most argc of each
+    mainHeap.fx = malloc(sizeof(const char *) * argc);
+    mainHeap.selectLines = malloc(sizeof(int) * argc);
+    mainHeap.regions = malloc(sizeof(Rectangle) * argc);
+    if (!mainHeap.fx || !mainHeap.selectLines || !mainHeap.regions) {
+        fprintf(stderr, "monolith: out of memory\n");
+        return 1;
+    }
+    const char **fxSettings = mainHeap.fx;
     int fxCount = 0;
-    int selectLines[64], selectLineCount = 0;
-    Rectangle regionArgs[MAX_REGIONS];
+    int *selectLines = mainHeap.selectLines, selectLineCount = 0;
+    Rectangle *regionArgs = mainHeap.regions;
     int regionArgCount = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--shot") == 0 && i + 1 < argc) shotPath = argv[++i];
@@ -540,7 +585,7 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--ao") == 0 && i + 1 < argc) aoMode = argv[++i];
         else if (strcmp(argv[i], "--bloom") == 0 && i + 1 < argc) bloomMode = argv[++i];
         else if (strcmp(argv[i], "--fx") == 0 && i + 1 < argc) {
-            if (fxCount < 16) fxSettings[fxCount++] = argv[i + 1];
+            fxSettings[fxCount++] = argv[i + 1];
             i++;
         }
         else if (strcmp(argv[i], "--bench") == 0) bench = true;
@@ -582,7 +627,7 @@ int main(int argc, char **argv)
             }
         }
         else if (strcmp(argv[i], "--bench-frames") == 0 && i + 1 < argc)
-            benchFrames = (int)Clamp((float)atoi(argv[++i]), 10.0f, (float)BENCH_FRAMES);
+            benchFrames = (int)Clamp((float)atoi(argv[++i]), 10.0f, (float)BENCH_FRAMES_LIMIT);
         else if (strcmp(argv[i], "--note") == 0 && i + 1 < argc) benchNote = argv[++i];
         else if (strcmp(argv[i], "--map") == 0 && i + 1 < argc) mapPath = argv[++i];
         else if (strcmp(argv[i], "--dump-boxes") == 0 && i + 1 < argc) dumpPath = argv[++i];
@@ -600,12 +645,10 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--classify") == 0 && i + 1 < argc) classifyText = argv[++i];
         else if (strcmp(argv[i], "--classify-kind") == 0 && i + 1 < argc) classifyKind = argv[++i];
         else if (strcmp(argv[i], "--select") == 0 && i + 1 < argc) {
-            int line = atoi(argv[++i]);
-            if (selectLineCount < 64) selectLines[selectLineCount++] = line;
+            selectLines[selectLineCount++] = atoi(argv[++i]);
         }
         else if (strcmp(argv[i], "--region") == 0 && i + 4 < argc) {
-            if (regionArgCount < MAX_REGIONS)
-                regionArgs[regionArgCount++] = (Rectangle){ atof(argv[i + 1]), atof(argv[i + 2]), atof(argv[i + 3]), atof(argv[i + 4]) };
+            regionArgs[regionArgCount++] = (Rectangle){ atof(argv[i + 1]), atof(argv[i + 2]), atof(argv[i + 3]), atof(argv[i + 4]) };
             i += 4;
         }
         else if (strcmp(argv[i], "--shadow") == 0 && i + 2 < argc) {
@@ -685,13 +728,15 @@ int main(int argc, char **argv)
                 for (int k = 0; k < selectLineCount; k++) if (peek->boxRefs[b].line == selectLines[k]) { selected++; break; }
             for (int m = 0; m < peek->modelCount; m++)
                 for (int k = 0; k < selectLineCount; k++) if (peek->models[m].ref.line == selectLines[k]) { selected++; break; }
-            const char *text = Unescape(classifyText);
+            char *text = Unescape(classifyText);
+            if (!text) { MS_Unload(peek); return 1; }
             ModelQuery q = { .prompt = text, .kind = classifyKind, .selected = selected, .regions = regionArgCount,
                              .hit = true, .emptyMap = peek->boxCount + peek->modelCount <= 2, .noBrief = !peek->brief[0] };
             ModelChoice c;
             LauncherChooseModel(&q, &c);
             printf("tier: %s\nmodel: %s%s\nreason: %s\nsource: %s\nprompt: %s\n", ModelTierName(c.tier), c.name,
                    c.addFlag ? "" : " (from MONOLITH_CLAUDE_ARGS, no --model added)", c.reason, c.source, text + c.promptSkip);
+            free(text);
             MS_Unload(peek);
             return 0;
         }
@@ -803,8 +848,7 @@ int main(int argc, char **argv)
     MS_ApplyRenderResolution(scene, GetScreenWidth(), GetScreenHeight());
 
     // --- Environment: the map's, then --ao / --bloom / --fx, then the 1-6 toggles
-    EffectState effects = { .aoMode = aoMode, .bloomMode = bloomMode, .fxCount = fxCount };
-    for (int k = 0; k < fxCount; k++) effects.fx[k] = fxSettings[k];
+    EffectState effects = { .aoMode = aoMode, .bloomMode = bloomMode, .fx = fxSettings, .fxCount = fxCount };
     ApplyEnvironment(&effects);
 
     bool hud = true;
@@ -836,7 +880,11 @@ int main(int argc, char **argv)
                      regionArgs[i].x, regionArgs[i].y, regionArgs[i].width, regionArgs[i].height, GetScreenWidth(), GetScreenHeight());
 
     if (!hidden) DisableCursor();
-    if (typeText) DesignerOpenPrompt(&designer, Unescape(typeText));
+    if (typeText) {
+        char *text = Unescape(typeText);
+        if (text) DesignerOpenPrompt(&designer, text);
+        free(text);
+    }
     RenderTexture shotTarget = { 0 };   // zero = draw to the window
     if (hidden) shotTarget = LoadRenderTexture(GetScreenWidth(), GetScreenHeight());
     // --bench-window: the headless bench renders into a stand-in for the window instead,
@@ -853,10 +901,18 @@ int main(int argc, char **argv)
 
     // Benchmark: for each viewpoint, warm up, then spin the camera a full turn
     // (so the camera-fitted shadow map is re-fit every frame) while timing frames.
-    static double benchTimes[MS_MAX_VIEWPOINTS][BENCH_FRAMES];
-    static int benchShadowUpdates[MS_MAX_VIEWPOINTS];
+    double *benchTimes = NULL;          // [view * benchFrames + frame]
+    int *benchShadowUpdates = NULL;     // per view
     int benchView = 0, benchFrame = -BENCH_WARMUP;
     double benchLast = 0.0;
+    if (bench) {
+        benchTimes = mainHeap.benchTimes = calloc((size_t)scene->viewpointCount * benchFrames, sizeof(double));
+        benchShadowUpdates = mainHeap.benchShadowUpdates = calloc(scene->viewpointCount, sizeof(int));
+        if (!benchTimes || !benchShadowUpdates || !BenchInit(scene->viewpointCount)) {
+            fprintf(stderr, "monolith: out of memory (bench tables)\n");
+            bench = false;
+        }
+    }
     if (bench) {
         spec.active = true;
         SpectatorJumpTo(&spec, 0);
@@ -1000,7 +1056,7 @@ int main(int argc, char **argv)
         double frameStart = GetTime();
         if (bench) {
             double now = frameStart;
-            if (benchFrame >= 0 && benchFrame < benchFrames) benchTimes[benchView][benchFrame] = now - benchLast;
+            if (benchFrame >= 0 && benchFrame < benchFrames) benchTimes[(size_t)benchView * benchFrames + benchFrame] = now - benchLast;
             benchLast = now;
             if (++benchFrame == benchFrames) {
                 if (++benchView == scene->viewpointCount) break;
@@ -1154,8 +1210,11 @@ int main(int argc, char **argv)
             if (submitText) {
                 char msg[512];
                 float yaw = spec.active ? spec.yaw : player.yaw, pitch = spec.active ? spec.pitch : player.pitch;
-                DesignerOpenPrompt(&designer, Unescape(submitText));
-                bool ok = Submit(&designer, camera, yaw, pitch, shotTarget, msg, sizeof(msg));
+                char *text = Unescape(submitText);
+                if (text) DesignerOpenPrompt(&designer, text);
+                free(text);
+                bool ok = text && Submit(&designer, camera, yaw, pitch, shotTarget, msg, sizeof(msg));
+                if (!text) snprintf(msg, sizeof(msg), "out of memory");
                 printf("submit: %s: %s\n", ok ? "ok" : "failed", msg);
                 fflush(stdout);
                 // --submit-wait / --close-submitted: poll the request (result.md, the
@@ -1187,6 +1246,8 @@ int main(int argc, char **argv)
 
     LauncherCloseOnExit();          // MONOLITH_CLOSE_ON_EXIT=1: close finished requests' terminals
     R3D_SetProfilerEnabled(false);  // frees its GL queries
+    BenchFree();
+    DesignerFree(&designer);
     if (emulateWindow) WindowEmuUnload(&windowEmu);
     else if (hidden) UnloadRenderTexture(shotTarget);
     if (reuse.rt.id) UnloadRenderTexture(reuse.rt);
