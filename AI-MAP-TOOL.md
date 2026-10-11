@@ -225,7 +225,7 @@ model "models/x.glb" x y z [rot yawDeg pitchDeg rollDeg] [scale s | scale sx sy 
 
 - glTF/GLB preferred (also OBJ, FBX, DAE through R3D's importer). Each file is loaded once per map load and drawn instanced. Animations and skins are ignored (static pose).
 - `rot`: yaw about +Y, pitch about +X, roll about +Z, applied roll, then pitch, then yaw (`R = Ry · Rx · Rz`); yaw 90 turns the model's +Z to +X. `scale` > 0 (files have no unit scale: a model in centimetres needs `scale 0.01`).
-- `origin bottom` puts the bottom centre of the scaled, rotated bounds at x y z: the safe way to stand a model on a surface. `center`: the bounds' centre; `model` (default): the file's own origin.
+- `origin bottom` stands the model on y by its lowest vertex after scale and rotation, centred over x z by its file bounds: the safe way to stand a model on a surface. `center`: the same x z and the middle between its lowest and highest vertex; `model` (default): the file's own origin. World bounds, `collide aabb` and picking use the rotated vertices, not the rotated file box.
 - Materials: `material "name"` overrides every slot, `material.N "name"` slot N (`--inspect-model` lists the slots). Precedence: `material.N`, then `material`, then the active `use` (when it is not `"default"`), else the file's own materials.
 - `collide`: `aabb` (default: the world bounds block the player), `none`, or `box …` boxes in model space (before scale and rotation), each turned into a world AABB (a tree's trunk only). `shadow off` stops it casting the sun shadow (it still receives shadows).
 - Finding, licensing, normalising, recording and restyling models: §12.
@@ -273,7 +273,7 @@ Run every command from the repo root. The binary is `./build/linux/monolith`, an
    ```sh
    ./build/linux/monolith --dump-boxes requests/<id>/boxes-after.txt --map <map>   # no window
    ```
-   A parse error prints `file:line: message` and exits with status 1 (`--dump-boxes` checks that model files exist but doesn't read them; `--dump-scene` and `--shot` do). `--map` is also how to try a draft copy before writing it over the real map. `diff` the two dumps to confirm that only the intended objects changed (with inserted lines, the unchanged ones move as a block).
+   A parse error prints `file:line: message` and exits with status 1 (`--dump-boxes` opens no window but also imports every model file on the CPU, so a missing, truncated or unreadable model fails here too; `--export` fails the same way). `--map` is also how to try a draft copy before writing it over the real map. `diff` the two dumps to confirm that only the intended objects changed (with inserted lines, the unchanged ones move as a block).
 5. **After image** from the same camera: `--shot requests/<id>/after.png` with the same `--eye`/`--look`. Then **look at both images** (Read them). Add extra views where the reproduction view can't show the change, e.g. from the other side, from above, or walking height `--eye x <ground + 1.62> z`. The map's viewpoints are `--view 1..n`. Use `--off <digits>` to isolate effects (1 volumetric fog, 2 distance fog, 3 SSAO, 4 SSIL, 5 bloom, 6 sun).
 6. **Check:**
    - the request is visibly done, at the right spot, at a sensible scale, **in the style of `MAP.md`** (materials, palette, budgets);
