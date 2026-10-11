@@ -105,6 +105,7 @@ static struct {
     char **lightLines; int lightLineCount, lightLineCap;
     Vector3 camPos, camTarget; double fovy; bool hasCam;
     MscNoteEntry *notes; int noteCount, noteCap;
+    BoundingBox *boxBounds; int boxBoundCount, boxBoundCap;   // the boxes written, for the spawn
 } msc;
 
 static void MscFreeAll(void)
@@ -115,27 +116,52 @@ static void MscFreeAll(void)
     for (int i = 0; i < msc.lightLineCount; i++) free(msc.lightLines[i]);
     for (int i = 0; i < msc.noteCount; i++) free(msc.notes[i].text);
     free(msc.cubes); free(msc.files); free(msc.skies); free(msc.shaders); free(msc.geo);
-    free(msc.mats); free(msc.lightLines); free(msc.notes);
+    free(msc.mats); free(msc.lightLines); free(msc.notes); free(msc.boxBounds);
     msc.cubes = NULL; msc.files = NULL; msc.skies = NULL; msc.shaders = NULL; msc.geo = NULL;
-    msc.mats = NULL; msc.lightLines = NULL; msc.notes = NULL;
+    msc.mats = NULL; msc.lightLines = NULL; msc.notes = NULL; msc.boxBounds = NULL;
+    msc.boxBoundCount = msc.boxBoundCap = 0;
     msc.cubeCount = msc.cubeCap = msc.fileCount = msc.fileCap = msc.skyCount = msc.skyCap = 0;
     msc.shaderCount = msc.shaderCap = msc.matCount = msc.matCap = msc.lightLineCount = msc.lightLineCap = 0;
     msc.noteCount = msc.noteCap = 0;
     msc.geoSize = msc.geoCap = 0;
 }
 
-// "Not translated" lines for CAPTURE.md; the same text is counted, not repeated
+// "Not translated" lines for CAPTURE.md (any length); the same text is counted, not repeated
 static void MscNote(const char *fmt, const char *a, int n)
 {
-    char text[512];
-    snprintf(text, sizeof(text), fmt, a);
+    int len = snprintf(NULL, 0, fmt, a);
+    char *text = len >= 0 ? malloc((size_t)len + 1) : NULL;
+    if (!text) return;
+    snprintf(text, (size_t)len + 1, fmt, a);
     for (int i = 0; i < msc.noteCount; i++)
-        if (strcmp(msc.notes[i].text, text) == 0) { msc.notes[i].count += n; return; }
-    char *copy = MS_StrDup(text);
-    MscNoteEntry *e = copy ? MS_PUSH(msc.notes, msc.noteCount, msc.noteCap) : NULL;
-    if (!e) { free(copy); return; }
-    e->text = copy;
+        if (strcmp(msc.notes[i].text, text) == 0) { msc.notes[i].count += n; free(text); return; }
+    MscNoteEntry *e = MS_PUSH(msc.notes, msc.noteCount, msc.noteCap);
+    if (!e) { free(text); return; }
+    e->text = text;
     e->count = n;
+}
+
+// A growing heap string (for note details)
+typedef struct { char *s; size_t len, cap; } MscStr;
+static void MscStrAdd(MscStr *t, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(NULL, 0, fmt, ap);
+    va_end(ap);
+    if (n < 0) return;
+    if (t->len + n + 1 > t->cap) {
+        size_t cap = t->cap ? t->cap * 2 : 256;
+        while (cap < t->len + n + 1) cap *= 2;
+        char *g = realloc(t->s, cap);
+        if (!g) return;
+        t->s = g;
+        t->cap = cap;
+    }
+    va_start(ap, fmt);
+    vsnprintf(t->s + t->len, (size_t)n + 1, fmt, ap);
+    va_end(ap);
+    t->len += n;
 }
 
 // Appends to the frame's geometry text (a growing buffer; plain C, no open_memstream)
@@ -165,6 +191,14 @@ static void MscGeo(const char *fmt, ...)
     free(line);
 }
 
+static void MscAtExit(void)
+{
+    if (msc.state == 2)
+        fprintf(stderr, "monolith_capture: frame %d (MONOLITH_CAPTURE_FRAME) was never reached: the program rendered %d "
+                        "frame%s, nothing written to %s\n", msc.target, msc.frame, msc.frame == 1 ? "" : "s", msc.dir);
+    MscFreeAll();
+}
+
 static bool MscRecording(void)
 {
     if (msc.state == 0) {
@@ -177,6 +211,7 @@ static bool MscRecording(void)
         const char *f = getenv("MONOLITH_CAPTURE_FRAME");
         msc.target = f && atoi(f) > 0 ? atoi(f) : 3;
         msc.state = 2;
+        atexit(MscAtExit);
     }
     return msc.state == 3;
 }
@@ -385,6 +420,8 @@ static void MscMesh(R3D_Mesh mesh, R3D_Material material, Matrix t)
     MscGeo("%s %s %s%s\n", MscFmt(ctr.x + ext[0]), MscFmt(ctr.y + ext[1]), MscFmt(ctr.z + ext[2]),
             aligned ? "" : "   # approximation: rotated cube, its world AABB");
     msc.boxes++;
+    BoundingBox *bb = MS_PUSH(msc.boxBounds, msc.boxBoundCount, msc.boxBoundCap);
+    if (bb) *bb = (BoundingBox){ { ctr.x - ext[0], ctr.y - ext[1], ctr.z - ext[2] }, { ctr.x + ext[0], ctr.y + ext[1], ctr.z + ext[2] } };
     if (!aligned) { msc.approx++; MscNote("rotated cubes written as their world AABB (approximation)%s", "", 1); }
 }
 
@@ -426,20 +463,39 @@ static void MscModel(R3D_Model model, Matrix t)
     if (s.x == 0 || s.y == 0 || s.z == 0) return;
     float r02 = c2.x / s.z, r12 = c2.y / s.z, r22 = c2.z / s.z, r10 = c0.y / s.x, r11 = c1.y / s.y;
     float pitch = asinf(Clamp(-r12, -1, 1)), yaw = atan2f(r02, r22), roll = atan2f(r10, r11);
+    // An active box material would restyle the model (`use` applies to models unless it is
+    // "default"): the program drew the model with its own materials
+    if (msc.curMat != -2) MscGeo("use \"default\"\n");
     MscGeo("model \"models/%s\" %s %s %s rot %s %s %s scale %s %s %s\n", GetFileName(msc.files[f].path),
             MscFmt(t.m12), MscFmt(t.m13), MscFmt(t.m14), MscFmt(yaw * RAD2DEG), MscFmt(pitch * RAD2DEG), MscFmt(roll * RAD2DEG),
             MscFmt(s.x), MscFmt(s.y), MscFmt(s.z));
     msc.models++;
-    msc.curMat = -1;    // a model line doesn't take the box material; keep `use` explicit
+    msc.curMat = -2;    // "default" is active (-1: unknown, write the next box's `use`)
+    // Material values the program changed after loading: slot, field, file -> program
     const MscModelFile *mf = &msc.files[f];
+    MscStr d = { 0 };
     for (int i = 0; i < mf->matCount; i++) {
         const R3D_Material *m = &model.materials[i];
-        MscMatState now = { m->albedo.color, m->orm.roughness, m->orm.metalness, m->unlit };
-        if (memcmp(&now, &mf->mats[i], sizeof(now)) != 0) {
-            MscNote("material values changed in code after loading %s (translate them as material overrides by hand)",
-                    GetFileName(mf->path), 1);
-            break;
+        const MscMatState *o = &mf->mats[i];
+        if (memcmp(&m->albedo.color, &o->albedo, sizeof(Color)) != 0)
+            MscStrAdd(&d, "%sslot %d albedo %d %d %d %d -> %d %d %d %d", d.len ? "; " : "", i, o->albedo.r, o->albedo.g, o->albedo.b,
+                      o->albedo.a, m->albedo.color.r, m->albedo.color.g, m->albedo.color.b, m->albedo.color.a);
+        if (m->orm.roughness != o->rough)
+            MscStrAdd(&d, "%sslot %d roughness %s -> %s", d.len ? "; " : "", i, MscFmt(o->rough), MscFmt(m->orm.roughness));
+        if (m->orm.metalness != o->metal)
+            MscStrAdd(&d, "%sslot %d metalness %s -> %s", d.len ? "; " : "", i, MscFmt(o->metal), MscFmt(m->orm.metalness));
+        if (m->unlit != o->unlit)
+            MscStrAdd(&d, "%sslot %d unlit %s -> %s", d.len ? "; " : "", i, o->unlit ? "on" : "off", m->unlit ? "on" : "off");
+    }
+    if (d.s) {
+        char *t = malloc(strlen(GetFileName(mf->path)) + d.len + 8);
+        if (t) {
+            sprintf(t, "%s: %s", GetFileName(mf->path), d.s);
+            MscNote("material values changed in code after loading %s (file -> program; translate them as `material.N` "
+                    "overrides by hand)", t, 1);
+            free(t);
         }
+        free(d.s);
     }
 }
 
@@ -566,7 +622,21 @@ static void MscWrite(void)
     if (msc.hasCam) {
         Vector3 d = Vector3Subtract(msc.camTarget, msc.camPos);
         float yaw = atan2f(d.x, d.z) * RAD2DEG;
-        fprintf(f, "spawn %s %s %s %s\n", MscFmt(msc.camPos.x), MscFmt(msc.camPos.y - 1.62f), MscFmt(msc.camPos.z), MscFmt(yaw));
+        // Feet on the highest box top under the camera (within 20 m below the eye), so the
+        // player doesn't drop at the start; else the eye height below the camera (said so)
+        float feet = msc.camPos.y - 1.62f;
+        bool onBox = false;
+        for (int i = 0; i < msc.boxBoundCount; i++) {
+            const BoundingBox *b = &msc.boxBounds[i];
+            if (msc.camPos.x < b->min.x || msc.camPos.x > b->max.x || msc.camPos.z < b->min.z || msc.camPos.z > b->max.z) continue;
+            if (b->max.y > msc.camPos.y || b->max.y < msc.camPos.y - 20.0f || (onBox && b->max.y <= feet)) continue;
+            feet = b->max.y;
+            onBox = true;
+        }
+        fprintf(f, onBox ? "# spawn: feet on the box top under the camera (the camera eye was %s m above it)\n"
+                         : "# spawn: no box under the camera: feet 1.62 m (eye height) below it%s\n",
+                onBox ? MscFmt(msc.camPos.y - feet) : "");
+        fprintf(f, "spawn %s %s %s %s\n", MscFmt(msc.camPos.x), MscFmt(feet), MscFmt(msc.camPos.z), MscFmt(yaw));
         fprintf(f, "viewpoint \"Captured\" %s %s %s %s %s %s\n", MscFmt(msc.camPos.x), MscFmt(msc.camPos.y), MscFmt(msc.camPos.z),
                 MscFmt(msc.camTarget.x), MscFmt(msc.camTarget.y), MscFmt(msc.camTarget.z));
         if (fabs(msc.fovy - 70.0) > 0.01) MscNote("camera field of view %s (monolith viewpoints use 70 degrees)", TextFormat("%.1f", msc.fovy), 1);
