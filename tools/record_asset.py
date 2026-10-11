@@ -8,6 +8,18 @@
 #       [--normalize-report <json from tools/normalize_model.py --report>] \
 #       [--change "text"]... [--ai-generated yes|no|unknown] [--note "text"]
 #
+# Without a provenance.json (a file copied from an imported project, or a local file the
+# developer supplied), describe the source by hand instead of --provenance:
+#
+#   python3 -I tools/record_asset.py --package maps/<name> --file models/x.glb \
+#       --source-note "copied from <project>/assets/x.glb (the imported project)" \
+#       --licence "CC0 1.0" [--licence-url URL] [--author NAME]... [--attribution TEXT] \
+#       [--source-url URL] [--original-file <path of the original, hashed>]... [other options]
+#
+# --licence takes CC0 / CC-BY / public domain as with a provenance, or "unknown" (recorded as
+# unknown, with a warning: the developer decides; say so in result.md). The project's licence
+# evidence (a License.txt, its ASSETS.md / README) goes into --note.
+#
 # --file is package-relative and must already exist (copy the checked file in first). The
 # sidecar is <package>/<file>.asset.md; ASSETS.md gets one row per file (the row whose first
 # cell is `<file>` is replaced, else a row is appended to the table). Changes listed are the
@@ -16,6 +28,7 @@
 
 import argparse
 import datetime
+import hashlib
 import json
 import pathlib
 import re
@@ -55,7 +68,16 @@ def main():
     p = argparse.ArgumentParser(description="Record an asset's provenance in a map package")
     p.add_argument("--package", required=True)
     p.add_argument("--file", required=True, help="package-relative path, e.g. models/pine.glb")
-    p.add_argument("--provenance", required=True)
+    src = p.add_mutually_exclusive_group(required=True)
+    src.add_argument("--provenance", help="provenance.json written by tools/fetch_asset.py")
+    src.add_argument("--source-note", help="without a provenance.json: where the file came from (free text)")
+    p.add_argument("--licence", help="with --source-note: CC0 / CC-BY x / public domain, or unknown")
+    p.add_argument("--licence-url", default="")
+    p.add_argument("--author", action="append", default=[])
+    p.add_argument("--attribution", default="")
+    p.add_argument("--source-url", default="")
+    p.add_argument("--original-file", action="append", default=[],
+                   help="with --source-note: the original file(s) (hashed into the record)")
     p.add_argument("--original", action="append", default=[],
                    help="path (as in provenance.json) of the original file(s) this one came from; "
                         "default: every model or texture file in the provenance")
@@ -76,12 +98,34 @@ def main():
     assets = pkg / "ASSETS.md"
     if not assets.is_file():
         Fail("%s missing (every package has one; --new-map creates it)" % assets)
-    prov = json.loads(pathlib.Path(a.provenance).read_text())
+    if a.provenance:
+        if a.licence or a.licence_url or a.author or a.attribution or a.source_url or a.original_file:
+            Fail("--licence / --author / --source-url / --original-file go with --source-note, not --provenance")
+        prov = json.loads(pathlib.Path(a.provenance).read_text())
+    else:
+        if not a.licence:
+            Fail("--source-note needs --licence (CC0, CC-BY x, public domain, or unknown)")
+        files = []
+        for o in a.original_file:
+            op = pathlib.Path(o)
+            if not op.is_file():
+                Fail("--original-file %s does not exist" % o)
+            files.append({"path": op.name, "sha256": hashlib.sha256(op.read_bytes()).hexdigest(),
+                          "url": a.source_url or None})
+        prov = {"source": a.source_note, "licence": a.licence, "licenceUrl": a.licence_url or "-",
+                "files": files, "downloadedAt": datetime.date.today().isoformat(),
+                "authors": a.author, "attribution": a.attribution, "pageUrl": a.source_url or None,
+                "tool": "record_asset.py --source-note (no provenance.json)"}
     for k in ("source", "licence", "licenceUrl", "files", "downloadedAt"):
         if k not in prov:
             Fail("provenance has no %r" % k)
     lic = prov["licence"]
-    if not re.match(r"(?i)^(cc0|cc-?by [0-9.]+$|cc-?by$|public domain)", lic):
+    unknown = a.source_note is not None and lic.strip().lower() == "unknown"
+    if unknown:
+        print("record_asset: warning: licence unknown, recorded as such: the developer decides "
+              "(say so in result.md)", file=sys.stderr)
+        lic = prov["licence"] = "unknown"
+    elif not re.match(r"(?i)^(cc0|cc-?by [0-9.]+$|cc-?by$|public domain)", lic):
         Fail("licence %r is not CC0 / CC-BY / public domain: such an asset must not be used" % lic)
     ccby = lic.lower().replace(" ", "").startswith(("cc-by", "ccby"))
     if ccby and not prov.get("attribution"):
@@ -119,7 +163,7 @@ def main():
              "| Author(s) | %s |" % Cell(authors),
              "| Licence | %s (%s) |" % (Cell(lic), Cell(prov["licenceUrl"])),
              "| Attribution | %s |" % Cell(prov.get("attribution") or "not required (CC0); credit given in ASSETS.md anyway"),
-             "| Downloaded | %s (by %s) |" % (date, Cell(prov.get("tool", "?"))),
+             "| %s | %s (by %s) |" % ("Downloaded" if a.provenance else "Recorded", date, Cell(prov.get("tool", "?"))),
              "| AI-generated | %s |" % a.ai_generated]
     for f in archives:
         lines.append("| Archive sha256 | `%s` %s |" % (f["sha256"], Cell(pathlib.PurePosixPath(f["path"]).name)))

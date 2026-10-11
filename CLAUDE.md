@@ -7,7 +7,7 @@ monolith is an **AI-assisted map designer** for 3D levels of any style, written 
 - Work only inside the repo, plus your own scratch and download folders.
 - Never run `rm` (or `rmdir`, `unlink`, `find -delete`): move things to the trash with `gio trash`.
 - Never run code from downloads or imported projects, except to build an imported project in a scratch copy.
-- Never open a visible window: run the game only with `--shot` (hidden window), `--dump-boxes`, `--dump-scene`, `--inspect-model`, `--new-map`, `--export`, `--classify` or `--bench --headless`. Without one of them (or with a mistyped flag) it opens a visible window.
+- Never open a visible window: run the game only with `--shot` (hidden window), `--dump-boxes`, `--dump-scene` / `--dump-scene-diff`, `--inspect-model`, `--new-map`, `--export`, `--classify` or `--bench --headless`. Without one of them (or with a mistyped flag) it opens a visible window.
 
 @AI-MAP-TOOL.md
 @PROMPT-INSTRUCTIONS.md

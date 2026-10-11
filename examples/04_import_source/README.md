@@ -17,7 +17,9 @@ examples/build/linux/04_import_source/import_source --shot /tmp/forest.png
 build/linux/monolith --import examples/04_import_source forest
 ```
 
-creates `maps/forest/` and opens a Claude Code session (heavy model tier) on a bundle
+creates `maps/forest/` (or, given a path such as `/tmp/drafts/forest`, the package in that
+folder, which keeps a trial import out of the repo) and opens a Claude Code session (heavy
+model tier) on a bundle
 `requests/<stamp>_import-forest/` that follows `AI-MAP-TOOL.md` "Import requests": it reads
 `main.c` as data, copies the models into the package, records them in `ASSETS.md`, translates
 the cubes, models, materials, lights, sky, fog and post-processing into the map, writes
@@ -38,10 +40,25 @@ model instances with their yaw and scale, 4 materials, the sun + 2 lights, the s
 environment setting. `CAPTURE.md` lists what it could not translate (here: the material
 changes the program makes to the loaded models, the camera's 60 degree field of view).
 
-## The package the import produced
+## Checking an import
 
-Model lines need the models support of the scene runtime; the imported package is added
-here once that is merged.
+No imported package is checked in here: an import is a request, so its result is a new map
+package in `maps/` (or wherever `--import` was pointed). Compare it with the original:
+
+```sh
+examples/build/linux/04_import_source/import_source --shot /tmp/original.png
+build/linux/monolith --map maps/forest --shot /tmp/imported.png --shot-size 1280 720 --view 1
+```
+
+Expected differences, none of them errors: the field of view (this program uses 60 degrees,
+monolith viewpoints 70), the rotated stones (boxes are axis-aligned: approximated or left out),
+and the Kenney models' colours if their materials were overridden with `inherit all` (an
+override's `albedo` defaults to white and replaces the file's colour factor: copy the colours
+`--inspect-model` lists into the override, or override only roughness / metalness per slot).
+
+The program builds only through `examples/build.sh` (it links monolith's R3D copy and the static
+libraries `../build.sh` builds, and includes `../common/shot.h` from outside this folder): to
+build a scratch copy, copy `examples/04_import_source/` and `examples/common/` together.
 
 ## Assets
 
