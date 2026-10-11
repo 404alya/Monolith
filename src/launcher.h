@@ -40,6 +40,18 @@ void LauncherChooseModel(const ModelQuery *q, ModelChoice *out);
 // was written, so the developer can run it by hand).
 bool LauncherSubmit(const DesignRequest *req, Image view, Image marked, char *msg, int msgSize);
 
+// Opens Claude Code on a bundle someone else wrote into requests/<id>/ (e.g. an import,
+// src/import.c), with the same terminal, permission flags and workspace handling as
+// LauncherSubmit, and tracks it in the HUD. claudePrompt is the one-line instruction on
+// the command line (never user text). slug: [a-z0-9-] only (it goes into the window title).
+// model: value of --model (NULL = none), e.g. from LauncherChooseModel
+bool LauncherStartBundle(const char *id, const char *slug, const char *claudePrompt, const char *model, char *msg, int msgSize);
+
+// requests/ (the repo's while it exists, else next to the executable) and the folder Claude
+// Code starts in; both with a trailing slash
+const char *LauncherRequestsDir(void);
+const char *LauncherRootDir(void);
+
 // Polls the open requests for result.md (cheap; call every frame, it rate-limits itself)
 void LauncherUpdate(float dt);
 

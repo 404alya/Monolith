@@ -1584,4 +1584,35 @@ bool LauncherSubmit(const DesignRequest *req, Image view, Image marked, char *ms
     return true;
 }
 
+bool LauncherStartBundle(const char *id, const char *slug, const char *claudePrompt, const char *model, char *msg, int msgSize)
+{
+    InitPaths();
+    OpenRequest *q = NewSlot();
+    snprintf(q->id, sizeof(q->id), "%s", id);
+    snprintf(q->slug, sizeof(q->slug), "%s", slug);
+    snprintf(q->dir, sizeof(q->dir), "%s%s/", requestsDir, id);
+    q->submitTime = clockTime;
+    char err[512] = "";
+    q->launched = Launch(id, slug, claudePrompt, model, q, err, sizeof(err));
+    if (!q->launched) {
+        snprintf(msg, msgSize, "launch failed: %s. Bundle kept: %s", err, q->dir);
+        TraceLog(LOG_WARNING, "monolith: run it by hand: cd '%s' && claude \"%s\"", rootDir, claudePrompt);
+        return false;
+    }
+    snprintf(msg, msgSize, "request sent: %s (Claude Code opens in a new terminal)", id);
+    return true;
+}
+
+const char *LauncherRequestsDir(void)
+{
+    InitPaths();
+    return requestsDir;
+}
+
+const char *LauncherRootDir(void)
+{
+    InitPaths();
+    return rootDir;
+}
+
 // #endregion

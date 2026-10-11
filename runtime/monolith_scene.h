@@ -266,4 +266,20 @@ bool MS_Collides(const MS_Scene *scene, BoundingBox box);
 const MS_Ref *MS_ObjectRef(const MS_Scene *scene, MS_ObjRef obj);     // NULL for MS_OBJ_NONE
 BoundingBox MS_ObjectBounds(const MS_Scene *scene, MS_ObjRef obj);    // world AABB
 
+// ======================================================================================
+// Package files and environment export (for --export, the capture shim and other tools)
+// ======================================================================================
+
+// Files the loaded scene depends on, each once: [0] is the map file, then every shader,
+// texture, panorama and model file a statement references, as scene->root + the
+// package-relative path written in the map. These are the files hot reload watches.
+// Files a model file pulls in by itself (a .gltf's .bin and textures) are not listed.
+int MS_DependencyCount(const MS_Scene *scene);
+const char *MS_Dependency(const MS_Scene *scene, int index);   // NULL when out of range
+
+// Writes every R3D_Environment field of `env` as a format-2 `env` line (the same table and
+// number formatting as MS_WriteEnvironment; no sky.*, ambientSky.*, sun.* or cache keys,
+// which are not part of R3D_Environment). For tools that translate a running R3D program.
+bool MS_WriteR3DEnvironment(const R3D_Environment *env, FILE *f);
+
 #endif

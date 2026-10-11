@@ -15,6 +15,8 @@
 //   F1             toggle HUD (also hides the crosshair and selection overlay)
 //   "(cached)" after the fps: nothing changed, the frame reused the last R3D image
 //   F12            screenshot           TAB    toggle spectator camera
+//   F9             export the map: package + scene runtime + README into
+//                  export/<map>-<YYYY-MM-DD_HHMMSS>/ next to requests/ (export.c, like --export)
 //   ESC            quit (closes the prompt box / leaves snip mode instead while open)
 //   The HUD's bottom line shows "map reloaded (N boxes)" after an edit to any file of the
 //   map package (map, shaders, textures), or the error (file:line: message) in red while
@@ -118,6 +120,14 @@
 //                  the default material and the default environment written out, a MAP.md
 //                  template, empty shaders/ models/ textures/ and ASSETS.md) and exit without
 //                  opening a window. Refuses to overwrite an existing folder
+//   --export <dir>  write the map (--map or the default) as a folder for a plain raylib + R3D
+//                  project and exit without opening a window: the package with every file it
+//                  references, monolith_scene.h/.c, viewer.c and a README.md (export.c).
+//                  Refuses a non-empty <dir>
+//   --import <project dir> <name>   create maps/<name>/ (as --new-map) and open a Claude Code
+//                  import session on a bundle requests/<stamp>_import-<name>/ that translates
+//                  the raylib + R3D project's scene into it (import.c, AI-MAP-TOOL.md "Import
+//                  requests"); no window. Same terminal / flags / workspace as edit requests
 //
 // Designer debug flags (for testing without a visible window):
 //   --pick         with --shot: print what the crosshair (screen centre) hits on the shot
@@ -166,6 +176,8 @@
 #include "designer.h"
 #include "launcher.h"
 #include "newmap.h"
+#include "export.h"
+#include "import.h"
 
 // Only needed for glEnable(GL_DEPTH_CLAMP), see main(), and glFinish() for --headless.
 // Declared by hand rather than via <GL/gl.h> / <windows.h> (which clashes with raylib).
@@ -445,6 +457,8 @@ int main(int argc, char **argv)
     bool depthPrepass = true;   // --no-prepass
     MS_ShadowMode shadowMode = MS_SHADOW_TILES;     // --shadow-camera / --shadow-always
     const char *newMapName = NULL;
+    const char *exportDir = NULL;               // --export
+    const char *importDir = NULL, *importName = NULL;   // --import
     float fogCacheVoxel = 0.0f;
     int fogCacheSub = 2;
     const char *benchNote = NULL;
@@ -485,6 +499,8 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--shadow-always") == 0) shadowMode = MS_SHADOW_ALWAYS;
         else if (strcmp(argv[i], "--shadow-camera") == 0) { if (shadowMode != MS_SHADOW_ALWAYS) shadowMode = MS_SHADOW_CAMERA; }
         else if (strcmp(argv[i], "--new-map") == 0 && i + 1 < argc) newMapName = argv[++i];
+        else if (strcmp(argv[i], "--export") == 0 && i + 1 < argc) exportDir = argv[++i];
+        else if (strcmp(argv[i], "--import") == 0 && i + 2 < argc) { importDir = argv[i + 1]; importName = argv[i + 2]; i += 2; }
         else if (strcmp(argv[i], "--fog-cache") == 0 && i + 2 < argc) {
             // Clamped: 0.25 m is already 228 MB over the default region; 0 or less turns it off
             fogCacheVoxel = (float)atof(argv[i + 1]);
@@ -560,6 +576,7 @@ int main(int argc, char **argv)
     }
 
     if (newMapName) return NewMap(mapsDir, newMapName) ? 0 : 1;
+    if (importDir) return ImportProject(mapsDir, importDir, importName) ? 0 : 1;
 
     // --- Map: parse it before opening a window, so a broken map just prints the error, and
     // the sun's shadow map size (an R3D init hint) is known before R3D_Init
@@ -599,6 +616,13 @@ int main(int argc, char **argv)
                    c.addFlag ? "" : " (from MONOLITH_CLAUDE_ARGS, no --model added)", c.reason, c.source, text + c.promptSkip);
             MS_Unload(peek);
             return 0;
+        }
+        if (exportDir) {
+            char msg[1400];
+            bool ok = ExportScene(peek, exportDir, msg, sizeof(msg));
+            fprintf(ok ? stdout : stderr, "monolith: %s\n", msg);
+            MS_Unload(peek);
+            return ok ? 0 : 1;
         }
         // The spawn's angles in double, so 180 degrees lands exactly on the float PI
         if (!posSet && !eyeSet) player.feet = peek->spawnFeet;
@@ -768,6 +792,17 @@ int main(int argc, char **argv)
         R3D_Environment *env = R3D_GetEnvironment();
         if (!typing && IsKeyPressed(KEY_F1))    hud = !hud;
         if (!typing && IsKeyPressed(KEY_F12))   TakeScreenshot("screenshot.png");
+        // (not while the package on disk is broken: the export copies the files on disk)
+        if (!typing && !shotPath && !bench && !mapMessageError && IsKeyPressed(KEY_F9)) {
+            // Export the current map (export.c); the result shows in the map message line
+            char dir[1400];
+            ExportDefaultDir(scene, dir, sizeof(dir));
+            // (not shown as a map error: those stay until the next successful reload)
+            bool exported = ExportScene(scene, dir, mapMessage, sizeof(mapMessage));
+            mapMessageError = false;
+            mapMessageTime = 6.0f;
+            TraceLog(exported ? LOG_INFO : LOG_WARNING, "monolith: %s", mapMessage);
+        }
 
         if (!typing && IsKeyPressed(KEY_TAB)) {
             spec.active = !spec.active;

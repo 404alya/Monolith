@@ -375,3 +375,26 @@ default map's box dump and the verification shots are unchanged.
   `MS_SHADOW_TILES` and `fogCacheVoxel` fall back to camera-fitted / off. Checked with
   `-fsyntax-only` and a `gcc -O2 -c` against `~/Projects/r3d/include` (no patched symbols
   referenced); not linked or run against an upstream build.
+
+---
+
+## 9. Stream D implementation notes (export, import, examples, capture)
+
+- **API additions** (`runtime/monolith_scene.h`, a separate region at the end of
+  `monolith_scene.c`): `MS_DependencyCount(scene)` / `MS_Dependency(scene, i)` (the watched
+  files: [0] the map, then every referenced shader / texture / panorama / model, as root +
+  package-relative path; files a model pulls in itself are not listed) and
+  `MS_WriteR3DEnvironment(const R3D_Environment *, FILE *)` (every `ENV_KEYS` field, for the
+  capture shim). No signature changed.
+- **Export layout:** `<dir>/README.md`, `<dir>/monolith_scene.h/.c`, `<dir>/viewer.c`,
+  `<dir>/<name>/` (the package; the map file renamed `<name>.map`). Paths need no rewriting:
+  the loader rejects anything not package-relative. Model parts (`.gltf` URIs, `.obj`/`.mtl`
+  maps) and `<file>.asset.md` sidecars are found by `src/export.c`, not by the runtime.
+- **Launcher addition:** `LauncherStartBundle(id, slug, claudePrompt, model, msg)` +
+  `LauncherRequestsDir()` / `LauncherRootDir()`, used by `--import`.
+- **Import bundle:** `request.json` `format: 2`, `kind: "import"`, `camera`/`hit` `null`,
+  empty `selection`/`regions`/`nearby`, `model`, `map` (the new package), `import`
+  `{projectDir, mapName, package}` (absolute paths); `request.md` sections *Prompt*, *Import*
+  (with an inventory of the project's files), *Verify*, *Map at creation*.
+- **Capture shim:** `runtime/monolith_capture.h` (header-only, `MONOLITH_CAPTURE_IMPLEMENTATION`
+  in one file, needs `monolith_scene.c` linked). Not used by the game.

@@ -1,0 +1,168 @@
+monolith 2
+# courtyard.map -- a small sample scene for examples/01_minimal (and a test map for --export):
+# a tiled courtyard with plaster walls, an arcade, a fountain, striped awnings and four lamps.
+# Paths in this file are relative to this folder.
+
+# --- Materials
+material "default" albedo 180 180 180 roughness 0.9 metalness 0
+material "terracotta" albedo 178 100 70 roughness 0.8
+material "tiles" albedo_map "textures/tiles.png" roughness 0.7        # 1 texture repeat per box face
+material "plaster" albedo 222 208 186 roughness 0.95
+material "stone" albedo 190 176 150 roughness 0.8
+material "water" albedo 40 70 80 roughness 0.05 metalness 0
+material "iron" albedo 40 38 36 roughness 0.5 metalness 1
+material "glow" albedo 255 230 200 emission 255 196 130 emission_energy 6
+material "awning" shader "shaders/stripes.glsl" alpha_cutoff 0
+material "awning" uniform u_colorA 0.55 0.08 0.05 uniform u_colorB 0.85 0.8 0.7 uniform u_width 0.5
+
+# --- Environment: late afternoon, warm low sun, light haze
+# Sky (sky.sunDirection follows sun.direction unless it is set)
+env sky.mode procedural
+env sky.size 1024
+env sky.skyTopColor 96 128 170
+env sky.skyHorizonColor 236 206 170
+env sky.skyHorizonCurve 0.15
+env sky.skyEnergy 1
+env sky.groundBottomColor 48 46 44
+env sky.groundHorizonColor 190 186 178
+env sky.groundHorizonCurve 0.02
+env sky.groundEnergy 1
+env sky.sunColor 255 214 170
+env sky.sunSizeDeg 2.5
+env sky.sunCurve 0.15
+env sky.sunEnergy 2
+# Ambient light (IBL): a copy of the sky with these keys changed
+env ambientSky.mode procedural
+env ambientSky.size 256
+env ambientSky.groundBottomColor 120 116 108
+env ambientSky.groundHorizonCurve 0.1
+# Sun: the shadowed directional light (static shadow tiles)
+env sun.enabled on
+env sun.direction 0.62 -0.42 -0.66
+env sun.color 255 214 168
+env sun.energy 2.4
+env sun.specular 1
+env sun.fogEnergy 2
+env sun.range 100
+env sun.shadow on
+env sun.softness 2
+env sun.depthBias 0.0001
+env sun.slopeBias 0.0015
+env shadow.size 8192
+# R3D environment
+env background.color 130 130 130
+env background.energy 1
+env background.skyBlur 0
+env background.rotation 0 0 0 1
+env ambient.color 0 0 0
+env ambient.energy 0.9
+env ssao.enabled on
+env ssao.sampleCount 16
+env ssao.intensity 1.2
+env ssao.power 1
+env ssao.radius 1.2
+env ssao.bias 0.03
+env ssil.enabled on
+env ssil.sampleCount 16
+env ssil.giIntensity 1.2
+env ssil.aoIntensity 1
+env ssil.aoPower 1
+env ssil.radius 5
+env ssil.bias 0.03
+env ssgi.enabled off
+env ssgi.sliceCount 4
+env ssgi.edgeFade 0.1
+env ssgi.distanceFalloff 1
+env ssgi.normalRejection 0
+env ssgi.intensity 1
+env ssgi.denoiseSteps 4
+env ssr.enabled off
+env ssr.maxIterations 64
+env ssr.thickness 0.5
+env ssr.edgeFade 0.25
+env fog.mode exp2
+env fog.color 214 196 172
+env fog.start 1
+env fog.end 50
+env fog.density 0.002
+env fog.skyAffect 0.7
+env volumetricFog.enabled on
+env volumetricFog.scatteringDensity 0.003
+env volumetricFog.absortionDensity 0.001
+env volumetricFog.scatteringColor 255 244 228
+env volumetricFog.anisotropy 0.4
+env volumetricFog.emissionColor 214 196 172
+env volumetricFog.emissionEnergy 0.12
+env volumetricFog.skyAffect 0.5
+env volumetricFog.length 90
+env volumetricFog.stepSize 0.75
+env dof.mode disabled
+env dof.focusPoint 10
+env dof.focusScale 1
+env dof.nearScale 1
+env dof.maxBlurSize 20
+env bloom.mode mix
+env bloom.levels 0.5
+env bloom.intensity 0.04
+env bloom.threshold 0
+env bloom.softThreshold 0.5
+env bloom.filterRadius 1
+env autoExposure.enabled off
+env autoExposure.minEV -1
+env autoExposure.maxEV 1
+env autoExposure.exposureCompensation 0
+env autoExposure.adaptationToBright 0.5
+env autoExposure.adaptationToDark 1
+env tonemap.mode agx
+env tonemap.exposure 0.85
+env tonemap.white 1
+env color.brightness 1
+env color.contrast 1.05
+env color.saturation 0.95
+
+
+# --- Player start (feet, yaw) and spectator viewpoints (eye, target)
+spawn 0 0 16 180
+viewpoint "Courtyard" 0 1.62 16 0 1.5 0
+viewpoint "Arcade" -12 1.62 -10 6 2.5 -14
+viewpoint "Overview" 26 18 26 0 0 0
+
+# --- Geometry
+group "ground"
+box -100 -1 -100 100 -0.05 100
+use "terracotta"
+box -20 -1 -20 20 0 20
+
+group "walls"
+use "plaster"
+box -20 0 -18 20 9 -17.4                 # back wall
+box -20 0 -17.4 -19.4 7 20               # west wall
+box 19.4 0 -17.4 20 7 20                 # east wall
+
+group "arcade"
+use "stone"
+repeat 8 5 0 0 block -17.5 0 -12.6 0.8 5 0.8     # pillars every 5 m
+box -18 5 -17.4 18 5.8 -12                # roof slab
+
+group "fountain"
+use "tiles"
+box -3 0 -3 3 0.6 -2.4
+box -3 0 2.4 3 0.6 3
+box -3 0 -2.4 -2.4 0.6 2.4
+box 2.4 0 -2.4 3 0.6 2.4
+use "stone"
+block 0 0 0 0.7 2.4 0.7                   # central column
+use "water"
+box -2.4 0 -2.4 2.4 0.45 2.4
+
+group "awnings"
+use "awning"
+box 16.5 3 -8 19.4 3.15 -2
+box 16.5 3 2 19.4 3.15 8
+
+group "lamps"
+use "iron"
+repeat 2 16 0 0 repeat 2 0 0 16 block -8 0 -8 0.15 3 0.15
+use "glow"
+repeat 2 16 0 0 repeat 2 0 0 16 block -8 3 -8 0.4 0.4 0.4
+repeat 2 16 0 0 repeat 2 0 0 16 light point -8 3.7 -8 color 255 190 120 energy 3 range 12

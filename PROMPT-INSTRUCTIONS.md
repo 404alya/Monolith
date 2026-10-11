@@ -52,7 +52,10 @@ monolith/
 │       ├── MAP.md               # the map's design brief
 │       ├── ASSETS.md            # external assets (none)
 │       └── shaders/concrete.glsl    # procedural board-formed concrete (R3D surface shader)
-├── runtime/                     # the scene runtime: monolith_scene.h (API) + monolith_scene.c (§6)
+├── runtime/                     # the scene runtime: monolith_scene.h (API) + monolith_scene.c (§6),
+│                                #   monolith_capture.h (capture shim for imports, §6.3)
+├── examples/                    # raylib + R3D programs using map packages + examples/build.sh (§6.3)
+├── export/                      # F9 exports (gitignored)
 ├── requests/                    # request bundles written by the game (gitignored), see AI-MAP-TOOL.md §2
 ├── benchmark/                   # --bench reports: <timestamp>_shadow-<size>-<range>.md (gitignored, local)
 ├── src/                         # the program, one module per concern (§6)
@@ -64,6 +67,8 @@ monolith/
 │   ├── launcher.c/.h            # request bundles, terminal + Claude Code launch, result.md polling
 │   ├── atmosphere.c/.h          # --ao / --bloom / --fx overrides on top of the map's environment
 │   ├── newmap.c/.h              # --new-map: creates a map package
+│   ├── export.c/.h              # --export / F9: package + runtime + README for other projects (§6.3)
+│   ├── import.c/.h              # --import: new package + an import request for Claude Code (§6.3)
 │   ├── bench.c/.h               # --bench statistics and Markdown report
 │   └── glibc_compat.c           # Linux only: binds a few symbols to old glibc versions (§4)
 └── submodules/
@@ -128,6 +133,7 @@ The header comment at the top of `src/main.c` is the source of truth; keep it up
 | 1–6 | Toggle volumetric fog / distance fog / SSAO / SSIL / bloom / sun |
 | F1 | Toggle HUD (also hides the crosshair and selection overlay) |
 | F12 | Save `screenshot.png` |
+| F9 | Export the map into `export/<map>-<YYYY-MM-DD_HHMMSS>/` next to `requests/` (as `--export`; the result shows in the bottom HUD line; not while the package has a load error) |
 | TAB | Toggle spectator mode |
 | Esc | Quit (closes the prompt box / leaves snip mode instead while open) |
 
@@ -177,6 +183,8 @@ Selected boxes get an orange tint and outline, plus a faint always-on-top outlin
 | `--fx key=value` | Override one effect setting, repeatable, applied after `--ao`/`--bloom`: `ssao.samples`, `ssao.radius`, `ssao.intensity`, `ssao.power`, `ssil.samples`, `ssil.radius`, `ssil.gi`, `ssil.ao`, `bloom.levels`, `bloom.intensity`, `exposure`. For experiments. |
 | `--map <path>` | Load this map package (folder) or `.map` file instead of `maps/monolith/` (path relative to the working directory). A folder loads `<folder>/<folder name>.map`, else its only `.map`. It is hot-reloaded like the default map (every file of the package). |
 | `--new-map <name>` | Create the package `maps/<name>/` (`<name>.map` with a ground slab, the default material, the built-in environment written out, a spawn and two viewpoints; a `MAP.md` template; empty `shaders/ models/ textures/` and `ASSETS.md`), check that it loads, and exit without a window. Refuses to overwrite. |
+| `--export <dir>` | Write the map (`--map` or the default) for use in another raylib + R3D project and exit **without a window**: `<dir>/<name>/` (the package with every file the map references, `MAP.md`, `ASSETS.md`, model sidecars and the files model files refer to), `monolith_scene.h/.c`, `viewer.c` (= `examples/01_minimal/main.c`) and `README.md`. Refuses a non-empty `<dir>`; checks that the copy loads. §6.3. |
+| `--import <project dir> <name>` | Create `maps/<name>/` (as `--new-map`) and open a Claude Code **import session** on a bundle `requests/<stamp>_import-<name>/` (`request.md` with an *Import* section, `request.json` `kind: "import"` + `import` object, heavy model tier); no window. Same terminal, permission flags and workspace as edit requests. The session follows `AI-MAP-TOOL.md` §9. |
 | `--dump-boxes <file>` | Load the map, write every box as hex floats (`%a`, one `min max` line per box) to `<file>` and exit **without opening a window**. Use it to check that an edit keeps the exact box list, and as a quick parse check (a broken map prints `file:line: message` and exits 1). |
 | `--shot <file>` | Render 30 frames offscreen, save the image to `<file>` (full path OK, 1600×900 unless `--shot-size w h`), exit. Uses a **hidden window** (`FLAG_WINDOW_HIDDEN`), so the window manager (i3) never maps, shows or focuses it. Hot reload and request polling are off during shots. |
 | `--shadow <size> <range>` | Sun shadow map size (px) and shadow distance (m). Default `8192 100` (clamped to 256–16384 px, 10–2000 m). |
@@ -301,6 +309,13 @@ An R3D **surface shader** (`#pragma usage opaque shadow`, `void fragment()`). Ev
 - **Uniform:** `u_scale` (pattern scale, 1 = metres).
 
 Fragment built-ins are listed in `submodules/r3d/docs/shaders/surface_shader.md` (`ALBEDO`, `ROUGHNESS`, `METALNESS`, `SPECULAR`, `EMISSION`, `NORMAL_MAP`, …).
+
+### 6.3 Export, import, examples
+
+- **Export** (`src/export.c`, `--export <dir>`, **F9**): copies the files the runtime lists (`MS_DependencyCount` / `MS_Dependency`: map, shaders, textures, panoramas, models) plus `MAP.md`, `ASSETS.md`, each model's `<file>.asset.md` and the files a model file refers to (`.gltf` URIs, `.obj` → `.mtl` → maps). The map file is copied byte for byte (the loader only accepts package-relative paths, so nothing needs rewriting) and renamed to `<name>.map`. The README is generated: build lines (plain compiler, CMake), minimal code, the "inside your own R3D frame" variant, hot reload, `MS_PATCHED_R3D` vs. upstream R3D (static tiles vs. camera-fitted shadow, no pre-pass toggle, no fog cache; image differences: patch 4 visible when turning, patch 7/9 rounding level, patch 1 breaks volumetric fog on AMD/Intel upstream), depth clamp, and the `ASSETS.md` table. The runtime sources come from the repo, or from `runtime/` next to the executable (`build.sh` copies `runtime/` and the viewer there). Tested: an export built outside the repo against `submodules/r3d`'s headers and libraries renders pixel-identical to `monolith --shot` (default map, views 1/2/6; the courtyard sample, views 1-3); against `~/Projects/r3d/include` (upstream) it compiles without `MS_PATCHED_R3D`.
+- **Import** (`src/import.c`, `--import`): `NewMap()`, then a bundle written like the launcher's, then `LauncherStartBundle()` (the launcher's `Launch()` with its terminal / flags / workspace handling; the model from `LauncherChooseModel` with `kind = "import"`). The procedure for the session is `AI-MAP-TOOL.md` §9.
+- **Capture shim** (`runtime/monolith_capture.h`): a header compiled into the user's program (`-include`, no source change) that routes `R3D_LoadModel`, `R3D_GenMeshCube`, `R3D_GenProceduralSky`, `R3D_LoadCubemap`, `R3D_LoadSurfaceShader`, `R3D_Begin*`, `R3D_PushLight*`, `R3D_DrawMesh*`, `R3D_DrawModel*` and `R3D_End` through recorders. With `MONOLITH_CAPTURE=<dir>` it writes a package from one frame (boxes from axis-aligned cubes, models with their transforms, plain materials + read-back textures, lights, sun, every `env` key via `MS_WriteR3DEnvironment`, the procedural sky, the camera) and `CAPTURE.md` with what it couldn't translate. Limits: meshes other than generated cubes and instanced draws can't be read back (their data lives on the GPU), rotated cubes become AABBs, shader uniforms and material changes on loaded models are only reported. A cross-check for imports, not a replacement for reading the source.
+- **Examples** (`examples/`, `examples/build.sh [--win]` → `examples/build/<linux|win>/<example>/`, gitignored): `01_minimal` (load + orbit; it is also the export's `viewer.c`), `02_existing_project` (`before.c` / `after.c`), `03_live_editing` (`MS_Poll`, `--reload` test), `04_import_source` (the import test input, also built with the capture shim as `import_source_capture`). Same flags and static linking as the game, against `submodules/r3d` with `-DMS_PATCHED_R3D`; each takes `--shot <file>` (hidden window titled `monolith-shot`, 30 frames into a `RenderTexture`, `examples/common/shot.h`).
 
 ## 7. R3D pitfalls already discovered (read before touching lighting)
 

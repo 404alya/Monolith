@@ -52,6 +52,14 @@ BuildR3D() {
   cmake --build "$dir" -j"$(nproc)" >> "$log" 2>&1 || { tail -50 "$log"; exit 1; }
 }
 
+# --export / F9 (src/export.c) put the scene runtime and the minimal viewer into every
+# export; a copied build folder (no repo around) finds them in $OUT/runtime/
+CopyExportTemplate() {
+  mkdir -p "$OUT/runtime"
+  cp -f "$ROOT"/runtime/monolith_scene.h "$ROOT"/runtime/monolith_scene.c "$OUT/runtime/"
+  cp -f "$ROOT/examples/01_minimal/main.c" "$OUT/runtime/viewer.c"
+}
+
 WIN=0
 if [[ "${1:-}" == "--win" ]]; then
   WIN=1
@@ -94,6 +102,7 @@ if [[ $WIN == 1 ]]; then
   # from builds before map packages (the shaders now live in the packages)
   rm -rf "$OUT/resources" "$OUT/maps"
   cp -r "$ROOT/maps" "$OUT/maps"
+  CopyExportTemplate
 
   echo "built: build/win/monolith.exe"
   if [[ "${1:-}" == "run" ]]; then
@@ -152,6 +161,7 @@ GLIBC_WRAP=acosf,asinf,atan2f,sqrtf,fmod,fmodf,hypot,hypotf,__isoc23_strtoul,arc
 
 rm -rf "$OUT/resources" "$OUT/maps"
 cp -r "$ROOT/maps" "$OUT/maps"
+CopyExportTemplate
 
 echo "built: build/linux/monolith"
 if [[ "${1:-}" == "run" ]]; then

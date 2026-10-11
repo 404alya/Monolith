@@ -16,3 +16,6 @@ requests/
 submodules/r3d/examples/
 submodules/r3d/external/assimp/test/
 submodules/r3d/external/raylib/examples/
+
+# Map exports written by F9 (src/export.c); examples/build/ is covered by build/ above
+export/
