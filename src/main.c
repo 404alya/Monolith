@@ -75,7 +75,11 @@
 //   --off <keys>   start with these effects toggled off, e.g. --off 34 (SSAO + SSIL)
 //   --view <n>     start in spectator mode at the map's viewpoint n (1-based)
 //   --ao <mode>    screen-space AO / indirect light trade-off (atmosphere.c): full (default),
-//                  ssao (SSIL off), lite (SSIL off, SSAO 8 samples), off (SSAO + SSIL off)
+//                  ssao (SSIL off), lite (SSIL off, SSAO 8 samples), off (SSAO + SSIL off),
+//                  baked (SSAO + SSIL off, the baked occlusion volume instead: --ao-volume 0.5 0.6)
+//   --ao-volume <voxel> <intensity>   trade-off, off by default: bake a world-space occlusion
+//                  volume of the boxes once per map load (voxel size in m, 0.25..4) and darken
+//                  the ambient light with it (R3D patch 11; on top of SSAO/SSIL unless --ao baked)
 //   --bloom off    bloom pass off, exposure x1.19 instead (same mean brightness, no faint
 //                  halo at bright openings; atmosphere.c). Default: on
 //   --fx key=value   override one effect setting, repeatable, e.g. --fx ssil.radius=2.5
@@ -92,6 +96,11 @@
 //                  sub^3 samples per voxel, e.g. 0.5 2) and let the fog march fetch it
 //                  instead of the shadow map (R3D patch 8); changes the light shafts slightly.
 //                  Region: the map's env fogCache.region, else derived from its bounds
+//   --render-scale <s>   trade-off, default 1: R3D renders at s (0.25..1) times the window /
+//                  shot size and upscales the result (--upscale nearest|linear|bicubic|lanczos,
+//                  default bicubic). 0.75 renders 56% of the pixels
+//   --window-msaa  4x multisampled window (the default before 2026-10-11): smoother designer
+//                  overlay lines for ~0.1 ms GPU per frame; the scene image is the same
 //   --no-prepass   no depth pre-pass before the G-buffer pass (R3D patch 6; same image,
 //                  for A/B tests: the concrete shader then runs for every overdrawn fragment)
 //   --bench        visit every viewpoint, spin the camera, print frame time stats, write a
@@ -109,6 +118,11 @@
 //   --frame-reuse  turn frame reuse on where it is off by default: --shot (to check that a
 //                  reused frame equals a fresh one; logs how many frames were reused) and
 //                  --bench-still (times a reused frame; report suffix _reuse, no GPU profile)
+//   --bench-window <samples>   with --bench --headless: render into an offscreen stand-in for
+//                  the visible window (a framebuffer with <samples> samples per pixel: 4 = the
+//                  window's FLAG_MSAA_4X_HINT, 0 = single-sample), draw the spectator HUD and
+//                  overlay on top and resolve it like the swap does (windowemu.c), to time the
+//                  window-only costs without a visible window
 //   --no-profile   with --bench: no per-pass GPU timings (R3D profiler, on by default when
 //                  R3D is built with R3D_GPU_PROFILER, as build.sh does)
 //   --note "text"  free-form note added to the benchmark report
@@ -208,6 +222,7 @@
 #include "import.h"
 #include "inspect.h"
 #include "dumpscene.h"
+#include "windowemu.h"
 
 // Only needed for glFinish() for --headless (depth clamp: MS_InitRenderer). Declared by hand
 // rather than via <GL/gl.h> / <windows.h> (which clashes with raylib). On Windows x64 there
@@ -327,9 +342,9 @@ static void ApplyEnvironment(const EffectState *fx)
 //     frame only composites the cache and draws the HUD / overlay on top.
 //   - The cache keeps R3D's depth in a depth *texture*, and the composite writes it back
 //     with gl_FragDepth, so the designer overlay depth-tests exactly as over a fresh frame.
-//     A shader pass rather than glBlitFramebuffer, because the window's framebuffer is
-//     multisampled (FLAG_MSAA_4X_HINT), and blitting into a multisampled framebuffer is
-//     an error; R3D's own final blit is a fullscreen shader pass for the same reason.
+//     A shader pass rather than glBlitFramebuffer, because the window's framebuffer can be
+//     multisampled (--window-msaa), and blitting into a multisampled framebuffer is an
+//     error; R3D's own final pass is a fullscreen shader pass for the same reason.
 
 // Everything that changes R3D's image. Compared bytewise, so floats compare exactly; a
 // false "changed" (e.g. -0 vs 0) only costs one render.
@@ -482,7 +497,12 @@ int main(int argc, char **argv)
     float shadowRange = 0.0f;
     bool bench = false;
     bool headless = false;      // --bench without a visible window
+    int benchWindowSamples = -1;    // --bench-window <samples>; -1 = off
+    bool windowMsaa = false;    // --window-msaa
     bool depthPrepass = true;   // --no-prepass
+    float renderScale = 1.0f;   // --render-scale
+    float aoVolumeVoxel = 0.0f, aoVolumeIntensity = 1.0f;  // --ao-volume (--ao baked: 0.5 1)
+    R3D_UpscaleMode upscale = R3D_UPSCALE_BICUBIC;  // --upscale
     MS_ShadowMode shadowMode = MS_SHADOW_TILES;     // --shadow-camera / --shadow-always
     const char *newMapName = NULL;
     const char *exportDir = NULL;               // --export
@@ -527,6 +547,9 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--bench-still") == 0) bench = benchStill = true;
         else if (strcmp(argv[i], "--no-profile") == 0) benchProfile = false;
         else if (strcmp(argv[i], "--headless") == 0) headless = true;
+        else if (strcmp(argv[i], "--window-msaa") == 0) windowMsaa = true;
+        else if (strcmp(argv[i], "--bench-window") == 0 && i + 1 < argc)
+            benchWindowSamples = (int)Clamp((float)atoi(argv[++i]), 0.0f, 16.0f);
         else if (strcmp(argv[i], "--shadow-always") == 0) shadowMode = MS_SHADOW_ALWAYS;
         else if (strcmp(argv[i], "--shadow-camera") == 0) { if (shadowMode != MS_SHADOW_ALWAYS) shadowMode = MS_SHADOW_CAMERA; }
         else if (strcmp(argv[i], "--new-map") == 0 && i + 1 < argc) newMapName = argv[++i];
@@ -540,6 +563,24 @@ int main(int argc, char **argv)
             i += 2;
         }
         else if (strcmp(argv[i], "--no-prepass") == 0) depthPrepass = false;
+        else if (strcmp(argv[i], "--ao-volume") == 0 && i + 2 < argc) {
+            aoVolumeVoxel = (float)atof(argv[i + 1]);
+            aoVolumeVoxel = aoVolumeVoxel > 0.0f ? Clamp(aoVolumeVoxel, 0.25f, 4.0f) : 0.0f;
+            aoVolumeIntensity = Clamp((float)atof(argv[i + 2]), 0.0f, 4.0f);
+            i += 2;
+        }
+        else if (strcmp(argv[i], "--render-scale") == 0 && i + 1 < argc) renderScale = Clamp((float)atof(argv[++i]), 0.25f, 1.0f);
+        else if (strcmp(argv[i], "--upscale") == 0 && i + 1 < argc) {
+            const char *m = argv[++i];
+            if (strcmp(m, "nearest") == 0) upscale = R3D_UPSCALE_NEAREST;
+            else if (strcmp(m, "linear") == 0) upscale = R3D_UPSCALE_LINEAR;
+            else if (strcmp(m, "bicubic") == 0) upscale = R3D_UPSCALE_BICUBIC;
+            else if (strcmp(m, "lanczos") == 0) upscale = R3D_UPSCALE_LANCZOS;
+            else {
+                fprintf(stderr, "monolith: unknown --upscale filter '%s' (nearest, linear, bicubic, lanczos)\n", m);
+                return 1;
+            }
+        }
         else if (strcmp(argv[i], "--bench-frames") == 0 && i + 1 < argc)
             benchFrames = (int)Clamp((float)atoi(argv[++i]), 10.0f, (float)BENCH_FRAMES);
         else if (strcmp(argv[i], "--note") == 0 && i + 1 < argc) benchNote = argv[++i];
@@ -678,7 +719,12 @@ int main(int argc, char **argv)
         shadowRange = peek->sun.light.range;
     }
 
-    unsigned int windowFlags = FLAG_MSAA_4X_HINT;   // no vsync, uncapped
+    // No vsync, uncapped. The window is single-sampled unless --window-msaa: R3D anti-aliases
+    // its own image (FXAA) and writes the same colour to every sample, so 4x MSAA on the
+    // window only smoothed the designer's overlay lines, for ~0.1 ms GPU per frame at 1080p
+    // (R3D's last pass writing 4 samples + the resolve; measured with --bench-window 4 vs 0).
+    // Shots and request images were always single-sampled.
+    unsigned int windowFlags = windowMsaa ? FLAG_MSAA_4X_HINT : 0;
     // --shot: hidden window, never mapped, so i3 & co. never show or focus it
     // --bench --headless too: then nothing ever appears on screen
     // --dump-scene of a map with models: model files load through R3D, which needs GL
@@ -746,7 +792,15 @@ int main(int argc, char **argv)
     renderSettings.fogCacheVoxel = fogCacheVoxel;
     renderSettings.fogCacheSub = fogCacheSub;
     renderSettings.depthPrepass = depthPrepass;
+    renderSettings.renderScale = renderScale;
+    // --ao baked: the occlusion volume replaces SSAO + SSIL (an explicit --ao-volume wins)
+    // (intensity 0.6: matched the mean brightness of full SSAO + SSIL in views 1-3 within 1.3/255)
+    if (strcmp(aoMode, "baked") == 0 && aoVolumeVoxel == 0.0f) { aoVolumeVoxel = 0.5f; aoVolumeIntensity = 0.6f; }
+    renderSettings.aoVolumeVoxel = aoVolumeVoxel;
+    renderSettings.aoVolumeIntensity = aoVolumeIntensity;
+    renderSettings.upscale = upscale;
     MS_SetRenderSettings(scene, renderSettings);
+    MS_ApplyRenderResolution(scene, GetScreenWidth(), GetScreenHeight());
 
     // --- Environment: the map's, then --ao / --bloom / --fx, then the 1-6 toggles
     EffectState effects = { .aoMode = aoMode, .bloomMode = bloomMode, .fxCount = fxCount };
@@ -785,6 +839,15 @@ int main(int argc, char **argv)
     if (typeText) DesignerOpenPrompt(&designer, Unescape(typeText));
     RenderTexture shotTarget = { 0 };   // zero = draw to the window
     if (hidden) shotTarget = LoadRenderTexture(GetScreenWidth(), GetScreenHeight());
+    // --bench-window: the headless bench renders into a stand-in for the window instead,
+    // with the spectator HUD and overlay drawn on top (windowemu.c)
+    static WindowEmu windowEmu;
+    bool emulateWindow = headlessBench && benchWindowSamples >= 0 &&
+                         WindowEmuLoad(&windowEmu, GetScreenWidth(), GetScreenHeight(), benchWindowSamples);
+    if (emulateWindow) {
+        UnloadRenderTexture(shotTarget);
+        shotTarget = windowEmu.target;
+    }
     int frame = 0;
     int reusedFrames = 0;   // frames composited from the frame reuse cache (logged by --shot)
 
@@ -797,7 +860,7 @@ int main(int argc, char **argv)
     if (bench) {
         spec.active = true;
         SpectatorJumpTo(&spec, 0);
-        hud = false;
+        hud = emulateWindow;
         // GPU timer queries per R3D pass; results are read back a few frames later
         if (benchProfile) R3D_SetProfilerEnabled(true);
     }
@@ -824,7 +887,7 @@ int main(int argc, char **argv)
     {
         float dt = fminf(GetFrameTime(), 1.0f / 20.0f);
 
-        if (IsWindowResized()) R3D_SetResolution(GetScreenWidth(), GetScreenHeight());
+        if (IsWindowResized()) MS_ApplyRenderResolution(scene, GetScreenWidth(), GetScreenHeight());
 
         // Esc quits, unless the prompt box is open or snip mode is on (the designer handles it)
         if (IsKeyPressed(KEY_ESCAPE) && !designer.promptOpen && !designer.snipping && closePickTime <= 0.0f) break;
@@ -990,6 +1053,7 @@ int main(int argc, char **argv)
 
         BeginDrawing();
             ClearBackground(BLACK);
+            if (emulateWindow) WindowEmuClear(&windowEmu);
 
             // A hidden window has no visible pixels, so reading back the default
             // framebuffer is undefined: render --shot frames into a texture instead.
@@ -1018,9 +1082,10 @@ int main(int argc, char **argv)
 
             // HUD and overlays: on the window, or with --shot-hud into the shot
             bool drawUi = !shotPath || shotHud;
-            if (drawUi && shotPath) BeginTextureMode(shotTarget);
+            bool uiToTarget = (drawUi && shotPath) || emulateWindow;
+            if (uiToTarget) BeginTextureMode(shotTarget);
             // (--shot-hud shows the designer UI in walk mode too: shots of arbitrary --pos views)
-            bool designerUi = (spec.active || shotPath) && !bench;
+            bool designerUi = (spec.active || shotPath) && (!bench || emulateWindow);
             if (drawUi && hud && designerUi) {
                 DesignerDrawOverlay(&designer, camera, true);
                 DesignerDrawCrosshair(GetScreenWidth(), GetScreenHeight());
@@ -1060,8 +1125,9 @@ int main(int argc, char **argv)
             }
             // The prompt box shows even with the HUD off (Enter opened it, it must be visible)
             if (drawUi && designerUi) DesignerDrawPrompt(&designer, GetScreenWidth(), GetScreenHeight());
-            if (drawUi && shotPath) EndTextureMode();
+            if (uiToTarget) EndTextureMode();
         EndDrawing();
+        if (emulateWindow) WindowEmuPresent(&windowEmu);
         // A reused frame costs ~0.2 ms, so an uncapped loop would spin at thousands of fps
         // doing copies (fans, battery). Pace cached frames to the display instead; rendered
         // frames stay uncapped. Not in --bench/--shot, which time or count real frames.
@@ -1121,7 +1187,8 @@ int main(int argc, char **argv)
 
     LauncherCloseOnExit();          // MONOLITH_CLOSE_ON_EXIT=1: close finished requests' terminals
     R3D_SetProfilerEnabled(false);  // frees its GL queries
-    if (hidden) UnloadRenderTexture(shotTarget);
+    if (emulateWindow) WindowEmuUnload(&windowEmu);
+    else if (hidden) UnloadRenderTexture(shotTarget);
     if (reuse.rt.id) UnloadRenderTexture(reuse.rt);
     if (reuse.enabled) UnloadShader(reuse.composite);
     MS_Unload(scene);

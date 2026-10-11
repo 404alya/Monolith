@@ -36,6 +36,24 @@ out vec4 FragColor;
 // ================================
 
 uniform sampler2D uSceneTex;
+uniform sampler2D uBloomTex;    //< monolith patch 10: bloom is applied here when uBloomFused
+uniform bool uBloomFused;
+
+// ================================
+// Monolith patch 10: 16-bit float rounding
+// ================================
+
+// Rounds to a half float the way storing into the RGBA16F scene target did when bloom was
+// composited in its own pass. NVIDIA truncates (rounds toward zero) on float -> half render
+// target writes; measured: with truncation the fused pass is bit-identical there, with
+// round-to-nearest-even 5% of pixels moved by 1/255 (and FXAA turned some into up to 12/255).
+// Other GPUs may round to nearest instead; the difference is then one half-float ulp before
+// tonemapping. Normal half range only: values below the smallest normal half (6.1e-5) keep
+// their extra bits, far below 1/255 after tonemapping.
+vec3 RoundToHalf(vec3 v)
+{
+    return uintBitsToFloat(floatBitsToUint(v) & uvec3(0xFFFFE000u));
+}
 
 // ================================
 // Tonemap Functions
@@ -216,6 +234,30 @@ vec3 Debanding(vec3 color)
 void main()
 {
     vec4 color = texelFetch(uSceneTex, ivec2(gl_FragCoord.xy), 0);
+
+    // Monolith patch 10: the bloom composite (post/bloom.frag, same math) folded into this
+    // pass, which saves a full-resolution write + read of the scene. The mixed colour is
+    // rounded to a half float like the scene target stored it (RoundToHalf).
+    if (uBloomFused)
+    {
+        vec3 bloom = texture(uBloomTex, vTexCoord).rgb;
+
+        if (uBloom.mode == BLOOM_MIX)
+        {
+            color.rgb = mix(color.rgb, bloom, uBloom.intensity);
+        }
+        else if (uBloom.mode == BLOOM_ADDITIVE)
+        {
+            color.rgb += bloom * uBloom.intensity;
+        }
+        else if (uBloom.mode == BLOOM_SCREEN)
+        {
+            bloom = clamp(bloom * uBloom.intensity, vec3(0.0), vec3(1.0));
+            color.rgb = max((color.rgb + bloom) - (color.rgb * bloom), vec3(0.0));
+        }
+
+        color.rgb = RoundToHalf(color.rgb);
+    }
 
     color.rgb = Tonemapping(color.rgb, uTonemap.exposure, uTonemap.white);
     color.rgb = Adjustments(color.rgb, uBcs.brightness, uBcs.contrast, uBcs.saturation);

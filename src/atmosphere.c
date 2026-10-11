@@ -15,6 +15,7 @@ static const AoMode AO_MODES[] = {
     { "ssao",  "SSIL off, SSAO unchanged" },
     { "lite",  "SSIL off, SSAO with 8 samples instead of 16" },
     { "off",   "SSAO and SSIL off" },
+    { "baked", "SSAO and SSIL off, replaced by the baked world-space occlusion volume (main.c sets it up)" },
 };
 
 bool ApplyAoMode(R3D_Environment *env, const char *mode)
@@ -22,7 +23,7 @@ bool ApplyAoMode(R3D_Environment *env, const char *mode)
     if (strcmp(mode, "full") == 0) return true;
     if (strcmp(mode, "ssao") == 0) { env->ssil.enabled = false; return true; }
     if (strcmp(mode, "lite") == 0) { env->ssil.enabled = false; env->ssao.sampleCount = 8; return true; }
-    if (strcmp(mode, "off") == 0)  { env->ssil.enabled = false; env->ssao.enabled = false; return true; }
+    if (strcmp(mode, "off") == 0 || strcmp(mode, "baked") == 0) { env->ssil.enabled = false; env->ssao.enabled = false; return true; }
     return false;
 }
 
@@ -69,6 +70,8 @@ bool ApplyFxSetting(R3D_Environment *env, const char *keyValue)
         { "bloom.levels",   &env->bloom.levels, NULL },
         { "bloom.intensity", &env->bloom.intensity, NULL },
         { "exposure",       &env->tonemap.exposure, NULL },
+        { "vfog.step",      &env->volumetricFog.stepSize, NULL },
+        { "vfog.length",    &env->volumetricFog.length, NULL },
     };
     const char *eq = strchr(keyValue, '=');
     if (!eq || !eq[1]) return false;
@@ -87,7 +90,8 @@ bool ApplyFxSetting(R3D_Environment *env, const char *keyValue)
 const char *FxSettingHelp(void)
 {
     return "  ssao.samples ssao.radius ssao.intensity ssao.power\n"
-           "  ssil.samples ssil.radius ssil.gi ssil.ao bloom.levels bloom.intensity exposure\n";
+           "  ssil.samples ssil.radius ssil.gi ssil.ao bloom.levels bloom.intensity exposure\n"
+           "  vfog.step vfog.length\n";
 }
 
 // #endregion

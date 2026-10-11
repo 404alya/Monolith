@@ -256,10 +256,25 @@ typedef struct {
     float fogCacheVoxel;    // > 0: bake the fog's sun visibility (needs MS_PATCHED_R3D), 0 = off (default)
     int fogCacheSub;        // subsamples^3 per voxel, default 2
     bool depthPrepass;      // default true: R3D_SetDepthPrepass (needs MS_PATCHED_R3D; R3D-global)
+    // Trade-offs (they change the image; the defaults keep the full-quality look):
+    float renderScale;      // 1 (default): R3D renders at the output size. 0.25..1: at that fraction
+                            // of it, upscaled with `upscale` (see MS_ApplyRenderResolution)
+    R3D_UpscaleMode upscale;    // filter for renderScale < 1, default R3D_UPSCALE_BICUBIC
+    float aoVolumeVoxel;    // > 0: bake a world-space occlusion volume of the boxes (voxel size in m,
+                            // 0.25..4) once per map load and darken the ambient light with it
+                            // (needs MS_PATCHED_R3D, patch 11); usually with SSAO + SSIL off,
+                            // which it replaces. 0 = off (default)
+    float aoVolumeIntensity;    // strength of that occlusion, default 1
 } MS_RenderSettings;
 
 MS_RenderSettings MS_GetRenderSettings(const MS_Scene *scene);
 void MS_SetRenderSettings(MS_Scene *scene, MS_RenderSettings settings);
+
+// R3D's internal resolution for an output of outW x outH pixels (the window, or the target
+// passed to MS_Draw): renderScale x output (at least 1 px), plus the upscale filter. Only calls
+// R3D when something changed. Call it after R3D_Init, when the output size changes and after
+// changing renderScale / upscale (in place of R3D_SetResolution).
+void MS_ApplyRenderResolution(const MS_Scene *scene, int outW, int outH);
 
 // A whole frame into `target` (zero = the current framebuffer): R3D_BeginPro, lights,
 // geometry, R3D_End. Returns true when a sun shadow map was (re)rendered this frame.

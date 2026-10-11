@@ -3194,3 +3194,616 @@ diff --git a/shaders/deferred/vfog_radiance.frag b/shaders/deferred/vfog_radianc
      {
          // Compute light direction and distance at each march step
 ```
+
+
+## Patch 10: post passes that only move pixels around (2026-10-11)
+
+**Symptom.** After the scene is lit, R3D spends ~0.4 ms per frame (1920×1006, bench average)
+on passes that compute nothing new: the depth pyramid down to 1×1, a full-resolution bloom
+composite pass whose result the tonemap pass reads right back, and a final copy blit after
+FXAA. Plus the CPU cost of ~12 extra passes (framebuffer re-attachments, draws).
+
+**Cause.**
+1. `pass_prepare_pyramid()` builds every depth mip level, but only SSR reads levels above 1
+   (SSAO, SSIL, SSGI, both fogs, DoF and the ambient pass use levels 0 and 1).
+2. `pass_post_bloom()` ends with `post/bloom.frag`, which mixes the bloom texture into the
+   scene (RGBA16F write + read at full resolution) right before `post/output.frag` reads it.
+3. When the internal resolution equals the destination, `blit_to_screen()` is a plain
+   `common_copy` of the FXAA result (colour + depth).
+
+**Fix.**
+1. Without SSR the pyramid stops at level 1.
+2. When nothing runs between bloom and the output pass (no auto exposure, no POST stage
+   screen shaders), the bloom chain runs without its composite pass and `output.frag` mixes
+   the bloom in (same code). The mixed colour is rounded to a half float the way the RGBA16F
+   target stored it (`RoundToHalf`, a bit mask: NVIDIA *truncates* float→half on render
+   target writes; measured: with truncation bit-identical, with round-to-nearest-even 5% of
+   pixels ±1/255 and FXAA turned a few into up to 12/255). On GPUs that round to nearest the
+   difference is one half-float ulp before tonemapping.
+3. `final_pass_direct()`: scene output, no FINAL stage screen shaders, viewport at the origin
+   and of the internal size → FXAA renders straight into the final target and writes the scene
+   depth there (`gl_FragDepth`, as the copy did); `blit_to_screen()` is skipped. FXAA into an
+   internal target writes no depth (no depth attachment, depth test off).
+
+| File | Change |
+|---|---|
+| `src/r3d_draw.c` | `pass_prepare_pyramid(maxLevel)`, `pass_post_bloom(…, apply)`, `pass_post_output(…, bloomFused)`, `final_pass_direct()`, `pass_post_fxaa_to_screen()`, `R3D_End()` wiring |
+| `shaders/post/output.frag` | optional bloom composite (`uBloomFused`, `uBloomTex`), `RoundToHalf()` |
+| `shaders/post/fxaa.frag` | `uDepthTex`, writes `gl_FragDepth` |
+| `src/modules/r3d_shader.[ch]` | the new uniforms / samplers |
+
+**Verified.** Bit-identical: 27 verification shots and the models test map vs. before, 0 pixels
+differ at all (`any: 0`). `glslangValidator` passes `output.frag`, `fxaa.frag`. Bench (headless,
+1920×1006, spinning, interleaved): depth pyramid 0.156 → 0.062 ms, bloom 0.181 → 0.140 ms,
+FXAA + blit 0.152 → 0.100 ms, i.e. −0.19 ms GPU, and ~−0.08 ms CPU per frame.
+
+**Upstream.** 1 and 3 are generic and exact; 2 is exact only where the half rounding matches.
+
+```diff
+diff --git a/shaders/post/fxaa.frag b/shaders/post/fxaa.frag
+index 1d52160..f81b4c0 100644
+--- a/shaders/post/fxaa.frag
++++ b/shaders/post/fxaa.frag
+@@ -73,4 +73,5 @@ out vec4 FragColor;
+ 
+ uniform sampler2D uSceneTex;
++uniform sampler2D uDepthTex;    //< monolith patch 10, see main()
+ 
+ // ================================
+@@ -110,3 +111,9 @@ void main()
+ 
+     FragColor = vec4(aa.rgb, alpha);
++
++    // Monolith patch 10: when FXAA renders straight into the final target (instead of an
++    // internal scene target followed by a copy blit), it also writes the scene depth there,
++    // as the copy blit did. Into an internal target the depth test is off, so this has no
++    // effect there.
++    gl_FragDepth = texelFetch(uDepthTex, ivec2(gl_FragCoord.xy), 0).r;
+ }
+diff --git a/shaders/post/output.frag b/shaders/post/output.frag
+index def70e1..65885ef 100644
+--- a/shaders/post/output.frag
++++ b/shaders/post/output.frag
+@@ -37,4 +37,22 @@ out vec4 FragColor;
+ 
+ uniform sampler2D uSceneTex;
++uniform sampler2D uBloomTex;    //< monolith patch 10: bloom is applied here when uBloomFused
++uniform bool uBloomFused;
++
++// ================================
++// Monolith patch 10: 16-bit float rounding
++// ================================
++
++// Rounds to a half float the way storing into the RGBA16F scene target did when bloom was
++// composited in its own pass. NVIDIA truncates (rounds toward zero) on float -> half render
++// target writes; measured: with truncation the fused pass is bit-identical there, with
++// round-to-nearest-even 5% of pixels moved by 1/255 (and FXAA turned some into up to 12/255).
++// Other GPUs may round to nearest instead; the difference is then one half-float ulp before
++// tonemapping. Normal half range only: values below the smallest normal half (6.1e-5) keep
++// their extra bits, far below 1/255 after tonemapping.
++vec3 RoundToHalf(vec3 v)
++{
++    return uintBitsToFloat(floatBitsToUint(v) & uvec3(0xFFFFE000u));
++}
+ 
+ // ================================
+@@ -218,4 +236,28 @@ void main()
+     vec4 color = texelFetch(uSceneTex, ivec2(gl_FragCoord.xy), 0);
+ 
++    // Monolith patch 10: the bloom composite (post/bloom.frag, same math) folded into this
++    // pass, which saves a full-resolution write + read of the scene. The mixed colour is
++    // rounded to a half float like the scene target stored it (RoundToHalf).
++    if (uBloomFused)
++    {
++        vec3 bloom = texture(uBloomTex, vTexCoord).rgb;
++
++        if (uBloom.mode == BLOOM_MIX)
++        {
++            color.rgb = mix(color.rgb, bloom, uBloom.intensity);
++        }
++        else if (uBloom.mode == BLOOM_ADDITIVE)
++        {
++            color.rgb += bloom * uBloom.intensity;
++        }
++        else if (uBloom.mode == BLOOM_SCREEN)
++        {
++            bloom = clamp(bloom * uBloom.intensity, vec3(0.0), vec3(1.0));
++            color.rgb = max((color.rgb + bloom) - (color.rgb * bloom), vec3(0.0));
++        }
++
++        color.rgb = RoundToHalf(color.rgb);
++    }
++
+     color.rgb = Tonemapping(color.rgb, uTonemap.exposure, uTonemap.white);
+     color.rgb = Adjustments(color.rgb, uBcs.brightness, uBcs.contrast, uBcs.saturation);
+diff --git a/src/modules/r3d_shader.c b/src/modules/r3d_shader.c
+index 0e17e82..44dda52 100644
+--- a/src/modules/r3d_shader.c
++++ b/src/modules/r3d_shader.c
+@@ -1660,4 +1667,6 @@ bool r3d_shader_load_post_output(r3d_shader_custom_t* custom)
+     USE_SHADER(output);
+     SET_SAMPLER(output, uSceneTex, R3D_SHADER_SAMPLER_BUFFER_SCENE);
++    SET_SAMPLER(output, uBloomTex, R3D_SHADER_SAMPLER_BUFFER_BLOOM);
++    GET_LOCATION(output, uBloomFused);
+ 
+     return true;
+@@ -1687,4 +1696,5 @@ static bool load_post_fxaa(r3d_shader_custom_t* custom, int index)
+     USE_SHADER(fxaa);
+     SET_SAMPLER(fxaa, uSceneTex, R3D_SHADER_SAMPLER_BUFFER_SCENE);
++    SET_SAMPLER(fxaa, uDepthTex, R3D_SHADER_SAMPLER_BUFFER_DEPTH);
+ 
+     return true;
+diff --git a/src/modules/r3d_shader.h b/src/modules/r3d_shader.h
+index 0d55871..e17518a 100644
+--- a/src/modules/r3d_shader.h
++++ b/src/modules/r3d_shader.h
+@@ -1138,4 +1148,6 @@ typedef struct {
+     GLuint id;
+     r3d_shader_uniform_sampler_t uSceneTex;
++    r3d_shader_uniform_sampler_t uBloomTex;     //< monolith patch 10: bloom applied here
++    r3d_shader_uniform_int_t uBloomFused;
+ } r3d_shader_post_output_t;
+ 
+@@ -1143,4 +1155,5 @@ typedef struct {
+     GLuint id;
+     r3d_shader_uniform_sampler_t uSceneTex;
++    r3d_shader_uniform_sampler_t uDepthTex;     //< monolith patch 10: FXAA writes the final target
+ } r3d_shader_post_fxaa_t;
+ 
+diff --git a/src/r3d_draw.c b/src/r3d_draw.c
+index beb67f7..7e2266b 100644
+--- a/src/r3d_draw.c
++++ b/src/r3d_draw.c
+@@ -239,5 +239,5 @@ static void pass_scene_geometry(void);
+ static void pass_scene_decals(void);
+ 
+-static void pass_prepare_pyramid(void);
++static void pass_prepare_pyramid(int maxLevel);
+ static void pass_prepare_downsample(r3d_target_t target, int level);
+ static r3d_target_t pass_prepare_ssao(void);
+@@ -257,9 +257,11 @@ static void pass_scene_background(r3d_target_t sceneTarget);
+ static r3d_target_t pass_post_setup(r3d_target_t sceneTarget);
+ static r3d_target_t pass_post_dof(r3d_target_t sceneTarget);
+-static r3d_target_t pass_post_bloom(r3d_target_t sceneTarget);
++static r3d_target_t pass_post_bloom(r3d_target_t sceneTarget, bool apply);
+ static r3d_target_t pass_post_auto_exposure(r3d_target_t sceneTarget);
+ static r3d_target_t pass_post_screen(R3D_ScreenShaderStage stage, r3d_target_t sceneTarget);
+-static r3d_target_t pass_post_output(r3d_target_t sceneTarget);
++static r3d_target_t pass_post_output(r3d_target_t sceneTarget, bool bloomFused);
+ static r3d_target_t pass_post_fxaa(r3d_target_t sceneTarget);
++static bool final_pass_direct(void);
++static void pass_post_fxaa_to_screen(r3d_target_t sceneTarget);
+ static r3d_target_t pass_post_smaa(r3d_target_t sceneTarget);
+ 
+@@ -393,5 +395,7 @@ void R3D_End(void)
+         {
+             PROF_BEGIN(R3D_PROFILER_PYRAMID);
+-            pass_prepare_pyramid();
++            // Monolith patch 10: only SSR reads depth levels above 1 (SSAO, SSIL, SSGI, the
++            // fog and DoF use levels 0 and 1), so without SSR the pyramid stops at level 1
++            pass_prepare_pyramid(ssr ? r3d_target_get_max_level(R3D_TARGET_DEPTH) : 1);
+ 
+             if (ssao || ssil || ssgi || ssr) pass_prepare_downsample(R3D_TARGET_NORMAL, 1);
+@@ -445,7 +449,16 @@ void R3D_End(void)
+     }
+ 
+-    if (R3D.environment.bloom.mode != R3D_BLOOM_DISABLED)
++    // Monolith patch 10: the bloom composite is folded into the output (tonemap) pass when
++    // nothing runs between the two (no auto exposure, no POST stage screen shaders)
++    bool bloomOn = R3D.environment.bloom.mode != R3D_BLOOM_DISABLED;
++    bool bloomFused = bloomOn && !R3D.environment.autoExposure.enabled;
++    for (int i = 0; bloomFused && i < (int)R3D_ARRAY_SIZE(R3D.screenShaders[R3D_SCREEN_SHADER_STAGE_POST]); i++)
+     {
+-        PROF_PASS(R3D_PROFILER_BLOOM, sceneTarget = pass_post_bloom(sceneTarget));
++        if (R3D.screenShaders[R3D_SCREEN_SHADER_STAGE_POST][i] != NULL) bloomFused = false;
++    }
++
++    if (bloomOn)
++    {
++        PROF_PASS(R3D_PROFILER_BLOOM, sceneTarget = pass_post_bloom(sceneTarget, !bloomFused));
+     }
+ 
+@@ -456,12 +469,24 @@ void R3D_End(void)
+ 
+     sceneTarget = pass_post_screen(R3D_SCREEN_SHADER_STAGE_POST, sceneTarget);
+-    PROF_PASS(R3D_PROFILER_OUTPUT, sceneTarget = pass_post_output(sceneTarget));
++    PROF_PASS(R3D_PROFILER_OUTPUT, sceneTarget = pass_post_output(sceneTarget, bloomFused));
+ 
+     sceneTarget = pass_post_screen(R3D_SCREEN_SHADER_STAGE_OUTPUT, sceneTarget);
+ 
++    // Monolith patch 10: FXAA renders straight into the final target when the final blit
++    // would only copy its result (same size, scene output, no FINAL stage screen shaders)
++    bool finalDone = false;
++
+     switch (R3D.aaMode)
+     {
+     case R3D_ANTI_ALIASING_MODE_FXAA:
+-        PROF_PASS(R3D_PROFILER_AA, sceneTarget = pass_post_fxaa(sceneTarget));
++        if (final_pass_direct())
++        {
++            PROF_PASS(R3D_PROFILER_AA, pass_post_fxaa_to_screen(sceneTarget));
++            finalDone = true;
++        }
++        else
++        {
++            PROF_PASS(R3D_PROFILER_AA, sceneTarget = pass_post_fxaa(sceneTarget));
++        }
+         break;
+     case R3D_ANTI_ALIASING_MODE_SMAA:
+@@ -477,5 +502,5 @@ void R3D_End(void)
+     switch (R3D.outputMode)
+     {
+-    case R3D_OUTPUT_SCENE:    blit_to_screen(r3d_target_swap_scene(sceneTarget)); break;
++    case R3D_OUTPUT_SCENE:    if (!finalDone) blit_to_screen(r3d_target_swap_scene(sceneTarget)); break;
+     case R3D_OUTPUT_ALBEDO:   visualize_to_screen(R3D_TARGET_ALBEDO); break;
+     case R3D_OUTPUT_NORMAL:   visualize_to_screen(R3D_TARGET_NORMAL); break;
+@@ -2210,5 +2285,5 @@ void pass_scene_decals(void)
+ }
+ 
+-void pass_prepare_pyramid(void)
++void pass_prepare_pyramid(int maxLevel)
+ {
+     r3d_driver_disable(GL_STENCIL_TEST);
+@@ -2224,5 +2299,5 @@ void pass_prepare_pyramid(void)
+     R3D_SHADER_USE(prepare.pyramid);
+ 
+-    int maxLevel = r3d_target_get_max_level(R3D_TARGET_DEPTH);
++    maxLevel = R3D_MIN(maxLevel, r3d_target_get_max_level(R3D_TARGET_DEPTH));
+ 
+     for (int iDst = 1; iDst <= maxLevel; iDst++)
+@@ -2879,5 +2965,5 @@ r3d_target_t pass_post_dof(r3d_target_t sceneTarget)
+ }
+ 
+-r3d_target_t pass_post_bloom(r3d_target_t sceneTarget)
++r3d_target_t pass_post_bloom(r3d_target_t sceneTarget, bool apply)
+ {
+     r3d_target_t sceneSource = r3d_target_swap_scene(sceneTarget);
+@@ -2940,4 +3026,7 @@ r3d_target_t pass_post_bloom(r3d_target_t sceneTarget)
+     r3d_driver_disable(GL_BLEND);
+ 
++    // Monolith patch 10: without `apply` the output pass composites the bloom (uBloomFused)
++    if (!apply) return sceneTarget;
++
+     /* --- Apply bloom to the scene --- */
+ 
+@@ -3040,5 +3129,5 @@ r3d_target_t pass_post_screen(R3D_ScreenShaderStage stage, r3d_target_t sceneTar
+ }
+ 
+-r3d_target_t pass_post_output(r3d_target_t sceneTarget)
++r3d_target_t pass_post_output(r3d_target_t sceneTarget, bool bloomFused)
+ {
+     R3D_TARGET_BIND_AND_SWAP_SCENE(sceneTarget);
+@@ -3046,4 +3135,10 @@ r3d_target_t pass_post_output(r3d_target_t sceneTarget)
+ 
+     R3D_SHADER_BIND_SAMPLER(post.output, uSceneTex, r3d_target_get(sceneTarget));
++    R3D_SHADER_SET_INT(post.output, uBloomFused, bloomFused ? 1 : 0);
++    if (bloomFused)
++    {
++        int minLevel = r3d_target_get_min_level(R3D_TARGET_BLOOM);
++        R3D_SHADER_BIND_SAMPLER(post.output, uBloomTex, r3d_target_get_level(R3D_TARGET_BLOOM, minLevel));
++    }
+     R3D_RENDER_SCREEN();
+ 
+@@ -3062,4 +3157,56 @@ r3d_target_t pass_post_fxaa(r3d_target_t sceneTarget)
+ }
+ 
++// Monolith patch 10: whether the last post pass may write the final target itself. That is
++// the case when blit_to_screen() would be a plain copy: scene output, internal resolution ==
++// destination viewport size, viewport at the origin (the copy and FXAA address texels by
++// gl_FragCoord), and no FINAL stage screen shaders after the AA pass.
++bool final_pass_direct(void)
++{
++    if (R3D.outputMode != R3D_OUTPUT_SCENE) return false;
++
++    for (int i = 0; i < (int)R3D_ARRAY_SIZE(R3D.screenShaders[R3D_SCREEN_SHADER_STAGE_FINAL]); i++)
++    {
++        if (R3D.screenShaders[R3D_SCREEN_SHADER_STAGE_FINAL][i] != NULL) return false;
++    }
++
++    Rectangle viewport = R3D.viewState.viewport;
++    int dstX = (int)(viewport.x + 0.5f);
++    int dstY = (int)(viewport.y + 0.5f);
++    int dstW = (int)(viewport.width + 0.5f);
++    int dstH = (int)(viewport.height + 0.5f);
++
++    GLuint dstId = R3D.screen.id;
++    int targetH = dstId ? R3D.screen.texture.height : GetRenderHeight();
++    int glDstY = targetH - dstY - dstH;
++
++    int srcW = 0, srcH = 0;
++    r3d_target_get_resolution(&srcW, &srcH, 0);
++
++    return dstX == 0 && glDstY == 0 && dstW == srcW && dstH == srcH;
++}
++
++// FXAA into the final target, with the scene depth like blit_to_screen()'s copy
++void pass_post_fxaa_to_screen(r3d_target_t sceneTarget)
++{
++    r3d_target_t source = r3d_target_swap_scene(sceneTarget);
++
++    int srcW = 0, srcH = 0;
++    r3d_target_get_resolution(&srcW, &srcH, 0);
++
++    glBindFramebuffer(GL_FRAMEBUFFER, R3D.screen.id);
++    glViewport(0, 0, srcW, srcH);
++
++    r3d_driver_enable(GL_DEPTH_TEST);
++    r3d_driver_disable(GL_BLEND);
++
++    r3d_driver_set_depth_func(GL_ALWAYS);
++    r3d_driver_set_depth_mask(GL_TRUE);
++
++    R3D_SHADER_USE(post.fxaa[R3D.aaPreset]);
++    R3D_SHADER_BIND_SAMPLER(post.fxaa[R3D.aaPreset], uSceneTex, r3d_target_get(source));
++    R3D_SHADER_BIND_SAMPLER(post.fxaa[R3D.aaPreset], uDepthTex, r3d_target_get_depth_buffer());
++    R3D_RENDER_SCREEN();
++}
++
+ r3d_target_t pass_post_smaa(r3d_target_t sceneTarget)
+ {
+```
+
+## Patch 11: baked world-space occlusion for the ambient light (2026-10-11)
+
+**Symptom.** SSAO + SSIL cost ~0.75 ms per frame (plus normal/radiance downsamples) for a
+small effect in this scene (PROMPT-INSTRUCTIONS §7.5), and being screen-space they change when
+the camera only turns and miss off-screen occluders. The scene is static, so its occlusion is a
+function of the world position.
+
+**Fix (an option, off unless the app sets a volume).** `R3D_SetWorldOcclusion()` uploads a
+caller-built 3D texture (GL_R8, trilinear) holding the signed distance from each voxel centre to
+the nearest surface; `R3D_ClearWorldOcclusion()` drops it (also in `R3D_Close`). The ambient
+pass multiplies the pixel's ambient occlusion by a distance-field AO estimate: 5 fetches along
+the normal at 0.15–3.2 m, occlusion = weighted shortfall of the distance against the height,
+times an intensity; it fades to 1 at the volume border. It multiplies with SSAO/SSIL if those
+stay on. monolith's runtime builds the volume from the boxes on the CPU (`BakeOcclusionVolume`,
+default map: 393×208×413 voxels at 0.5 m, 32 MB, ~60 ms per map load) and the game uses it as
+`--ao baked` (SSAO + SSIL off, intensity 0.6).
+
+| File | Change |
+|---|---|
+| `include/r3d/r3d_draw.h` | `R3D_SetWorldOcclusion()`, `R3D_ClearWorldOcclusion()` |
+| `src/r3d_draw.c` | volume state + the two functions; uniforms in `pass_deferred_ambient()` |
+| `shaders/deferred/ambient.frag` | `WorldOcclusion()`, applied to `orm.x` |
+| `src/modules/r3d_shader.[ch]` | sampler slot 19 (`R3D_SHADER_SAMPLER_WORLD_AO`, 3D), uniforms |
+| `src/r3d_core.c` | `R3D_Close()` frees the volume |
+
+**Verified.** Without a volume the image is unchanged (27 shots: 0 pixels differ). With
+`--ao baked` vs. the default: mean luminance −0.7/255 over 5 views, 11.7% of pixels > 2/255
+(darkening along wall feet and in the canyon corners is crisper and also comes from off-screen
+geometry; the faint SSIL bounce is gone). Cost of the AO term: ambient pass +0.03 ms; frame
+−0.75 ms GPU vs. SSAO + SSIL. `--reload-test` re-bakes and matches a fresh load.
+`glslangValidator` passes `ambient.frag`.
+
+**Upstream.** A generic "static AO volume" API; the bake belongs to the app.
+
+```diff
+diff --git a/include/r3d/r3d_draw.h b/include/r3d/r3d_draw.h
+index f66e24a..b48ede3 100644
+--- a/include/r3d/r3d_draw.h
++++ b/include/r3d/r3d_draw.h
+@@ -197,4 +197,23 @@ R3DAPI void R3D_ClearFogSunVisibility(void);
+ R3DAPI float R3D_GetFogSunVisibilityBakeTime(void);
+ 
++/**
++ * @brief Sets a baked world-space occlusion volume for the ambient light.
++ *
++ * Local monolith patch 11 (see patches.md). 'distance' is a w x h x d grid (x fastest, then
++ * y, then z) of one byte per voxel: the signed distance from the voxel centre to the nearest
++ * surface (negative inside geometry), decoded as value / 255 * (maxDistance - minDistance) +
++ * minDistance metres. Voxel (i, j, k) is centred at min + (i + 0.5, j + 0.5, k + 0.5) * voxelSize.
++ * The ambient pass then scales the ambient occlusion of every pixel inside the volume by a
++ * distance-field AO estimate (a few trilinear fetches along the normal, 0.15 to 3.2 m out),
++ * times 'intensity' (1 = full); outside it, and near its border, the factor fades to 1.
++ * It works with or without SSAO/SSIL (it multiplies with them). VRAM: one byte per voxel.
++ * The volume stays until the next call or R3D_ClearWorldOcclusion().
++ */
++R3DAPI void R3D_SetWorldOcclusion(const unsigned char *distance, int w, int h, int d, Vector3 min, float voxelSize,
++                                  float minDistance, float maxDistance, float intensity);
++
++/** @brief Drops the world occlusion volume (and frees its texture). */
++R3DAPI void R3D_ClearWorldOcclusion(void);
++
+ /**
+  * @brief Queues a probe to be rendered for the current frame.
+diff --git a/shaders/deferred/ambient.frag b/shaders/deferred/ambient.frag
+index 8d44b80..45604c8 100644
+--- a/shaders/deferred/ambient.frag
++++ b/shaders/deferred/ambient.frag
+@@ -54,4 +54,12 @@ uniform samplerCubeArray uPrefilterTex;
+ uniform sampler2D uBrdfLutTex;
+ 
++// Local patch 11: baked world-space occlusion (R3D_SetWorldOcclusion)
++uniform sampler3D uWorldAoTex;      //< signed distance to the nearest surface, encoded in [0, 1]
++uniform bool uWorldAoEnabled;
++uniform vec3 uWorldAoMin;           //< volume corner (world)
++uniform vec3 uWorldAoInvExtent;     //< 1 / volume size
++uniform vec2 uWorldAoDecode;        //< distance (m) = value * x + y
++uniform float uWorldAoIntensity;
++
+ // ================================
+ // Helper Includes
+@@ -61,4 +69,36 @@ uniform sampler2D uBrdfLutTex;
+ #include <wrap/env.glsl>
+ 
++// ================================
++// World-space occlusion (local patch 11)
++// ================================
++
++// Distance-field ambient occlusion: how far the surface is from other surfaces at a few
++// heights above it along its normal. A point h metres out from a surface with nothing else
++// near is h from every surface; any nearer surface makes it less, and the shortfall is the
++// occlusion. Static (a function of the world position and normal only), so it never
++// changes when the camera turns, and it sees occluders that are off screen.
++float WorldOcclusion(vec3 P, vec3 N)
++{
++    const float H[5] = float[5](0.15, 0.4, 0.9, 1.8, 3.2);
++
++    vec3 uvw = (P - uWorldAoMin) * uWorldAoInvExtent;
++    vec3 edge = min(uvw, 1.0 - uvw);
++    float inside = clamp(min(edge.x, min(edge.y, edge.z)) * 32.0, 0.0, 1.0);
++    if (inside <= 0.0) return 1.0;
++
++    float occ = 0.0, wsum = 0.0, w = 1.0;
++    for (int i = 0; i < 5; i++)
++    {
++        vec3 q = (P + N * H[i] - uWorldAoMin) * uWorldAoInvExtent;
++        float d = texture(uWorldAoTex, q).r * uWorldAoDecode.x + uWorldAoDecode.y;
++        occ += w * clamp((H[i] - d) / H[i], 0.0, 1.0);
++        wsum += w;
++        w *= 0.75;
++    }
++
++    float ao = clamp(1.0 - uWorldAoIntensity * occ / wsum, 0.0, 1.0);
++    return mix(1.0, ao, inside);
++}
++
+ // ================================
+ // Main Function
+@@ -114,4 +154,9 @@ void main()
+     }
+ 
++    if (uWorldAoEnabled)
++    {
++        orm.x *= WorldOcclusion(P, N);
++    }
++
+     vec3 diff = vec3(0.0);
+     vec3 spec = vec3(0.0);
+diff --git a/src/modules/r3d_shader.c b/src/modules/r3d_shader.c
+index 0e17e82..44dda52 100644
+--- a/src/modules/r3d_shader.c
++++ b/src/modules/r3d_shader.c
+@@ -1448,4 +1448,11 @@ bool r3d_shader_load_deferred_ambient(r3d_shader_custom_t* custom)
+     SET_SAMPLER(ambient, uBrdfLutTex, R3D_SHADER_SAMPLER_IBL_BRDF_LUT);
+ 
++    SET_SAMPLER(ambient, uWorldAoTex, R3D_SHADER_SAMPLER_WORLD_AO);
++    GET_LOCATION(ambient, uWorldAoEnabled);
++    GET_LOCATION(ambient, uWorldAoMin);
++    GET_LOCATION(ambient, uWorldAoInvExtent);
++    GET_LOCATION(ambient, uWorldAoDecode);
++    GET_LOCATION(ambient, uWorldAoIntensity);
++
+     return true;
+ }
+diff --git a/src/modules/r3d_shader.h b/src/modules/r3d_shader.h
+index 0d55871..e17518a 100644
+--- a/src/modules/r3d_shader.h
++++ b/src/modules/r3d_shader.h
+@@ -303,4 +303,7 @@ typedef enum {
+     R3D_SHADER_SAMPLER_FOG_SUNVOL           = 18,
+ 
++    // Baked world-space occlusion volume (local patch 11, see patches.md)
++    R3D_SHADER_SAMPLER_WORLD_AO             = 19,
++
+     // Buffers
+     R3D_SHADER_SAMPLER_BUFFER_SCENE         = 20,
+@@ -363,4 +366,5 @@ static const GLenum R3D_MOD_SHADER_SAMPLER_TYPES[R3D_SHADER_SAMPLER_COUNT] =
+     [R3D_SHADER_SAMPLER_SHADOW_DIR_MINMAX]      = GL_TEXTURE_2D_ARRAY,
+     [R3D_SHADER_SAMPLER_FOG_SUNVOL]             = GL_TEXTURE_3D,
++    [R3D_SHADER_SAMPLER_WORLD_AO]               = GL_TEXTURE_3D,
+     [R3D_SHADER_SAMPLER_BUFFER_SCENE]           = GL_TEXTURE_2D,
+     [R3D_SHADER_SAMPLER_BUFFER_ALBEDO]          = GL_TEXTURE_2D,
+@@ -1057,4 +1061,10 @@ typedef struct {
+     r3d_shader_uniform_sampler_t uPrefilterTex;
+     r3d_shader_uniform_sampler_t uBrdfLutTex;
++    r3d_shader_uniform_sampler_t uWorldAoTex;       //< local patch 11
++    r3d_shader_uniform_int_t uWorldAoEnabled;
++    r3d_shader_uniform_vec3_t uWorldAoMin;
++    r3d_shader_uniform_vec3_t uWorldAoInvExtent;
++    r3d_shader_uniform_vec2_t uWorldAoDecode;
++    r3d_shader_uniform_float_t uWorldAoIntensity;
+ } r3d_shader_deferred_ambient_t;
+ 
+diff --git a/src/r3d_core.c b/src/r3d_core.c
+index aa9dd04..5b30ff4 100644
+--- a/src/r3d_core.c
++++ b/src/r3d_core.c
+@@ -8,4 +8,5 @@
+ 
+ #include <r3d/r3d_core.h>
++#include <r3d/r3d_draw.h>     // R3D_ClearWorldOcclusion (local patch 11)
+ #include <raymath.h>
+ #include <float.h>
+@@ -223,4 +224,5 @@ bool R3D_Init(int resWidth, int resHeight)
+ void R3D_Close(void)
+ {
++    R3D_ClearWorldOcclusion();  // local patch 11
+     r3d_stack_destroy(R3D.stack);
+     r3d_texture_quit();
+diff --git a/src/r3d_draw.c b/src/r3d_draw.c
+index beb67f7..7e2266b 100644
+--- a/src/r3d_draw.c
++++ b/src/r3d_draw.c
+@@ -533,4 +558,54 @@ void R3D_PushLightFixedShadow(R3D_Light light, R3D_ShadowMap map, Matrix lightVi
+ static float fogSunVolBakeMs;   //< local patch, see pass_scene_fog_sunvol()
+ 
++// Local patch 11: baked world-space occlusion volume, see R3D_SetWorldOcclusion()
++static struct {
++    GLuint texture;
++    Vector3 min, invExtent;
++    Vector2 decode;         //< distance = value * x + y (value in [0, 1])
++    float intensity;
++} worldAo;
++
++void R3D_SetWorldOcclusion(const unsigned char *distance, int w, int h, int d, Vector3 min, float voxelSize,
++                           float minDistance, float maxDistance, float intensity)
++{
++    if (!distance || w <= 0 || h <= 0 || d <= 0 || voxelSize <= 0.0f || maxDistance <= minDistance)
++    {
++        R3D_TRACELOG(LOG_WARNING, "R3D_SetWorldOcclusion: invalid volume");
++        R3D_ClearWorldOcclusion();
++        return;
++    }
++
++    if (worldAo.texture == 0) glGenTextures(1, &worldAo.texture);
++
++    glBindTexture(GL_TEXTURE_3D, worldAo.texture);
++    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
++    r3d_driver_clear_errors();
++    glTexImage3D(GL_TEXTURE_3D, 0, GL_R8, w, h, d, 0, GL_RED, GL_UNSIGNED_BYTE, distance);
++    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
++    if (r3d_driver_check_error("World occlusion -> texture upload"))
++    {
++        glBindTexture(GL_TEXTURE_3D, 0);
++        R3D_ClearWorldOcclusion();
++        return;
++    }
++    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
++    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
++    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
++    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
++    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
++    glBindTexture(GL_TEXTURE_3D, 0);
++
++    worldAo.min = min;
++    worldAo.invExtent = (Vector3){ 1.0f / (voxelSize * w), 1.0f / (voxelSize * h), 1.0f / (voxelSize * d) };
++    worldAo.decode = (Vector2){ maxDistance - minDistance, minDistance };
++    worldAo.intensity = intensity;
++}
++
++void R3D_ClearWorldOcclusion(void)
++{
++    if (worldAo.texture != 0) glDeleteTextures(1, &worldAo.texture);
++    memset(&worldAo, 0, sizeof(worldAo));
++}
++
+ void R3D_BakeFogSunVisibility(R3D_ShadowMap map, Matrix lightViewProj, BoundingBox region, float voxelSize, int subsamples)
+ {
+@@ -2597,4 +2672,15 @@ void pass_deferred_ambient(r3d_target_t ssaoSource, r3d_target_t ssilSource, r3d
+     R3D_SHADER_BIND_SAMPLER(deferred.ambient, uOrmTex, r3d_target_get_level(R3D_TARGET_ORM, 0));
+ 
++    // Local patch 11: baked world occlusion
++    R3D_SHADER_SET_INT(deferred.ambient, uWorldAoEnabled, worldAo.texture != 0 ? 1 : 0);
++    if (worldAo.texture != 0)
++    {
++        R3D_SHADER_BIND_SAMPLER(deferred.ambient, uWorldAoTex, worldAo.texture);
++        R3D_SHADER_SET_VEC3(deferred.ambient, uWorldAoMin, worldAo.min);
++        R3D_SHADER_SET_VEC3(deferred.ambient, uWorldAoInvExtent, worldAo.invExtent);
++        R3D_SHADER_SET_VEC2(deferred.ambient, uWorldAoDecode, worldAo.decode);
++        R3D_SHADER_SET_FLOAT(deferred.ambient, uWorldAoIntensity, worldAo.intensity);
++    }
++
+     R3D_RENDER_SCREEN();
+ }
+```

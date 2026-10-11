@@ -158,6 +158,12 @@
 #define SUN_TILE_COUNT      2       // = the 2 layers R3D allocates for directional shadows anyway
 // --fog-cache without a region hint: at most this many voxels (bytes of VRAM)
 #define FOG_CACHE_BUDGET    (64.0 * 1024.0 * 1024.0)
+// The occlusion volume (aoVolumeVoxel): at most this many voxels (bytes of VRAM), and the
+// distance range it stores (the AO probes reach 3.2 m out; inside geometry only the first
+// voxel matters, for the trilinear filter)
+#define AO_VOLUME_BUDGET    (32.0 * 1024.0 * 1024.0)
+#define AO_DIST_MIN         (-1.0f)
+#define AO_DIST_MAX         4.0f
 
 // ======================================================================================
 // #region Types
@@ -338,6 +344,7 @@ struct MS_Private {
     SunShadowTiles tiles;
     SunShadowCache camCache;
     unsigned int fogCacheVersion;               // scene version the fog volume was baked for, 0 = none
+    unsigned int aoVersion;                     // scene version the occlusion volume was baked for, 0 = none
     bool warnedShadowSize;                      // the shadow.size vs. R3D hint warning, once
 };
 
@@ -1916,18 +1923,16 @@ static Vector3 ShadowHome(const SceneData *d)
     return d->env.homeSet ? d->env.home : PlayCenter(d);
 }
 
-// The --fog-cache region: the hint, else the content bounds (+2 m), shrunk around the play
-// centre until it fits FOG_CACHE_BUDGET voxels
-static BoundingBox FogCacheRegion(const SceneData *d, float voxel)
+// The content bounds (+2 m), shrunk around the play centre until they fit `budget` voxels
+static BoundingBox BudgetRegion(const SceneData *d, float voxel, double budget)
 {
-    if (d->env.fogRegionSet) return d->env.fogRegion;
     BoundingBox r = ContentBounds(d);
     r.min = Vector3SubtractValue(r.min, 2.0f);
     r.max = Vector3AddValue(r.max, 2.0f);
     Vector3 size = Vector3Subtract(r.max, r.min);
     double voxels = (double)(size.x / voxel) * (size.y / voxel) * (size.z / voxel);
-    if (voxels > FOG_CACHE_BUDGET) {
-        float s = (float)cbrt(FOG_CACHE_BUDGET / voxels);
+    if (voxels > budget) {
+        float s = (float)cbrt(budget / voxels);
         Vector3 c = Vector3Clamp(PlayCenter(d), r.min, r.max), half = Vector3Scale(size, 0.5f * s);
         Vector3 lo = Vector3Subtract(c, half), hi = Vector3Add(c, half);
         // keep the shrunk box inside the content bounds where it fits
@@ -1940,6 +1945,91 @@ static BoundingBox FogCacheRegion(const SceneData *d, float voxel)
         r = (BoundingBox){ lo, hi };
     }
     return r;
+}
+
+// The --fog-cache region: the hint, else the content bounds (+2 m), shrunk around the play
+// centre until it fits FOG_CACHE_BUDGET voxels
+static BoundingBox FogCacheRegion(const SceneData *d, float voxel)
+{
+    return d->env.fogRegionSet ? d->env.fogRegion : BudgetRegion(d, voxel, FOG_CACHE_BUDGET);
+}
+
+// Occlusion volume (aoVolumeVoxel, R3D patch 11): the signed distance from each voxel centre
+// to the nearest box surface (negative inside), clamped to [AO_DIST_MIN, AO_DIST_MAX] and
+// stored in a byte. Built on the CPU: every box only visits the voxels within AO_DIST_MAX of
+// it (its grown bounds), so the cost follows the boxes' volume, not boxes x voxels (default
+// map, 0.5 m: ~0.1 s). Models are not in it (their bounds are no stand-in for their shape).
+static bool BakeOcclusionVolume(const SceneData *d, float voxel, float intensity)
+{
+    BoundingBox region = BudgetRegion(d, voxel, AO_VOLUME_BUDGET);
+    int dim[3];
+    for (int a = 0; a < 3; a++) {
+        float size = ((const float *)&region.max)[a] - ((const float *)&region.min)[a];
+        dim[a] = (int)ceilf(size / voxel);
+        if (dim[a] < 2) dim[a] = 2;
+    }
+    size_t count = (size_t)dim[0] * dim[1] * dim[2];
+    unsigned char *grid = malloc(count);
+    float *dist = malloc(count * sizeof(float));
+    float *axis = malloc(sizeof(float) * (dim[0] + dim[1] + dim[2]));
+    if (!grid || !dist || !axis) {
+        free(grid); free(dist); free(axis);
+        TraceLog(LOG_WARNING, "monolith_scene: occlusion volume: out of memory (%d x %d x %d)", dim[0], dim[1], dim[2]);
+        return false;
+    }
+    double t0 = GetTime();
+    // dist > 0: distance to the nearest box outside all boxes; <= 0: minus the depth inside
+    for (size_t i = 0; i < count; i++) dist[i] = AO_DIST_MAX;
+    const float *rmin = (const float *)&region.min;
+    for (int b = 0; b < d->boxCount; b++) {
+        const float *bmin = (const float *)&d->boxes[b].min, *bmax = (const float *)&d->boxes[b].max;
+        int lo[3], hi[3];
+        bool empty = false;
+        float *ax[3] = { axis, axis + dim[0], axis + dim[0] + dim[1] };
+        for (int a = 0; a < 3 && !empty; a++) {
+            // voxel centres c = rmin + (i + 0.5) * voxel within AO_DIST_MAX of the box
+            lo[a] = (int)floorf((bmin[a] - AO_DIST_MAX - rmin[a]) / voxel - 0.5f);
+            hi[a] = (int)ceilf((bmax[a] + AO_DIST_MAX - rmin[a]) / voxel - 0.5f);
+            if (lo[a] < 0) lo[a] = 0;
+            if (hi[a] > dim[a] - 1) hi[a] = dim[a] - 1;
+            empty = lo[a] > hi[a];
+            // per axis: outside distance (> 0), or minus the distance to the nearer face (<= 0)
+            for (int i = lo[a]; i <= hi[a]; i++) {
+                float c = rmin[a] + ((float)i + 0.5f) * voxel;
+                ax[a][i] = c < bmin[a] ? bmin[a] - c : c > bmax[a] ? c - bmax[a] : -fminf(c - bmin[a], bmax[a] - c);
+            }
+        }
+        if (empty) continue;
+        for (int z = lo[2]; z <= hi[2]; z++) {
+            float dz = ax[2][z];
+            for (int y = lo[1]; y <= hi[1]; y++) {
+                float dy = ax[1][y];
+                float oz = fmaxf(dz, 0.0f), oy = fmaxf(dy, 0.0f), syz = oy * oy + oz * oz;
+                if (syz >= AO_DIST_MAX * AO_DIST_MAX) continue;
+                float iyz = fmaxf(dy, dz);     // <= 0 only when inside on both axes
+                float *row = dist + ((size_t)z * dim[1] + y) * dim[0];
+                for (int x = lo[0]; x <= hi[0]; x++) {
+                    float dx = ax[0][x], e;
+                    if (dx <= 0.0f && iyz <= 0.0f) e = fmaxf(dx, iyz);     // inside: minus the depth
+                    else {
+                        float ox = fmaxf(dx, 0.0f);
+                        e = sqrtf(ox * ox + syz);
+                    }
+                    // union of boxes: the minimum (outside: the nearest box, inside: the deepest)
+                    if (e < row[x]) row[x] = e;
+                }
+            }
+        }
+    }
+    for (size_t i = 0; i < count; i++) {
+        float v = (Clamp(dist[i], AO_DIST_MIN, AO_DIST_MAX) - AO_DIST_MIN) / (AO_DIST_MAX - AO_DIST_MIN);
+        grid[i] = (unsigned char)(v * 255.0f + 0.5f);
+    }
+    R3D_SetWorldOcclusion(grid, dim[0], dim[1], dim[2], region.min, voxel, AO_DIST_MIN, AO_DIST_MAX, intensity);
+    TraceLog(LOG_INFO, "monolith_scene: occlusion volume %d x %d x %d (%.1f MB, %.2f m voxels) baked in %.0f ms",
+             dim[0], dim[1], dim[2], count / (1024.0 * 1024.0), voxel, (GetTime() - t0) * 1000.0);
+    free(grid); free(dist); free(axis);
+    return true;
 }
 #endif
 
@@ -2851,9 +2941,11 @@ MS_Scene *MS_Load(const char *path, const MS_LoadOptions *opt, char *err, int er
     if (opt) p->opt = *opt;
     p->gpu = !p->opt.noGpu;
 #ifdef MS_PATCHED_R3D
-    p->rs = (MS_RenderSettings){ .sunOn = true, .shadowMode = MS_SHADOW_TILES, .fogCacheSub = 2, .depthPrepass = true };
+    p->rs = (MS_RenderSettings){ .sunOn = true, .shadowMode = MS_SHADOW_TILES, .fogCacheSub = 2, .depthPrepass = true,
+                                 .renderScale = 1.0f, .upscale = R3D_UPSCALE_BICUBIC, .aoVolumeIntensity = 1.0f };
 #else
-    p->rs = (MS_RenderSettings){ .sunOn = true, .shadowMode = MS_SHADOW_CAMERA, .fogCacheSub = 2, .depthPrepass = true };
+    p->rs = (MS_RenderSettings){ .sunOn = true, .shadowMode = MS_SHADOW_CAMERA, .fogCacheSub = 2, .depthPrepass = true,
+                                 .renderScale = 1.0f, .upscale = R3D_UPSCALE_BICUBIC, .aoVolumeIntensity = 1.0f };
 #endif
     p->tiles.current = -1;
     if (p->gpu) {
@@ -2884,6 +2976,9 @@ void MS_Unload(MS_Scene *s)
     if (p) {
         FreeData(p->d);
         if (p->gpu) {
+#ifdef MS_PATCHED_R3D
+            if (p->aoVersion) R3D_ClearWorldOcclusion();
+#endif
             if (p->sunShadowLoaded)
                 for (int i = 0; i < SUN_TILE_COUNT; i++) R3D_UnloadShadowMap(p->sunShadow[i]);
             R3D_UnloadMesh(p->cube);
@@ -3007,11 +3102,16 @@ void MS_SetRenderSettings(MS_Scene *s, MS_RenderSettings rs)
 #ifndef MS_PATCHED_R3D
     if (rs.shadowMode == MS_SHADOW_TILES) rs.shadowMode = MS_SHADOW_CAMERA;
     rs.fogCacheVoxel = 0.0f;
+    rs.aoVolumeVoxel = 0.0f;
 #endif
     if (rs.fogCacheVoxel > 0.0f) {
         rs.fogCacheVoxel = Clamp(rs.fogCacheVoxel, 0.25f, 8.0f);
         rs.fogCacheSub = (int)Clamp((float)rs.fogCacheSub, 1.0f, 4.0f);
     } else rs.fogCacheVoxel = 0.0f;
+    rs.renderScale = (rs.renderScale > 0.0f) ? Clamp(rs.renderScale, 0.25f, 1.0f) : 1.0f;
+    rs.aoVolumeVoxel = rs.aoVolumeVoxel > 0.0f ? Clamp(rs.aoVolumeVoxel, 0.25f, 4.0f) : 0.0f;
+    if (!(rs.aoVolumeIntensity >= 0.0f)) rs.aoVolumeIntensity = 1.0f;
+    if ((int)rs.upscale < (int)R3D_UPSCALE_NEAREST || (int)rs.upscale > (int)R3D_UPSCALE_LANCZOS) rs.upscale = R3D_UPSCALE_BICUBIC;
     MS_RenderSettings old = p->rs;
     p->rs = rs;
     if (rs.shadowMode != old.shadowMode) {
@@ -3026,7 +3126,24 @@ void MS_SetRenderSettings(MS_Scene *s, MS_RenderSettings rs)
         if (p->fogCacheVersion) R3D_ClearFogSunVisibility();
         p->fogCacheVersion = 0;
     }
+    if (p->gpu && (rs.aoVolumeVoxel != old.aoVolumeVoxel || rs.aoVolumeIntensity != old.aoVolumeIntensity)) {
+        if (p->aoVersion) R3D_ClearWorldOcclusion();
+        p->aoVersion = 0;   // re-baked by the next MS_DrawGeometry
+    }
 #endif
+}
+
+void MS_ApplyRenderResolution(const MS_Scene *s, int outW, int outH)
+{
+    const MS_RenderSettings *rs = &s->priv->rs;
+    // Rounded to the nearest pixel; renderScale 1 gives exactly the output size
+    int w = (int)((float)outW * rs->renderScale + 0.5f), h = (int)((float)outH * rs->renderScale + 0.5f);
+    if (w < 1) w = 1;
+    if (h < 1) h = 1;
+    int cw = 0, ch = 0;
+    R3D_GetResolution(&cw, &ch);
+    if (cw != w || ch != h) R3D_SetResolution(w, h);
+    if (R3D_GetUpscaleMode() != rs->upscale) R3D_SetUpscaleMode(rs->upscale);
 }
 
 static R3D_ShadowMap SunShadowMap(const MS_Private *p, int slot)
@@ -3085,6 +3202,11 @@ void MS_DrawGeometry(MS_Scene *s)
     for (int g = 0; g < d->modelGroupCount; g++)
         R3D_DrawModelInstanced(d->modelGroups[g].model, d->modelGroups[g].inst, d->modelGroups[g].count);
 #ifdef MS_PATCHED_R3D
+    // Occlusion volume: once per map load (CPU bake + upload; not a pass of this frame)
+    if (p->rs.aoVolumeVoxel > 0.0f && p->aoVersion != s->version) {
+        if (!BakeOcclusionVolume(d, p->rs.aoVolumeVoxel, p->rs.aoVolumeIntensity)) R3D_ClearWorldOcclusion();
+        p->aoVersion = s->version;
+    }
     if (p->rs.sunOn && d->env.sun.enabled && d->env.sun.shadow && p->rs.fogCacheVoxel > 0.0f && p->fogCacheVersion != s->version) {
         // Fog sun visibility, baked once per map load into the shadow layer this frame
         // doesn't sample (that tile slot is forgotten: it holds the bake map now)

@@ -302,6 +302,9 @@ typedef enum {
     // Sun-visibility volume of the volumetric fog (local patch, see patches.md)
     R3D_SHADER_SAMPLER_FOG_SUNVOL           = 18,
 
+    // Baked world-space occlusion volume (local patch 11, see patches.md)
+    R3D_SHADER_SAMPLER_WORLD_AO             = 19,
+
     // Buffers
     R3D_SHADER_SAMPLER_BUFFER_SCENE         = 20,
     R3D_SHADER_SAMPLER_BUFFER_ALBEDO        = 21,
@@ -362,6 +365,7 @@ static const GLenum R3D_MOD_SHADER_SAMPLER_TYPES[R3D_SHADER_SAMPLER_COUNT] =
     [R3D_SHADER_SAMPLER_BONE_MATRICES]          = GL_TEXTURE_1D,
     [R3D_SHADER_SAMPLER_SHADOW_DIR_MINMAX]      = GL_TEXTURE_2D_ARRAY,
     [R3D_SHADER_SAMPLER_FOG_SUNVOL]             = GL_TEXTURE_3D,
+    [R3D_SHADER_SAMPLER_WORLD_AO]               = GL_TEXTURE_3D,
     [R3D_SHADER_SAMPLER_BUFFER_SCENE]           = GL_TEXTURE_2D,
     [R3D_SHADER_SAMPLER_BUFFER_ALBEDO]          = GL_TEXTURE_2D,
     [R3D_SHADER_SAMPLER_BUFFER_NORMAL]          = GL_TEXTURE_2D,
@@ -1056,6 +1060,12 @@ typedef struct {
     r3d_shader_uniform_sampler_t uIrradianceTex;
     r3d_shader_uniform_sampler_t uPrefilterTex;
     r3d_shader_uniform_sampler_t uBrdfLutTex;
+    r3d_shader_uniform_sampler_t uWorldAoTex;       //< local patch 11
+    r3d_shader_uniform_int_t uWorldAoEnabled;
+    r3d_shader_uniform_vec3_t uWorldAoMin;
+    r3d_shader_uniform_vec3_t uWorldAoInvExtent;
+    r3d_shader_uniform_vec2_t uWorldAoDecode;
+    r3d_shader_uniform_float_t uWorldAoIntensity;
 } r3d_shader_deferred_ambient_t;
 
 typedef struct {
@@ -1137,11 +1147,14 @@ typedef struct {
 typedef struct {
     GLuint id;
     r3d_shader_uniform_sampler_t uSceneTex;
+    r3d_shader_uniform_sampler_t uBloomTex;     //< monolith patch 10: bloom applied here
+    r3d_shader_uniform_int_t uBloomFused;
 } r3d_shader_post_output_t;
 
 typedef struct {
     GLuint id;
     r3d_shader_uniform_sampler_t uSceneTex;
+    r3d_shader_uniform_sampler_t uDepthTex;     //< monolith patch 10: FXAA writes the final target
 } r3d_shader_post_fxaa_t;
 
 typedef struct {
