@@ -213,6 +213,18 @@ int InspectModel(const char *path)
         printf("inspect-model: %s: file not found\n", path);
         return 1;
     }
+    // What the file refers to must stay in its folder (and exist) before assimp opens any of
+    // it: a downloaded model could name ../../../etc/passwd as a buffer or texture (QA2 F13);
+    // the map loader would refuse it anyway (same check, package root instead of the folder)
+    {
+        char dir[1100], err[1400];
+        snprintf(dir, sizeof(dir), "%s/", GetDirectoryPath(path));
+        if (!MS_CheckModelReferences(dir, GetFileName(path), err, sizeof(err))) {
+            printf("inspect-model: %s: not imported: %s\n", path, err);
+            printf("  (a model may only refer to files in its own folder or below it; the map loader rejects it too)\n");
+            return 1;
+        }
+    }
     const struct aiScene *sc = aiImportFile(path, R3D_POSTPROCESS);
     if (!sc || !sc->mRootNode) {
         printf("inspect-model: %s: cannot import: %s\n", path, aiGetErrorString());
@@ -388,6 +400,8 @@ int InspectModel(const char *path)
     for (int i = 0; i < 5; i++)
         if (strstr(used, BAD_EXT[i])) Warn("extension %s: not supported by R3D's importer (re-export without it)", BAD_EXT[i]);
     if (strstr(used, "KHR_texture_transform")) Warn("extension KHR_texture_transform: ignored by R3D (UV offsets/scales in the file are lost)");
+    if (sc->mNumMeshes == 0) Warn("no meshes: the map loader rejects this file (\"no meshes in the file\")");
+    else if (t.triangles == 0) Warn("no triangles (only points or lines): nothing of it would be drawn");
     if (warn.len > 0) {
         printf("%s", warn.s);
         for (const char *c = warn.s; *c; c++) warnings += *c == '\n';

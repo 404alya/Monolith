@@ -415,6 +415,14 @@ const char *MS_Dependency(const MS_Scene *scene, int index);   // NULL when out 
 // which are not part of R3D_Environment). For tools that translate a running R3D program.
 bool MS_WriteR3DEnvironment(const R3D_Environment *env, FILE *f);
 
+// Checks the files a model file refers to (glTF buffers and images, OBJ material libraries
+// and their texture maps) without importing it: each must stay inside `root` (a folder path
+// ending in '/') and exist; references of 1024 bytes or more, control characters and
+// absolute or URL references fail. modelRel: the model's path relative to root. False with
+// the reason in err. The map loader runs this check for every model file of a map;
+// --inspect-model runs it with the model's own folder as root before assimp reads anything.
+bool MS_CheckModelReferences(const char *root, const char *modelRel, char *err, int errSize);
+
 // The range the map parser enforces for an `env` key (e.g. "volumetricFog.stepSize": >= 0.05):
 // lo..hi, lo excluded when *loOpen. False if the key has no range. For tools that set
 // environment values from elsewhere (monolith's --fx), so they can't do what a map can't.

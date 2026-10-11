@@ -184,8 +184,9 @@
 //                  bounds, size, origin, mesh/triangle/vertex counts, materials (= the slots
 //                  for material.N) and their textures (embedded or external, sizes), up axis
 //                  and unit hints, glTF extensions, warnings (unlit or fully metallic
-//                  materials, > 50k triangles, textures > 2K, unsupported extensions) and a
-//                  placement line (src/inspect.c)
+//                  materials, > 50k triangles, textures > 2K, unsupported extensions, no
+//                  meshes) and a placement line (src/inspect.c). A model whose glTF / OBJ / MTL
+//                  references leave its folder is refused (exit 1) before anything is read
 //   --new-map <name|path>   create the map package maps/<name>/ (<name>.map with a ground
 //                  slab, the default material and the default environment written out, a
 //                  MAP.md template, empty shaders/ models/ textures/ and ASSETS.md) and exit

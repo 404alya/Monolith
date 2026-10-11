@@ -131,7 +131,9 @@
 //                                          without any, one viewpoint is made from the spawn
 //
 // Paths are relative to the package root (the folder of the map file). Absolute paths and
-// ".." components are rejected, so a package can be copied anywhere.
+// ".." components are rejected, so a package can be copied anywhere. The files a model file
+// itself refers to (glTF buffer / image URIs, OBJ mtllib, .mtl texture maps) must stay inside
+// the package too (checked as assimp reads them: MS_CheckModelReferences).
 // Limits: none on content (any number of objects, groups, materials, lights, viewpoints; lines
 // and names of any length). Sanity caps against runaway input: MS_MAX_OBJECTS (1000000 boxes +
 // models + lights; a `repeat` grid multiplying to more fails), MS_MAX_FILE_BYTES (4 MB file),
@@ -1582,33 +1584,33 @@ static bool ParseEnv(Parser *P, Token *tok, int n)
 
 // --- Models (docs/design-v2.md 2.5)
 
-// A file that a model file refers to (`ref`, as written in it, relative to the model's
-// folder): must stay inside the package and exist; it becomes a dependency (hot reload)
-static bool ModelRefDep(Parser *P, const char *modelRel, const char *ref, int refLen)
+// A model file's references (glTF uris, OBJ mtllib, MTL texture maps) must stay inside the
+// package. The checks read the files the way assimp / R3D's importer do (QA2 F1/F2): JSON
+// strings fully decoded (\uXXXX too) and keys matched after decoding, OBJ/MTL lines split on
+// \r \n \0 \f over the whole buffer, MTL map lines matched by prefix and every possible file
+// name on the line checked (assimp takes the rest of the line after the options, spaces
+// included), references of 1024 bytes or more rejected (never skipped), and both the raw and
+// the %-decoded form of each path must stay inside.
+
+// R3D's importer joins a model's folder and a texture path in a 256-byte buffer
+// (r3d_importer_texture.c, MAX_PATH_LENGTH); a longer join would overflow it
+#define MS_IMPORTER_PATH_MAX 256
+
+enum { REF_DEP = 1, REF_TEXTURE = 2 };
+
+// `ref` resolved against the folder of `base` (a package-relative file): "." and ".."
+// removed, '\' read as '/'. Fails if it is absolute, a URL, or leaves the package.
+static bool RefResolve(Parser *P, const char *modelRel, const char *base, const char *ref, char *out, int outSize)
 {
-    char dec[MS_PATH_MAX];
-    int n = 0;
-    for (int i = 0; i < refLen && n < MS_PATH_MAX - 1; i++) {
-        char c = ref[i];
-        if (c == '\\' && i + 1 < refLen && ref[i + 1] == '/') continue;            // JSON "\/"
-        if (c == '%' && i + 2 < refLen && isxdigit((unsigned char)ref[i + 1]) && isxdigit((unsigned char)ref[i + 2])) {
-            char hex[3] = { ref[i + 1], ref[i + 2], 0 };
-            c = (char)strtol(hex, NULL, 16);
-            i += 2;
-        }
-        dec[n++] = c == '\\' ? '/' : c;
-    }
-    dec[n] = 0;
-    if (n == 0 || strncmp(dec, "data:", 5) == 0) return true;                       // embedded
-    char msg[MS_PATH_MAX + 200];
-    if (strstr(dec, "://") || dec[0] == '/' || (dec[0] && dec[1] == ':')) {
-        snprintf(msg, sizeof(msg), "\"%s\" refers to \"%s\", outside the package", modelRel, dec);
+    char msg[2 * MS_PATH_MAX + 200];
+    if (strstr(ref, "://") || ref[0] == '/' || ref[0] == '\\' || (ref[0] && ref[1] == ':')) {
+        snprintf(msg, sizeof(msg), "\"%s\" refers to \"%s\", outside the package", modelRel, ref);
         return Fail(P, "%s", msg);
     }
-    // modelRel's folder + dec, with "." and ".." resolved
-    char joined[2 * MS_PATH_MAX], out[MS_PATH_MAX];
-    const char *slash = strrchr(modelRel, '/');
-    snprintf(joined, sizeof(joined), "%.*s%s", slash ? (int)(slash - modelRel + 1) : 0, modelRel, dec);
+    char joined[2 * MS_PATH_MAX];
+    const char *slash = strrchr(base, '/');
+    snprintf(joined, sizeof(joined), "%.*s%s", slash ? (int)(slash - base + 1) : 0, base, ref);
+    for (char *c = joined; *c; c++) if (*c == '\\') *c = '/';
     int len = 0;
     for (char *c = joined; *c; ) {
         char *e = strchr(c, '/');
@@ -1616,13 +1618,13 @@ static bool ModelRefDep(Parser *P, const char *modelRel, const char *ref, int re
         if (seg == 0 || (seg == 1 && c[0] == '.')) { /* skip */ }
         else if (seg == 2 && c[0] == '.' && c[1] == '.') {
             if (len == 0) {
-                snprintf(msg, sizeof(msg), "\"%s\" refers to \"%s\", outside the package", modelRel, dec);
+                snprintf(msg, sizeof(msg), "\"%s\" refers to \"%s\", outside the package", modelRel, ref);
                 return Fail(P, "%s", msg);
             }
             while (len > 0 && out[len - 1] != '/') len--;
             if (len > 0) len--;     // the '/' before the dropped segment
         } else {
-            if (len + seg + 2 >= MS_PATH_MAX) return Fail(P, "path too long: \"%s\"", dec);
+            if (len + seg + 2 >= outSize) return Fail(P, "path too long: \"%s\"", ref);
             if (len > 0) out[len++] = '/';
             memcpy(out + len, c, seg);
             len += seg;
@@ -1630,116 +1632,299 @@ static bool ModelRefDep(Parser *P, const char *modelRel, const char *ref, int re
         c = e ? e + 1 : c + seg;
     }
     out[len] = 0;
-    char full[MS_PATH_MAX];
+    return true;
+}
+
+// One file reference in a model file (`ref`, refLen bytes, JSON escapes already decoded),
+// relative to the folder of `base`. REF_DEP: it must exist and becomes a dependency (hot
+// reload; outRel, if given, gets its package path); REF_TEXTURE: R3D's importer opens it
+// relative to the model's folder (length guard).
+static bool ModelRef(Parser *P, const char *modelRel, const char *base, const char *ref, int refLen, int flags, char *outRel)
+{
+    if (refLen == 0 || (refLen >= 5 && strncmp(ref, "data:", 5) == 0)) return true;    // embedded
+    if (refLen >= MS_PATH_MAX) return Fail(P, "\"%s\": a file reference in it is too long (1024 bytes or more)", modelRel);
+    for (int i = 0; i < refLen; i++)
+        if ((unsigned char)ref[i] < 0x20) return Fail(P, "\"%s\": a file reference in it contains a control character", modelRel);
+    if (flags & REF_TEXTURE) {
+        const char *slash = strrchr(modelRel, '/');
+        size_t dir = strlen(P->d->root) + (slash ? (size_t)(slash - modelRel) : 0);
+        if (dir + 1 + (size_t)refLen + 1 > MS_IMPORTER_PATH_MAX)
+            return Fail(P, "\"%s\": a file reference in it is too long for R3D's importer (its folder + the reference "
+                           "must stay under 256 bytes)", modelRel);
+    }
+    char raw[MS_PATH_MAX], dec[MS_PATH_MAX], out[MS_PATH_MAX];
+    memcpy(raw, ref, refLen);
+    raw[refLen] = 0;
+    int n = 0;
+    for (int i = 0; i < refLen; i++) {
+        char c = raw[i];
+        if (c == '%' && i + 2 < refLen && isxdigit((unsigned char)raw[i + 1]) && isxdigit((unsigned char)raw[i + 2])) {
+            char hex[3] = { raw[i + 1], raw[i + 2], 0 };
+            c = (char)strtol(hex, NULL, 16);
+            i += 2;
+            if ((unsigned char)c < 0x20) return Fail(P, "\"%s\": a file reference in it contains a control character", modelRel);
+        }
+        dec[n++] = c;
+    }
+    dec[n] = 0;
+    // both forms (assimp and R3D may or may not %-decode): each must stay inside
+    if (!RefResolve(P, modelRel, base, raw, out, sizeof(out)) || !RefResolve(P, modelRel, base, dec, out, sizeof(out))) return false;
+    if (!(flags & REF_DEP)) return true;
+    char full[MS_PATH_MAX], msg[MS_PATH_MAX + 200];
     if (snprintf(full, sizeof(full), "%s%s", P->d->root, out) >= (int)sizeof(full)) return Fail(P, "path too long: \"%s\"", out);
     if (!AddDep(P, full)) return false;
     if (!FileExists(full)) {
         snprintf(msg, sizeof(msg), "file not found: \"%s\" (named by \"%s\")", out, modelRel);
         return Fail(P, "%s", msg);
     }
+    if (outRel) memcpy(outRel, out, strlen(out) + 1);
     return true;
 }
 
-// Every "uri": "..." in glTF JSON text
+static void PutUtf8(char *o, int *n, unsigned cp)
+{
+    if (cp < 0x80) o[(*n)++] = (char)cp;
+    else if (cp < 0x800) { o[(*n)++] = (char)(0xC0 | (cp >> 6)); o[(*n)++] = (char)(0x80 | (cp & 0x3F)); }
+    else if (cp < 0x10000) {
+        o[(*n)++] = (char)(0xE0 | (cp >> 12)); o[(*n)++] = (char)(0x80 | ((cp >> 6) & 0x3F)); o[(*n)++] = (char)(0x80 | (cp & 0x3F));
+    } else {
+        o[(*n)++] = (char)(0xF0 | (cp >> 18)); o[(*n)++] = (char)(0x80 | ((cp >> 12) & 0x3F));
+        o[(*n)++] = (char)(0x80 | ((cp >> 6) & 0x3F)); o[(*n)++] = (char)(0x80 | (cp & 0x3F));
+    }
+}
+
+static bool Hex4(const char *s, const char *end, unsigned *out)
+{
+    if (end - s < 4) return false;
+    unsigned v = 0;
+    for (int i = 0; i < 4; i++) {
+        int c = (unsigned char)s[i];
+        if (!isxdigit(c)) return false;
+        v = v * 16 + (unsigned)(isdigit(c) ? c - '0' : tolower(c) - 'a' + 10);
+    }
+    *out = v;
+    return true;
+}
+
+// The JSON string starting after its opening quote at s, decoded (UTF-8) into a heap string
+// of *outLen bytes; *next = just after the closing quote. NULL (with Fail) on a bad escape,
+// an unterminated string or out of memory.
+static char *JsonString(Parser *P, const char *modelRel, const char *s, const char *end, const char **next, int *outLen)
+{
+    const char *q = s;
+    while (q < end && *q != '"') q += (*q == '\\' && q + 1 < end) ? 2 : 1;
+    if (q >= end) { Fail(P, "\"%s\": malformed JSON (unterminated string)", modelRel); return NULL; }
+    char *o = malloc((size_t)(q - s) + 1);
+    if (!o) { Fail(P, "out of memory", NULL); return NULL; }
+    int n = 0;
+    for (const char *p = s; p < q; p++) {
+        if (*p != '\\') { o[n++] = *p; continue; }
+        char e = *++p;
+        unsigned cp;
+        switch (e) {
+        case '"': case '\\': case '/': o[n++] = e; break;
+        case 'b': o[n++] = '\b'; break;
+        case 'f': o[n++] = '\f'; break;
+        case 'n': o[n++] = '\n'; break;
+        case 'r': o[n++] = '\r'; break;
+        case 't': o[n++] = '\t'; break;
+        case 'u':
+            if (!Hex4(p + 1, q, &cp)) goto bad;
+            p += 4;
+            if (cp >= 0xD800 && cp <= 0xDBFF) {     // surrogate pair
+                unsigned lo;
+                if (q - p < 7 || p[1] != '\\' || p[2] != 'u' || !Hex4(p + 3, q, &lo) || lo < 0xDC00 || lo > 0xDFFF) goto bad;
+                cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                p += 6;
+            }
+            PutUtf8(o, &n, cp);
+            break;
+        default: goto bad;
+        }
+    }
+    o[n] = 0;
+    *outLen = n;
+    *next = q + 1;
+    return o;
+bad:
+    free(o);
+    Fail(P, "\"%s\": malformed JSON (bad string escape)", modelRel);
+    return NULL;
+}
+
+// glTF JSON: the value of every "uri" key (keys compared after decoding)
 static bool GltfUriDeps(Parser *P, const char *modelRel, const char *json, size_t size)
 {
     const char *end = json + size;
-    for (const char *p = json; p + 5 < end; p++) {
-        if (memcmp(p, "\"uri\"", 5) != 0) continue;
-        const char *q = p + 5;
-        while (q < end && (*q == ' ' || *q == '\t' || *q == '\r' || *q == '\n')) q++;
-        if (q >= end || *q != ':') continue;
-        q++;
-        while (q < end && (*q == ' ' || *q == '\t' || *q == '\r' || *q == '\n')) q++;
-        if (q >= end || *q != '"') continue;
-        const char *s = ++q;
-        while (q < end && *q != '"') q += (*q == '\\' && q + 1 < end) ? 2 : 1;
-        if (q >= end) break;
-        if (q - s < MS_PATH_MAX && !ModelRefDep(P, modelRel, s, (int)(q - s))) return false;
-        p = q;
-    }
-    return true;
-}
-
-// The last whitespace-separated word of each line starting with one of `keys` (OBJ/MTL)
-static bool ObjLineDeps(Parser *P, const char *modelRel, const char *text, const char *const *keys, int keyCount,
-                        bool mtllib)
-{
-    for (const char *line = text; *line; ) {
-        const char *eol = strchr(line, '\n');
-        if (!eol) eol = line + strlen(line);
-        const char *s = line;
-        while (s < eol && (*s == ' ' || *s == '\t')) s++;
-        for (int k = 0; k < keyCount; k++) {
-            size_t kl = strlen(keys[k]);
-            if ((size_t)(eol - s) <= kl || strncmp(s, keys[k], kl) != 0 || (s[kl] != ' ' && s[kl] != '\t')) continue;
-            const char *a = s + kl, *b = eol;
-            while (b > a && (b[-1] == ' ' || b[-1] == '\t' || b[-1] == '\r')) b--;
-            if (!mtllib) {          // options (-bm 1 ...) come first: the file name is the last word
-                const char *w = b;
-                while (w > a && w[-1] != ' ' && w[-1] != '\t') w--;
-                a = w;
-            } else while (a < b && (*a == ' ' || *a == '\t')) a++;
-            if (b > a && b - a < MS_PATH_MAX) {
-                if (!ModelRefDep(P, modelRel, a, (int)(b - a))) return false;
-                if (mtllib) {
-                    // the material library's textures, relative to the library's folder
-                    char lib[MS_PATH_MAX], rel[2 * MS_PATH_MAX], full[3 * MS_PATH_MAX];
-                    snprintf(lib, sizeof(lib), "%.*s", (int)(b - a), a);
-                    const char *slash = strrchr(modelRel, '/');
-                    snprintf(rel, sizeof(rel), "%.*s%s", slash ? (int)(slash - modelRel + 1) : 0, modelRel, lib);
-                    snprintf(full, sizeof(full), "%s%s", P->d->root, rel);
-                    int size;
-                    char e[256];
-                    char *mtl = ReadWholeFile(full, &size, e, sizeof(e));
-                    if (mtl) {
-                        static const char *const MAPS[] = { "map_Kd", "map_Ka", "map_Ks", "map_Ke", "map_Bump", "map_bump",
-                                                            "bump", "map_d", "norm", "map_Pr", "map_Pm", "map_Ns", "disp" };
-                        bool ok = ObjLineDeps(P, rel, mtl, MAPS, COUNT(MAPS), false);
-                        free(mtl);
-                        if (!ok) return false;
-                    }
-                }
-            }
+    bool uriValueNext = false;      // just read the key "uri" and its ':'
+    for (const char *p = json; p < end; ) {
+        if (*p != '"') {
+            if (*p != ' ' && *p != '\t' && *p != '\r' && *p != '\n') uriValueNext = false;
+            p++;
+            continue;
         }
-        line = *eol ? eol + 1 : eol;
+        const char *next;
+        int len;
+        char *str = JsonString(P, modelRel, p + 1, end, &next, &len);
+        if (!str) return false;
+        const char *q = next;
+        while (q < end && (*q == ' ' || *q == '\t' || *q == '\r' || *q == '\n')) q++;
+        bool ok = true;
+        if (q < end && *q == ':') {         // a key
+            uriValueNext = len == 3 && memcmp(str, "uri", 3) == 0;
+            p = q + 1;
+        } else {
+            if (uriValueNext) ok = ModelRef(P, modelRel, modelRel, str, len, REF_DEP | REF_TEXTURE, NULL);
+            uriValueNext = false;
+            p = next;
+        }
+        free(str);
+        if (!ok) return false;
     }
     return true;
 }
 
-// The files a model file refers to: glTF buffers and images, OBJ material libraries and
-// their textures (FBX/DAE: not followed)
+// OBJ / MTL lines as assimp splits them: [*s, *e) is the next line (without its end)
+static bool NextLine(const char **cur, const char *end, const char **s, const char **e)
+{
+    if (*cur >= end) return false;
+    const char *p = *cur;
+    while (p < end && *p != '\r' && *p != '\n' && *p != '\0' && *p != '\f') p++;
+    *s = *cur;
+    *e = p;
+    *cur = p < end ? p + 1 : p;
+    return true;
+}
+
+static bool IsBlank(char c) { return c == ' ' || c == '\t'; }
+
+// An .mtl file's texture maps (map_*, bump, norm, disp, refl, any case). assimp takes the
+// rest of the line after the options as the name, R3D opens it relative to the model's
+// folder: every word start on the line must give a path inside the package from the
+// model's and from the library's folder; the last word must exist (relative to the library,
+// lastMustExist) and becomes a dependency.
+static bool MtlDeps(Parser *P, const char *modelRel, const char *mtlRel, const char *text, size_t size, bool lastMustExist)
+{
+    const char *cur = text, *end = text + size, *s, *e;
+    while (NextLine(&cur, end, &s, &e)) {
+        while (s < e && IsBlank(*s)) s++;
+        const char *k = s;
+        while (k < e && !IsBlank(*k)) k++;
+        char key[8] = { 0 };
+        for (int i = 0; i < 4 && s + i < k; i++) key[i] = (char)tolower((unsigned char)s[i]);
+        if (strncmp(key, "map", 3) != 0 && strcmp(key, "bump") != 0 && strcmp(key, "norm") != 0 &&
+            strcmp(key, "disp") != 0 && strcmp(key, "refl") != 0) continue;
+        const char *b = e;
+        while (b > k && (IsBlank(b[-1]) || b[-1] == '\r')) b--;
+        const char *first = k;
+        while (first < b && IsBlank(*first)) first++;
+        if (first >= b) continue;
+        if (b - first >= MS_PATH_MAX) return Fail(P, "\"%s\": a texture line in it is too long (1024 bytes or more)", mtlRel);
+        const char *last = first;
+        for (const char *w = first; w < b; w++) {
+            if (w > first && !(IsBlank(w[-1]) && !IsBlank(*w))) continue;
+            last = w;
+            if (!ModelRef(P, modelRel, modelRel, w, (int)(b - w), w == first ? REF_TEXTURE : 0, NULL) ||
+                !ModelRef(P, modelRel, mtlRel, w, (int)(b - w), 0, NULL)) return false;
+        }
+        if (lastMustExist && !ModelRef(P, modelRel, mtlRel, last, (int)(b - last), REF_DEP, NULL)) return false;
+    }
+    return true;
+}
+
+// An .mtl file the OBJ importer reads (package-relative): its texture maps
+static bool MtlFileDeps(Parser *P, const char *modelRel, const char *mtlRel, bool lastMustExist)
+{
+    char full[MS_PATH_MAX], e[256];
+    if (snprintf(full, sizeof(full), "%s%s", P->d->root, mtlRel) >= (int)sizeof(full)) return Fail(P, "path too long: \"%s\"", mtlRel);
+    int size;
+    char *mtl = ReadWholeFile(full, &size, e, sizeof(e));
+    if (!mtl) return Fail(P, "cannot read the material library \"%s\" (or larger than 4 MB)", mtlRel);
+    bool ok = MtlDeps(P, modelRel, mtlRel, mtl, (size_t)size, lastMustExist);
+    free(mtl);
+    return ok;
+}
+
+// OBJ: every mtllib line (the name is the rest of the line) and its library's textures;
+// also the library assimp falls back to when a mtllib can't be opened (<model>.mtl)
+static bool ObjDeps(Parser *P, const char *modelRel, const char *text, size_t size)
+{
+    const char *cur = text, *end = text + size, *s, *e;
+    while (NextLine(&cur, end, &s, &e)) {
+        while (s < e && IsBlank(*s)) s++;
+        if (e - s <= 6 || strncmp(s, "mtllib", 6) != 0 || !IsBlank(s[6])) continue;
+        const char *a = s + 6, *b = e;
+        while (a < b && IsBlank(*a)) a++;
+        while (b > a && IsBlank(b[-1])) b--;
+        if (b <= a) continue;
+        char lib[MS_PATH_MAX];
+        if (!ModelRef(P, modelRel, modelRel, a, (int)(b - a), REF_DEP, lib) || !MtlFileDeps(P, modelRel, lib, true)) return false;
+    }
+    size_t l = strlen(modelRel);
+    char fallback[MS_PATH_MAX], full[MS_PATH_MAX];
+    if (l >= 3 && l < sizeof(fallback)) {
+        snprintf(fallback, sizeof(fallback), "%.*smtl", (int)(l - 3), modelRel);
+        if (snprintf(full, sizeof(full), "%s%s", P->d->root, fallback) < (int)sizeof(full) && FileExists(full) &&
+            !MtlFileDeps(P, modelRel, fallback, false)) return false;
+    }
+    return true;
+}
+
+// The files a model file refers to: glTF buffers and images (.gltf / .glb, either layout:
+// assimp tells binary from text by the magic, not the extension), OBJ material libraries
+// and their textures (FBX/DAE: not followed)
 static bool ModelDeps(Parser *P, const char *modelRel, const char *full)
 {
     const char *ext = GetFileExtension(full);
     if (!ext) return true;
-    if (TextIsEqual(TextToLower(ext), ".gltf") || TextIsEqual(TextToLower(ext), ".obj")) {
-        bool gltf = TextIsEqual(TextToLower(ext), ".gltf");
-        int size;
-        char e[256];
-        char *text = ReadWholeFile(full, &size, e, sizeof(e));
-        if (!text) return Fail(P, "cannot read the model file \"%s\" (or larger than 4 MB)", modelRel);
-        static const char *const OBJ_KEYS[] = { "mtllib" };
-        bool ok = gltf ? GltfUriDeps(P, modelRel, text, (size_t)size) : ObjLineDeps(P, modelRel, text, OBJ_KEYS, 1, true);
-        free(text);
-        return ok;
-    }
-    if (TextIsEqual(TextToLower(ext), ".glb")) {
-        // GLB: 12-byte header, then the JSON chunk (length, type "JSON", text)
+    bool gltf = TextIsEqual(TextToLower(ext), ".gltf") || TextIsEqual(TextToLower(ext), ".glb");
+    if (!gltf && !TextIsEqual(TextToLower(ext), ".obj")) return true;
+    if (gltf) {
+        // GLB: 12-byte header, then the JSON chunk (length, type, text); read only that
+        // part (the binary chunk can be large)
         FILE *f = fopen(full, "rb");
         if (!f) return Fail(P, "cannot read the model file \"%s\"", modelRel);
         unsigned char h[20];
+        bool glb = fread(h, 1, 20, f) == 20 && memcmp(h, "glTF", 4) == 0;
         bool ok = true;
-        if (fread(h, 1, 20, f) == 20 && memcmp(h, "glTF", 4) == 0 && memcmp(h + 16, "JSON", 4) == 0) {
+        if (glb) {
             uint32_t len = h[12] | (h[13] << 8) | (h[14] << 16) | ((uint32_t)h[15] << 24);
-            char *json = len <= MS_FILE_MAX ? malloc(len) : NULL;
+            char *json = memcmp(h + 16, "JSON", 4) == 0 && len <= MS_FILE_MAX ? malloc(len ? len : 1) : NULL;
             if (json && fread(json, 1, len, f) == len) ok = GltfUriDeps(P, modelRel, json, len);
+            else ok = Fail(P, "\"%s\": not a GLB file assimp can read (no complete JSON chunk of at most 4 MB)", modelRel);
             free(json);
         }
         fclose(f);
-        return ok;
+        if (glb) return ok;
     }
-    return true;
+    // .gltf (or a text glTF named .glb) and .obj: the whole text
+    int size;
+    char e[256];
+    char *text = ReadWholeFile(full, &size, e, sizeof(e));
+    if (!text) return Fail(P, "cannot read the model file \"%s\" (or larger than 4 MB)", modelRel);
+    bool ok = gltf ? GltfUriDeps(P, modelRel, text, (size_t)size) : ObjDeps(P, modelRel, text, (size_t)size);
+    free(text);
+    return ok;
+}
+
+bool MS_CheckModelReferences(const char *root, const char *modelRel, char *err, int errSize)
+{
+    if (errSize > 0) err[0] = 0;
+    SceneData *d = calloc(1, sizeof(SceneData));
+    char *full = d ? MS_StrDup(TextFormat("%s%s", root, modelRel)) : NULL;
+    char *rootCopy = MS_StrDup(root);
+    bool ok = false;
+    if (d && full && rootCopy) {
+        d->root = rootCopy;
+        Parser P = { .d = d, .path = modelRel, .err = err, .errSize = errSize };
+        ok = ModelDeps(&P, modelRel, full);
+        for (int i = 0; i < d->depCount; i++) free(d->deps[i]);
+        free(d->deps);
+    } else snprintf(err, errSize, "out of memory");
+    free(rootCopy);
+    free(full);
+    free(d);
+    return ok;
 }
 
 // model "models/x.glb" x y z [rot y p r] [scale s | sx sy sz] [origin model|bottom|center]
