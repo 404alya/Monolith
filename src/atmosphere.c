@@ -63,6 +63,10 @@ bool ApplyFxSetting(R3D_Environment *env, const char *keyValue)
     char *end;
     float v = strtof(eq + 1, &end);
     if (*end) return false;
+    if (!isfinite(v)) {         // "nan" / "inf" parse, and would black out the frame
+        TraceLog(LOG_WARNING, "monolith: --fx %s: not a finite number (rejected)", keyValue);
+        return false;
+    }
     for (int k = 0; k < (int)(sizeof(knobs) / sizeof(knobs[0])); k++) {
         if (strlen(knobs[k].key) != (size_t)(eq - keyValue) || strncmp(knobs[k].key, keyValue, eq - keyValue) != 0) continue;
         if (knobs[k].f) *knobs[k].f = v;

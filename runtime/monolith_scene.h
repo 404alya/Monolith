@@ -106,7 +106,7 @@ typedef struct {
     Matrix transform;           // model -> world: scale, rotate, translate (includes the origin shift)
     Quaternion rotation;        // the rotation of transform
     Vector3 translation;        // the translation of transform (= position + origin shift)
-    BoundingBox bounds;         // world AABB of the transformed model bounds
+    BoundingBox bounds;         // world AABB of the transformed vertices (noGpu: of the file's bounds)
     MS_ModelCollide collide;
     int colliderFirst, colliderCount;   // range in colliders[] (0 count = collide none)
     int slotFirst, slotCount;   // range in modelSlots[] (material.N overrides)
@@ -185,9 +185,10 @@ typedef struct {
 
 typedef struct {
     bool noGpu;             // parse + geometry only, no R3D calls (e.g. a box dump without a window).
-                            // Model files (and the .bin / textures a .gltf names) are only checked
-                            // for existence; their bounds are unknown (zero box, loaded = false), so
-                            // model bounds, colliders and origin bottom/center shifts are not final.
+                            // Model files are parsed on the CPU (assimp, no GL) so a broken one
+                            // fails the load like a GPU load would, then dropped; their bounds are
+                            // unknown (zero box, loaded = false), so model bounds, colliders and
+                            // origin bottom/center shifts are not final.
     int shadowSizeOverride; // > 0: overrides env shadow.size
     float shadowRangeOverride;  // > 0: overrides sun.range
 } MS_LoadOptions;

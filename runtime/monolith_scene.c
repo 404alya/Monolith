@@ -35,8 +35,11 @@
 //                                     is approximate (R3D rotates instance normals but does not
 //                                     re-scale them)
 //       origin model|bottom|center    model (default): the file's origin goes to x y z; bottom:
-//                                     the bottom centre of the scaled, rotated bounds (the safe
-//                                     way to stand a model on a surface); center: their centre
+//                                     the model stands on y (its lowest vertex after scale and
+//                                     rotation), centred over x z (the centre of the file's
+//                                     bounds, turned with it); the safe way to stand a model on
+//                                     a surface; center: the same x z, the middle between its
+//                                     lowest and highest vertex at y
 //       material "name"               every material slot drawn with this map material
 //       material.N "name"             slot N only (0-based; --inspect-model lists the slots)
 //                                     Precedence: material.N, then material, then the active
@@ -46,7 +49,7 @@
 //                                     (inherit emission also keeps its colour and energy, inherit
 //                                     normal its scale); the override's colours and factors apply.
 //       collide aabb|none|box x0 y0 z0 x1 y1 z1 [box ...]   aabb (default): the world bounds
-//                                     block the player; none; or any number of boxes in model space
+//                                     (of the turned vertices) block the player; none; or any number of boxes in model space
 //                                     (before scale/rotation), each turned into a world AABB
 //                                     (e.g. a tree's trunk only)
 //       shadow on|off                 casts the sun shadow (default on); always receives shadows
@@ -225,6 +228,7 @@ typedef struct { char *path; bool isColor; int wrap; Texture2D tex; } TexEntry;
 typedef struct { Vector3 mn, mx; int left, first, count; } BvhNode;    // leaf: count > 0 (left = -1)
 typedef struct {
     Vector3 *pos;
+    int vertCount;              // pos[] entries (the vertices of the file's triangle meshes)
     unsigned int *tri;          // 3 vertex indices per triangle, in BVH order
     int triCount;
     BvhNode *nodes;
@@ -2012,12 +2016,50 @@ static Vector3 ShadowHome(const SceneData *d)
     return d->env.homeSet ? d->env.home : PlayCenter(d);
 }
 
-// The content bounds (+2 m), shrunk around the play centre until they fit `budget` voxels
-static BoundingBox BudgetRegion(const SceneData *d, float voxel, double budget)
+#define MS_GL_MAX_3D_TEXTURE_SIZE 0x8073
+extern void glGetIntegerv(unsigned int pname, int *data);     // (declared by hand, see glEnable below)
+
+// GL_MAX_3D_TEXTURE_SIZE of the current context (0 = unknown)
+static int Max3DTextureSize(void)
+{
+    int v = 0;
+    glGetIntegerv(MS_GL_MAX_3D_TEXTURE_SIZE, &v);
+    return v;
+}
+
+// Shrinks r on every axis that would need more than the GPU's 3D texture size in voxels
+// (a long thin map: an object 20 km out made the occlusion volume 23153 voxels long, the
+// upload failed with GL_INVALID_VALUE and AO silently went off). The kept part is centred
+// on the play centre and stays inside r. Logs what it cut.
+static BoundingBox ClampRegionTo3DLimit(const SceneData *d, BoundingBox r, float voxel, const char *what)
+{
+    int max3D = Max3DTextureSize();
+    if (max3D <= 2) return r;
+    float maxSize = (float)(max3D - 1) * voxel;    // ceil(size / voxel) <= max3D with room for rounding
+    Vector3 c = Vector3Clamp(PlayCenter(d), r.min, r.max);
+    for (int a = 0; a < 3; a++) {
+        float *l = &((float *)&r.min)[a], *h = &((float *)&r.max)[a];
+        if (*h - *l <= maxSize) continue;
+        float rmin = *l, rmax = *h, cc = ((const float *)&c)[a];
+        float lo = cc - maxSize * 0.5f, hi = cc + maxSize * 0.5f;
+        if (lo < rmin) { hi += rmin - lo; lo = rmin; }
+        if (hi > rmax) { lo -= hi - rmax; hi = rmax; }
+        TraceLog(LOG_WARNING, "monolith_scene: %s: %c extent %.0f m is %d voxels of %.2f m, over the GPU's 3D texture limit %d: "
+                 "only %.0f..%.0f is covered", what, "xyz"[a], rmax - rmin, (int)ceilf((rmax - rmin) / voxel), voxel, max3D, lo, hi);
+        *l = lo;
+        *h = hi;
+    }
+    return r;
+}
+
+// The content bounds (+2 m), cut to the GPU's 3D texture size per axis, then shrunk around
+// the play centre until they fit `budget` voxels
+static BoundingBox BudgetRegion(const SceneData *d, float voxel, double budget, const char *what)
 {
     BoundingBox r = ContentBounds(d);
     r.min = Vector3SubtractValue(r.min, 2.0f);
     r.max = Vector3AddValue(r.max, 2.0f);
+    r = ClampRegionTo3DLimit(d, r, voxel, what);
     Vector3 size = Vector3Subtract(r.max, r.min);
     double voxels = (double)(size.x / voxel) * (size.y / voxel) * (size.z / voxel);
     if (voxels > budget) {
@@ -2040,7 +2082,8 @@ static BoundingBox BudgetRegion(const SceneData *d, float voxel, double budget)
 // centre until it fits FOG_CACHE_BUDGET voxels
 static BoundingBox FogCacheRegion(const SceneData *d, float voxel)
 {
-    return d->env.fogRegionSet ? d->env.fogRegion : BudgetRegion(d, voxel, FOG_CACHE_BUDGET);
+    return d->env.fogRegionSet ? ClampRegionTo3DLimit(d, d->env.fogRegion, voxel, "fog cache")
+                               : BudgetRegion(d, voxel, FOG_CACHE_BUDGET, "fog cache");
 }
 
 // Occlusion volume (aoVolumeVoxel, R3D patch 11): the signed distance from each voxel centre
@@ -2050,12 +2093,13 @@ static BoundingBox FogCacheRegion(const SceneData *d, float voxel)
 // map, 0.5 m: ~0.1 s). Models are not in it (their bounds are no stand-in for their shape).
 static bool BakeOcclusionVolume(const SceneData *d, float voxel, float intensity)
 {
-    BoundingBox region = BudgetRegion(d, voxel, AO_VOLUME_BUDGET);
-    int dim[3];
+    BoundingBox region = BudgetRegion(d, voxel, AO_VOLUME_BUDGET, "occlusion volume");
+    int dim[3], max3D = Max3DTextureSize();
     for (int a = 0; a < 3; a++) {
         float size = ((const float *)&region.max)[a] - ((const float *)&region.min)[a];
         dim[a] = (int)ceilf(size / voxel);
         if (dim[a] < 2) dim[a] = 2;
+        if (max3D > 2 && dim[a] > max3D) dim[a] = max3D;    // (float rounding; the region is cut already)
     }
     size_t count = (size_t)dim[0] * dim[1] * dim[2];
     unsigned char *grid = malloc(count);
@@ -2585,6 +2629,7 @@ static void BuildModelPick(MS_ModelFile *F, ModelPick *mp)
             v0 += md->vertexCount;
         }
         mp->triCount = tris;
+        mp->vertCount = verts;
         mp->nodeCount = 1;
         BvhBuild(mp, 0, 0, tris, 0);
     } else if (tris > 0) FreeModelPick(mp);
@@ -2621,6 +2666,44 @@ static bool LoadModelFiles(SceneData *d, char *err, int errSize)
     return true;
 }
 
+// noGpu loads (--dump-boxes, --export, the peek before R3D_Init) don't upload models, but a
+// broken model file must still fail the load the way the GPU load would. So every model
+// file is imported here with assimp on the CPU (no GL) and dropped: the same call and
+// post-processing flags as R3D_LoadImporter (r3d_importer.c: POST_PROCESS_BASELINE +
+// aiProcess_GenNormals, the flags R3D_LoadModelEx(.., R3D_IMPORT_RETAIN_MESH_DATA) uses), the
+// same failure test, plus "no meshes" (R3D's model takes scene->mNumMeshes meshes; the GPU
+// load fails on 0, e.g. a text file named .obj). assimp is declared by hand: its headers
+// aren't on every include path the runtime is built with, but it is always linked (R3D
+// needs it). Only the first three members of the C struct aiScene are read (unchanged since
+// assimp 3).
+struct MS_AiScenePrefix { unsigned int mFlags; void *mRootNode; unsigned int mNumMeshes; };
+extern const struct MS_AiScenePrefix *aiImportFile(const char *file, unsigned int flags);
+extern void aiReleaseImport(const struct MS_AiScenePrefix *scene);
+extern const char *aiGetErrorString(void);
+#define MS_AI_IMPORT_FLAGS (0x1u | 0x2u | 0x8u | 0x20u | 0x1000u | 0x8000u | 0x40000u | 0x800000u)
+#define MS_AI_SCENE_FLAGS_INCOMPLETE 0x1u
+
+// On failure: "map:line: message" (the GPU load's wording)
+static bool CheckModelFiles(SceneData *d, char *err, int errSize)
+{
+    for (int i = 0; i < d->modelFileCount; i++) {
+        const MS_ModelFile *F = &d->modelFiles[i];
+        char full[MS_PATH_MAX + MS_PATH_MAX];
+        snprintf(full, sizeof(full), "%s%s", d->root, F->path);
+        const struct MS_AiScenePrefix *sc = aiImportFile(full, MS_AI_IMPORT_FLAGS);
+        bool ok = sc && sc->mRootNode && !(sc->mFlags & MS_AI_SCENE_FLAGS_INCOMPLETE) && sc->mNumMeshes > 0;
+        if (!ok) TraceLog(LOG_WARNING, "monolith_scene: model %s: %s", full, !sc || !sc->mRootNode || (sc->mFlags & MS_AI_SCENE_FLAGS_INCOMPLETE)
+                                                                         ? aiGetErrorString() : "no meshes in the file");
+        if (sc) aiReleaseImport(sc);
+        if (!ok) {
+            snprintf(err, errSize, "%s:%d: cannot load the model \"%s\" (unsupported or broken file; see the log; "
+                     "--inspect-model shows why)", d->path, F->line, F->path);
+            return false;
+        }
+    }
+    return true;
+}
+
 // World AABB of the model-space box b under the linear part of m plus `t`
 static BoundingBox TransformBox(BoundingBox b, Matrix m)
 {
@@ -2634,10 +2717,43 @@ static BoundingBox TransformBox(BoundingBox b, Matrix m)
     return r;
 }
 
+// Model-space bounds of a file under the linear matrix m (rotation x scale), cached per
+// (file, rotation, scale) for one ResolveModels call
+typedef struct { int file; Vector3 rot, scale; BoundingBox box; } RotBoundsEntry;
+typedef struct { RotBoundsEntry *e; int count, cap; } RotBoundsCache;
+
+// The tight bounds of the file's vertices under m: the file's AABB turned and re-boxed is
+// too big for a pitched or rolled model (a rock at rot 0 30 20 floated 0.89 m with origin
+// bottom, and its collider was far too wide). Without CPU vertex data (noGpu loads, a file
+// without triangles) or when out of memory: the file's AABB corners, transformed and re-boxed.
+static BoundingBox RotatedFileBounds(const SceneData *d, const MS_ModelInstance *M, Matrix m, RotBoundsCache *cache)
+{
+    const MS_ModelFile *F = &d->modelFiles[M->file];
+    BoundingBox fb = F->loaded ? F->bounds : (BoundingBox){ 0 };
+    const ModelPick *mp = d->modelPick ? &d->modelPick[M->file] : NULL;
+    if (!F->loaded || !mp || !mp->pos || mp->vertCount <= 0) return TransformBox(fb, m);
+    for (int i = 0; i < cache->count; i++) {
+        const RotBoundsEntry *e = &cache->e[i];
+        if (e->file == M->file && memcmp(&e->rot, &M->rotationDeg, sizeof(Vector3)) == 0
+            && memcmp(&e->scale, &M->scale, sizeof(Vector3)) == 0)
+            return e->box;
+    }
+    BoundingBox r = { { INFINITY, INFINITY, INFINITY }, { -INFINITY, -INFINITY, -INFINITY } };
+    for (int k = 0; k < mp->vertCount; k++) {
+        Vector3 p = Vector3Transform(mp->pos[k], m);
+        r.min = Vector3Min(r.min, p);
+        r.max = Vector3Max(r.max, p);
+    }
+    RotBoundsEntry *e = MS_PUSH(cache->e, cache->count, cache->cap);
+    if (e) *e = (RotBoundsEntry){ M->file, M->rotationDeg, M->scale, r };
+    return r;
+}
+
 // Transforms, world bounds and colliders of every instance (file bounds: zero box when the
 // files were not loaded); then the collider list (boxes first)
 static bool ResolveModels(SceneData *d, char *err, int errSize)
 {
+    RotBoundsCache cache = { 0 };
     int nc = d->boxCount;
     if (d->modelCount > 0) {
         d->colliders = malloc(sizeof(BoundingBox) * ((size_t)d->boxCount + (size_t)d->modelColliderCount));
@@ -2660,11 +2776,18 @@ static bool ResolveModels(SceneData *d, char *err, int errSize)
         m.m0 *= M->scale.x; m.m1 *= M->scale.x; m.m2 *= M->scale.x;
         m.m4 *= M->scale.y; m.m5 *= M->scale.y; m.m6 *= M->scale.y;
         m.m8 *= M->scale.z; m.m9 *= M->scale.z; m.m10 *= M->scale.z;
-        BoundingBox lb = TransformBox(fb, m);      // bounds around the origin
+        // Bounds around the origin: the vertices' (tight). Horizontally, origin bottom/center
+        // put the centre of the file's AABB (turned with the model, so it does not wander as
+        // the model yaws) at x z; vertically the lowest vertex (bottom) or the middle of the
+        // lowest and highest vertex (center) at y, so a pitched or rolled model stands on y
+        // instead of floating above it. (Yaw only: the same y as the re-boxed AABB.)
+        BoundingBox lb = RotatedFileBounds(d, M, m, &cache);
+        BoundingBox ob = TransformBox(fb, m);      // the file's AABB, turned and re-boxed
         Vector3 shift = { 0 };
         if (M->origin == MS_ORIGIN_BOTTOM)
-            shift = (Vector3){ -(lb.min.x + lb.max.x) * 0.5f, -lb.min.y, -(lb.min.z + lb.max.z) * 0.5f };
-        else if (M->origin == MS_ORIGIN_CENTER) shift = Vector3Scale(Vector3Add(lb.min, lb.max), -0.5f);
+            shift = (Vector3){ -(ob.min.x + ob.max.x) * 0.5f, -lb.min.y, -(ob.min.z + ob.max.z) * 0.5f };
+        else if (M->origin == MS_ORIGIN_CENTER)
+            shift = (Vector3){ -(ob.min.x + ob.max.x) * 0.5f, -(lb.min.y + lb.max.y) * 0.5f, -(ob.min.z + ob.max.z) * 0.5f };
         M->translation = Vector3Add(M->position, shift);
         m.m12 = M->translation.x; m.m13 = M->translation.y; m.m14 = M->translation.z;
         M->transform = m;
@@ -2678,6 +2801,7 @@ static bool ResolveModels(SceneData *d, char *err, int errSize)
         M->colliderCount = nc - M->colliderFirst;
     }
     d->colliderCount = nc;
+    free(cache.e);
     return true;
 }
 
@@ -3053,6 +3177,7 @@ static bool LoadText(MS_Scene *s, const char *mapPath, char *text, int size, cha
         d->gpu = true;                  // (so FreeData unloads what LoadModelFiles loaded)
         ok = LoadModelFiles(d, err, errSize);
     }
+    if (ok && !p->gpu) ok = CheckModelFiles(d, err, errSize);
     if (ok) ok = ResolveModels(d, err, errSize);
     if (ok) FinishGeometry(d);
     if (ok && p->gpu) {
@@ -3433,8 +3558,45 @@ MS_QualityLevel MS_QualityMatch(const MS_Quality *q)
     return MS_QUALITY_CUSTOM;
 }
 
-void MS_ApplyQuality(MS_Scene *s, const MS_Quality *q)
+// A non-finite float in MS_Quality (a NaN from a bad settings file or an app bug) would
+// pass every clamp and black out the frame: such a field takes ultra's value (the map's
+// own) instead, with a warning. Returns how many fields it replaced.
+static int QualitySanitize(MS_Quality *q)
 {
+    const MS_Quality ultra = MS_QualityPreset(MS_QUALITY_ULTRA);
+    struct { const char *name; float *f; float def; } fields[] = {
+        { "renderScale", &q->renderScale, ultra.renderScale },
+        { "shadowRange", &q->shadowRange, ultra.shadowRange },
+        { "shadowSoftness", &q->shadowSoftness, ultra.shadowSoftness },
+        { "aoVolumeVoxel", &q->aoVolumeVoxel, ultra.aoVolumeVoxel },
+        { "aoVolumeIntensity", &q->aoVolumeIntensity, ultra.aoVolumeIntensity },
+        { "ssaoRadius", &q->ssaoRadius, ultra.ssaoRadius },
+        { "ssaoIntensity", &q->ssaoIntensity, ultra.ssaoIntensity },
+        { "ssilRadius", &q->ssilRadius, ultra.ssilRadius },
+        { "fogStepScale", &q->fogStepScale, ultra.fogStepScale },
+        { "fogLengthScale", &q->fogLengthScale, ultra.fogLengthScale },
+        { "fogCacheVoxel", &q->fogCacheVoxel, ultra.fogCacheVoxel },
+        { "bloomIntensityScale", &q->bloomIntensityScale, ultra.bloomIntensityScale },
+        { "exposure", &q->exposure, ultra.exposure },
+        { "brightness", &q->brightness, ultra.brightness },
+        { "contrast", &q->contrast, ultra.contrast },
+        { "saturation", &q->saturation, ultra.saturation },
+    };
+    int n = 0;
+    for (int i = 0; i < (int)(sizeof(fields) / sizeof(fields[0])); i++) {
+        if (isfinite(*fields[i].f)) continue;
+        TraceLog(LOG_WARNING, "monolith_scene: quality %s is not a finite number, using %g", fields[i].name, fields[i].def);
+        *fields[i].f = fields[i].def;
+        n++;
+    }
+    return n;
+}
+
+void MS_ApplyQuality(MS_Scene *s, const MS_Quality *qIn)
+{
+    MS_Quality qs = *qIn;
+    QualitySanitize(&qs);
+    const MS_Quality *q = &qs;
     MS_RenderSettings rs = MS_GetRenderSettings(s);
     rs.renderScale = q->renderScale;
     rs.upscale = q->upscale;

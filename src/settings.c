@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <ctype.h>
 #include <errno.h>
+#include <math.h>
 
 GfxSettings GfxDefaults(void)
 {
@@ -334,6 +335,12 @@ static bool SetKeyValue(GfxSettings *s, const char *key, const char *v)
                 errno = 0;
                 f = strtof(v, &end);
                 if (end == v || *end || errno) return false;
+                // strtof takes "nan" / "inf"; a NaN passes the clamp below and turns the
+                // frame black (and the panel would save it), so no non-finite value anywhere
+                if (!isfinite(f)) {
+                    TraceLog(LOG_WARNING, "monolith: setting %s: '%s' is not a finite number (rejected)", key, v);
+                    return false;
+                }
                 bool zeroOk = row->zero && f == 0.0f;
                 bool negOk = row->off == OFF(fpsCap) && f == -1.0f;
                 if (!zeroOk && !negOk) f = Clamp(f, row->min, row->max);
