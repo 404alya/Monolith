@@ -1,5 +1,4 @@
 #include "player.h"
-#include "world.h"
 
 // ======================================================================================
 // #region Player
@@ -26,8 +25,8 @@ bool BoxesOverlap(BoundingBox a, BoundingBox b)
 static int Overlap(Vector3 feet)
 {
     BoundingBox pb = PlayerBox(feet);
-    for (int i = 0; i < world.count; i++)
-        if (BoxesOverlap(pb, world.items[i])) return i;
+    for (int i = 0; i < scene->colliderCount; i++)
+        if (BoxesOverlap(pb, scene->colliders[i])) return i;
     return -1;
 }
 
@@ -42,10 +41,10 @@ static void MoveHorizontal(Player *p, int axis, float delta)
     int hit = Overlap(next);
     if (hit < 0) { p->feet = next; return; }
 
-    float stepUp = world.items[hit].max.y - p->feet.y;
+    float stepUp = scene->colliders[hit].max.y - p->feet.y;
     if (p->grounded && stepUp > 0.0f && stepUp <= STEP_HEIGHT) {
         Vector3 up = next;
-        up.y = world.items[hit].max.y + 0.001f;
+        up.y = scene->colliders[hit].max.y + 0.001f;
         if (Overlap(up) < 0) { p->feet = up; return; }
     }
 }
@@ -105,10 +104,10 @@ void UpdatePlayer(Player *p, float dt)
     p->grounded = false;
     if (hit >= 0) {
         if (p->vel.y < 0.0f) {
-            next.y = world.items[hit].max.y;
+            next.y = scene->colliders[hit].max.y;
             p->grounded = true;
         } else {
-            next.y = world.items[hit].min.y - PLAYER_HEIGHT - 0.001f;
+            next.y = scene->colliders[hit].min.y - PLAYER_HEIGHT - 0.001f;
         }
         p->vel.y = 0.0f;
     }

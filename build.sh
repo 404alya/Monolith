@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Build: ./build.sh                -> Linux x86_64 build in build/linux/:
 #                                     monolith (R3D, raylib, assimp and libstdc++ linked
-#                                     statically) + resources/ + maps/, the folder can be
+#                                     statically) + maps/ (map packages), the folder can be
 #                                     copied as-is
 #        ./build.sh run [args]     -> build and run
 #        ./build.sh debug          -> debug build (-g -O0 + sanitizers), same output folder
 #        ./build.sh --win          -> Windows x86_64 build in build/win/ (MinGW-w64):
-#                                     monolith.exe (statically linked) + resources/ + maps/,
+#                                     monolith.exe (statically linked) + maps/ (packages),
 #                                     the folder can be zipped and copied as-is
 #        ./build.sh --win run [args]  -> Windows build, then run it under wine
 # R3D is vendored in submodules/r3d (with local fixes, see submodules/r3d/patches.md)
@@ -85,13 +85,14 @@ if [[ $WIN == 1 ]]; then
     -I"$R3D_WIN/generated/include" \
     -I"$R3D_WIN/external/raylib/raylib/include" \
     -DR3D_BUILD_TYPE_NAME='"Release"' \
-    "$ROOT"/src/*.c -o "$OUT/monolith.exe" \
+    -I"$ROOT/runtime" -DMS_PATCHED_R3D \
+    "$ROOT"/src/*.c "$ROOT"/runtime/*.c -o "$OUT/monolith.exe" \
     -s -static -L"$R3D_WIN/lib" -lr3d -lraylib -lassimp -lzlibstatic -lstdc++ \
     -lopengl32 -lgdi32 -lwinmm -lshell32 -lm
 
-  # Resources and maps are found next to the .exe (see InitDataPaths in src/main.c)
+  # Map packages are found next to the .exe (see InitDataPaths in src/main.c); resources/ is
+  # from builds before map packages (the shaders now live in the packages)
   rm -rf "$OUT/resources" "$OUT/maps"
-  cp -r "$ROOT/resources" "$OUT/resources"
   cp -r "$ROOT/maps" "$OUT/maps"
 
   echo "built: build/win/monolith.exe"
@@ -141,15 +142,15 @@ mkdir -p "$OUT"
 # The baked-in repo paths are only used while they exist (see InitDataPaths in src/main.c).
 GLIBC_WRAP=acosf,asinf,atan2f,sqrtf,fmod,fmodf,hypot,hypotf,__isoc23_strtoul,arc4random
 "$CC" "${CFLAGS[@]}" "${INCLUDES[@]}" \
-  -DRESOURCES_PATH="\"$ROOT/resources/\"" -DBENCHMARK_PATH="\"$ROOT/benchmark/\"" \
+  -DBENCHMARK_PATH="\"$ROOT/benchmark/\"" \
   -DMAPS_PATH="\"$ROOT/maps/\"" -DPROJECT_PATH="\"$ROOT/\"" \
   -DR3D_BUILD_TYPE_NAME="\"$R3D_BUILD_TYPE\"" \
-  "$ROOT"/src/*.c -o "$OUT/monolith" \
+  -I"$ROOT/runtime" -DMS_PATCHED_R3D \
+  "$ROOT"/src/*.c "$ROOT"/runtime/*.c -o "$OUT/monolith" \
   -L"$R3D_LINUX/lib" -lr3d -lraylib -lassimp -lzlibstatic \
   -l:libstdc++.a -lgcc_s -lGL -lm -lpthread -ldl -Wl,--wrap="${GLIBC_WRAP//,/,--wrap=}"
 
 rm -rf "$OUT/resources" "$OUT/maps"
-cp -r "$ROOT/resources" "$OUT/resources"
 cp -r "$ROOT/maps" "$OUT/maps"
 
 echo "built: build/linux/monolith"

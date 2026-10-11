@@ -19,11 +19,11 @@ bool benchProfile = true;
 #endif
 
 // Per-viewpoint sums over the timed frames
-static double profPassMs[VIEWPOINT_COUNT][R3D_PROFILER_PASS_COUNT];
-static double profTotalMs[VIEWPOINT_COUNT];
-static int profFrames[VIEWPOINT_COUNT];
-static double cpuSeconds[VIEWPOINT_COUNT];
-static double r3dEndSeconds[VIEWPOINT_COUNT];
+static double profPassMs[MS_MAX_VIEWPOINTS][R3D_PROFILER_PASS_COUNT];
+static double profTotalMs[MS_MAX_VIEWPOINTS];
+static int profFrames[MS_MAX_VIEWPOINTS];
+static double cpuSeconds[MS_MAX_VIEWPOINTS];
+static double r3dEndSeconds[MS_MAX_VIEWPOINTS];
 
 void BenchCollectProfile(bool flush)
 {
@@ -32,7 +32,7 @@ void BenchCollectProfile(bool flush)
     while (R3D_PopProfilerFrame(&pf)) {
         if (pf.tag < 0) continue;   // warmup
         int v = pf.tag / BENCH_FRAMES;
-        if (v >= VIEWPOINT_COUNT) continue;
+        if (v >= scene->viewpointCount) continue;
         for (int p = 0; p < R3D_PROFILER_PASS_COUNT; p++) profPassMs[v][p] += pf.passMs[p];
         profTotalMs[v] += pf.totalMs;
         profFrames[v]++;
@@ -50,33 +50,33 @@ void BenchAddCpuTime(int view, double frameSeconds, double r3dEndSecs)
 static void WriteProfileTable(FILE *f, bool md, const double *frameMs, double allFrameMs)
 {
     int totalFrames = 0;
-    for (int v = 0; v < VIEWPOINT_COUNT; v++) totalFrames += profFrames[v];
+    for (int v = 0; v < scene->viewpointCount; v++) totalFrames += profFrames[v];
 
     // Header
     if (md) {
         fprintf(f, "| GPU ms per frame |");
-        for (int v = 0; v < VIEWPOINT_COUNT; v++) fprintf(f, " %s |", VIEWPOINTS[v].name);
+        for (int v = 0; v < scene->viewpointCount; v++) fprintf(f, " %s |", scene->viewpoints[v].name);
         fprintf(f, " **All** |\n|---|");
-        for (int v = 0; v <= VIEWPOINT_COUNT; v++) fprintf(f, "---:|");
+        for (int v = 0; v <= scene->viewpointCount; v++) fprintf(f, "---:|");
         fprintf(f, "\n");
     } else {
         fprintf(f, "%-18s", "GPU ms/frame");
-        for (int v = 0; v < VIEWPOINT_COUNT; v++) fprintf(f, " %9.9s", VIEWPOINTS[v].name);
+        for (int v = 0; v < scene->viewpointCount; v++) fprintf(f, " %9.9s", scene->viewpoints[v].name);
         fprintf(f, " %9s\n", "ALL");
     }
 
     // One row: per-view values (already per frame) and their frame-weighted mean
     #define ROW(label, bold, expr) do {                                                     \
         double all_ = 0.0;                                                                  \
-        for (int v = 0; v < VIEWPOINT_COUNT; v++) all_ += (expr) * profFrames[v];           \
+        for (int v = 0; v < scene->viewpointCount; v++) all_ += (expr) * profFrames[v];           \
         all_ = totalFrames ? all_ / totalFrames : 0.0;                                      \
         if (md) {                                                                           \
             fprintf(f, bold ? "| **%s** |" : "| %s |", label);                              \
-            for (int v = 0; v < VIEWPOINT_COUNT; v++) fprintf(f, " %.3f |", (expr));        \
+            for (int v = 0; v < scene->viewpointCount; v++) fprintf(f, " %.3f |", (expr));        \
             fprintf(f, " **%.3f** |\n", all_);                                              \
         } else {                                                                            \
             fprintf(f, "%-18s", label);                                                     \
-            for (int v = 0; v < VIEWPOINT_COUNT; v++) fprintf(f, " %9.3f", (expr));         \
+            for (int v = 0; v < scene->viewpointCount; v++) fprintf(f, " %9.3f", (expr));         \
             fprintf(f, " %9.3f\n", all_);                                                   \
         }                                                                                   \
     } while (0)
@@ -84,11 +84,11 @@ static void WriteProfileTable(FILE *f, bool md, const double *frameMs, double al
 
     for (int p = 0; p < R3D_PROFILER_PASS_COUNT; p++) {
         bool ran = false;   // only passes that ran at all (e.g. no SSGI/SSR/DoF rows)
-        for (int v = 0; v < VIEWPOINT_COUNT; v++) ran |= profPassMs[v][p] > 0.0;
+        for (int v = 0; v < scene->viewpointCount; v++) ran |= profPassMs[v][p] > 0.0;
         if (ran) ROW(R3D_GetProfilerPassName((R3D_ProfilerPass)p), false, PER_FRAME(profPassMs[v][p]));
     }
-    double sum[VIEWPOINT_COUNT];
-    for (int v = 0; v < VIEWPOINT_COUNT; v++) {
+    double sum[MS_MAX_VIEWPOINTS];
+    for (int v = 0; v < scene->viewpointCount; v++) {
         sum[v] = 0.0;
         for (int p = 0; p < R3D_PROFILER_PASS_COUNT; p++) sum[v] += profPassMs[v][p];
     }
@@ -103,11 +103,11 @@ static void WriteProfileTable(FILE *f, bool md, const double *frameMs, double al
     // Frame time: the regular bench average (frame-weighted over the same timed frames)
     if (md) {
         fprintf(f, "| **Frame time** |");
-        for (int v = 0; v < VIEWPOINT_COUNT; v++) fprintf(f, " %.3f |", frameMs[v]);
+        for (int v = 0; v < scene->viewpointCount; v++) fprintf(f, " %.3f |", frameMs[v]);
         fprintf(f, " **%.3f** |\n", allFrameMs);
     } else {
         fprintf(f, "%-18s", "frame time");
-        for (int v = 0; v < VIEWPOINT_COUNT; v++) fprintf(f, " %9.3f", frameMs[v]);
+        for (int v = 0; v < scene->viewpointCount; v++) fprintf(f, " %9.3f", frameMs[v]);
         fprintf(f, " %9.3f\n", allFrameMs);
     }
 }
@@ -145,16 +145,16 @@ static BenchStats ComputeBenchStats(const double *times, int n)
 void WriteBenchReport(double times[][BENCH_FRAMES], const int *shadowUpdates, int shadowSize,
                              float shadowRange, bool shadowReuse, bool headless, const char *note, int argc, char **argv)
 {
-    BenchStats stats[VIEWPOINT_COUNT];
+    BenchStats stats[MS_MAX_VIEWPOINTS];
     double total = 0.0;
-    for (int v = 0; v < VIEWPOINT_COUNT; v++) {
+    for (int v = 0; v < scene->viewpointCount; v++) {
         stats[v] = ComputeBenchStats(times[v], benchFrames);
         for (int f = 0; f < benchFrames; f++) total += times[v][f];
     }
-    int frames = VIEWPOINT_COUNT * benchFrames;
+    int frames = scene->viewpointCount * benchFrames;
     double allMs = total / frames * 1000.0, allFps = frames / total;
-    double viewMs[VIEWPOINT_COUNT];
-    for (int v = 0; v < VIEWPOINT_COUNT; v++) viewMs[v] = stats[v].avgMs;
+    double viewMs[MS_MAX_VIEWPOINTS];
+    for (int v = 0; v < scene->viewpointCount; v++) viewMs[v] = stats[v].avgMs;
     bool haveProfile = benchProfile && R3D_IsProfilerAvailable();
 
     // stdout
@@ -163,8 +163,8 @@ void WriteBenchReport(double times[][BENCH_FRAMES], const int *shadowUpdates, in
            benchStill ? "still" : "spinning", R3D_BUILD_TYPE_NAME);
     if (benchFrameReuse) printf("frame reuse ON: unchanged frames composite the cached scene image (no R3D rendering)\n");
     printf("%-16s %9s %9s %9s %9s\n", "view", "avg ms", "avg fps", "1% low", "sh.upd");
-    for (int v = 0; v < VIEWPOINT_COUNT; v++)
-        printf("%-16s %9.3f %9.1f %9.1f %9d\n", VIEWPOINTS[v].name, stats[v].avgMs, stats[v].avgFps, stats[v].lowFps, shadowUpdates[v]);
+    for (int v = 0; v < scene->viewpointCount; v++)
+        printf("%-16s %9.3f %9.1f %9.1f %9d\n", scene->viewpoints[v].name, stats[v].avgMs, stats[v].avgFps, stats[v].lowFps, shadowUpdates[v]);
     printf("%-16s %9.3f %9.1f\n", "ALL", allMs, allFps);
     if (haveProfile) {
         printf("\n");
@@ -209,6 +209,8 @@ void WriteBenchReport(double times[][BENCH_FRAMES], const int *shadowUpdates, in
     if (haveUname) fprintf(f, "| System | %s %s (%s) |\n", un.sysname, un.release, un.machine);
 #endif
     fprintf(f, "| Resolution | %d x %d |\n", GetRenderWidth(), GetRenderHeight());
+    fprintf(f, "| Map | `%s` (format %d, %d boxes, %d materials, %d lights) |\n", scene->path, scene->formatVersion,
+            scene->boxCount, scene->materialCount, scene->lightCount);
     // Frame times from before 2026-10-10 were measured with an unoptimised R3D
     fprintf(f, "| R3D build | %s%s |\n", R3D_BUILD_TYPE_NAME, strcmp(R3D_BUILD_TYPE_NAME, "None") == 0
             ? " (no CMAKE_BUILD_TYPE, unoptimised: like the reports before 2026-10-10)" : "");
@@ -238,8 +240,8 @@ void WriteBenchReport(double times[][BENCH_FRAMES], const int *shadowUpdates, in
     fprintf(f, "## Results\n\n");
     fprintf(f, "| View | Avg ms | Avg FPS | 1%% low FPS | Worst ms | Shadow updates |\n|---|---:|---:|---:|---:|---:|\n");
     int allUpdates = 0;
-    for (int v = 0; v < VIEWPOINT_COUNT; v++) {
-        fprintf(f, "| %s | %.3f | %.1f | %.1f | %.2f | %d / %d |\n", VIEWPOINTS[v].name,
+    for (int v = 0; v < scene->viewpointCount; v++) {
+        fprintf(f, "| %s | %.3f | %.1f | %.1f | %.2f | %d / %d |\n", scene->viewpoints[v].name,
                 stats[v].avgMs, stats[v].avgFps, stats[v].lowFps, stats[v].worstMs, shadowUpdates[v], benchFrames);
         allUpdates += shadowUpdates[v];
     }

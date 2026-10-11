@@ -4,17 +4,6 @@
 // #region Spectator camera
 // ======================================================================================
 
-const Viewpoint VIEWPOINTS[VIEWPOINT_COUNT] = {
-    { "Canyon",         {    0.0f,   1.6f,   88.0f }, {    0.0f,  4.0f,   40.0f } },
-    { "Hypostyle hall", {   -6.0f,   1.6f,   34.0f }, {    6.0f,  6.0f,    0.0f } },
-    { "Above the roof", {  -24.0f,  30.0f,   26.0f }, {    4.0f, 20.0f,    4.0f } },
-    { "Stairs",         {    0.0f,   2.0f,  -25.0f }, {    0.0f, 10.0f,  -70.0f } },
-    { "Terrace",        {    8.0f,  13.6f,  -70.0f }, {    0.0f, 30.0f, -100.0f } },
-    { "Tower",          {   38.0f,  40.0f,  -55.0f }, {    0.0f, 55.0f, -100.0f } },
-    { "Overview",       {   55.0f,  38.0f,   52.0f }, {    0.0f,  8.0f,  -10.0f } },
-};
-_Static_assert(sizeof(VIEWPOINTS) / sizeof(VIEWPOINTS[0]) == VIEWPOINT_COUNT, "update VIEWPOINT_COUNT");
-
 void LookAngles(Vector3 eye, Vector3 target, float *yaw, float *pitch)
 {
     Vector3 d = Vector3Normalize(Vector3Subtract(target, eye));
@@ -49,11 +38,13 @@ void SpectatorFlyToPose(Spectator *s, Vector3 eye, float yaw, float pitch)
 
 void SpectatorFlyTo(Spectator *s, int view)
 {
+    int n = scene->viewpointCount;
+    view = ((view % n) + n) % n;    // the map may have fewer viewpoints after a reload
     float yaw, pitch;
-    LookAngles(VIEWPOINTS[view].eye, VIEWPOINTS[view].target, &yaw, &pitch);
+    LookAngles(scene->viewpoints[view].eye, scene->viewpoints[view].target, &yaw, &pitch);
     s->view = view;
-    SpectatorFlyToPose(s, VIEWPOINTS[view].eye, yaw, pitch);
-    SpectatorMessage(s, TextFormat("[%d/%d] %s", view + 1, VIEWPOINT_COUNT, VIEWPOINTS[view].name));
+    SpectatorFlyToPose(s, scene->viewpoints[view].eye, yaw, pitch);
+    SpectatorMessage(s, TextFormat("[%d/%d] %s", view + 1, scene->viewpointCount, scene->viewpoints[view].name));
 }
 
 void SpectatorJumpTo(Spectator *s, int view)
@@ -61,8 +52,8 @@ void SpectatorJumpTo(Spectator *s, int view)
     s->view = view;
     s->flying = false;
     s->vel = Vector3Zero();
-    s->pos = VIEWPOINTS[view].eye;
-    LookAngles(VIEWPOINTS[view].eye, VIEWPOINTS[view].target, &s->yaw, &s->pitch);
+    s->pos = scene->viewpoints[view].eye;
+    LookAngles(scene->viewpoints[view].eye, scene->viewpoints[view].target, &s->yaw, &s->pitch);
 }
 
 void UpdateSpectator(Spectator *s, Player *player, float dt)
@@ -70,8 +61,8 @@ void UpdateSpectator(Spectator *s, Player *player, float dt)
     if (s->messageTime > 0.0f) s->messageTime -= dt;
 
     // Viewpoints: arrows cycle with a smooth flight
-    if (IsKeyPressed(KEY_RIGHT)) SpectatorFlyTo(s, (s->view + 1) % VIEWPOINT_COUNT);
-    if (IsKeyPressed(KEY_LEFT))  SpectatorFlyTo(s, (s->view <= 0 ? VIEWPOINT_COUNT : s->view) - 1);
+    if (IsKeyPressed(KEY_RIGHT)) SpectatorFlyTo(s, (s->view + 1) % scene->viewpointCount);
+    if (IsKeyPressed(KEY_LEFT))  SpectatorFlyTo(s, (s->view <= 0 ? scene->viewpointCount : s->view) - 1);
 
     // Speed: mouse wheel, exponential so it is equally quick at 2 m/s and 200 m/s
     float wheel = GetMouseWheelMove();

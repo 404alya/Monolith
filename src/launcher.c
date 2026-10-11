@@ -47,7 +47,6 @@
 #endif
 
 #include "launcher.h"
-#include "map.h"
 #include <ctype.h>
 #include <errno.h>
 #include <math.h>
@@ -213,26 +212,31 @@ static float DistToBox(Vector3 p, BoundingBox b)
 
 static const char *GroupName(int g)
 {
-    return (g >= 0 && g < world.groupCount) ? world.groups[g] : "(no group)";
+    return (g >= 0 && g < scene->groupCount) ? scene->groups[g] : "(no group)";
 }
 
-// Object references ({kind, index}, designer.h). The bundle's per-object lookups go through
-// these, so models (and the scene runtime's arrays) only need a case here.
-static bool ObjValid(MS_ObjRef o) { return o.kind == MS_OBJ_BOX && o.index >= 0 && o.index < world.count; }
+// Object references ({kind, index}, runtime/monolith_scene.h). The bundle's per-object
+// lookups go through these and the runtime's MS_ObjectRef / MS_ObjectBounds, so models
+// work here once the runtime has them (MS_ObjectRef covers MS_OBJ_MODEL).
+static bool ObjValid(MS_ObjRef o) { return MS_ObjectRef(scene, o) != NULL; }
 static const char *ObjKindName(MS_ObjRef o) { return o.kind == MS_OBJ_BOX ? "box" : o.kind == MS_OBJ_MODEL ? "model" : "none"; }
-static BoundingBox ObjBounds(MS_ObjRef o) { return world.items[o.index]; }
-static int ObjLine(MS_ObjRef o) { return world.refs[o.index].line; }
-static int ObjGroup(MS_ObjRef o) { return world.refs[o.index].group; }
-// Material name; NULL while maps have no named materials
-static const char *ObjMaterial(MS_ObjRef o) { (void)o; return NULL; }
-#define MAP_MATERIALS 1         // today every box uses the one surface material
-#define MAP_FORMAT_VERSION 1    // what today's loader reads (format 2 comes with the scene runtime)
+static BoundingBox ObjBounds(MS_ObjRef o) { return MS_ObjectBounds(scene, o); }
+static int ObjLine(MS_ObjRef o) { return MS_ObjectRef(scene, o)->line; }
+static int ObjGroup(MS_ObjRef o) { return MS_ObjectRef(scene, o)->group; }
+// Material name (models: their override material; NULL = the model's own materials)
+static const char *ObjMaterial(MS_ObjRef o)
+{
+    int m = MS_ObjectRef(scene, o)->material;
+    return m >= 0 && m < scene->materialCount ? scene->materials[m].name : NULL;
+}
+#define MAP_MATERIALS (scene->materialCount)
+#define MAP_FORMAT_VERSION (scene->formatVersion)
 
 // Index of a box among the boxes of its map line
 static int ObjNth(MS_ObjRef o)
 {
     int nth = 0, line = ObjLine(o);
-    for (int i = 0; i < o.index; i++) if (world.refs[i].line == line) nth++;
+    for (int i = 0; i < o.index; i++) if (scene->boxRefs[i].line == line) nth++;
     return nth;
 }
 
@@ -263,14 +267,14 @@ typedef struct {
     Vector3 fwd, right;
     float yawDeg, pitchDeg, aspect;
     bool hit;
-    char hitLine[MAP_LINE_MAX + 1];
+    char hitLine[MS_LINE_MAX + 1];
     bool hitHasLine;
     int sel[MAX_SELECTION];             // valid selected box indices
     int selCount;
     SelLine selLines[MAX_SELECTION];
     int selLineCount;
     int selOrder[MAX_SELECTION];        // sel[] reordered so each line's boxes are adjacent
-    Nearby nearby[MAX_GROUPS + 1];
+    Nearby nearby[MS_MAX_GROUPS + 1];
     int nearbyCount;
     Vector3 nearbyCenter;
     char binary[1024], mapPath[1024], prompt[256];
@@ -290,21 +294,21 @@ static int CompareNearby(const void *a, const void *b)
 static void BuildBundle(Bundle *B, const DesignRequest *req)
 {
     B->req = req;
-    B->stale = req->mapVersion != world.version;
+    B->stale = req->mapVersion != scene->version;
     B->yawDeg = Wrap(Deg(req->yaw), 0.0f, 360.0f);
     B->pitchDeg = Deg(req->pitch);
     B->fwd = (Vector3){ cosf(req->pitch) * sinf(req->yaw), sinf(req->pitch), cosf(req->pitch) * cosf(req->yaw) };
     B->right = (Vector3){ -cosf(req->yaw), 0.0f, sinf(req->yaw) };
     B->aspect = req->height > 0 ? (float)req->width / req->height : 0.0f;
 
-    B->hit = req->hit.box >= 0 && req->hit.box < world.count;
-    if (B->hit) B->hitHasLine = MapGetLine(world.refs[req->hit.box].line, B->hitLine, sizeof(B->hitLine));
+    B->hit = req->hit.box >= 0 && req->hit.box < scene->boxCount;
+    if (B->hit) B->hitHasLine = MS_GetLine(scene, scene->boxRefs[req->hit.box].line, B->hitLine, sizeof(B->hitLine));
 
     // Selection: drop invalid references, then group by line
     for (int i = 0; i < req->selectedCount && i < MAX_SELECTION; i++)
         if (ObjValid(req->selected[i])) B->sel[B->selCount++] = req->selected[i].index;
     for (int i = 0; i < B->selCount; i++) {
-        int line = world.refs[B->sel[i]].line, k = 0;
+        int line = scene->boxRefs[B->sel[i]].line, k = 0;
         while (k < B->selLineCount && B->selLines[k].line != line) k++;
         if (k == B->selLineCount) B->selLines[B->selLineCount++] = (SelLine){ line, 0, 0 };
         B->selLines[k].count++;
@@ -313,32 +317,32 @@ static void BuildBundle(Bundle *B, const DesignRequest *req)
     for (int k = 0; k < B->selLineCount; k++) {
         B->selLines[k].first = at;
         for (int i = 0; i < B->selCount; i++)
-            if (world.refs[B->sel[i]].line == B->selLines[k].line) B->selOrder[at++] = B->sel[i];
+            if (scene->boxRefs[B->sel[i]].line == B->selLines[k].line) B->selOrder[at++] = B->sel[i];
     }
 
     // Nearby groups around the hit point (or the eye if the crosshair points at the sky)
     B->nearbyCenter = B->hit ? req->hit.point : req->eye;
-    for (int g = 0; g <= world.groupCount; g++)
-        B->nearby[g] = (Nearby){ g < world.groupCount ? g : -1, 1e30f, 0, 1 << 30, 0 };
-    for (int i = 0; i < world.count; i++) {
-        int g = world.refs[i].group;
-        Nearby *n = &B->nearby[(g >= 0 && g < world.groupCount) ? g : world.groupCount];
-        float d = DistToBox(B->nearbyCenter, world.items[i]);
+    for (int g = 0; g <= scene->groupCount; g++)
+        B->nearby[g] = (Nearby){ g < scene->groupCount ? g : -1, 1e30f, 0, 1 << 30, 0 };
+    for (int i = 0; i < scene->boxCount; i++) {
+        int g = scene->boxRefs[i].group;
+        Nearby *n = &B->nearby[(g >= 0 && g < scene->groupCount) ? g : scene->groupCount];
+        float d = DistToBox(B->nearbyCenter, scene->boxes[i]);
         if (d < n->dist) n->dist = d;
         if (d <= NEARBY_RADIUS) n->nearCount++;
-        int line = world.refs[i].line;
+        int line = scene->boxRefs[i].line;
         if (line > 0 && line < n->firstLine) n->firstLine = line;
         if (line > n->lastLine) n->lastLine = line;
     }
-    for (int g = 0; g <= world.groupCount; g++)
+    for (int g = 0; g <= scene->groupCount; g++)
         if (B->nearby[g].nearCount > 0) B->nearby[B->nearbyCount++] = B->nearby[g];
     qsort(B->nearby, B->nearbyCount, sizeof(Nearby), CompareNearby);
 
     BinaryPath(B->binary, sizeof(B->binary));
-    AbsPath(world.path, B->mapPath, sizeof(B->mapPath));
+    AbsPath(scene->path, B->mapPath, sizeof(B->mapPath));
     snprintf(B->package, sizeof(B->package), "%s", GetDirectoryPath(B->mapPath));
-    snprintf(B->brief, sizeof(B->brief), "%s/MAP.md", B->package);
-    if (!FileExists(B->brief)) B->brief[0] = 0;
+    B->brief[0] = 0;                    // the runtime found <package>/MAP.md, or ""
+    if (scene->brief[0]) AbsPath(scene->brief, B->brief, sizeof(B->brief));
     ShellQuote(B->binary, B->binaryQ, sizeof(B->binaryQ));
     ShellQuote(B->mapPath, B->mapPathQ, sizeof(B->mapPathQ));
     snprintf(B->shotCmd, sizeof(B->shotCmd), "%s --shot requests/%s/before.png --shot-size %d %d --eye %.6f %.6f %.6f --look %.6f %.6f --map %s",
@@ -373,8 +377,8 @@ static void MdVec(FILE *f, Vector3 v) { fprintf(f, "(%.3f, %.3f, %.3f)", v.x, v.
 
 static void MdLine(FILE *f, int line)
 {
-    char text[MAP_LINE_MAX + 1];
-    if (line > 0 && MapGetLine(line, text, sizeof(text))) {
+    char text[MS_LINE_MAX + 1];
+    if (line > 0 && MS_GetLine(scene, line, text, sizeof(text))) {
         fprintf(f, "Map line %d:\n\n", line);
         MdFence(f, text, "");
     } else fprintf(f, "Not from a map line.\n\n");
@@ -440,7 +444,7 @@ static void WriteRegionsMd(FILE *f, const Bundle *B)
         fprintf(f, "\n");
 
         // The map lines behind the listed objects, each quoted once
-        static char text[MAP_LINE_MAX + 1], block[16384];
+        static char text[MS_LINE_MAX + 1], block[16384];
         int lines[MD_REGION_ROWS], lineCount = 0, n = 0;
         block[0] = 0;
         for (int k = 0; k < rows; k++) {
@@ -448,7 +452,7 @@ static void WriteRegionsMd(FILE *f, const Bundle *B)
             int line = ObjLine(g->objects[k].obj);
             bool seen = false;
             for (int j = 0; j < lineCount; j++) seen |= lines[j] == line;
-            if (seen || line <= 0 || !MapGetLine(line, text, sizeof(text))) continue;
+            if (seen || line <= 0 || !MS_GetLine(scene, line, text, sizeof(text))) continue;
             lines[lineCount++] = line;
             if (n < (int)sizeof(block) - 1) n += snprintf(block + n, sizeof(block) - n, "%d: %s\n", line, text);
         }
@@ -501,13 +505,13 @@ static bool WriteRequestMd(const char *path, const Bundle *B)
 
     fprintf(f, "## Crosshair hit\n\n");
     if (B->hit) {
-        BoundingBox b = world.items[r->hit.box];
-        BoxRef ref = world.refs[r->hit.box];
+        BoundingBox b = scene->boxes[r->hit.box];
+        MS_Ref ref = scene->boxRefs[r->hit.box];
         fprintf(f, "- point: "); MdVec(f, r->hit.point); fprintf(f, "\n");
         fprintf(f, "- face normal: "); MdVec(f, r->hit.normal); fprintf(f, "\n");
         fprintf(f, "- distance from the eye: %.2f m\n", r->hit.dist);
         fprintf(f, "- object: box #%d (kind `box`, index %d): min ", r->hit.box, r->hit.box); MdVec(f, b.min); fprintf(f, ", max "); MdVec(f, b.max); fprintf(f, "\n");
-        fprintf(f, "- group: \"%s\"\n\n", GroupName(ref.group));
+        fprintf(f, "- group: \"%s\", material \"%s\"\n\n", GroupName(ref.group), ObjMaterial((MS_ObjRef){ MS_OBJ_BOX, r->hit.box }) ? ObjMaterial((MS_ObjRef){ MS_OBJ_BOX, r->hit.box }) : "(own)");
         MdLine(f, ref.line);
     } else {
         fprintf(f, "Nothing: the crosshair points at the sky (no box hit).\n\n");
@@ -518,12 +522,13 @@ static bool WriteRequestMd(const char *path, const Bundle *B)
     for (int k = 0; k < B->selLineCount; k++) {
         const SelLine *sl = &B->selLines[k];
         int first = B->selOrder[sl->first];
-        fprintf(f, "### Line %d, group \"%s\", %d box%s\n\n", sl->line, GroupName(world.refs[first].group),
+        fprintf(f, "### Line %d, group \"%s\", material \"%s\", %d box%s\n\n", sl->line, GroupName(scene->boxRefs[first].group),
+                ObjMaterial((MS_ObjRef){ MS_OBJ_BOX, first }) ? ObjMaterial((MS_ObjRef){ MS_OBJ_BOX, first }) : "(own)",
                 sl->count, sl->count == 1 ? "" : "es");
         MdLine(f, sl->line);
         fprintf(f, "| box | min | max | centre | size |\n|---|---|---|---|---|\n");
         for (int i = sl->first; i < sl->first + sl->count; i++) {
-            BoundingBox b = world.items[B->selOrder[i]];
+            BoundingBox b = scene->boxes[B->selOrder[i]];
             fprintf(f, "| #%d | ", B->selOrder[i]); MdVec(f, b.min);
             fprintf(f, " | "); MdVec(f, b.max);
             fprintf(f, " | "); MdVec(f, Vector3Scale(Vector3Add(b.min, b.max), 0.5f));
@@ -559,11 +564,11 @@ static bool WriteRequestMd(const char *path, const Bundle *B)
     if (B->brief[0]) fprintf(f, "- package (folder): `%s`; design brief: `%s`\n", B->package, B->brief);
     else fprintf(f, "- package (folder): `%s`; design brief: none\n", B->package);
     char when[32] = "?";
-    time_t mt = (time_t)world.mtime;
+    time_t mt = (time_t)scene->mtime;
     struct tm *tm = localtime(&mt);
     if (tm) strftime(when, sizeof(when), "%Y-%m-%d %H:%M:%S", tm);
-    fprintf(f, "- at submit: FNV-1a 64 hash `%016llx`, mtime %ld (%s), load #%u, %d boxes, 0 models, %d groups, %d material%s\n\n",
-            world.hash, world.mtime, when, world.version, world.count, world.groupCount, MAP_MATERIALS, MAP_MATERIALS == 1 ? "" : "s");
+    fprintf(f, "- at submit: FNV-1a 64 hash `%016llx`, mtime %ld (%s), load #%u, %d boxes, %d models, %d groups, %d material%s\n\n",
+            scene->hash, scene->mtime, when, scene->version, scene->boxCount, scene->modelCount, scene->groupCount, MAP_MATERIALS, MAP_MATERIALS == 1 ? "" : "s");
     fprintf(f, "Several requests can run at once. Before editing, check that the file still has this hash; "
                "if not, it changed since this request was submitted (maybe another request edited it): "
                "re-read it, the line numbers above may have moved.\n\n");
@@ -623,8 +628,8 @@ static void JsonVec(FILE *f, Vector3 v)
 
 static void JsonLineText(FILE *f, int line)
 {
-    char text[MAP_LINE_MAX + 1];
-    if (line > 0 && MapGetLine(line, text, sizeof(text))) JsonStr(f, text);
+    char text[MS_LINE_MAX + 1];
+    if (line > 0 && MS_GetLine(scene, line, text, sizeof(text))) JsonStr(f, text);
     else fputs("null", f);
 }
 
@@ -666,8 +671,8 @@ static bool WriteRequestJson(const char *path, const Bundle *B)
 
     fprintf(f, ",\n  \"hit\": ");
     if (B->hit) {
-        BoundingBox b = world.items[r->hit.box];
-        BoxRef ref = world.refs[r->hit.box];
+        BoundingBox b = scene->boxes[r->hit.box];
+        MS_Ref ref = scene->boxRefs[r->hit.box];
         fprintf(f, "{\n    \"kind\": \"box\",\n    \"index\": %d", r->hit.box);
         fprintf(f, ",\n    \"material\": "); JsonMaterial(f, (MS_ObjRef){ MS_OBJ_BOX, r->hit.box });
         fprintf(f, ",\n    \"point\": "); JsonVec(f, r->hit.point);
@@ -685,7 +690,7 @@ static bool WriteRequestJson(const char *path, const Bundle *B)
         const SelLine *sl = &B->selLines[k];
         fprintf(f, "%s\n    {\n      \"line\": %d,\n      \"lineText\": ", k ? "," : "", sl->line);
         JsonLineText(f, sl->line);
-        fprintf(f, ",\n      \"group\": "); JsonStr(f, GroupName(world.refs[B->selOrder[sl->first]].group));
+        fprintf(f, ",\n      \"group\": "); JsonStr(f, GroupName(scene->boxRefs[B->selOrder[sl->first]].group));
         fprintf(f, ",\n      \"objects\": [");
         for (int i = sl->first; i < sl->first + sl->count; i++) {
             MS_ObjRef o = { MS_OBJ_BOX, B->selOrder[i] };
@@ -771,9 +776,9 @@ static bool WriteRequestJson(const char *path, const Bundle *B)
     fprintf(f, ",\n    \"brief\": ");
     if (B->brief[0]) JsonStr(f, B->brief); else fputs("null", f);
     fprintf(f, ",\n    \"formatVersion\": %d", MAP_FORMAT_VERSION);
-    fprintf(f, ",\n    \"hash\": \"%016llx\",\n    \"hashAlgorithm\": \"FNV-1a 64 of the file bytes\"", world.hash);
-    fprintf(f, ",\n    \"mtime\": %ld,\n    \"version\": %u,\n    \"boxes\": %d,\n    \"models\": 0,\n    \"groups\": %d,\n    \"materials\": %d\n  }\n}\n",
-            world.mtime, world.version, world.count, world.groupCount, MAP_MATERIALS);
+    fprintf(f, ",\n    \"hash\": \"%016llx\",\n    \"hashAlgorithm\": \"FNV-1a 64 of the file bytes\"", scene->hash);
+    fprintf(f, ",\n    \"mtime\": %ld,\n    \"version\": %u,\n    \"boxes\": %d,\n    \"models\": %d,\n    \"groups\": %d,\n    \"materials\": %d\n  }\n}\n",
+            scene->mtime, scene->version, scene->boxCount, scene->modelCount, scene->groupCount, MAP_MATERIALS);
 
     return fclose(f) == 0;
 }

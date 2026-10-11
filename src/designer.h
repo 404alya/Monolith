@@ -2,7 +2,7 @@
 #ifndef MONOLITH_DESIGNER_H
 #define MONOLITH_DESIGNER_H
 
-#include "world.h"
+#include "common.h"
 
 #define MAX_SELECTION   512
 #define PROMPT_MAX      4096    // bytes, including the terminating 0
@@ -10,15 +10,10 @@
 #define REGION_MAX_SAMPLES 4096 // rays per region at most (a regular grid, see DesignerAnalyzeRegion)
 #define REGION_MAX_OBJECTS 256  // objects listed per region (the rest is summed up as "omitted")
 
-// Object references as in the scene runtime (runtime/monolith_scene.h, docs/design-v2.md
-// section 5). Until the runtime is merged only boxes exist (index into world.items); once
-// monolith_scene.h is included before this header, these stand-ins disappear.
-#ifndef MONOLITH_SCENE_H
-typedef enum { MS_OBJ_NONE = 0, MS_OBJ_BOX, MS_OBJ_MODEL } MS_ObjKind;
-typedef struct { MS_ObjKind kind; int index; } MS_ObjRef;
-#endif
+// Objects are MS_ObjRef (runtime/monolith_scene.h, docs/design-v2.md section 5): for now
+// only boxes (index into scene->boxes); models come with the models stream.
 
-// What the crosshair points at. box = index into world.items, -1 = nothing hit.
+// What the crosshair points at. box = index into scene->boxes, -1 = nothing hit.
 typedef struct {
     int box;
     Vector3 point;          // world-space hit point
@@ -54,7 +49,7 @@ typedef struct {
 } DesignRegionInfo;
 
 // One request as it is submitted: a snapshot of everything the launcher writes into the
-// bundle. Object indices refer to `world` at submit time (world.version tells which load).
+// bundle. Object indices refer to the scene at submit time (scene->version tells which load).
 typedef struct {
     char prompt[PROMPT_MAX];
     Vector3 eye;
@@ -79,7 +74,7 @@ typedef struct {
     int line;               // map line of the box
     int nth;                // index among the boxes of that line
     int group;              // group index at selection time (compared by name after a reload)
-    char groupName[GROUP_NAME_MAX];
+    char groupName[MS_NAME_MAX];
 } DesignerSelKey;
 
 typedef struct {
@@ -87,10 +82,10 @@ typedef struct {
 
     DesignerHit hit;        // under the crosshair (refreshed by DesignerPick / DesignerUpdate)
 
-    int selected[MAX_SELECTION];    // indices into world.items, no duplicates
+    int selected[MAX_SELECTION];    // indices into scene->boxes, no duplicates
     DesignerSelKey keys[MAX_SELECTION];
     int selectedCount;
-    unsigned int version;   // world.version the indices refer to
+    unsigned int version;   // scene->version the indices refer to
 
     // Snip mode (C): screen regions dragged out over a frozen camera. Regions are
     // screen-space, so a map reload leaves them alone (what they show is computed at submit).
@@ -120,7 +115,7 @@ typedef enum {
     DESIGNER_SUBMIT,        // Enter in the prompt box: main() renders the images and calls LauncherSubmit
 } DesignerAction;
 
-// Casts a ray against world.items (slab test); hit.box = -1 when nothing is hit.
+// Casts a ray against scene->boxes (slab test); hit.box = -1 when nothing is hit.
 // Boxes that contain the ray origin are ignored (you can pick out of a box you're inside).
 DesignerHit DesignerPick(Vector3 origin, Vector3 dir);
 

@@ -9,16 +9,7 @@
 #define SPEC_MAX_SPEED  400.0f
 #define SPEC_FLY_TIME   1.6f    // seconds for a viewpoint transition
 
-typedef struct {
-    const char *name;
-    Vector3 eye;
-    Vector3 target;
-} Viewpoint;
-
-// A compile-time constant, because the benchmark sizes arrays with it.
-// spectator.c checks it against the VIEWPOINTS table.
-#define VIEWPOINT_COUNT 7
-extern const Viewpoint VIEWPOINTS[VIEWPOINT_COUNT];
+// The viewpoints are map data: scene->viewpoints[0 .. scene->viewpointCount - 1]
 
 typedef struct {
     bool active;

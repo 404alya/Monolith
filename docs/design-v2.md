@@ -225,6 +225,15 @@ stays in `src/`.
   (`env shadow.home`, `env fogCache.region`) override. The default map must give
   pixel-identical images; if the derived values can't reproduce today's layout exactly,
   the default map carries the hints.
+- **As implemented (stream A):** a box is *ground-like* when its smaller horizontal extent
+  is >= 100 m and its height <= 5% of that; the *content bounds* are all other boxes (all
+  boxes if only ground-like ones exist). The shadow tile home is the centre of the AABB of
+  the viewpoint eyes (a map without viewpoints gets one from its spawn), else of the content
+  bounds. The fog-cache region is the content bounds + 2 m, shrunk around the play centre
+  (keeping its proportions, staying inside the bounds) until it has at most 64 M voxels at
+  the requested voxel size. Derivation does not reproduce `(10, 38, 2)` / `FOG_CACHE_REGION`,
+  so `maps/monolith/monolith.map` carries `env shadow.home 10 38 2` and
+  `env fogCache.region -70 -1 -150 75 100 105`.
 
 ---
 
@@ -321,3 +330,48 @@ distance from the eye.
 
 Merges go into `main` one at a time; after each: both targets build with zero warnings, the
 default map's box dump and the verification shots are unchanged.
+
+---
+
+## 8. Stream A implementation notes (differences from the draft above)
+
+- **API additions** (`runtime/monolith_scene.h`): `MS_SetInitHints(scene)` (R3D hints that
+  only apply before `R3D_Init`: today the sun's shadow map size; call it after `InitWindow`,
+  because `R3D_SetHint` queries GL, e.g. with a `noGpu` scene); `MS_WriteEnvironment(scene
+  or NULL, FILE *)` (writes every `env` key; NULL = built-in defaults; used by `--new-map`,
+  meant for export); `MS_RenderSettings.depthPrepass` (default true; `R3D_SetDepthPrepass`,
+  patched R3D only); `MS_DEFAULT_EYE_HEIGHT` (1.62, for the viewpoint made from the spawn).
+  `<stdio.h>` is included by the header. No other signature changed.
+- **Parsing:** every referenced file (shader, texture, panorama) must exist at parse time
+  (`file:line: file not found: "..."`), also for `noGpu` loads, so `--dump-boxes` is a full
+  package check. A v2 map without boxes is rejected (`map is empty`); the models stream
+  relaxes that to "no boxes and no models". `model` lines are recognised and rejected with
+  "not supported by this build" (slot marked in `ParseStatement`). A `monolith N` line after
+  another statement is an error.
+- **Material keys beyond §2.2:** `sampler <name> "path"` (sampler2D uniform of the material's
+  shader), `specular f` (`orm.specular`), `blend alpha|additive|add_alpha|multiply|premultiplied`,
+  `unlit on|off`, `priority n`. Unset keys keep `R3D_MATERIAL_BASE` (so `alpha_cutoff` is
+  0.5 unless set; set it to 0 for opaque shader materials to get the depth pre-pass).
+- **Lights:** defaults white, energy 1, range 16 (point/spot), falloff 1, specular 1,
+  fogEnergy 1, cone 22.5/45 deg, `shadow off`. Shadowed point/spot lights render their map
+  once per load; shadowed extra `dir` lights are camera-fitted every frame (expensive; they
+  also take extra directional shadow layers, 128 MB each at 8192 px).
+- **Environment:** `sky.sunSizeDeg` is degrees (converted with `DEG2RAD` in float, so 2.5
+  reproduces the old value bit for bit). `ambientSky.<key>` overrides only the keys given;
+  the others follow `sky.*`. `sky.mode panorama` loads `sky.panorama` with
+  `R3D_CUBEMAP_LAYOUT_PANORAMA`; `ambientSky.mode same` is the right choice with panoramas.
+  `shadow.size` is read at start-up only (a reload that changes it logs a warning).
+- **Hot reload:** the watch list is the files of the last load *attempt* (so a shader that is
+  still missing after a failed reload is picked up when it appears). A reload happens when
+  an mtime changes and the combined content hash (map bytes + every watched file) differs
+  from the last attempt; the 2 s settle window of v1 is kept.
+- **Game side:** the 1-6 toggles are *flips* relative to the map's (+ `--ao/--bloom/--fx`)
+  setting; after a reload the game re-applies map environment, overrides and flips, so a
+  toggled-off effect stays off. Flipping a mode that the map has off turns on `exp2` fog /
+  `mix` bloom (as before). The player starts at the map's `spawn` unless `--pos/--eye/--look`.
+  `resources/` is gone (the only resource was the shader); `build.sh` copies `maps/`.
+- **Upstream R3D:** without `MS_PATCHED_R3D` the runtime uses `R3D_PushLightEx` (camera-fitted,
+  re-rendered when needed), never the fixed-shadow / fog-bake / pre-pass / profiler APIs;
+  `MS_SHADOW_TILES` and `fogCacheVoxel` fall back to camera-fitted / off. Checked with
+  `-fsyntax-only` and a `gcc -O2 -c` against `~/Projects/r3d/include` (no patched symbols
+  referenced); not linked or run against an upstream build.

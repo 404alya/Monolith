@@ -1,20 +1,24 @@
 // monolith -- AI-assisted map designer for brutalist concrete levels (raylib + R3D)
 //
-// The level is a plain-text map file (maps/monolith.map, format: see map.c), hot-reloaded
-// while the game runs. In spectator mode you point at things, select boxes and type a
-// request; the game writes requests/<id>/ and opens Claude Code in a new terminal to edit
-// the map (AI-MAP-TOOL.md). Engine reference: PROMPT-INSTRUCTIONS.md.
+// The level is a map package (maps/<name>/: a plain-text <name>.map plus MAP.md, shaders,
+// textures; format: the header comment of runtime/monolith_scene.c), loaded, drawn and
+// hot-reloaded by the scene runtime (runtime/monolith_scene.h) while the game runs. In
+// spectator mode you point at things, select boxes and type a request; the game writes
+// requests/<id>/ and opens Claude Code in a new terminal to edit the map (AI-MAP-TOOL.md).
+// Engine reference: PROMPT-INSTRUCTIONS.md.
 //
 // Controls:
 //   WASD / mouse   walk & look          SHIFT  walk faster
 //   SPACE          jump                 F      toggle fly (noclip)
-//   1..6           toggle effects (volumetric fog, fog, SSAO, SSIL, bloom, sun)
+//   1..6           toggle effects (volumetric fog, fog, SSAO, SSIL, bloom, sun): each key
+//                  flips that effect relative to the map's setting; flips survive hot reloads
 //   F1             toggle HUD (also hides the crosshair and selection overlay)
 //   "(cached)" after the fps: nothing changed, the frame reused the last R3D image
 //   F12            screenshot           TAB    toggle spectator camera
 //   ESC            quit (closes the prompt box / leaves snip mode instead while open)
-//   The HUD's bottom line shows "map reloaded (N boxes)" after a map edit, or the parse
-//   error (file:line: message) in red while the file is broken (the old map stays loaded).
+//   The HUD's bottom line shows "map reloaded (N boxes)" after an edit to any file of the
+//   map package (map, shaders, textures), or the error (file:line: message) in red while
+//   the package is broken (the old map stays loaded).
 //
 // Spectator:
 //   WASD / mouse   move & look          E/Q or SPACE        up/down
@@ -52,12 +56,13 @@
 //                  No hot reload or request polling during shots
 //   --shot-size <w> <h>   size of the --shot image (default 1600 900); request bundles pass
 //                  their window size so the reproduction matches view.png exactly
-//   --pos x y z    start position (feet)
-//   --look yawDeg pitchDeg   start view angles (with --view: override the viewpoint's)
+//   --pos x y z    start position (feet; default: the map's spawn)
+//   --look yawDeg pitchDeg   start view angles (default: the spawn's; with --view: override
+//                  the viewpoint's)
 //   --eye x y z    start position of the eye (= --pos x y-1.62 z); with --view it moves the
 //                  spectator there instead (request bundles use it for their --shot command)
 //   --off <keys>   start with these effects toggled off, e.g. --off 34 (SSAO + SSIL)
-//   --view <n>     start in spectator mode at viewpoint n (1-based)
+//   --view <n>     start in spectator mode at the map's viewpoint n (1-based)
 //   --ao <mode>    screen-space AO / indirect light trade-off (atmosphere.c): full (default),
 //                  ssao (SSIL off), lite (SSIL off, SSAO 8 samples), off (SSAO + SSIL off)
 //   --bloom off    bloom pass off, exposure x1.19 instead (same mean brightness, no faint
@@ -65,15 +70,17 @@
 //   --fx key=value   override one effect setting, repeatable, e.g. --fx ssil.radius=2.5
 //                  (keys: ssao./ssil.samples, .radius; ssao.intensity/.power; ssil.gi/.ao;
 //                  bloom.levels/.intensity; exposure). Applied after --ao / --bloom
-//   --shadow <size> <range>   sun shadow map size (px) and distance (m), default 8192 100
+//   --shadow <size> <range>   sun shadow map size (px) and distance (m), overriding the map's
+//                  env shadow.size / sun.range (the default map: 8192 100)
 //   --shadow-camera   sun shadow from R3D's camera-fitted map, re-rendered only when the
 //                  cached map no longer covers the view (the pre-tile path; default: static
-//                  world-fixed tiles drawn once per map load, see shadow.c; for A/B tests)
+//                  world-fixed tiles drawn once per map load, see monolith_scene.c; A/B tests)
 //   --shadow-always   camera-fitted map re-rendered every frame (A/B tests and debugging)
 //   --fog-cache <voxel> <sub>   trade-off, off by default: bake the sun visibility of the
 //                  volumetric fog into a 3D texture once per map load (voxel size in m,
 //                  sub^3 samples per voxel, e.g. 0.5 2) and let the fog march fetch it
-//                  instead of the shadow map (R3D patch 8); changes the light shafts slightly
+//                  instead of the shadow map (R3D patch 8); changes the light shafts slightly.
+//                  Region: the map's env fogCache.region, else derived from its bounds
 //   --no-prepass   no depth pre-pass before the G-buffer pass (R3D patch 6; same image,
 //                  for A/B tests: the concrete shader then runs for every overdrawn fragment)
 //   --bench        visit every viewpoint, spin the camera, print frame time stats, write a
@@ -94,17 +101,23 @@
 //   --no-profile   with --bench: no per-pass GPU timings (R3D profiler, on by default when
 //                  R3D is built with R3D_GPU_PROFILER, as build.sh does)
 //   --note "text"  free-form note added to the benchmark report
-//   --map <file>   load this map instead of maps/monolith.map (path relative to the CWD;
-//                  the default is the repo's maps/ while it exists, else maps/ next to the
-//                  executable). The map is reloaded whenever the file changes (format: map.c)
-//   --reload-test <file>   with --shot: after 10 frames, load this map through the hot-reload
-//                  path (as if the map file had changed), then render the remaining frames.
-//                  The shot must equal a plain --shot --map <file> (proves that every
-//                  static cache is rebuilt on reload)
+//   --map <path>   load this map package (folder) or .map file instead of maps/monolith/
+//                  (relative to the CWD; the default is the repo's maps/ while it exists,
+//                  else maps/ next to the executable). A folder loads <folder>/<name>.map,
+//                  else its only .map file. The package is reloaded whenever one of its
+//                  files changes (format: runtime/monolith_scene.c)
+//   --reload-test <path>   with --shot: after 10 frames, load this map (package or file)
+//                  through the hot-reload path (as if the map had changed), then render the
+//                  remaining frames. The shot must equal a plain --shot --map <path> (proves
+//                  that every static cache is rebuilt on reload)
 //   --dump-boxes <file>   load the map, write every box as hex floats (%a) to <file> and
 //                  exit without opening a window (for checking that edits to the loader
 //                  or the map keep the exact box list). Any map that fails to parse (with
 //                  or without this flag) prints file:line: message and exits with status 1
+//   --new-map <name>   create the map package maps/<name>/ (<name>.map with a ground slab,
+//                  the default material and the default environment written out, a MAP.md
+//                  template, empty shaders/ models/ textures/ and ASSETS.md) and exit without
+//                  opening a window. Refuses to overwrite an existing folder
 //
 // Designer debug flags (for testing without a visible window):
 //   --pick         with --shot: print what the crosshair (screen centre) hits on the shot
@@ -128,19 +141,20 @@
 //                       args, e.g. "kitty --single-instance"
 //   TERMINAL            used if MONOLITH_TERMINAL is unset; else the first of alacritty,
 //                       kitty, foot, wezterm, xterm in PATH
-//   MONOLITH_CLAUDE_ARGS   extra Claude Code flags, split on whitespace (default none)
+//   MONOLITH_CLAUDE_ARGS   extra Claude Code flags, split on whitespace (default none), after
+//                       --allow-dangerously-skip-permissions --dangerously-skip-permissions
+//   MONOLITH_CLAUDE_SAFE=1   drop those two permission flags
+//   MONOLITH_WORKSPACE  i3/sway workspace for the terminal (default 10, empty = don't move)
 //   __GL_SYNC_TO_VBLANK=0 (NVIDIA) / vblank_mode=0 (Mesa)   driver vsync off, for --bench
 
 #include "common.h"
-#include "world.h"
-#include "map.h"
 #include "player.h"
 #include "spectator.h"
 #include "atmosphere.h"
-#include "shadow.h"
 #include "bench.h"
 #include "designer.h"
 #include "launcher.h"
+#include "newmap.h"
 
 // Only needed for glEnable(GL_DEPTH_CLAMP), see main(), and glFinish() for --headless.
 // Declared by hand rather than via <GL/gl.h> / <windows.h> (which clashes with raylib).
@@ -149,9 +163,6 @@
 extern void glEnable(unsigned int cap);
 extern void glFinish(void);
 
-#ifndef RESOURCES_PATH
-#   define RESOURCES_PATH "./resources/"
-#endif
 #ifndef BENCHMARK_PATH
 #   define BENCHMARK_PATH "./benchmark/"
 #endif
@@ -162,22 +173,20 @@ extern void glFinish(void);
 // Data directories, with a trailing slash. Both builds are meant to be copied to other
 // computers as a folder (build/linux/, build/win/), so they look next to the executable.
 // On Linux, the repo directories baked in by build.sh win while they exist (i.e. on the
-// dev machine), so concrete.glsl edits apply without rebuilding and bench reports land
-// in the repo's benchmark/, and the map that gets hot-reloaded is the repo's maps/ one.
+// dev machine), so bench reports land in the repo's benchmark/, and the map package that
+// gets hot-reloaded (with its shaders) is the repo's maps/ one.
 // Windows paths aren't baked in (wine would see Z:\...).
-char resourcesDir[1024], benchmarkDir[1024];
-static char mapsDir[1024];  // only main() needs it (default map)
+char benchmarkDir[1024];
+static char mapsDir[1024];  // only main() needs it (default map, --new-map)
+MS_Scene *scene;
 
 static void InitDataPaths(void)
 {
     const char *exeDir = GetApplicationDirectory();
 #ifdef _WIN32
-    snprintf(resourcesDir, sizeof(resourcesDir), "%sresources/", exeDir);
     snprintf(benchmarkDir, sizeof(benchmarkDir), "%sbenchmark/", exeDir);
     snprintf(mapsDir, sizeof(mapsDir), "%smaps/", exeDir);
 #else
-    if (DirectoryExists(RESOURCES_PATH)) snprintf(resourcesDir, sizeof(resourcesDir), "%s", RESOURCES_PATH);
-    else snprintf(resourcesDir, sizeof(resourcesDir), "%sresources/", exeDir);
     if (DirectoryExists(BENCHMARK_PATH)) snprintf(benchmarkDir, sizeof(benchmarkDir), "%s", BENCHMARK_PATH);
     else snprintf(benchmarkDir, sizeof(benchmarkDir), "%sbenchmark/", exeDir);
     if (DirectoryExists(MAPS_PATH)) snprintf(mapsDir, sizeof(mapsDir), "%s", MAPS_PATH);
@@ -185,92 +194,30 @@ static void InitDataPaths(void)
 #endif
 }
 
-// Box centers and sizes -> instance buffer of unit cubes (again after every map reload)
-static R3D_InstanceBuffer LoadWorldInstances(void)
-{
-    R3D_InstanceBuffer instances = R3D_LoadInstanceBuffer(world.count, R3D_INSTANCE_POSITION | R3D_INSTANCE_SCALE);
-    Vector3 *pos = R3D_MapInstances(instances, R3D_INSTANCE_POSITION, false);
-    for (int i = 0; i < world.count; i++)
-        pos[i] = Vector3Scale(Vector3Add(world.items[i].min, world.items[i].max), 0.5f);
-    R3D_UnmapInstances(instances, R3D_INSTANCE_POSITION);
-
-    Vector3 *scl = R3D_MapInstances(instances, R3D_INSTANCE_SCALE, false);
-    for (int i = 0; i < world.count; i++)
-        scl[i] = Vector3Subtract(world.items[i].max, world.items[i].min);
-    R3D_UnmapInstances(instances, R3D_INSTANCE_SCALE);
-    return instances;
-}
-
-static bool DumpBoxes(const char *path)
+static bool DumpBoxes(const MS_Scene *s, const char *path)
 {
     FILE *f = fopen(path, "w");
     if (!f) return false;
-    for (int i = 0; i < world.count; i++) {
-        BoundingBox b = world.items[i];
+    for (int i = 0; i < s->boxCount; i++) {
+        BoundingBox b = s->boxes[i];
         fprintf(f, "%a %a %a %a %a %a\n", b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z);
     }
     return fclose(f) == 0;
 }
 
-// Everything R3D needs to draw the world, so the main view and the request images
-// (Submit) render through the same code
-typedef struct {
-    R3D_Mesh cube;
-    R3D_Material concrete;
-    R3D_InstanceBuffer instances;
-    R3D_Light sun;
-    R3D_ShadowMap sunShadow[SUN_TILE_COUNT];    // one per cached tile ([0] for the camera-fitted map)
-    bool sunOn;
-    bool shadowTiles;       // static tiles (default), see SunShadowTileSelect()
-    SunShadowTiles sunTiles;
-    SunShadowCache sunCache;    // camera-fitted map (--shadow-camera / --shadow-always)
-    bool shadowReuse;       // see SunShadowNeedsUpdate()
-    float fogCacheVoxel;    // --fog-cache: voxel size (m), 0 = off
-    int fogCacheSub;
-    unsigned int fogCacheVersion;   // world.version the fog volume was baked for, 0 = none
-    float shadowRange;
-    int shadowSize;
-} Scene;
-
-// Renders the world into `target` (zero = the window). Returns whether the sun shadow
-// map was re-rendered. Extra renders (Submit) go through the same cache check with their
-// own target's aspect, so the cached map always matches what R3D last rendered.
+// Renders the scene into `target` (zero = the window), so the main view and the request
+// images (Submit) go through the same code. Returns whether a sun shadow map was
+// re-rendered. Extra renders (Submit) go through the same cache check with their own
+// target's aspect, so the cached map always matches what R3D last rendered.
 static double lastR3DEndTime;   // seconds, set by DrawScene
 
-// Where the fog's baked sun visibility applies (--fog-cache): the default map's play
-// area with its light shafts (hall, canyon, stairs, terrace, tower) up to 100 m high.
-// The fog samples the shadow map outside it.
-#define FOG_CACHE_REGION (BoundingBox){ { -70.0f, -1.0f, -150.0f }, { 75.0f, 100.0f, 105.0f } }
-
-static bool DrawScene(Scene *sc, Camera3D camera, RenderTexture target)
+static bool DrawScene(Camera3D camera, RenderTexture target)
 {
-    bool update = false;
+    float aspect = target.id ? (float)target.texture.width / target.texture.height
+                             : (float)GetRenderWidth() / GetRenderHeight();
     R3D_BeginPro((R3D_View){ .camera = R3D_CameraFromRL(camera), .target = target });
-        if (sc->sunOn && sc->shadowTiles) {
-            // Static tiles: drawn once per map load (per tile), chosen by eye position only
-            int tile = SunShadowTileSelect(&sc->sunTiles, sc->sun.direction, sc->shadowRange, sc->shadowSize,
-                                           camera.position, world.version, &update);
-            if (update) TraceLog(LOG_INFO, "monolith: sun shadow tile %d drawn (%d so far)", tile, sc->sunTiles.renders);
-            R3D_PushLightFixedShadow(sc->sun, sc->sunShadow[tile], sc->sunTiles.tile[tile].viewProj, update);
-        } else if (sc->sunOn) {
-            // Only re-render the shadow map when the cached one no longer covers the view
-            float aspect = target.id ? (float)target.texture.width / target.texture.height
-                                     : (float)GetRenderWidth() / GetRenderHeight();
-            update = !sc->shadowReuse ||
-                SunShadowNeedsUpdate(&sc->sunCache, sc->sun.direction, sc->shadowRange, camera, aspect, sc->shadowSize);
-            R3D_PushLightEx(sc->sun, sc->sunShadow[0], update);
-        }
-        R3D_DrawMeshInstanced(sc->cube, sc->concrete, sc->instances, world.count);
-        if (sc->sunOn && sc->fogCacheVoxel > 0.0f && sc->fogCacheVersion != world.version) {
-            // Fog sun visibility, baked once per map load into the shadow layer this frame
-            // doesn't sample (that tile slot is forgotten: it holds the bake map now)
-            int slot = (sc->shadowTiles && sc->sunTiles.current == 1) ? 0 : 1;
-            if (sc->shadowTiles) SunShadowTileForget(&sc->sunTiles, slot);
-            BoundingBox region = FOG_CACHE_REGION;
-            R3D_BakeFogSunVisibility(sc->sunShadow[slot], SunShadowBoxMatrix(sc->sun.direction, region, 2.0f),
-                                     region, sc->fogCacheVoxel, sc->fogCacheSub);
-            sc->fogCacheVersion = world.version;
-        }
+        bool update = MS_PushLights(scene, camera, aspect);
+        MS_DrawGeometry(scene);     // (also bakes the --fog-cache volume once per map load)
     double r3dEndStart = GetTime();
     R3D_End();
     lastR3DEndTime = GetTime() - r3dEndStart;   // CPU side of R3D_End, for the bench report
@@ -278,12 +225,48 @@ static bool DrawScene(Scene *sc, Camera3D camera, RenderTexture target)
 }
 
 // ======================================================================================
+// #region Environment: the map's, then the command line overrides, then the 1-6 toggles
+// ======================================================================================
+// The toggles flip an effect relative to the map's setting (+ --ao/--bloom/--fx), and the
+// flips are kept across hot reloads: a reload re-applies the map's environment and must not
+// silently turn a toggled-off effect back on.
+
+typedef struct {
+    const char *aoMode, *bloomMode;
+    const char *fx[16];
+    int fxCount;
+    bool flip[6];               // keys 1-6: volumetric fog, fog, SSAO, SSIL, bloom, sun
+} EffectState;
+
+static void ApplyEnvironment(const EffectState *fx)
+{
+    MS_ApplyEnvironment(scene);
+    R3D_Environment *env = R3D_GetEnvironment();
+    ApplyAoMode(env, fx->aoMode);
+    ApplyBloomMode(env, fx->bloomMode);
+    for (int k = 0; k < fx->fxCount; k++) ApplyFxSetting(env, fx->fx[k]);
+
+    // Flipping a mode that is off turns on the mode the default map uses
+    if (fx->flip[0]) env->volumetricFog.enabled = !env->volumetricFog.enabled;
+    if (fx->flip[1]) env->fog.mode = env->fog.mode ? R3D_FOG_DISABLED : R3D_FOG_EXP2;
+    if (fx->flip[2]) env->ssao.enabled = !env->ssao.enabled;
+    if (fx->flip[3]) env->ssil.enabled = !env->ssil.enabled;
+    if (fx->flip[4]) env->bloom.mode = env->bloom.mode ? R3D_BLOOM_DISABLED : R3D_BLOOM_MIX;
+    MS_RenderSettings rs = MS_GetRenderSettings(scene);
+    rs.sunOn = !fx->flip[5];
+    MS_SetRenderSettings(scene, rs);
+}
+
+// #endregion
+
+// ======================================================================================
 // #region Frame reuse
 // ======================================================================================
 // A still camera over an unchanged scene produces the same R3D image every frame: R3D has
 // no temporal effects in this setup (no TAA, no auto exposure, no history buffers; SSAO,
 // SSIL and fog noise are keyed on screen position only, and the per-frame TIME /
-// FRAME_INDEX only reach user shaders, which concrete.glsl doesn't read). So when nothing
+// FRAME_INDEX only reach surface shaders, which the default map's concrete.glsl doesn't
+// read; a map shader animated by TIME would freeze while the camera is still). So when nothing
 // that feeds R3D changed since the last frame, the frame is composited from a cached copy
 // of R3D's colour + depth instead of re-rendering it.
 //   - While the key changes, R3D renders straight into the window as before (no extra
@@ -299,14 +282,13 @@ static bool DrawScene(Scene *sc, Camera3D camera, RenderTexture target)
 
 // Everything that changes R3D's image. Compared bytewise, so floats compare exactly; a
 // false "changed" (e.g. -0 vs 0) only costs one render.
+// Everything else the image depends on (materials, lights, sun, sky, shaders, textures)
+// comes from the map package, and any change there is a reload, i.e. a new scene version.
 typedef struct {
     Camera3D camera;
-    R3D_Environment env;    // every effect setting (toggles 1-5 and anything else)
-    R3D_Light sun;
-    R3D_ShadowMap sunShadow;
-    bool sunOn;             // toggle 6
-    bool shadowReuse;
-    unsigned int mapVersion;
+    R3D_Environment env;    // every effect setting (the map's, --ao/--bloom/--fx, toggles 1-5)
+    MS_RenderSettings render;   // toggle 6 (sunOn), shadow mode, fog cache, pre-pass
+    unsigned int sceneVersion;
     int width, height;      // R3D resolution = window size
 } FrameKey;
 
@@ -320,16 +302,14 @@ typedef struct {
 } FrameReuse;
 
 // Fills every byte of the key (padding included), so memcmp is meaningful
-static void MakeFrameKey(FrameKey *k, const Scene *sc, Camera3D camera)
+static void MakeFrameKey(FrameKey *k, Camera3D camera)
 {
     memset(k, 0, sizeof(*k));
     memcpy(&k->camera, &camera, sizeof(camera));
     memcpy(&k->env, R3D_GetEnvironment(), sizeof(k->env));
-    memcpy(&k->sun, &sc->sun, sizeof(k->sun));
-    memcpy(&k->sunShadow, &sc->sunShadow, sizeof(k->sunShadow));
-    k->sunOn = sc->sunOn;
-    k->shadowReuse = sc->shadowReuse;
-    k->mapVersion = world.version;
+    MS_RenderSettings rs = MS_GetRenderSettings(scene);
+    memcpy(&k->render, &rs, sizeof(rs));
+    k->sceneVersion = scene->version;
     k->width = GetScreenWidth();
     k->height = GetScreenHeight();
 }
@@ -391,7 +371,7 @@ static Image ReadTarget(RenderTexture rt)
 // view-marked.png the same pixels plus the selection, hit point and crosshair. One R3D
 // render into `rt`, read back before and after drawing the overlay on top (R3D_End leaves
 // its depth in rt, so the overlay is depth-tested like in the live view).
-static bool Submit(Scene *sc, Designer *d, Camera3D cam, float yaw, float pitch, RenderTexture rt,
+static bool Submit(Designer *d, Camera3D cam, float yaw, float pitch, RenderTexture rt,
                    char *msg, int msgSize)
 {
     // Window mode: an offscreen target at R3D's resolution (the window size), like --shot
@@ -400,7 +380,7 @@ static bool Submit(Scene *sc, Designer *d, Camera3D cam, float yaw, float pitch,
 
     static DesignRequest req;
     DesignerBuildRequest(d, cam, yaw, pitch, rt.texture.width, rt.texture.height, &req);
-    DrawScene(sc, cam, rt);
+    DrawScene(cam, rt);
     Image view = ReadTarget(rt);
     BeginTextureMode(rt);
         DesignerDrawOverlay(d, cam, false);
@@ -439,20 +419,21 @@ int main(int argc, char **argv)
 {
     InitDataPaths();
 
-    // Player starts at the dark end of the entry canyon, facing the hall
-    Player player = { .feet = { 0, 0, 90 }, .yaw = PI };
+    // The player starts at the map's spawn (set after loading it) unless --pos/--eye/--look
+    Player player = { 0 };
+    bool posSet = false;
 
     const char *shotPath = NULL;
     int shotW = 1600, shotH = 900;  // --shot-size
     const char *offKeys = "";
     int startView = 0;
-    int shadowSize = 8192;
-    float shadowRange = 100.0f;
+    int shadowSize = 0;         // --shadow; 0 = the map's (env shadow.size / sun.range)
+    float shadowRange = 0.0f;
     bool bench = false;
     bool headless = false;      // --bench without a visible window
-    bool shadowReuse = true;    // see SunShadowNeedsUpdate()
     bool depthPrepass = true;   // --no-prepass
-    bool shadowTiles = true;    // see SunShadowTileSelect()
+    MS_ShadowMode shadowMode = MS_SHADOW_TILES;     // --shadow-camera / --shadow-always
+    const char *newMapName = NULL;
     float fogCacheVoxel = 0.0f;
     int fogCacheSub = 2;
     const char *benchNote = NULL;
@@ -489,8 +470,9 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--bench-still") == 0) bench = benchStill = true;
         else if (strcmp(argv[i], "--no-profile") == 0) benchProfile = false;
         else if (strcmp(argv[i], "--headless") == 0) headless = true;
-        else if (strcmp(argv[i], "--shadow-always") == 0) shadowReuse = shadowTiles = false;
-        else if (strcmp(argv[i], "--shadow-camera") == 0) shadowTiles = false;
+        else if (strcmp(argv[i], "--shadow-always") == 0) shadowMode = MS_SHADOW_ALWAYS;
+        else if (strcmp(argv[i], "--shadow-camera") == 0) { if (shadowMode != MS_SHADOW_ALWAYS) shadowMode = MS_SHADOW_CAMERA; }
+        else if (strcmp(argv[i], "--new-map") == 0 && i + 1 < argc) newMapName = argv[++i];
         else if (strcmp(argv[i], "--fog-cache") == 0 && i + 2 < argc) {
             // Clamped: 0.25 m is already 228 MB over the default region; 0 or less turns it off
             fogCacheVoxel = (float)atof(argv[i + 1]);
@@ -528,6 +510,7 @@ int main(int argc, char **argv)
         }
         else if (strcmp(argv[i], "--pos") == 0 && i + 3 < argc) {
             player.feet = (Vector3){ atof(argv[i + 1]), atof(argv[i + 2]), atof(argv[i + 3]) };
+            posSet = true;
             i += 3;
         } else if (strcmp(argv[i], "--eye") == 0 && i + 3 < argc) {
             eye = (Vector3){ atof(argv[i + 1]), atof(argv[i + 2]), atof(argv[i + 3]) };
@@ -562,22 +545,39 @@ int main(int argc, char **argv)
         }
     }
 
-    // --- World: load the map before opening a window, so a broken map just prints the error
+    if (newMapName) return NewMap(mapsDir, newMapName) ? 0 : 1;
+
+    // --- Map: parse it before opening a window, so a broken map just prints the error, and
+    // the sun's shadow map size (an R3D init hint) is known before R3D_Init
+    char defaultMap[1100];
+    snprintf(defaultMap, sizeof(defaultMap), "%smonolith", mapsDir);
+    if (!mapPath) mapPath = defaultMap;
+    MS_LoadOptions loadOpt = { .noGpu = true, .shadowSizeOverride = shadowSize, .shadowRangeOverride = shadowRange };
+    MS_Scene *peek;     // parsed only (no GPU); gives the R3D init hints once a GL context exists
     {
-        char defaultMap[1100], err[512];
-        snprintf(defaultMap, sizeof(defaultMap), "%smonolith.map", mapsDir);
-        if (!mapPath) mapPath = defaultMap;
-        if (!LoadMap(mapPath, err, sizeof(err))) {
+        char err[512];
+        peek = MS_Load(mapPath, &loadOpt, err, sizeof(err));
+        if (!peek) {
             fprintf(stderr, "monolith: cannot load the map\n%s\n", err);
             return 1;
         }
-        TraceLog(LOG_INFO, "monolith: %s: %d boxes, %d groups", world.path, world.count, world.groupCount);
+        TraceLog(LOG_INFO, "monolith: %s: %d boxes, %d groups (format %d)", peek->path, peek->boxCount,
+                 peek->groupCount, peek->formatVersion);
         if (dumpPath) {
-            bool ok = DumpBoxes(dumpPath);
+            bool ok = DumpBoxes(peek, dumpPath);
             fprintf(ok ? stdout : stderr, ok ? "monolith: wrote %d boxes to %s\n" : "monolith: cannot write %d boxes to %s\n",
-                    world.count, dumpPath);
+                    peek->boxCount, dumpPath);
+            MS_Unload(peek);
             return ok ? 0 : 1;
         }
+        // The spawn's angles in double, so 180 degrees lands exactly on the float PI
+        if (!posSet && !eyeSet) player.feet = peek->spawnFeet;
+        if (!lookSet) {
+            player.yaw = (float)(peek->spawnYawDeg * (3.14159265358979323846 / 180.0));
+            player.pitch = (float)(peek->spawnPitchDeg * (3.14159265358979323846 / 180.0));
+        }
+        shadowSize = peek->sun.shadowSize;          // (for the bench report)
+        shadowRange = peek->sun.light.range;
     }
 
     unsigned int windowFlags = FLAG_MSAA_4X_HINT;   // no vsync, uncapped
@@ -598,13 +598,14 @@ int main(int argc, char **argv)
     // in the main loop (the window's close button still ends WindowShouldClose())
     SetExitKey(KEY_NULL);
 
-    // Sun shadow resolution. Static tiles (shadow.c) and R3D's camera-fitted map
-    // both cover a sphere of radius ~1.5x range (70 deg fov / 16:9; the fitted map
-    // grows with wider aspects), so texel size = 2 * radius / shadow map size.
-    // range 100 m @ 8192 px -> ~3.7 cm texels (was 140 m @ 4096 -> ~10.7 cm).
-    // VRAM: 16-bit depth, R3D allocates 2 layers -> 8192^2 * 2 B * 2 = 256 MB (the two
-    // tiles use exactly these two layers), plus the min/max tiles (2 x 512^2 RG32F, 4 MB).
-    R3D_SetHint(R3D_HINT_SHADOW_DIR_SIZE, shadowSize);
+    // Sun shadow resolution (the map's shadow.size or --shadow; R3D_SetHint needs the GL
+    // context). Static tiles and R3D's camera-fitted map both cover a sphere of radius
+    // ~1.5x range (70 deg fov / 16:9; the fitted map grows with wider aspects), so texel
+    // size = 2 * radius / shadow map size: range 100 m @ 8192 px -> ~3.7 cm texels. VRAM:
+    // 16-bit depth, R3D allocates 2 layers -> 8192^2 * 2 B * 2 = 256 MB (the two tiles use
+    // exactly these two layers), plus the min/max tiles (2 x 512^2 RG32F, 4 MB).
+    MS_SetInitHints(peek);
+    MS_Unload(peek);
 
     R3D_Init(GetScreenWidth(), GetScreenHeight());
     R3D_SetAntiAliasingMode(R3D_ANTI_ALIASING_MODE_FXAA);
@@ -619,47 +620,30 @@ int main(int argc, char **argv)
     // geometry closer than the 1 cm near plane is clamped rather than cut away.
     glEnable(GL_DEPTH_CLAMP);
 
-    // --- World -> instanced unit cubes
-    Scene scene = { .shadowReuse = shadowReuse, .shadowTiles = shadowTiles,
-                    .fogCacheVoxel = fogCacheVoxel, .fogCacheSub = fogCacheSub,
-                    .shadowRange = shadowRange, .shadowSize = shadowSize };
-    scene.cube = R3D_GenMeshCube(1.0f, 1.0f, 1.0f);
-    scene.instances = LoadWorldInstances();
-
-    scene.concrete = R3D_GetDefaultMaterial();
-    scene.concrete.shader = R3D_LoadSurfaceShader(TextFormat("%sshaders/concrete.glsl", resourcesDir));
-    float patternScale = 1.0f;
-    R3D_SetSurfaceShaderUniform(scene.concrete.shader, "u_scale", &patternScale);
-    // The concrete never discards (alpha is always 1), so turning the alpha test off
-    // changes nothing on screen but lets R3D pre-pass it: depth first, then the
-    // expensive procedural shader runs once per visible pixel instead of once per
-    // overdrawn fragment (pillar forests, fins: ~1.2-2.4x overdraw). R3D patch 6.
-    scene.concrete.alphaCutoff = 0.0f;
-    R3D_SetDepthPrepass(depthPrepass);
-
-    // --- Atmosphere
-    R3D_Cubemap sky;
-    R3D_AmbientMap ambient;
-    SetupEnvironment(&sky, &ambient);
-    ApplyAoMode(R3D_GetEnvironment(), aoMode);
-    ApplyBloomMode(R3D_GetEnvironment(), bloomMode);
-    for (int k = 0; k < fxCount; k++) ApplyFxSetting(R3D_GetEnvironment(), fxSettings[k]);
-
-    R3D_Light sun = R3D_CreateDirLight(SUN_DIR, (Color){ 255, 238, 214, 255 }, 2.0f);
-    // Shadow distance. Shadows fade out between 75% and 100% of it (R3D), and
-    // the distance fog already hides most of what lies beyond ~100 m. It also
-    // must cover volumetricFog.length (90 m) or the light shafts fade early.
-    sun.range = shadowRange;
-    sun.fogEnergy = 4.0f;    // how strongly the sun lights the volumetric fog
-    for (int i = 0; i < SUN_TILE_COUNT; i++) {
-        scene.sunShadow[i] = R3D_LoadShadowMap(R3D_LIGHT_DIR);
-        scene.sunShadow[i].softness = 2.0f;
+    // --- The scene (runtime/monolith_scene.c): boxes as one instanced draw per material,
+    // materials and their shaders, sky + ambient map, lights, sun shadow tiles
+    {
+        char err[512];
+        loadOpt.noGpu = false;
+        scene = MS_Load(mapPath, &loadOpt, err, sizeof(err));
+        if (!scene) {
+            fprintf(stderr, "monolith: cannot load the map\n%s\n", err);
+            R3D_Close();
+            CloseWindow();
+            return 1;
+        }
     }
-    scene.sun = sun;
-    scene.sunOn = true;
-    if (shadowTiles)
-        TraceLog(LOG_INFO, "monolith: sun shadow: static tiles, %d px, %.2f cm texels", shadowSize,
-                 100.0f * SunShadowTileTexel(shadowRange, shadowSize));
+    MS_RenderSettings renderSettings = MS_GetRenderSettings(scene);
+    renderSettings.shadowMode = shadowMode;
+    renderSettings.fogCacheVoxel = fogCacheVoxel;
+    renderSettings.fogCacheSub = fogCacheSub;
+    renderSettings.depthPrepass = depthPrepass;
+    MS_SetRenderSettings(scene, renderSettings);
+
+    // --- Environment: the map's, then --ao / --bloom / --fx, then the 1-6 toggles
+    EffectState effects = { .aoMode = aoMode, .bloomMode = bloomMode, .fxCount = fxCount };
+    for (int k = 0; k < fxCount; k++) effects.fx[k] = fxSettings[k];
+    ApplyEnvironment(&effects);
 
     bool hud = true;
 
@@ -670,7 +654,7 @@ int main(int argc, char **argv)
     bool mapMessageError = false;
 
     Spectator spec = { .speed = 12.0f, .view = -1 };
-    if (startView >= 1 && startView <= VIEWPOINT_COUNT) {
+    if (startView >= 1 && startView <= scene->viewpointCount) {
         spec.active = true;
         SpectatorJumpTo(&spec, startView - 1);
         if (eyeSet) spec.pos = eye;
@@ -698,8 +682,8 @@ int main(int argc, char **argv)
 
     // Benchmark: for each viewpoint, warm up, then spin the camera a full turn
     // (so the camera-fitted shadow map is re-fit every frame) while timing frames.
-    static double benchTimes[VIEWPOINT_COUNT][BENCH_FRAMES];
-    static int benchShadowUpdates[VIEWPOINT_COUNT];
+    static double benchTimes[MS_MAX_VIEWPOINTS][BENCH_FRAMES];
+    static int benchShadowUpdates[MS_MAX_VIEWPOINTS];
     int benchView = 0, benchFrame = -BENCH_WARMUP;
     double benchLast = 0.0;
     if (bench) {
@@ -740,18 +724,18 @@ int main(int argc, char **argv)
         // game key and the camera are frozen: the keys are text now
         bool typing = DesignerCapturesInput(&designer);
 
-        // Effect toggles, to see what each one contributes
-        R3D_Environment *env = R3D_GetEnvironment();
-        bool first = !offApplied;
-        #define TOGGLE(key, ch) ((!typing && IsKeyPressed(key)) || (first && strchr(offKeys, ch)))
-        if (TOGGLE(KEY_ONE, '1'))   env->volumetricFog.enabled = !env->volumetricFog.enabled;
-        if (TOGGLE(KEY_TWO, '2'))   env->fog.mode = env->fog.mode ? R3D_FOG_DISABLED : R3D_FOG_EXP2;
-        if (TOGGLE(KEY_THREE, '3')) env->ssao.enabled = !env->ssao.enabled;
-        if (TOGGLE(KEY_FOUR, '4'))  env->ssil.enabled = !env->ssil.enabled;
-        if (TOGGLE(KEY_FIVE, '5'))  env->bloom.mode = env->bloom.mode ? R3D_BLOOM_DISABLED : R3D_BLOOM_MIX;
-        if (TOGGLE(KEY_SIX, '6'))   scene.sunOn = !scene.sunOn;
-        #undef TOGGLE
+        // Effect toggles, to see what each one contributes (1 volumetric fog, 2 fog, 3 SSAO,
+        // 4 SSIL, 5 bloom, 6 sun; --off applies them on the first frame)
+        bool first = !offApplied, toggled = false;
+        for (int k = 0; k < 6; k++) {
+            if ((!typing && IsKeyPressed(KEY_ONE + k)) || (first && strchr(offKeys, '1' + k))) {
+                effects.flip[k] = !effects.flip[k];
+                toggled = true;
+            }
+        }
+        if (toggled) ApplyEnvironment(&effects);
         offApplied = true;
+        R3D_Environment *env = R3D_GetEnvironment();
         if (!typing && IsKeyPressed(KEY_F1))    hud = !hud;
         if (!typing && IsKeyPressed(KEY_F12))   TakeScreenshot("screenshot.png");
 
@@ -770,32 +754,25 @@ int main(int argc, char **argv)
 
         // Map hot reload (not during --bench/--shot runs, which must stay deterministic)
         if (!bench && (!shotPath || reloadTestPath)) {
-            MapPollResult r = MAP_UNCHANGED;
-            if (!shotPath) r = MapPoll(GetFrameTime());
+            MS_ReloadResult r = MS_UNCHANGED;
+            if (!shotPath) r = MS_Poll(scene, GetFrameTime());
             else if (frame == 10) {
-                // --reload-test: the same reload handling as a changed map file
+                // --reload-test: the same reload handling as a changed map package
                 char err[512];
-                r = LoadMap(reloadTestPath, err, sizeof(err)) ? MAP_RELOADED : MAP_RELOAD_FAILED;
-                if (r == MAP_RELOAD_FAILED) TraceLog(LOG_WARNING, "monolith: --reload-test: %s", err);
+                r = MS_Reload(scene, reloadTestPath, err, sizeof(err));
+                if (r == MS_RELOAD_FAILED) TraceLog(LOG_WARNING, "monolith: --reload-test: %s", err);
             }
-            if (r == MAP_RELOADED) {
-                // New buffer first, then free the old one. R3D caches the bound instance
-                // buffer names (instances_enable in r3d_render.c) and skips re-binding when
-                // they match; freeing first let GL hand out the same names again, so the
-                // global VAO kept pointing at the deleted buffers and the reloaded map was
-                // drawn with the old boxes (found by --reload-test).
-                R3D_InstanceBuffer old = scene.instances;
-                scene.instances = LoadWorldInstances();
-                R3D_UnloadInstanceBuffer(old);
-                // Boxes moved: the cached sun shadow maps are stale (the tiles also key on
-                // world.version themselves)
-                scene.sunCache.valid = false;
-                snprintf(mapMessage, sizeof(mapMessage), "map reloaded (%d boxes)", world.count);
+            if (r == MS_RELOADED) {
+                // The runtime swapped in the new GPU resources (new before old: R3D caches
+                // instance buffer names) and its caches key on scene->version. The map's
+                // environment applies again, then the overrides and the current toggles.
+                ApplyEnvironment(&effects);
+                snprintf(mapMessage, sizeof(mapMessage), "map reloaded (%d boxes)", scene->boxCount);
                 mapMessageTime = 3.0f;
                 mapMessageError = false;
                 TraceLog(LOG_INFO, "monolith: %s", mapMessage);
-            } else if (r == MAP_RELOAD_FAILED) {
-                snprintf(mapMessage, sizeof(mapMessage), "%s", MapError());
+            } else if (r == MS_RELOAD_FAILED) {
+                snprintf(mapMessage, sizeof(mapMessage), "%s", MS_Error(scene));
                 mapMessageError = true;
                 TraceLog(LOG_WARNING, "monolith: map reload failed: %s", mapMessage);
             }
@@ -810,12 +787,12 @@ int main(int argc, char **argv)
             if (benchFrame >= 0 && benchFrame < benchFrames) benchTimes[benchView][benchFrame] = now - benchLast;
             benchLast = now;
             if (++benchFrame == benchFrames) {
-                if (++benchView == VIEWPOINT_COUNT) break;
+                if (++benchView == scene->viewpointCount) break;
                 SpectatorJumpTo(&spec, benchView);
                 benchFrame = -BENCH_WARMUP;
             }
             float baseYaw, basePitch;
-            LookAngles(VIEWPOINTS[benchView].eye, VIEWPOINTS[benchView].target, &baseYaw, &basePitch);
+            LookAngles(scene->viewpoints[benchView].eye, scene->viewpoints[benchView].target, &baseYaw, &basePitch);
             spec.yaw = baseYaw;
             if (!benchStill) spec.yaw += 2.0f * PI * (float)(benchFrame > 0 ? benchFrame : 0) / benchFrames;
             R3D_SetProfilerTag(benchFrame >= 0 ? BENCH_TAG(benchView, benchFrame) : -1);
@@ -840,7 +817,7 @@ int main(int argc, char **argv)
             if (action == DESIGNER_SUBMIT) {
                 // The camera is frozen while the box is open: this is the view the user typed at
                 char msg[512];
-                Submit(&scene, &designer, SpectatorCamera(&spec), spec.yaw, spec.pitch, (RenderTexture){ 0 }, msg, sizeof(msg));
+                Submit(&designer, SpectatorCamera(&spec), spec.yaw, spec.pitch, (RenderTexture){ 0 }, msg, sizeof(msg));
             }
         }
         Camera3D camera = spec.active ? SpectatorCamera(&spec) : PlayerCamera(&player);
@@ -851,7 +828,7 @@ int main(int argc, char **argv)
         bool unchanged = false;
         if (reuse.enabled) {
             FrameKey key;
-            MakeFrameKey(&key, &scene, camera);
+            MakeFrameKey(&key, camera);
             unchanged = reuse.keyValid && memcmp(&key, &reuse.key, sizeof(key)) == 0;
             reuse.key = key;
             reuse.keyValid = true;
@@ -871,7 +848,7 @@ int main(int argc, char **argv)
                         if (reuse.rt.id) UnloadRenderTexture(reuse.rt);
                         reuse.rt = LoadSceneCache(GetScreenWidth(), GetScreenHeight());
                     }
-                    shadowUpdated = DrawScene(&scene, camera, reuse.rt);
+                    shadowUpdated = DrawScene(camera, reuse.rt);
                     reuse.cacheValid = true;
                 } else {
                     reused = true;
@@ -882,7 +859,7 @@ int main(int argc, char **argv)
                 DrawSceneCache(&reuse);
                 if (shotTarget.id) EndTextureMode();
             } else {
-                shadowUpdated = DrawScene(&scene, camera, shotTarget);
+                shadowUpdated = DrawScene(camera, shotTarget);
             }
             if (bench && shadowUpdated && benchFrame >= 0 && benchFrame < benchFrames) benchShadowUpdates[benchView]++;
 
@@ -902,7 +879,7 @@ int main(int argc, char **argv)
                          GetFPS(), reused ? " (cached)" : "", spec.active ? "SPECTATOR" : player.fly ? "FLY" : "WALK",
                          env->volumetricFog.enabled ? "on" : "off", env->fog.mode ? "on" : "off",
                          env->ssao.enabled ? "on" : "off", env->ssil.enabled ? "on" : "off",
-                         env->bloom.mode ? "on" : "off", scene.sunOn ? "on" : "off"),
+                         env->bloom.mode ? "on" : "off", MS_GetRenderSettings(scene).sunOn ? "on" : "off"),
                          12, 10, 16, (Color){ 230, 230, 230, 160 });
 
                 if (spec.active) {
@@ -959,7 +936,7 @@ int main(int argc, char **argv)
                 char msg[512];
                 float yaw = spec.active ? spec.yaw : player.yaw, pitch = spec.active ? spec.pitch : player.pitch;
                 DesignerOpenPrompt(&designer, Unescape(submitText));
-                bool ok = Submit(&scene, &designer, camera, yaw, pitch, shotTarget, msg, sizeof(msg));
+                bool ok = Submit(&designer, camera, yaw, pitch, shotTarget, msg, sizeof(msg));
                 printf("submit: %s: %s\n", ok ? "ok" : "failed", msg);
                 fflush(stdout);
             }
@@ -967,21 +944,16 @@ int main(int argc, char **argv)
         }
     }
 
-    if (bench && benchView == VIEWPOINT_COUNT) {
+    if (bench && benchView == scene->viewpointCount) {
         BenchCollectProfile(true);  // the last frames' results are still in flight
-        WriteBenchReport(benchTimes, benchShadowUpdates, shadowSize, shadowRange, shadowReuse, headless, benchNote, argc, argv);
+        WriteBenchReport(benchTimes, benchShadowUpdates, shadowSize, shadowRange, shadowMode != MS_SHADOW_ALWAYS, headless, benchNote, argc, argv);
     }
 
     R3D_SetProfilerEnabled(false);  // frees its GL queries
     if (hidden) UnloadRenderTexture(shotTarget);
     if (reuse.rt.id) UnloadRenderTexture(reuse.rt);
     if (reuse.enabled) UnloadShader(reuse.composite);
-    R3D_UnloadSurfaceShader(scene.concrete.shader);
-    R3D_UnloadInstanceBuffer(scene.instances);
-    R3D_UnloadMesh(scene.cube);
-    for (int i = 0; i < SUN_TILE_COUNT; i++) R3D_UnloadShadowMap(scene.sunShadow[i]);
-    R3D_UnloadAmbientMap(ambient);
-    R3D_UnloadCubemap(sky);
+    MS_Unload(scene);
     R3D_Close();
     CloseWindow();
     return 0;

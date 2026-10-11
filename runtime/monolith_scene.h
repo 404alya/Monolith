@@ -8,8 +8,12 @@
 // only (camera-fitted sun shadow, no depth pre-pass toggle, no fog cache).
 //
 // Minimal use:
-//     R3D_Init(w, h);
 //     char err[512];
+//     InitWindow(w, h, "game");
+//     // optional: the map's shadow map size is an R3D init hint, so peek at it first
+//     MS_Scene *peek = MS_Load("maps/forest", &(MS_LoadOptions){ .noGpu = true }, err, sizeof(err));
+//     if (peek) { MS_SetInitHints(peek); MS_Unload(peek); }
+//     R3D_Init(w, h);
 //     MS_Scene *scene = MS_Load("maps/forest", NULL, err, sizeof(err));
 //     if (!scene) { puts(err); return 1; }
 //     MS_ApplyEnvironment(scene);
@@ -28,14 +32,17 @@
 //         ... your R3D_Draw* calls ...
 //     R3D_End();
 //
-// STATUS: interface draft written before implementation (docs/design-v2.md section 3).
-// The stream that implements it may refine it; it updates this comment and the design note.
+// The map format reference is the header comment of monolith_scene.c (and docs/design-v2.md
+// section 2). Scene contents are read-only for callers; everything the runtime owns (GPU
+// resources, file text, caches) is freed by MS_Unload. One scene can be drawn at a time
+// per R3D context (R3D's environment and fog bake are global).
 #ifndef MONOLITH_SCENE_H
 #define MONOLITH_SCENE_H
 
 #include <r3d/r3d.h>
 #include <raylib.h>
 #include <stdbool.h>
+#include <stdio.h>
 
 #define MS_FORMAT_VERSION       2       // newest map format this runtime reads
 
@@ -49,6 +56,7 @@
 #define MS_NAME_MAX             64      // group / material / viewpoint names, incl. the 0
 #define MS_PATH_MAX             1024
 #define MS_LINE_MAX             1024    // longest accepted map line (characters)
+#define MS_DEFAULT_EYE_HEIGHT   1.62f   // eye above the spawn's feet (for the viewpoint made from the spawn)
 
 // ======================================================================================
 // Scene contents (read-only for callers; valid until the next MS_Poll / MS_Reload)
@@ -187,6 +195,12 @@ MS_ReloadResult MS_Reload(MS_Scene *scene, const char *path, char *err, int errS
 
 const char *MS_Error(const MS_Scene *scene);    // last failed (re)load, "" after a success
 
+// R3D hints that only take effect before R3D_Init (today: the sun's shadow map size, from
+// env shadow.size or MS_LoadOptions.shadowSizeOverride). Call it after InitWindow (R3D_SetHint
+// queries GL) and before R3D_Init, e.g. with a noGpu scene. A reload that changes shadow.size
+// keeps the old size until a restart.
+void MS_SetInitHints(const MS_Scene *scene);
+
 // Line `line` (1-based) of the loaded map's text, without the newline
 bool MS_GetLine(const MS_Scene *scene, int line, char *out, int outSize);
 
@@ -208,9 +222,10 @@ typedef enum {
 // Runtime switches that are not part of the map (the editor's toggles and A/B flags)
 typedef struct {
     bool sunOn;             // default true
-    MS_ShadowMode shadowMode;
-    float fogCacheVoxel;    // > 0: bake the fog's sun visibility (needs MS_PATCHED_R3D), 0 = off
-    int fogCacheSub;
+    MS_ShadowMode shadowMode;   // default MS_SHADOW_TILES (without MS_PATCHED_R3D: MS_SHADOW_CAMERA)
+    float fogCacheVoxel;    // > 0: bake the fog's sun visibility (needs MS_PATCHED_R3D), 0 = off (default)
+    int fogCacheSub;        // subsamples^3 per voxel, default 2
+    bool depthPrepass;      // default true: R3D_SetDepthPrepass (needs MS_PATCHED_R3D; R3D-global)
 } MS_RenderSettings;
 
 MS_RenderSettings MS_GetRenderSettings(const MS_Scene *scene);
@@ -223,6 +238,12 @@ bool MS_Draw(MS_Scene *scene, Camera3D camera, RenderTexture target);
 // The parts, for use inside your own R3D_Begin*/R3D_End. aspect = target width / height.
 bool MS_PushLights(MS_Scene *scene, Camera3D camera, float aspect);
 void MS_DrawGeometry(MS_Scene *scene);
+
+// Writes the scene's environment as format-2 `env` lines: every R3D_Environment field,
+// sky.*, the ambientSky.* keys that are set, sun.*, shadow.size and the cache hints that are
+// set. scene NULL = the built-in defaults (docs/design-v2.md section 2.6). For --new-map
+// and export. Values are written so that they read back as the same floats.
+bool MS_WriteEnvironment(const MS_Scene *scene, FILE *f);
 
 // ======================================================================================
 // Queries

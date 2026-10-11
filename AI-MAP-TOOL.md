@@ -14,7 +14,7 @@ Instructions for the AI side (Claude Code) of the map designer. Engine and rende
 monolith is an **AI-assisted map designer** for brutalist concrete levels:
 
 - **The game** (`build/linux/monolith`) is the editor and viewer. The developer flies through the level in spectator mode, points the crosshair at a spot, optionally selects boxes, types a request ("make this wall twice as tall", "add a row of pillars here") and submits it.
-- **The level** is a plain-text file, `maps/monolith.map` (`maps/*.map`). Every object is an axis-aligned concrete box. No textures or models.
+- **The level** is a map package, `maps/monolith/` (`maps/<name>/`), whose plain-text map file is `maps/monolith/monolith.map`. Every object is an axis-aligned concrete box. No textures or models.
 - **Claude Code** gets each request in a new terminal window, started by the game in the repo root. It edits the map file. The running game hot-reloads the map, so the change shows up in place without a restart.
 
 You are that Claude Code session. Your job is to change the map (rarely the engine) so it does what the user asked, check the result visually, and report back.
@@ -73,12 +73,12 @@ Work through these sources in this order:
 - **Visibility.** Sun shadows reach about 100 m from the eye (`--shadow` range), fading out from 75 m. Distance fog turns anything beyond ~150 m into a silhouette.
 - **Feet vs. eye.** This is a common source of off-by-1.62 m errors.
   - `--pos x y z` takes the **feet** (eye − 1.62). The **P** key in the game prints `--pos` (feet).
-  - `--eye x y z` takes the **eye**. `request.md`, `request.json`, the `VIEWPOINTS[]` table and the reproduction command all use the eye.
+  - `--eye x y z` takes the **eye**. `request.md`, `request.json`, the map's `viewpoint` lines and the reproduction command all use the eye.
   - Without `--view`, `--pos`/`--eye` place the walking player (the shot renders that player's camera). With `--view n`, `--eye` moves the spectator camera instead and `--look` overrides the viewpoint's angles.
 
 ## 5. Map format reference
 
-Each statement takes one line, so a line number identifies an object. The parser is in `src/map.c`, and the header comment there is authoritative.
+Each statement takes one line, so a line number identifies an object. The parser is in `runtime/monolith_scene.c`, and the header comment there is authoritative (it also lists the format-2 statements: `monolith 2`, `material`/`use`, `env`, `light`, `spawn`, `viewpoint`).
 
 ```
 # comment                      '#' starts a comment anywhere outside "quotes"
@@ -133,7 +133,7 @@ The **groups of the default map**, in file order: `ground`, `entry canyon: walls
 - **Faces:** exactly coplanar overlapping faces are harmless here, because the concrete shader is computed from world position and both faces shade identically. Faces that are *nearly* coplanar (a few mm to cm apart) can flicker, so either align them exactly or separate them clearly.
 - **Keep the box count under `MAX_BOXES`** (8192), and watch what a `repeat` grid multiplies to.
 - **Real scale.** Think in metres (§4). Keep walkways ≥ 2.2 m high and steps ≤ 0.45 m. New boxes should rest on something (ground y = 0, terrace y = 12, a roof) unless the request wants them floating.
-- **Engine changes are allowed when a request needs them**: a new primitive type in `src/map.c`, lighting or atmosphere in `SetupEnvironment()` (`src/atmosphere.c`), the sun in `src/main.c`, shader work. They must follow `PROMPT-INSTRUCTIONS.md` (§7 pitfalls, R3D changes recorded in `submodules/r3d/patches.md`), keep the look unless the request is about the look, and build with **zero warnings on both targets** (`./build.sh` and `./build.sh --win`). If you add a primitive, document it in the `map.c` header comment and in §5 here.
+- **Engine changes are allowed when a request needs them**: a new primitive type in `runtime/monolith_scene.c`, lighting or atmosphere as `env` / `light` lines in the map (the built-in defaults are in `BuiltinEnvironment()` in `runtime/monolith_scene.c`), shader work. They must follow `PROMPT-INSTRUCTIONS.md` (§7 pitfalls, R3D changes recorded in `submodules/r3d/patches.md`), keep the look unless the request is about the look, and build with **zero warnings on both targets** (`./build.sh` and `./build.sh --win`). If you add a primitive, document it in the `map.c` header comment and in §5 here.
 
 ## 7. Verification
 
@@ -141,19 +141,19 @@ Run every command from the repo root. The binary is `./build/linux/monolith`, an
 
 1. **Check the map hash** before editing. Compare with the hash in `request.md` ("at submit: FNV-1a 64 hash …"), using the command printed there:
    ```sh
-   python3 -c "import sys,functools as f;print('%016x'%f.reduce(lambda h,b:((h^b)*0x100000001b3)&(2**64-1),open(sys.argv[1],'rb').read(),0xcbf29ce484222325))" maps/monolith.map
+   python3 -c "import sys,functools as f;print('%016x'%f.reduce(lambda h,b:((h^b)*0x100000001b3)&(2**64-1),open(sys.argv[1],'rb').read(),0xcbf29ce484222325))" maps/monolith/monolith.map
    ```
    If the hash differs, the file changed after the submit, maybe because of another request. Re-read it and re-locate your targets by coordinates and line text, because the line numbers and box indices in `request.md` may be stale.
 2. **Before image.** Run the bundle's reproduction command, with the output put into the bundle folder:
    ```sh
-   ./build/linux/monolith --shot requests/<id>/before.png --shot-size W H --eye X Y Z --look YAW PITCH --map maps/monolith.map
+   ./build/linux/monolith --shot requests/<id>/before.png --shot-size W H --eye X Y Z --look YAW PITCH --map maps/monolith/monolith.map
    ```
    (`--shot` with a relative path writes into the current directory, so always give the bundle path.) `--shot` renders 30 frames and exits; the bundle's command passes `--shot-size W H` with the size of `view.png`, so the image matches `view.png` (pixel-identical in tests; without `--shot-size` shots are 1600 × 900). Add `--pick` to print what the screen centre hits (box, group, map line, point, normal, distance).
    Also save the box list: `./build/linux/monolith --dump-boxes requests/<id>/boxes-before.txt` (one box per line as hex floats).
 3. **Edit the map.** For multi-line edits, prefer one write: the game reloads on every save, so intermediate states flash on the developer's screen. A broken save keeps the old map loaded and shows a red `file:line: message` in the HUD.
 4. **Check that it parses.** A broken map never crashes the game, but it also doesn't load, so the developer keeps seeing the old one. To check the file, load it explicitly:
    ```sh
-   ./build/linux/monolith --dump-boxes requests/<id>/boxes-after.txt --map maps/monolith.map   # no window
+   ./build/linux/monolith --dump-boxes requests/<id>/boxes-after.txt --map maps/monolith/monolith.map   # no window
    ```
    A parse error prints `file:line: message` and exits with status 1. Any `--shot … --map <file>` also refuses to start on a broken map. `--map` is also how to try a draft copy before writing it over the real map. `diff` the two box dumps to confirm that only the intended boxes changed (with inserted lines, the unchanged boxes move as a block).
 5. **After image** from the same camera: `--shot requests/<id>/after.png` with the same `--eye`/`--look`. Then **look at both images** (Read them). Add extra views where the reproduction view can't show the change, e.g. from the other side, from above, or walking height `--eye x 1.62 z`. The 7 presets are `--view 1..7`. Use `--off <digits>` to isolate effects (1 volumetric fog, 2 distance fog, 3 SSAO, 4 SSIL, 5 bloom, 6 sun).
@@ -165,7 +165,7 @@ Run every command from the repo root. The binary is `./build/linux/monolith`, an
    - no unrelated geometry moved (the box diff), and the box count is < 8192.
 7. **Write `requests/<id>/result.md`** (§8).
 
-**Hot reload vs. rebuild.** The game polls the map file about twice a second and reloads it when its content changes. The HUD then shows `map reloaded (N boxes)`. **A map-only edit needs no rebuild and no restart.** A **code edit** (C or R3D) needs `./build.sh` (and `./build.sh --win` for the warning check), and **the developer restarts the game**. Say so in `result.md`. Edits to `resources/shaders/concrete.glsl` need no rebuild, but they need a restart (the shader loads at start-up).
+**Hot reload vs. rebuild.** The game polls the map package (map file, shaders, textures) about twice a second and reloads it when a file's content changes. The HUD then shows `map reloaded (N boxes)`. **A map-only edit needs no rebuild and no restart.** A **code edit** (C or R3D) needs `./build.sh` (and `./build.sh --win` for the warning check), and **the developer restarts the game**. Say so in `result.md`. Edits to the package's shaders (e.g. `maps/monolith/shaders/concrete.glsl`) hot-reload like the map: no rebuild, no restart.
 
 ## 8. result.md
 
