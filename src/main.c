@@ -69,7 +69,9 @@
 //   world bounds), else by the same map line + index within it + group; the HUD says if any
 //   got lost.
 //
-// Command line:
+// Command line (an unknown flag, a missing or unparsable value, a value that is itself a
+// --flag, or a non-finite / out-of-range number prints a message and exits 1 before any
+// window opens):
 //   --shot <file>  render 30 frames offscreen (1600x900) in a hidden window (never mapped,
 //                  so the window manager doesn't show it), save the image to <file> and exit.
 //                  No hot reload or request polling during shots
@@ -266,6 +268,9 @@
 #include "windowemu.h"
 #include "settings.h"
 #include "settingspanel.h"
+#include <errno.h>
+#include <limits.h>
+#include <math.h>
 
 // Only needed for glFinish() for --headless (depth clamp: MS_InitRenderer). Declared by hand
 // rather than via <GL/gl.h> / <windows.h> (which clashes with raylib). On Windows x64 there
@@ -600,6 +605,65 @@ static void FreeMainHeap(void)
 
 static int Run(int argc, char **argv);
 
+// #region Command-line values
+// Checks for Run()'s flag loop. Each prints why it failed (stderr) and returns false.
+
+// Camera, look and region numbers must be finite and within this: the sun shadow tiles and
+// the region frames convert them to int (QA2 F4/F5)
+#define ARG_COORD_LIMIT 1e6
+
+// argv[i] is a flag that takes n values: they must exist and must not be flags themselves
+static bool ArgValues(int argc, char **argv, int i, int n)
+{
+    for (int k = 1; k <= n; k++) {
+        if (i + k >= argc) {
+            fprintf(stderr, "monolith: %s needs %d value%s\n", argv[i], n, n == 1 ? "" : "s");
+            return false;
+        }
+        if (strncmp(argv[i + k], "--", 2) == 0) {
+            fprintf(stderr, "monolith: %s needs %d value%s, got the flag '%s' instead\n", argv[i], n, n == 1 ? "" : "s", argv[i + k]);
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool ArgNumber(const char *flag, const char *s, double lo, double hi, double *out)
+{
+    char *end;
+    errno = 0;
+    double v = strtod(s, &end);
+    if (end == s || *end) {
+        fprintf(stderr, "monolith: %s: '%s' is not a number\n", flag, s);
+        return false;
+    }
+    if (!isfinite(v) || v < lo || v > hi) {
+        fprintf(stderr, "monolith: %s: %s is out of range (%g .. %g)\n", flag, s, lo, hi);
+        return false;
+    }
+    *out = v;
+    return true;
+}
+
+static bool ArgInt(const char *flag, const char *s, long *out)
+{
+    char *end;
+    errno = 0;
+    long v = strtol(s, &end, 10);
+    if (end == s || *end) {
+        fprintf(stderr, "monolith: %s: '%s' is not a whole number\n", flag, s);
+        return false;
+    }
+    if (errno == ERANGE || v < INT_MIN || v > INT_MAX) {
+        fprintf(stderr, "monolith: %s: %s is out of range\n", flag, s);
+        return false;
+    }
+    *out = v;
+    return true;
+}
+
+// #endregion
+
 int main(int argc, char **argv)
 {
     int status = Run(argc, argv);
@@ -682,55 +746,78 @@ static int Run(int argc, char **argv)
     int regionArgCount = 0;
     const char **settingsSets = mainHeap.settingsSet, **settingsChanges = mainHeap.settingsChange;
     int settingsSetCount = 0, settingsChangeCount = 0;
+    // Every flag is checked here, before anything else happens: an unknown flag, a missing
+    // value, a value that is another flag (`--pos 1 --shot x.png` must not eat --shot) or a
+    // number that doesn't parse stops the program with a message and status 1. Safety rule:
+    // a mistyped automated run must never fall through to the interactive (visible) game.
+#define NEED(n) do { if (!ArgValues(argc, argv, i, (n))) return 1; } while (0)
+#define NUM(k, lo, hi, dst) do { double v_; if (!ArgNumber(argv[i], argv[i + (k)], (lo), (hi), &v_)) return 1; (dst) = v_; } while (0)
+#define INT(k, dst) do { long v_; if (!ArgInt(argv[i], argv[i + (k)], &v_)) return 1; (dst) = (int)v_; } while (0)
+    const char *inspectPath = NULL;     // --inspect-model (runs after every flag is checked)
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--shot") == 0 && i + 1 < argc) shotPath = argv[++i];
-        else if (strcmp(argv[i], "--shot-size") == 0 && i + 2 < argc) {
-            shotW = (int)Clamp((float)atoi(argv[i + 1]), 64.0f, 8192.0f);
-            shotH = (int)Clamp((float)atoi(argv[i + 2]), 64.0f, 8192.0f);
+        const char *a = argv[i];
+        if (strcmp(a, "--shot") == 0) { NEED(1); shotPath = argv[++i]; }
+        else if (strcmp(a, "--shot-size") == 0) {
+            NEED(2);
+            INT(1, shotW);
+            INT(2, shotH);
+            shotW = shotW < 64 ? 64 : shotW > 8192 ? 8192 : shotW;
+            shotH = shotH < 64 ? 64 : shotH > 8192 ? 8192 : shotH;
             i += 2;
         }
-        else if (strcmp(argv[i], "--off") == 0 && i + 1 < argc) offKeys = argv[++i];
-        else if (strcmp(argv[i], "--view") == 0 && i + 1 < argc) startView = atoi(argv[++i]);
-        else if (strcmp(argv[i], "--ao") == 0 && i + 1 < argc) aoMode = argv[++i];
-        else if (strcmp(argv[i], "--bloom") == 0 && i + 1 < argc) bloomMode = argv[++i];
-        else if (strcmp(argv[i], "--fx") == 0 && i + 1 < argc) {
-            fxSettings[fxCount++] = argv[i + 1];
+        else if (strcmp(a, "--off") == 0) { NEED(1); offKeys = argv[++i]; }
+        else if (strcmp(a, "--view") == 0) { NEED(1); INT(1, startView); i++; }
+        else if (strcmp(a, "--ao") == 0) { NEED(1); aoMode = argv[++i]; }
+        else if (strcmp(a, "--bloom") == 0) { NEED(1); bloomMode = argv[++i]; }
+        else if (strcmp(a, "--fx") == 0) { NEED(1); fxSettings[fxCount++] = argv[++i]; }
+        else if (strcmp(a, "--bench") == 0) bench = true;
+        else if (strcmp(a, "--bench-still") == 0) bench = benchStill = true;
+        else if (strcmp(a, "--no-profile") == 0) benchProfile = false;
+        else if (strcmp(a, "--headless") == 0) headless = true;
+        else if (strcmp(a, "--window-msaa") == 0) windowMsaa = 1;
+        else if (strcmp(a, "--quality") == 0) { NEED(1); qualityName = argv[++i]; }
+        else if (strcmp(a, "--settings") == 0) { NEED(1); settingsPath = argv[++i]; }
+        else if (strcmp(a, "--no-settings") == 0) noSettings = true;
+        else if (strcmp(a, "--settings-set") == 0) { NEED(1); settingsSets[settingsSetCount++] = argv[++i]; }
+        else if (strcmp(a, "--settings-change") == 0) { NEED(1); settingsChanges[settingsChangeCount++] = argv[++i]; }
+        else if (strcmp(a, "--settings-panel") == 0) settingsPanelFlag = true;
+        else if (strcmp(a, "--bench-window") == 0) {
+            NEED(1);
+            INT(1, benchWindowSamples);
+            benchWindowSamples = benchWindowSamples < 0 ? 0 : benchWindowSamples > 16 ? 16 : benchWindowSamples;
             i++;
         }
-        else if (strcmp(argv[i], "--bench") == 0) bench = true;
-        else if (strcmp(argv[i], "--bench-still") == 0) bench = benchStill = true;
-        else if (strcmp(argv[i], "--no-profile") == 0) benchProfile = false;
-        else if (strcmp(argv[i], "--headless") == 0) headless = true;
-        else if (strcmp(argv[i], "--window-msaa") == 0) windowMsaa = 1;
-        else if (strcmp(argv[i], "--quality") == 0 && i + 1 < argc) qualityName = argv[++i];
-        else if (strcmp(argv[i], "--settings") == 0 && i + 1 < argc) settingsPath = argv[++i];
-        else if (strcmp(argv[i], "--no-settings") == 0) noSettings = true;
-        else if (strcmp(argv[i], "--settings-set") == 0 && i + 1 < argc) settingsSets[settingsSetCount++] = argv[++i];
-        else if (strcmp(argv[i], "--settings-change") == 0 && i + 1 < argc) settingsChanges[settingsChangeCount++] = argv[++i];
-        else if (strcmp(argv[i], "--settings-panel") == 0) settingsPanelFlag = true;
-        else if (strcmp(argv[i], "--bench-window") == 0 && i + 1 < argc)
-            benchWindowSamples = (int)Clamp((float)atoi(argv[++i]), 0.0f, 16.0f);
-        else if (strcmp(argv[i], "--shadow-always") == 0) shadowMode = MS_SHADOW_ALWAYS;
-        else if (strcmp(argv[i], "--shadow-camera") == 0) { if (shadowMode != (int)MS_SHADOW_ALWAYS) shadowMode = MS_SHADOW_CAMERA; }
-        else if (strcmp(argv[i], "--new-map") == 0 && i + 1 < argc) newMapName = argv[++i];
-        else if (strcmp(argv[i], "--export") == 0 && i + 1 < argc) exportDir = argv[++i];
-        else if (strcmp(argv[i], "--import") == 0 && i + 2 < argc) { importDir = argv[i + 1]; importName = argv[i + 2]; i += 2; }
-        else if (strcmp(argv[i], "--fog-cache") == 0 && i + 2 < argc) {
+        else if (strcmp(a, "--shadow-always") == 0) shadowMode = MS_SHADOW_ALWAYS;
+        else if (strcmp(a, "--shadow-camera") == 0) { if (shadowMode != (int)MS_SHADOW_ALWAYS) shadowMode = MS_SHADOW_CAMERA; }
+        else if (strcmp(a, "--new-map") == 0) { NEED(1); newMapName = argv[++i]; }
+        else if (strcmp(a, "--export") == 0) { NEED(1); exportDir = argv[++i]; }
+        else if (strcmp(a, "--import") == 0) { NEED(2); importDir = argv[i + 1]; importName = argv[i + 2]; i += 2; }
+        else if (strcmp(a, "--fog-cache") == 0) {
             // Clamped: 0.25 m is already 228 MB over the default region; 0 or less turns it off
-            fogCacheVoxel = (float)atof(argv[i + 1]);
+            NEED(2);
+            NUM(1, -1e9, 1e9, fogCacheVoxel);
+            INT(2, fogCacheSub);
             fogCacheVoxel = fogCacheVoxel > 0.0f ? Clamp(fogCacheVoxel, 0.25f, 8.0f) : 0.0f;
-            fogCacheSub = (int)Clamp((float)atoi(argv[i + 2]), 1.0f, 4.0f);
+            fogCacheSub = fogCacheSub < 1 ? 1 : fogCacheSub > 4 ? 4 : fogCacheSub;
             i += 2;
         }
-        else if (strcmp(argv[i], "--no-prepass") == 0) noPrepass = true;
-        else if (strcmp(argv[i], "--ao-volume") == 0 && i + 2 < argc) {
-            aoVolumeVoxel = (float)atof(argv[i + 1]);
+        else if (strcmp(a, "--no-prepass") == 0) noPrepass = true;
+        else if (strcmp(a, "--ao-volume") == 0) {
+            NEED(2);
+            NUM(1, -1e9, 1e9, aoVolumeVoxel);
+            NUM(2, -1e9, 1e9, aoVolumeIntensity);
             aoVolumeVoxel = aoVolumeVoxel > 0.0f ? Clamp(aoVolumeVoxel, 0.25f, 4.0f) : 0.0f;
-            aoVolumeIntensity = Clamp((float)atof(argv[i + 2]), 0.01f, 4.0f);
+            aoVolumeIntensity = Clamp(aoVolumeIntensity, 0.01f, 4.0f);
             i += 2;
         }
-        else if (strcmp(argv[i], "--render-scale") == 0 && i + 1 < argc) renderScale = Clamp((float)atof(argv[++i]), 0.25f, 1.0f);
-        else if (strcmp(argv[i], "--upscale") == 0 && i + 1 < argc) {
+        else if (strcmp(a, "--render-scale") == 0) {
+            NEED(1);
+            NUM(1, -1e9, 1e9, renderScale);
+            renderScale = Clamp(renderScale, 0.25f, 1.0f);
+            i++;
+        }
+        else if (strcmp(a, "--upscale") == 0) {
+            NEED(1);
             const char *m = argv[++i];
             if (strcmp(m, "nearest") == 0) upscale = R3D_UPSCALE_NEAREST;
             else if (strcmp(m, "linear") == 0) upscale = R3D_UPSCALE_LINEAR;
@@ -741,59 +828,97 @@ static int Run(int argc, char **argv)
                 return 1;
             }
         }
-        else if (strcmp(argv[i], "--bench-frames") == 0 && i + 1 < argc)
-            benchFrames = (int)Clamp((float)atoi(argv[++i]), 10.0f, (float)BENCH_FRAMES_LIMIT);
-        else if (strcmp(argv[i], "--note") == 0 && i + 1 < argc) benchNote = argv[++i];
-        else if (strcmp(argv[i], "--map") == 0 && i + 1 < argc) mapPath = argv[++i];
-        else if (strcmp(argv[i], "--dump-boxes") == 0 && i + 1 < argc) dumpPath = argv[++i];
-        else if (strcmp(argv[i], "--dump-scene") == 0 && i + 1 < argc) { dumpScenePath = argv[++i]; dumpSceneDiff = false; }
-        else if (strcmp(argv[i], "--dump-scene-diff") == 0 && i + 1 < argc) { dumpScenePath = argv[++i]; dumpSceneDiff = true; }
-        else if (strcmp(argv[i], "--inspect-model") == 0 && i + 1 < argc) return InspectModel(argv[++i]);
-        else if (strcmp(argv[i], "--reload-test") == 0 && i + 1 < argc) reloadTestPath = argv[++i];
-        else if (strcmp(argv[i], "--pick") == 0) pickFlag = true;
-        else if (strcmp(argv[i], "--pick-at") == 0 && i + 2 < argc) {
-            pickAtArgs[pickAtCount++] = (Vector2){ (float)atof(argv[i + 1]), (float)atof(argv[i + 2]) };
+        else if (strcmp(a, "--bench-frames") == 0) {
+            NEED(1);
+            INT(1, benchFrames);
+            benchFrames = benchFrames < 10 ? 10 : benchFrames > BENCH_FRAMES_LIMIT ? BENCH_FRAMES_LIMIT : benchFrames;
+            i++;
+        }
+        else if (strcmp(a, "--note") == 0) { NEED(1); benchNote = argv[++i]; }
+        else if (strcmp(a, "--map") == 0) { NEED(1); mapPath = argv[++i]; }
+        else if (strcmp(a, "--dump-boxes") == 0) { NEED(1); dumpPath = argv[++i]; }
+        else if (strcmp(a, "--dump-scene") == 0) { NEED(1); dumpScenePath = argv[++i]; dumpSceneDiff = false; }
+        else if (strcmp(a, "--dump-scene-diff") == 0) { NEED(1); dumpScenePath = argv[++i]; dumpSceneDiff = true; }
+        else if (strcmp(a, "--inspect-model") == 0) { NEED(1); inspectPath = argv[++i]; }
+        else if (strcmp(a, "--reload-test") == 0) { NEED(1); reloadTestPath = argv[++i]; }
+        else if (strcmp(a, "--pick") == 0) pickFlag = true;
+        else if (strcmp(a, "--pick-at") == 0) {
+            NEED(2);
+            Vector2 v;
+            NUM(1, -ARG_COORD_LIMIT, ARG_COORD_LIMIT, v.x);
+            NUM(2, -ARG_COORD_LIMIT, ARG_COORD_LIMIT, v.y);
+            pickAtArgs[pickAtCount++] = v;
             i += 2;
         }
-        else if (strcmp(argv[i], "--shot-hud") == 0) shotHud = true;
-        else if (strcmp(argv[i], "--no-frame-reuse") == 0) frameReuseFlag = 0;
-        else if (strcmp(argv[i], "--frame-reuse") == 0) frameReuseFlag = 1;
-        else if (strcmp(argv[i], "--submit") == 0 && i + 1 < argc) submitText = argv[++i];
-        else if (strcmp(argv[i], "--submit-wait") == 0 && i + 1 < argc) submitWait = (float)atof(argv[++i]);
-        else if (strcmp(argv[i], "--close-submitted") == 0) closeSubmitted = true;
-        else if (strcmp(argv[i], "--type") == 0 && i + 1 < argc) typeText = argv[++i];
-        else if (strcmp(argv[i], "--classify") == 0 && i + 1 < argc) classifyText = argv[++i];
-        else if (strcmp(argv[i], "--classify-kind") == 0 && i + 1 < argc) classifyKind = argv[++i];
-        else if (strcmp(argv[i], "--select") == 0 && i + 1 < argc) {
-            selectLines[selectLineCount++] = atoi(argv[++i]);
-        }
-        else if (strcmp(argv[i], "--region") == 0 && i + 4 < argc) {
-            regionArgs[regionArgCount++] = (Rectangle){ atof(argv[i + 1]), atof(argv[i + 2]), atof(argv[i + 3]), atof(argv[i + 4]) };
+        else if (strcmp(a, "--shot-hud") == 0) shotHud = true;
+        else if (strcmp(a, "--no-frame-reuse") == 0) frameReuseFlag = 0;
+        else if (strcmp(a, "--frame-reuse") == 0) frameReuseFlag = 1;
+        else if (strcmp(a, "--submit") == 0) { NEED(1); submitText = argv[++i]; }
+        else if (strcmp(a, "--submit-wait") == 0) { NEED(1); NUM(1, 0.0, 86400.0, submitWait); i++; }
+        else if (strcmp(a, "--close-submitted") == 0) closeSubmitted = true;
+        else if (strcmp(a, "--type") == 0) { NEED(1); typeText = argv[++i]; }
+        else if (strcmp(a, "--classify") == 0) { NEED(1); classifyText = argv[++i]; }
+        else if (strcmp(a, "--classify-kind") == 0) { NEED(1); classifyKind = argv[++i]; }
+        else if (strcmp(a, "--select") == 0) { NEED(1); INT(1, selectLines[selectLineCount]); selectLineCount++; i++; }
+        else if (strcmp(a, "--region") == 0) {
+            // (finite and bounded: the region frame is drawn with integer pixel coordinates)
+            NEED(4);
+            Rectangle r;
+            NUM(1, -ARG_COORD_LIMIT, ARG_COORD_LIMIT, r.x);
+            NUM(2, -ARG_COORD_LIMIT, ARG_COORD_LIMIT, r.y);
+            NUM(3, -ARG_COORD_LIMIT, ARG_COORD_LIMIT, r.width);
+            NUM(4, -ARG_COORD_LIMIT, ARG_COORD_LIMIT, r.height);
+            regionArgs[regionArgCount++] = r;
             i += 4;
         }
-        else if (strcmp(argv[i], "--shadow") == 0 && i + 2 < argc) {
+        else if (strcmp(a, "--shadow") == 0) {
             // Clamped: a zero range or size would divide by zero in the shadow tile layout
-            shadowSize = (int)Clamp((float)atoi(argv[i + 1]), 256.0f, 16384.0f);
-            shadowRange = Clamp((float)atof(argv[i + 2]), 10.0f, 2000.0f);
+            NEED(2);
+            INT(1, shadowSize);
+            NUM(2, -1e9, 1e9, shadowRange);
+            shadowSize = shadowSize < 256 ? 256 : shadowSize > 16384 ? 16384 : shadowSize;
+            shadowRange = Clamp(shadowRange, 10.0f, 2000.0f);
             i += 2;
         }
-        else if (strcmp(argv[i], "--pos") == 0 && i + 3 < argc) {
-            player.feet = (Vector3){ atof(argv[i + 1]), atof(argv[i + 2]), atof(argv[i + 3]) };
+        else if (strcmp(a, "--pos") == 0) {
+            // (finite and bounded: the sun shadow tiles key on the camera position as integers)
+            NEED(3);
+            NUM(1, -ARG_COORD_LIMIT, ARG_COORD_LIMIT, player.feet.x);
+            NUM(2, -ARG_COORD_LIMIT, ARG_COORD_LIMIT, player.feet.y);
+            NUM(3, -ARG_COORD_LIMIT, ARG_COORD_LIMIT, player.feet.z);
             posSet = true;
             i += 3;
-        } else if (strcmp(argv[i], "--eye") == 0 && i + 3 < argc) {
-            eye = (Vector3){ atof(argv[i + 1]), atof(argv[i + 2]), atof(argv[i + 3]) };
+        } else if (strcmp(a, "--eye") == 0) {
+            NEED(3);
+            double ey;
+            NUM(1, -ARG_COORD_LIMIT, ARG_COORD_LIMIT, eye.x);
+            NUM(2, -ARG_COORD_LIMIT, ARG_COORD_LIMIT, ey);
+            NUM(3, -ARG_COORD_LIMIT, ARG_COORD_LIMIT, eye.z);
+            eye.y = (float)ey;
             // in double, so --eye x y z lands on the same float feet as --pos x y-1.62 z
-            player.feet = (Vector3){ eye.x, (float)(atof(argv[i + 2]) - EYE_HEIGHT), eye.z };
+            player.feet = (Vector3){ eye.x, (float)(ey - EYE_HEIGHT), eye.z };
             eyeSet = true;
             i += 3;
-        } else if (strcmp(argv[i], "--look") == 0 && i + 2 < argc) {
-            player.yaw = atof(argv[i + 1]) * DEG2RAD;
-            player.pitch = atof(argv[i + 2]) * DEG2RAD;
+        } else if (strcmp(a, "--look") == 0) {
+            NEED(2);
+            double yaw, pitch;
+            NUM(1, -ARG_COORD_LIMIT, ARG_COORD_LIMIT, yaw);
+            NUM(2, -ARG_COORD_LIMIT, ARG_COORD_LIMIT, pitch);
+            player.yaw = yaw * DEG2RAD;
+            player.pitch = pitch * DEG2RAD;
             lookSet = true;
             i += 2;
         }
+        else {
+            if (a[0] == '-') fprintf(stderr, "monolith: unknown flag '%s' (the flags are listed in the header comment of src/main.c)\n", a);
+            else fprintf(stderr, "monolith: unexpected argument '%s' (no flag takes it as a value)\n", a);
+            return 1;
+        }
     }
+#undef NEED
+#undef NUM
+#undef INT
+    if (inspectPath) return InspectModel(inspectPath);
 
     // --ao / --bloom / --fx / --quality / --settings-set: reject unknown names before a window opens
     MS_AoMode aoArg = MS_AO_FULL;

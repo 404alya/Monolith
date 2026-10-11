@@ -201,7 +201,7 @@ Selected objects get an orange tint and outline, plus a faint always-on-top outl
 
 **Prompt box.** Typing; Backspace / Delete (Ctrl+Backspace deletes a word); ← → ↑ ↓; Home / End (with Ctrl: the whole text); Ctrl+V paste; Shift+Enter new line; **Enter sends** the request; **Esc cancels** and discards the text. The text has no fixed limit (a sanity cap of 1 MB stops a runaway paste); its size in bytes is shown as a counter. While the box is open, every game key and the camera are frozen and the mouse cursor is free (they stay frozen for 2 more frames after it closes). An empty prompt can't be sent. If sending fails, the box stays open with the text, and the HUD shows the error and the bundle path.
 
-**Command line** (the `main.c` header comment is authoritative)
+**Command line** (the `main.c` header comment is authoritative). An unknown flag, a missing or unparsable value, a value that is itself a `--flag`, or a non-finite / out-of-range number (positions, angles and regions: |v| ≤ 1e6) prints a message and exits 1 before any window opens.
 
 | Flag | Meaning |
 |---|---|
