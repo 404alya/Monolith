@@ -234,7 +234,7 @@ stays in `src/`.
   instance-buffer name caching).
 - `version` changes on every successful (re)load; everything that changes the image
   without a reload is in `R3D_GetEnvironment()` or in `MS_RenderSettings`, so the game's
-  `FrameKey` = camera + environment bytes + render settings + `version` + window size.
+  `FrameKey` = camera + environment bytes + render settings + graphics settings (`GfxSettings`, F2) + R3D's AA mode + `version` + window size.
 
 ---
 

@@ -320,6 +320,19 @@ static bool WriteReadme(const char *path, const MS_Scene *s, const char *name, c
         "unless that bug is fixed upstream.\n\n");
 
     fprintf(f,
+        "## Graphics quality presets\n\n"
+        "`MS_QualityPreset(MS_QUALITY_LOW / MEDIUM / HIGH / ULTRA)` gives the editor's presets as an `MS_Quality` "
+        "(render scale and upscale filter, anti-aliasing, sun shadow size / range / softness / mode, AO mode and the "
+        "baked occlusion volume, SSAO/SSIL samples and radius, volumetric fog step / length / cache, distance fog, "
+        "bloom, SSR/SSGI, exposure and colour trims, depth pre-pass). Every value is relative to the map, so ultra "
+        "renders exactly what the map describes and an effect the map turns off stays off. Apply it with "
+        "`MS_ApplyQuality(scene, &q)` right after every `MS_ApplyEnvironment(scene)`, then "
+        "`MS_ApplyRenderResolution(scene, w, h)`; `q.shadowSize` is an R3D init hint, so pass it as "
+        "`MS_LoadOptions.shadowSizeOverride` to the peek load before `R3D_Init` and to the real load "
+        "(`viewer.c --quality medium` does all of this). Lower presets need the patched R3D for the baked parts "
+        "(fog cache, occlusion volume); with upstream R3D they fall back to the plain passes.\n\n");
+
+    fprintf(f,
         "## Sun shadow and depth clamp\n\n"
         "R3D's sun shadow map has a limited depth range toward the sun; tall casters far away get clipped and their "
         "shadows pop as the camera turns. `MS_InitRenderer()` (call it once after `R3D_Init`) enables `GL_DEPTH_CLAMP` (R3D never "

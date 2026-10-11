@@ -13,7 +13,8 @@
 #
 # Every run uses a hidden window (--shot, --dump-*, ...) or none: nothing appears on screen.
 # What it runs: --dump-boxes, --dump-scene (with and without models), --shot of the default map
-# (two views, camera-fitted shadow and fog cache variants), of tests/models (models, textured /
+# (two views, camera-fitted shadow and fog cache variants; every quality preset, settings files,
+# live settings changes incl. the renderer restart, the settings panel), of tests/models (models, textured /
 # shader materials, shadowed lights), of examples/01_minimal/scene and maps/pine_forest
 # (textured ground, many restyled models), --reload-test both ways
 # and into a broken map, a broken map on the command line, --shot-hud with --select / --region,
@@ -127,6 +128,21 @@ Run shot-render-scale 0 "$M" --shot "$TMP/scale.png" --view 2 --render-scale 0.5
 Run shot-ao-baked 0     "$M" --shot "$TMP/aobaked.png" --view 1 --ao baked
 Run shot-ao-volume 0    "$M" --shot "$TMP/aovol.png" --view 2 --map tests/models --ao-volume 0.5 0.6 --render-scale 0.75
 Run reload-ao-volume 0  "$M" --shot "$TMP/aovol2.png" --view 1 --ao baked --reload-test tests/models
+# Graphics settings (settings.c, settingspanel.c, MS_Quality): every preset, a settings file
+# written / read / rejected, live changes incl. the renderer restart (shadow map size), the panel
+for q in low medium high ultra; do
+  Run "shot-quality-$q" 0 "$M" --shot "$TMP/q-$q.png" --view 1 --quality "$q"
+done
+Run settings-write 0    "$M" --settings "$TMP/settings.ini" --settings-set preset=medium --settings-set bloom=off \
+                            --settings-set fps_cap=monitor --dump-boxes "$TMP/sb.txt"
+Run settings-read 0     "$M" --shot "$TMP/sr.png" --view 2 --settings "$TMP/settings.ini" --quality low --render-scale 0.6
+printf 'preset = high\nbogus = 1\nrender_scale = abc\n' > "$TMP/bad-settings.ini"
+Run settings-bad-lines 0 "$M" --shot "$TMP/sbad.png" --view 2 --settings "$TMP/bad-settings.ini"
+Run settings-bad-flag 1 "$M" --dump-boxes "$TMP/sb2.txt" --settings-set nonsense=1
+Run settings-restart 0  "$M" --shot "$TMP/srs.png" --view 2 --quality low --settings-change preset=ultra
+Run settings-restart-models 0 "$M" --shot "$TMP/srm.png" --view 1 --map tests/models --settings-change shadow_size=4096 \
+                            --settings-change ao=baked --settings-change ssr=on --settings-change ssgi=on
+Run settings-panel 0    "$M" --shot "$TMP/panel.png" --view 2 --shot-hud --settings-panel --quality high
 if [[ $BENCH == 1 ]]; then
   Run bench-window 0    "$M" --bench --headless --bench-frames 10 --bench-window 4 --no-profile --note "leakcheck (not a measurement)"
 fi
@@ -158,6 +174,7 @@ if [[ $MODE == lsan ]]; then
   echo "leakcheck: running the examples ..."
   Run ex-01-minimal 0         "$EX_DIR/01_minimal/minimal" --shot "$TMP/e1.png"
   Run ex-01-minimal-v2 0      "$EX_DIR/01_minimal/minimal" --shot "$TMP/e1b.png" --view 2
+  Run ex-01-minimal-quality 0 "$EX_DIR/01_minimal/minimal" --shot "$TMP/e1q.png" --view 2 --quality medium
   Run ex-02-before 0          "$EX_DIR/02_existing_project/before" --shot "$TMP/e2a.png"
   Run ex-02-after 0           "$EX_DIR/02_existing_project/after" --shot "$TMP/e2b.png"
   Run ex-03-live-editing 0    "$EX_DIR/03_live_editing/live_editing" --shot "$TMP/e3.png"

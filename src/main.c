@@ -13,6 +13,12 @@
 //   1..6           toggle effects (volumetric fog, fog, SSAO, SSIL, bloom, sun): each key
 //                  flips that effect relative to the map's setting; flips survive hot reloads
 //   F1             toggle HUD (also hides the crosshair and selection overlay)
+//   F2             graphics settings panel (settingspanel.c): preset low/medium/high/ultra,
+//                  then Display, Shadows, Ambient occlusion, Fog, Post, Performance rows.
+//                  UP/DOWN select, LEFT/RIGHT (or the mouse: arrows, wheel) change, changes
+//                  apply at once (a shadow map size restarts the renderer, ~1 s), ESC / F2
+//                  close; saved to the settings file on close. Camera and game keys are frozen
+//                  and the cursor is free while it is open
 //   "(cached)" after the fps: nothing changed, the frame reused the last R3D image
 //   F12            screenshot           TAB    toggle spectator camera
 //   F9             export the map: package + scene runtime + README into
@@ -82,6 +88,26 @@
 //                  the ambient light with it (R3D patch 11; on top of SSAO/SSIL unless --ao baked)
 //   --bloom off    bloom pass off, exposure x1.19 instead (same mean brightness, no faint
 //                  halo at bright openings; atmosphere.c). Default: on
+//   --quality <low|medium|high|ultra>   graphics quality preset for this run (MS_Quality in
+//                  runtime/monolith_scene.h; ultra = the map exactly, the default). The flags
+//                  --ao, --ao-volume, --bloom, --shadow, --shadow-camera/-always, --fog-cache,
+//                  --render-scale, --upscale, --window-msaa, --no-prepass and --(no-)frame-reuse
+//                  are graphics settings too: given, each overrides that one setting for this run
+//                  (after --quality). None of them is saved
+//   --settings <file>   graphics settings file to read (and, from the panel, write) instead of
+//                  ~/.config/monolith/settings.ini ($XDG_CONFIG_HOME; Windows:
+//                  %APPDATA%\monolith\settings.ini; else next to the executable). Only the
+//                  interactive game reads the default file: --shot, --bench, --dump-*, --export
+//                  and --classify never read settings unless --settings names a file, so their
+//                  images and numbers stay deterministic
+//   --no-settings  neither read nor save a settings file
+//   --settings-set key=value   change one setting as if in the panel (repeatable, after every
+//                  other flag): applies to this run and is saved to the settings file. Keys = the
+//                  file's (settings.c), e.g. preset=medium, render_scale=0.75, ao=baked
+//   --settings-change key=value   with --shot: after 10 frames, apply this change through the
+//                  panel's live path (repeatable; shadow_size restarts the renderer). The shot
+//                  must equal a run started with --settings-set key=value
+//   --settings-panel   with --shot --shot-hud: draw the open settings panel into the shot
 //   --fx key=value   override one effect setting, repeatable, e.g. --fx ssil.radius=2.5
 //                  (keys: ssao./ssil.samples, .radius; ssao.intensity/.power; ssil.gi/.ao;
 //                  bloom.levels/.intensity; exposure). Applied after --ao / --bloom
@@ -223,6 +249,8 @@
 #include "inspect.h"
 #include "dumpscene.h"
 #include "windowemu.h"
+#include "settings.h"
+#include "settingspanel.h"
 
 // Only needed for glFinish() for --headless (depth clamp: MS_InitRenderer). Declared by hand
 // rather than via <GL/gl.h> / <windows.h> (which clashes with raylib). On Windows x64 there
@@ -298,18 +326,20 @@ static bool DrawScene(Camera3D camera, RenderTexture target)
 // silently turn a toggled-off effect back on.
 
 typedef struct {
-    const char *aoMode, *bloomMode;
+    const GfxSettings *gfx;     // the graphics settings of this run (file + flags + panel)
     const char **fx;            // the --fx arguments (argv strings)
     int fxCount;
     bool flip[6];               // keys 1-6: volumetric fog, fog, SSAO, SSIL, bloom, sun
 } EffectState;
 
+// The map's environment, then the quality settings (runtime MS_ApplyQuality: --ao, --bloom,
+// --render-scale, ... and the settings panel land there), then --fx, then the toggles; and
+// R3D's resolution for the (possibly new) render scale
 static void ApplyEnvironment(const EffectState *fx)
 {
     MS_ApplyEnvironment(scene);
+    MS_ApplyQuality(scene, &fx->gfx->q);
     R3D_Environment *env = R3D_GetEnvironment();
-    ApplyAoMode(env, fx->aoMode);
-    ApplyBloomMode(env, fx->bloomMode);
     for (int k = 0; k < fx->fxCount; k++) ApplyFxSetting(env, fx->fx[k]);
 
     // Flipping a mode that is off turns on the mode the default map uses
@@ -321,6 +351,45 @@ static void ApplyEnvironment(const EffectState *fx)
     MS_RenderSettings rs = MS_GetRenderSettings(scene);
     rs.sunOn = !fx->flip[5];
     MS_SetRenderSettings(scene, rs);
+    MS_ApplyRenderResolution(scene, GetScreenWidth(), GetScreenHeight());
+}
+
+// Shadow map size is an R3D init hint: a new size closes and re-initialises R3D and loads the
+// map again (~1 s). False = nothing changed (the map on disk doesn't load: msg says why);
+// *fatal = R3D was closed but the map then failed to load (the game has to quit).
+static bool RestartRenderer(MS_LoadOptions *opt, int shadowSize, bool *fatal, char *msg, int msgSize)
+{
+    *fatal = false;
+    char path[MS_PATH_MAX];
+    snprintf(path, sizeof(path), "%s", scene->path);
+    MS_LoadOptions peekOpt = *opt;
+    peekOpt.noGpu = true;
+    peekOpt.shadowSizeOverride = shadowSize;
+    char err[512];
+    MS_Scene *peek = MS_Load(path, &peekOpt, err, sizeof(err));
+    if (!peek) { snprintf(msg, msgSize, "renderer not restarted: %.200s", err); return false; }
+    MS_Unload(scene);
+    scene = NULL;
+    R3D_Close();
+    MS_SetInitHints(peek);
+    MS_Unload(peek);
+    R3D_Init(GetScreenWidth(), GetScreenHeight());
+    R3D_SetAntiAliasingMode(R3D_ANTI_ALIASING_MODE_FXAA);
+    MS_InitRenderer();
+    opt->shadowSizeOverride = shadowSize;
+    opt->noGpu = false;
+    scene = MS_Load(path, opt, err, sizeof(err));
+    if (!scene) { *fatal = true; snprintf(msg, msgSize, "renderer restart failed: %.200s", err); return false; }
+    snprintf(msg, msgSize, "renderer restarted: sun shadow map %d px", R3D_GetHint(R3D_HINT_SHADOW_DIR_SIZE));
+    return true;
+}
+
+// fps cap of the settings: 0 = uncapped, -1 = the monitor's refresh rate
+static int FpsTarget(int cap)
+{
+    if (cap >= 0) return cap;
+    int hz = GetMonitorRefreshRate(GetCurrentMonitor());
+    return hz > 0 ? hz : 60;
 }
 
 // #endregion
@@ -353,7 +422,9 @@ static void ApplyEnvironment(const EffectState *fx)
 typedef struct {
     Camera3D camera;
     R3D_Environment env;    // every effect setting (the map's, --ao/--bloom/--fx, toggles 1-5)
-    MS_RenderSettings render;   // toggle 6 (sunOn), shadow mode, fog cache, pre-pass
+    MS_RenderSettings render;   // toggle 6 (sunOn), shadow mode, fog cache, pre-pass, render scale
+    GfxSettings gfx;            // every graphics setting (most also show up in env / render)
+    int antiAliasing;           // R3D's AA mode (not part of the environment)
     unsigned int sceneVersion;
     int width, height;      // R3D resolution = window size
 } FrameKey;
@@ -368,13 +439,15 @@ typedef struct {
 } FrameReuse;
 
 // Fills every byte of the key (padding included), so memcmp is meaningful
-static void MakeFrameKey(FrameKey *k, Camera3D camera)
+static void MakeFrameKey(FrameKey *k, Camera3D camera, const GfxSettings *gfx)
 {
     memset(k, 0, sizeof(*k));
     memcpy(&k->camera, &camera, sizeof(camera));
     memcpy(&k->env, R3D_GetEnvironment(), sizeof(k->env));
     MS_RenderSettings rs = MS_GetRenderSettings(scene);
     memcpy(&k->render, &rs, sizeof(rs));
+    memcpy(&k->gfx, gfx, sizeof(*gfx));
+    k->antiAliasing = (int)R3D_GetAntiAliasingMode();
     k->sceneVersion = scene->version;
     k->width = GetScreenWidth();
     k->height = GetScreenHeight();
@@ -488,6 +561,8 @@ static char *Unescape(const char *in)
 // the repeatable command-line arguments (sized by argc) and the --bench tables
 static struct {
     const char **fx;            // --fx key=value
+    const char **settingsSet;   // --settings-set key=value
+    const char **settingsChange;    // --settings-change key=value
     int *selectLines;           // --select <line>
     Rectangle *regions;         // --region x y w h
     double *benchTimes;         // [view * benchFrames + frame]
@@ -497,6 +572,8 @@ static struct {
 static void FreeMainHeap(void)
 {
     free(mainHeap.fx);
+    free(mainHeap.settingsSet);
+    free(mainHeap.settingsChange);
     free(mainHeap.selectLines);
     free(mainHeap.regions);
     free(mainHeap.benchTimes);
@@ -530,21 +607,27 @@ static int Run(int argc, char **argv)
     int shotW = 1600, shotH = 900;  // --shot-size
     const char *offKeys = "";
     int startView = 0;
-    int shadowSize = 0;         // --shadow; 0 = the map's (env shadow.size / sun.range)
+    int shadowSize = 0;         // --shadow; 0 = not given (the map's env shadow.size / sun.range)
     float shadowRange = 0.0f;
     bool bench = false;
     bool headless = false;      // --bench without a visible window
     int benchWindowSamples = -1;    // --bench-window <samples>; -1 = off
-    bool windowMsaa = false;    // --window-msaa
-    bool depthPrepass = true;   // --no-prepass
-    float renderScale = 1.0f;   // --render-scale
-    float aoVolumeVoxel = 0.0f, aoVolumeIntensity = 1.0f;  // --ao-volume (--ao baked: 0.5 1)
-    R3D_UpscaleMode upscale = R3D_UPSCALE_BICUBIC;  // --upscale
-    MS_ShadowMode shadowMode = MS_SHADOW_TILES;     // --shadow-camera / --shadow-always
+    // Graphics flags: each one, when given, overrides that graphics setting for this run (the
+    // settings file, if read, or the defaults; -1 / NULL = not given)
+    int windowMsaa = -1;        // --window-msaa
+    bool noPrepass = false;     // --no-prepass
+    float renderScale = -1.0f;  // --render-scale
+    float aoVolumeVoxel = -1.0f, aoVolumeIntensity = 1.0f;  // --ao-volume
+    int upscale = -1;           // --upscale
+    int shadowMode = -1;        // --shadow-camera / --shadow-always
+    const char *qualityName = NULL;     // --quality
+    const char *settingsPath = NULL;    // --settings <file>
+    bool noSettings = false;            // --no-settings
+    bool settingsPanelFlag = false;     // --settings-panel
     const char *newMapName = NULL;
     const char *exportDir = NULL;               // --export
     const char *importDir = NULL, *importName = NULL;   // --import
-    float fogCacheVoxel = 0.0f;
+    float fogCacheVoxel = -1.0f;    // --fog-cache
     int fogCacheSub = 2;
     const char *benchNote = NULL;
     const char *mapPath = NULL;
@@ -559,12 +642,14 @@ static int Run(int argc, char **argv)
     float submitWait = -1.0f;       // --submit-wait: keep polling the request this long
     bool closeSubmitted = false;    // --close-submitted
     const char *classifyText = NULL, *classifyKind = "edit";
-    const char *aoMode = "full", *bloomMode = "on";
+    const char *aoMode = NULL, *bloomMode = NULL;
     // Repeatable arguments: at most argc of each
     mainHeap.fx = malloc(sizeof(const char *) * argc);
     mainHeap.selectLines = malloc(sizeof(int) * argc);
     mainHeap.regions = malloc(sizeof(Rectangle) * argc);
-    if (!mainHeap.fx || !mainHeap.selectLines || !mainHeap.regions) {
+    mainHeap.settingsSet = malloc(sizeof(const char *) * argc);
+    mainHeap.settingsChange = malloc(sizeof(const char *) * argc);
+    if (!mainHeap.fx || !mainHeap.selectLines || !mainHeap.regions || !mainHeap.settingsSet || !mainHeap.settingsChange) {
         fprintf(stderr, "monolith: out of memory\n");
         return 1;
     }
@@ -573,6 +658,8 @@ static int Run(int argc, char **argv)
     int *selectLines = mainHeap.selectLines, selectLineCount = 0;
     Rectangle *regionArgs = mainHeap.regions;
     int regionArgCount = 0;
+    const char **settingsSets = mainHeap.settingsSet, **settingsChanges = mainHeap.settingsChange;
+    int settingsSetCount = 0, settingsChangeCount = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--shot") == 0 && i + 1 < argc) shotPath = argv[++i];
         else if (strcmp(argv[i], "--shot-size") == 0 && i + 2 < argc) {
@@ -592,11 +679,17 @@ static int Run(int argc, char **argv)
         else if (strcmp(argv[i], "--bench-still") == 0) bench = benchStill = true;
         else if (strcmp(argv[i], "--no-profile") == 0) benchProfile = false;
         else if (strcmp(argv[i], "--headless") == 0) headless = true;
-        else if (strcmp(argv[i], "--window-msaa") == 0) windowMsaa = true;
+        else if (strcmp(argv[i], "--window-msaa") == 0) windowMsaa = 1;
+        else if (strcmp(argv[i], "--quality") == 0 && i + 1 < argc) qualityName = argv[++i];
+        else if (strcmp(argv[i], "--settings") == 0 && i + 1 < argc) settingsPath = argv[++i];
+        else if (strcmp(argv[i], "--no-settings") == 0) noSettings = true;
+        else if (strcmp(argv[i], "--settings-set") == 0 && i + 1 < argc) settingsSets[settingsSetCount++] = argv[++i];
+        else if (strcmp(argv[i], "--settings-change") == 0 && i + 1 < argc) settingsChanges[settingsChangeCount++] = argv[++i];
+        else if (strcmp(argv[i], "--settings-panel") == 0) settingsPanelFlag = true;
         else if (strcmp(argv[i], "--bench-window") == 0 && i + 1 < argc)
             benchWindowSamples = (int)Clamp((float)atoi(argv[++i]), 0.0f, 16.0f);
         else if (strcmp(argv[i], "--shadow-always") == 0) shadowMode = MS_SHADOW_ALWAYS;
-        else if (strcmp(argv[i], "--shadow-camera") == 0) { if (shadowMode != MS_SHADOW_ALWAYS) shadowMode = MS_SHADOW_CAMERA; }
+        else if (strcmp(argv[i], "--shadow-camera") == 0) { if (shadowMode != (int)MS_SHADOW_ALWAYS) shadowMode = MS_SHADOW_CAMERA; }
         else if (strcmp(argv[i], "--new-map") == 0 && i + 1 < argc) newMapName = argv[++i];
         else if (strcmp(argv[i], "--export") == 0 && i + 1 < argc) exportDir = argv[++i];
         else if (strcmp(argv[i], "--import") == 0 && i + 2 < argc) { importDir = argv[i + 1]; importName = argv[i + 2]; i += 2; }
@@ -607,11 +700,11 @@ static int Run(int argc, char **argv)
             fogCacheSub = (int)Clamp((float)atoi(argv[i + 2]), 1.0f, 4.0f);
             i += 2;
         }
-        else if (strcmp(argv[i], "--no-prepass") == 0) depthPrepass = false;
+        else if (strcmp(argv[i], "--no-prepass") == 0) noPrepass = true;
         else if (strcmp(argv[i], "--ao-volume") == 0 && i + 2 < argc) {
             aoVolumeVoxel = (float)atof(argv[i + 1]);
             aoVolumeVoxel = aoVolumeVoxel > 0.0f ? Clamp(aoVolumeVoxel, 0.25f, 4.0f) : 0.0f;
-            aoVolumeIntensity = Clamp((float)atof(argv[i + 2]), 0.0f, 4.0f);
+            aoVolumeIntensity = Clamp((float)atof(argv[i + 2]), 0.01f, 4.0f);
             i += 2;
         }
         else if (strcmp(argv[i], "--render-scale") == 0 && i + 1 < argc) renderScale = Clamp((float)atof(argv[++i]), 0.25f, 1.0f);
@@ -675,16 +768,30 @@ static int Run(int argc, char **argv)
         }
     }
 
-    // --ao / --bloom / --fx: reject unknown names before a window opens
+    // --ao / --bloom / --fx / --quality / --settings-set: reject unknown names before a window opens
+    MS_AoMode aoArg = MS_AO_FULL;
+    MS_QualityLevel qualityArg = MS_QUALITY_ULTRA;
     {
         R3D_Environment scratch = { 0 };
-        if (!ApplyAoMode(&scratch, aoMode)) {
+        if (aoMode && !AoModeFromName(aoMode, &aoArg)) {
             fprintf(stderr, "monolith: unknown --ao mode '%s'. Modes:\n%s", aoMode, AoModeHelp());
             return 1;
         }
-        if (!ApplyBloomMode(&scratch, bloomMode)) {
+        if (bloomMode && strcmp(bloomMode, "on") != 0 && strcmp(bloomMode, "off") != 0) {
             fprintf(stderr, "monolith: unknown --bloom mode '%s' (on, off)\n", bloomMode);
             return 1;
+        }
+        if (qualityName && (!MS_QualityFromName(qualityName, &qualityArg) || qualityArg == MS_QUALITY_CUSTOM)) {
+            fprintf(stderr, "monolith: unknown --quality '%s' (low, medium, high, ultra)\n", qualityName);
+            return 1;
+        }
+        GfxSettings scratchGfx = GfxDefaults();
+        for (int k = 0; k < settingsSetCount + settingsChangeCount; k++) {
+            const char *kv = k < settingsSetCount ? settingsSets[k] : settingsChanges[k - settingsSetCount];
+            if (!GfxSetKey(&scratchGfx, kv)) {
+                fprintf(stderr, "monolith: bad setting '%s' (key=value). Keys:\n%s", kv, GfxKeyHelp());
+                return 1;
+            }
         }
         for (int k = 0; k < fxCount; k++) {
             if (!ApplyFxSetting(&scratch, fxSettings[k])) {
@@ -697,12 +804,54 @@ static int Run(int argc, char **argv)
     if (newMapName) return NewMap(mapsDir, newMapName) ? 0 : 1;
     if (importDir) return ImportProject(mapsDir, importDir, importName) ? 0 : 1;
 
+    // --- Graphics settings (settings.c). The interactive game reads the user's settings file
+    // (and the panel saves it); automated runs (--shot, --bench, --dump-*, --export,
+    // --classify) never read it unless --settings names a file, so their images and numbers
+    // don't depend on what the developer last chose. --no-settings: no file at all. Then
+    // --quality, then the single flags: they apply to this run and are never saved.
+    // Last --settings-set: a change "as if made in the panel" (applies, and is saved).
+    bool automated = shotPath || bench || dumpPath || dumpScenePath || exportDir || classifyText;
+    const char *settingsFile = noSettings ? NULL : settingsPath ? settingsPath : automated ? NULL : GfxDefaultPath();
+    GfxSettings gfx = GfxDefaults();
+    if (settingsFile) {
+        char err[512];
+        if (GfxLoad(&gfx, settingsFile, err, sizeof(err)))
+            TraceLog(LOG_INFO, "monolith: settings %s: quality %s%s%s", settingsFile, MS_QualityName(GfxPreset(&gfx)), err[0] ? "; " : "", err);
+        else TraceLog(LOG_INFO, "monolith: settings %s: no file yet (defaults; F2 changes them)", settingsFile);
+    }
+    GfxSettings gfxSaved = gfx;     // what the file holds: the panel's changes go here too, the flags don't
+    bool gfxDirty = false;
+    if (qualityName) GfxSetPreset(&gfx, qualityArg);
+    if (aoMode) gfx.q.ao = aoArg;
+    if (aoVolumeVoxel >= 0.0f) { gfx.q.aoVolumeVoxel = aoVolumeVoxel; gfx.q.aoVolumeIntensity = aoVolumeVoxel > 0.0f ? aoVolumeIntensity : 0.0f; }
+    if (bloomMode) gfx.q.bloom = strcmp(bloomMode, "on") == 0;
+    if (shadowSize > 0) { gfx.q.shadowSize = shadowSize; gfx.q.shadowRange = shadowRange; }
+    if (shadowMode >= 0) gfx.q.shadowMode = (MS_ShadowMode)shadowMode;
+    if (fogCacheVoxel >= 0.0f) { gfx.q.fogCacheVoxel = fogCacheVoxel; gfx.q.fogCacheSub = fogCacheSub; }
+    if (noPrepass) gfx.q.depthPrepass = false;
+    if (renderScale > 0.0f) gfx.q.renderScale = renderScale;
+    if (upscale >= 0) gfx.q.upscale = (R3D_UpscaleMode)upscale;
+    if (windowMsaa >= 0) gfx.windowMsaa = windowMsaa == 1;
+    if (frameReuseFlag >= 0) gfx.frameReuse = frameReuseFlag == 1;
+    for (int k = 0; k < settingsSetCount; k++) {
+        GfxSetKey(&gfx, settingsSets[k]);
+        GfxSetKey(&gfxSaved, settingsSets[k]);
+        gfxDirty = true;
+    }
+    if (gfxDirty && settingsFile) {
+        bool ok = GfxSave(&gfxSaved, settingsFile);
+        TraceLog(ok ? LOG_INFO : LOG_WARNING, "monolith: settings %s %s", ok ? "saved to" : "could not be saved to", settingsFile);
+        gfxDirty = false;
+    }
+    benchQuality = MS_QualityName(GfxPreset(&gfx));
+
     // --- Map: parse it before opening a window, so a broken map just prints the error, and
     // the sun's shadow map size (an R3D init hint) is known before R3D_Init
     char defaultMap[1100];
     snprintf(defaultMap, sizeof(defaultMap), "%smonolith", mapsDir);
     if (!mapPath) mapPath = defaultMap;
-    MS_LoadOptions loadOpt = { .noGpu = true, .shadowSizeOverride = shadowSize, .shadowRangeOverride = shadowRange };
+    // (shadow size: an init hint, so a load option; the range is applied by MS_ApplyQuality)
+    MS_LoadOptions loadOpt = { .noGpu = true, .shadowSizeOverride = gfx.q.shadowSize };
     MS_Scene *peek;     // parsed only (no GPU); gives the R3D init hints once a GL context exists
     {
         char err[512];
@@ -761,7 +910,7 @@ static int Run(int argc, char **argv)
             player.pitch = (float)(peek->spawnPitchDeg * (3.14159265358979323846 / 180.0));
         }
         shadowSize = peek->sun.shadowSize;          // (for the bench report)
-        shadowRange = peek->sun.light.range;
+        shadowRange = gfx.q.shadowRange > 0.0f ? gfx.q.shadowRange : peek->sun.light.range;
     }
 
     // No vsync, uncapped. The window is single-sampled unless --window-msaa: R3D anti-aliases
@@ -769,12 +918,13 @@ static int Run(int argc, char **argv)
     // window only smoothed the designer's overlay lines, for ~0.1 ms GPU per frame at 1080p
     // (R3D's last pass writing 4 samples + the resolve; measured with --bench-window 4 vs 0).
     // Shots and request images were always single-sampled.
-    unsigned int windowFlags = windowMsaa ? FLAG_MSAA_4X_HINT : 0;
+    unsigned int windowFlags = gfx.windowMsaa ? FLAG_MSAA_4X_HINT : 0;
     // --shot: hidden window, never mapped, so i3 & co. never show or focus it
     // --bench --headless too: then nothing ever appears on screen
     // --dump-scene of a map with models: model files load through R3D, which needs GL
     bool hidden = shotPath || (bench && headless) || dumpScenePath;
     windowFlags |= hidden ? FLAG_WINDOW_HIDDEN : FLAG_WINDOW_RESIZABLE;
+    if (!hidden && gfx.vsync) windowFlags |= FLAG_VSYNC_HINT;     // (settings: Performance)
     SetConfigFlags(windowFlags);
     // Distinct titles let the window manager route automated runs elsewhere, e.g. i3:
     //   for_window [title="^monolith-(bench|shot)$"] move container to workspace number 10
@@ -783,7 +933,7 @@ static int Run(int argc, char **argv)
     bool headlessBench = bench && headless;
     InitWindow(headlessBench ? 1920 : shotPath ? shotW : 1600, headlessBench ? 1006 : shotPath ? shotH : 900,
                bench ? "monolith-bench" : (shotPath || dumpScenePath) ? "monolith-shot" : "monolith");
-    SetTargetFPS(0);
+    SetTargetFPS(hidden || bench ? 0 : FpsTarget(gfx.fpsCap));
     // Esc must close the prompt box without quitting, so quitting on Esc is done by hand
     // in the main loop (the window's close button still ends WindowShouldClose())
     SetExitKey(KEY_NULL);
@@ -832,24 +982,13 @@ static int Run(int argc, char **argv)
             return ok ? 0 : 1;
         }
     }
-    MS_RenderSettings renderSettings = MS_GetRenderSettings(scene);
-    renderSettings.shadowMode = shadowMode;
-    renderSettings.fogCacheVoxel = fogCacheVoxel;
-    renderSettings.fogCacheSub = fogCacheSub;
-    renderSettings.depthPrepass = depthPrepass;
-    renderSettings.renderScale = renderScale;
-    // --ao baked: the occlusion volume replaces SSAO + SSIL (an explicit --ao-volume wins)
-    // (intensity 0.6: matched the mean brightness of full SSAO + SSIL in views 1-3 within 1.3/255)
-    if (strcmp(aoMode, "baked") == 0 && aoVolumeVoxel == 0.0f) { aoVolumeVoxel = 0.5f; aoVolumeIntensity = 0.6f; }
-    renderSettings.aoVolumeVoxel = aoVolumeVoxel;
-    renderSettings.aoVolumeIntensity = aoVolumeIntensity;
-    renderSettings.upscale = upscale;
-    MS_SetRenderSettings(scene, renderSettings);
-    MS_ApplyRenderResolution(scene, GetScreenWidth(), GetScreenHeight());
-
-    // --- Environment: the map's, then --ao / --bloom / --fx, then the 1-6 toggles
-    EffectState effects = { .aoMode = aoMode, .bloomMode = bloomMode, .fx = fxSettings, .fxCount = fxCount };
+    // --- Environment: the map's, then the graphics settings (render settings, AA, render
+    // scale; --ao / --bloom / --render-scale / ... are part of them), --fx, the 1-6 toggles
+    EffectState effects = { .gfx = &gfx, .fx = fxSettings, .fxCount = fxCount };
     ApplyEnvironment(&effects);
+    int appliedShadowSize = gfx.q.shadowSize;   // the renderer restarts when the panel changes it
+    bool appliedVsync = gfx.vsync;
+    int appliedFps = gfx.fpsCap;
 
     bool hud = true;
 
@@ -925,10 +1064,13 @@ static int Run(int argc, char **argv)
     // still) and --shot must measure / show real rendering, so there it is off unless
     // --frame-reuse asks for it (to time a reused frame, or to prove reused == fresh).
     static FrameReuse reuse;
-    reuse.enabled = frameReuseFlag >= 0 ? frameReuseFlag == 1 : !hidden && !bench;
-    if (reuse.enabled) {
+    // (interactive: the settings' frame reuse, which the panel can switch)
+    reuse.enabled = frameReuseFlag >= 0 ? frameReuseFlag == 1 : !hidden && !bench && gfx.frameReuse;
+    if (reuse.enabled || (!hidden && !bench)) {
         reuse.composite = LoadShaderFromMemory(NULL, COMPOSITE_FS);
         reuse.depthLoc = GetShaderLocation(reuse.composite, "depthTex");
+    }
+    if (reuse.enabled) {
         if (bench) {
             benchFrameReuse = true;
             // timed frames are reused ones, so R3D records no passes
@@ -936,8 +1078,15 @@ static int Run(int argc, char **argv)
             R3D_SetProfilerEnabled(false);
         }
     }
+    // Settings panel (F2): settingspanel.c. --settings-panel opens it for a --shot-hud image
+    static SettingsPanel panel;
+    panel.interactive = !hidden;
+    if (settingsPanelFlag && shotPath) PanelOpen(&panel);
+    bool pendingApply = false;      // a heavy change waits one frame, so "applying ..." shows first
+    const char *settingsSaveFile = automated ? (settingsPath && !noSettings ? settingsPath : NULL) : settingsFile;
     bool offApplied = false;  // --off toggles are applied on the first frame only
     float closePickTime = 0.0f; // CTRL+K: seconds left to press a request's number
+    int exitStatus = 0;
 
     while (!WindowShouldClose())
     {
@@ -946,11 +1095,83 @@ static int Run(int argc, char **argv)
         if (IsWindowResized()) MS_ApplyRenderResolution(scene, GetScreenWidth(), GetScreenHeight());
 
         // Esc quits, unless the prompt box is open or snip mode is on (the designer handles it)
-        if (IsKeyPressed(KEY_ESCAPE) && !designer.promptOpen && !designer.snipping && closePickTime <= 0.0f) break;
+        if (IsKeyPressed(KEY_ESCAPE) && !designer.promptOpen && !designer.snipping && closePickTime <= 0.0f &&
+            !PanelCapturesInput(&panel)) break;
 
         // While the prompt box is open (and a couple of frames after it closed) every
         // game key and the camera are frozen: the keys are text now
         bool typing = DesignerCapturesInput(&designer);
+
+        // Graphics settings panel (F2, both modes; settingspanel.c). A change goes to this
+        // run's settings and to the saved ones (the command-line overrides of other settings
+        // stay out of the file). Heavy changes (shadow map size, bakes) are applied one frame
+        // later, so the panel shows "applying ..." first; the rest at once.
+        bool applyNow = pendingApply;
+        bool announced = pendingApply;
+        pendingApply = false;
+        if (!bench) {
+            bool wasOpen = panel.open;
+            int changed = PanelUpdate(&panel, &gfx, GetFrameTime(), GetScreenWidth(), GetScreenHeight());
+            if (changed == PANEL_RESET) {
+                GfxSetPreset(&gfx, gfx.base);
+                GfxSetPreset(&gfxSaved, gfx.base);
+            } else if (changed >= 0) GfxRowCopy(&gfxSaved, &gfx, changed);
+            if (changed != -1) {
+                gfxDirty = true;
+                if (changed == PANEL_RESET || GfxRowIsHeavy(changed)) {
+                    pendingApply = true;
+                    PanelStatus(&panel, "applying ...", 30.0f);
+                } else applyNow = true;
+                if (changed >= 0 && GfxRowNeedsRestart(changed)) PanelStatus(&panel, "window MSAA changes at the next start", 4.0f);
+            }
+            if (wasOpen && !panel.open && gfxDirty && settingsSaveFile) {
+                bool ok = GfxSave(&gfxSaved, settingsSaveFile);
+                TraceLog(ok ? LOG_INFO : LOG_WARNING, "monolith: settings %s %s", ok ? "saved to" : "could not be saved to", settingsSaveFile);
+                if (ok) gfxDirty = false;
+            }
+            if (!shotPath && !typing && !PanelCapturesInput(&panel) && IsKeyPressed(KEY_F2)) PanelOpen(&panel);
+        }
+        // --settings-change: after 10 frames, the same live path as a change in the panel
+        if (shotPath && frame == 10 && settingsChangeCount > 0) {
+            for (int k = 0; k < settingsChangeCount; k++) {
+                GfxSetKey(&gfx, settingsChanges[k]);
+                GfxSetKey(&gfxSaved, settingsChanges[k]);
+            }
+            gfxDirty = applyNow = true;
+        }
+        if (applyNow) {
+            char msg[256] = "";
+            if (gfx.q.shadowSize != appliedShadowSize) {
+                bool fatal;
+                if (RestartRenderer(&loadOpt, gfx.q.shadowSize, &fatal, msg, sizeof(msg))) {
+                    appliedShadowSize = gfx.q.shadowSize;
+                    designer.version = (unsigned int)-1;   // remap the selection by its keys
+                    reuse.keyValid = reuse.cacheValid = false;
+                } else if (fatal) {
+                    fprintf(stderr, "monolith: %s\n", msg);
+                    exitStatus = 1;
+                    break;
+                } else gfx.q.shadowSize = appliedShadowSize;   // the map on disk is broken: keep the old one
+                TraceLog(LOG_INFO, "monolith: %s", msg);
+            }
+            ApplyEnvironment(&effects);
+            if (!hidden && gfx.vsync != appliedVsync) {
+                if (gfx.vsync) SetWindowState(FLAG_VSYNC_HINT);
+                else ClearWindowState(FLAG_VSYNC_HINT);
+                appliedVsync = gfx.vsync;
+            }
+            if (!hidden && gfx.fpsCap != appliedFps) {
+                SetTargetFPS(FpsTarget(gfx.fpsCap));
+                appliedFps = gfx.fpsCap;
+            }
+            if (!hidden && !bench) {
+                reuse.enabled = gfx.frameReuse && reuse.composite.id;
+                if (!reuse.enabled) reuse.keyValid = reuse.cacheValid = false;
+            }
+            if (msg[0]) PanelStatus(&panel, msg, 5.0f);
+            else if (announced) PanelStatus(&panel, "applied", 1.5f);
+        }
+        typing = typing || PanelCapturesInput(&panel);
 
         // Closing request terminals (launcher.c): K = the last finished request, SHIFT+K =
         // all finished ones, CTRL+K then 1-9 / 0 (= 10) = request [n] of the HUD list, also
@@ -1071,7 +1292,7 @@ static int Run(int argc, char **argv)
         }
         else if (!shotPath) {
             DesignerAction action = DESIGNER_NONE;
-            if (spec.active) {
+            if (spec.active && !PanelCapturesInput(&panel)) {
                 action = DesignerUpdate(&designer, dt);
                 typing = DesignerCapturesInput(&designer);
             }
@@ -1084,7 +1305,7 @@ static int Run(int argc, char **argv)
                 } else SpectatorMessage(&spec, "no finished request yet");
             }
             if (spec.active) { if (!typing) UpdateSpectator(&spec, &player, dt); }
-            else UpdatePlayer(&player, dt);
+            else if (!typing) UpdatePlayer(&player, dt);
 
             if (action == DESIGNER_SUBMIT) {
                 // The camera is frozen while the box is open: this is the view the user typed at
@@ -1100,7 +1321,7 @@ static int Run(int argc, char **argv)
         bool unchanged = false;
         if (reuse.enabled) {
             FrameKey key;
-            MakeFrameKey(&key, camera);
+            MakeFrameKey(&key, camera, &gfx);
             unchanged = reuse.keyValid && memcmp(&key, &reuse.key, sizeof(key)) == 0;
             reuse.key = key;
             reuse.keyValid = true;
@@ -1149,11 +1370,12 @@ static int Run(int argc, char **argv)
             // Snip mode (screen regions) shows even with the HUD off, like the prompt box
             if (drawUi && designerUi) DesignerDrawRegions(&designer, GetScreenWidth(), GetScreenHeight(), false);
             if (drawUi && hud) {
-                DrawText(TextFormat("%d fps%s  |  %s  |  1 volFog:%s  2 fog:%s  3 ssao:%s  4 ssil:%s  5 bloom:%s  6 sun:%s",
+                DrawText(TextFormat("%d fps%s  |  %s  |  1 volFog:%s  2 fog:%s  3 ssao:%s  4 ssil:%s  5 bloom:%s  6 sun:%s  |  F2 settings: %s",
                          GetFPS(), reused ? " (cached)" : "", spec.active ? "SPECTATOR" : player.fly ? "FLY" : "WALK",
                          env->volumetricFog.enabled ? "on" : "off", env->fog.mode ? "on" : "off",
                          env->ssao.enabled ? "on" : "off", env->ssil.enabled ? "on" : "off",
-                         env->bloom.mode ? "on" : "off", MS_GetRenderSettings(scene).sunOn ? "on" : "off"),
+                         env->bloom.mode ? "on" : "off", MS_GetRenderSettings(scene).sunOn ? "on" : "off",
+                         MS_QualityName(GfxPreset(&gfx))),
                          12, 10, 16, (Color){ 230, 230, 230, 160 });
 
                 if (spec.active) {
@@ -1181,6 +1403,8 @@ static int Run(int argc, char **argv)
             }
             // The prompt box shows even with the HUD off (Enter opened it, it must be visible)
             if (drawUi && designerUi) DesignerDrawPrompt(&designer, GetScreenWidth(), GetScreenHeight());
+            // The settings panel shows even with the HUD off (F2 opened it)
+            if (drawUi) PanelDraw(&panel, &gfx, GetScreenWidth(), GetScreenHeight(), reused);
             if (uiToTarget) EndTextureMode();
         EndDrawing();
         if (emulateWindow) WindowEmuPresent(&windowEmu);
@@ -1241,9 +1465,14 @@ static int Run(int argc, char **argv)
 
     if (bench && benchView == scene->viewpointCount) {
         BenchCollectProfile(true);  // the last frames' results are still in flight
-        WriteBenchReport(benchTimes, benchShadowUpdates, shadowSize, shadowRange, shadowMode != MS_SHADOW_ALWAYS, headless, benchNote, argc, argv);
+        WriteBenchReport(benchTimes, benchShadowUpdates, shadowSize, shadowRange, gfx.q.shadowMode != MS_SHADOW_ALWAYS, headless, benchNote, argc, argv);
     }
 
+    if (gfxDirty && settingsSaveFile) {
+        bool ok = GfxSave(&gfxSaved, settingsSaveFile);
+        TraceLog(ok ? LOG_INFO : LOG_WARNING, "monolith: settings %s %s", ok ? "saved to" : "could not be saved to", settingsSaveFile);
+    }
+    PanelClose(&panel);             // (switches the GPU profiler off if the panel switched it on)
     LauncherCloseOnExit();          // MONOLITH_CLOSE_ON_EXIT=1: close finished requests' terminals
     R3D_SetProfilerEnabled(false);  // frees its GL queries
     BenchFree();
@@ -1251,11 +1480,11 @@ static int Run(int argc, char **argv)
     if (emulateWindow) WindowEmuUnload(&windowEmu);
     else if (hidden) UnloadRenderTexture(shotTarget);
     if (reuse.rt.id) UnloadRenderTexture(reuse.rt);
-    if (reuse.enabled) UnloadShader(reuse.composite);
+    if (reuse.composite.id) UnloadShader(reuse.composite);
     MS_Unload(scene);
     R3D_Close();
     CloseWindow();
-    return 0;
+    return exitStatus;
 }
 
 // #endregion

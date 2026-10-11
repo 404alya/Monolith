@@ -3122,10 +3122,12 @@ MS_Scene *MS_Load(const char *path, const MS_LoadOptions *opt, char *err, int er
     p->gpu = !p->opt.noGpu;
 #ifdef MS_PATCHED_R3D
     p->rs = (MS_RenderSettings){ .sunOn = true, .shadowMode = MS_SHADOW_TILES, .fogCacheSub = 2, .depthPrepass = true,
-                                 .renderScale = 1.0f, .upscale = R3D_UPSCALE_BICUBIC, .aoVolumeIntensity = 1.0f };
+                                 .renderScale = 1.0f, .upscale = R3D_UPSCALE_BICUBIC, .aoVolumeIntensity = 1.0f,
+                                 .sunShadow = true };
 #else
     p->rs = (MS_RenderSettings){ .sunOn = true, .shadowMode = MS_SHADOW_CAMERA, .fogCacheSub = 2, .depthPrepass = true,
-                                 .renderScale = 1.0f, .upscale = R3D_UPSCALE_BICUBIC, .aoVolumeIntensity = 1.0f };
+                                 .renderScale = 1.0f, .upscale = R3D_UPSCALE_BICUBIC, .aoVolumeIntensity = 1.0f,
+                                 .sunShadow = true };
 #endif
     p->tiles.current = -1;
     if (p->gpu) {
@@ -3313,6 +3315,8 @@ void MS_SetRenderSettings(MS_Scene *s, MS_RenderSettings rs)
     rs.renderScale = (rs.renderScale > 0.0f) ? Clamp(rs.renderScale, 0.25f, 1.0f) : 1.0f;
     rs.aoVolumeVoxel = rs.aoVolumeVoxel > 0.0f ? Clamp(rs.aoVolumeVoxel, 0.25f, 4.0f) : 0.0f;
     if (!(rs.aoVolumeIntensity >= 0.0f)) rs.aoVolumeIntensity = 1.0f;
+    rs.shadowRange = rs.shadowRange > 0.0f ? Clamp(rs.shadowRange, 10.0f, 2000.0f) : 0.0f;
+    rs.shadowSoftness = rs.shadowSoftness > 0.0f ? rs.shadowSoftness : 0.0f;
     if ((int)rs.upscale < (int)R3D_UPSCALE_NEAREST || (int)rs.upscale > (int)R3D_UPSCALE_LANCZOS) rs.upscale = R3D_UPSCALE_BICUBIC;
     MS_RenderSettings old = p->rs;
     p->rs = rs;
@@ -3348,10 +3352,147 @@ void MS_ApplyRenderResolution(const MS_Scene *s, int outW, int outH)
     if (R3D_GetUpscaleMode() != rs->upscale) R3D_SetUpscaleMode(rs->upscale);
 }
 
+// --- Graphics quality (MS_Quality, monolith_scene.h)
+// Presets from the measured trade-off knobs (PROMPT-INSTRUCTIONS.md 7.3 "Trade-off knobs" and
+// "Graphics settings"): ultra is the map exactly; high trades SSAO + SSIL for the baked
+// occlusion volume and bakes the fog's sun visibility; medium also renders at 75% with half
+// the fog march steps and a 4096 shadow map; low renders at 50% without AO and bloom.
+
+MS_Quality MS_QualityPreset(MS_QualityLevel level)
+{
+    MS_Quality q = {
+        .renderScale = 1.0f, .upscale = R3D_UPSCALE_BICUBIC, .antiAliasing = R3D_ANTI_ALIASING_MODE_FXAA,
+        .sunShadow = true, .shadowMode = MS_SHADOW_TILES,
+        .ao = MS_AO_FULL,
+        .volumetricFog = true, .fogStepScale = 1.0f, .fogLengthScale = 1.0f, .fogCacheSub = 2, .distanceFog = true,
+        .bloom = true, .bloomIntensityScale = 1.0f,
+        .exposure = 1.0f, .brightness = 1.0f, .contrast = 1.0f, .saturation = 1.0f,
+        .depthPrepass = true,
+    };
+    switch (level) {
+    case MS_QUALITY_LOW:
+        q.renderScale = 0.5f;
+        q.ao = MS_AO_OFF;
+        q.bloom = false;
+        q.shadowSize = 4096;
+        q.fogCacheVoxel = 0.5f;
+        q.fogStepScale = 2.0f;
+        break;
+    case MS_QUALITY_MEDIUM:
+        q.renderScale = 0.75f;
+        q.ao = MS_AO_BAKED;
+        q.aoVolumeVoxel = 0.5f;
+        q.aoVolumeIntensity = 0.6f;
+        q.shadowSize = 4096;
+        q.fogCacheVoxel = 0.5f;
+        q.fogStepScale = 2.0f;
+        break;
+    case MS_QUALITY_HIGH:
+        q.ao = MS_AO_BAKED;
+        q.aoVolumeVoxel = 0.5f;
+        q.aoVolumeIntensity = 0.6f;
+        q.fogCacheVoxel = 0.5f;
+        break;
+    default: break;     // ultra, custom
+    }
+    return q;
+}
+
+static const char *const QUALITY_NAMES[] = { "low", "medium", "high", "ultra", "custom" };
+
+const char *MS_QualityName(MS_QualityLevel level)
+{
+    return (level >= MS_QUALITY_LOW && level <= MS_QUALITY_CUSTOM) ? QUALITY_NAMES[level] : "custom";
+}
+
+bool MS_QualityFromName(const char *name, MS_QualityLevel *level)
+{
+    for (int i = 0; i <= MS_QUALITY_CUSTOM; i++)
+        if (strcmp(name, QUALITY_NAMES[i]) == 0) { *level = (MS_QualityLevel)i; return true; }
+    return false;
+}
+
+bool MS_QualityEqual(const MS_Quality *a, const MS_Quality *b)
+{
+#define EQ(f) (a->f == b->f)
+    return EQ(renderScale) && EQ(upscale) && EQ(antiAliasing) && EQ(sunShadow) && EQ(shadowSize) &&
+           EQ(shadowRange) && EQ(shadowSoftness) && EQ(shadowMode) && EQ(ao) && EQ(aoVolumeVoxel) &&
+           EQ(aoVolumeIntensity) && EQ(ssaoSamples) && EQ(ssilSamples) && EQ(ssaoRadius) && EQ(ssaoIntensity) &&
+           EQ(ssilRadius) && EQ(volumetricFog) && EQ(fogStepScale) && EQ(fogLengthScale) && EQ(fogCacheVoxel) &&
+           EQ(fogCacheSub) && EQ(distanceFog) && EQ(bloom) && EQ(bloomIntensityScale) && EQ(ssr) && EQ(ssgi) &&
+           EQ(exposure) && EQ(brightness) && EQ(contrast) && EQ(saturation) && EQ(depthPrepass);
+#undef EQ
+}
+
+MS_QualityLevel MS_QualityMatch(const MS_Quality *q)
+{
+    for (int i = MS_QUALITY_LOW; i < MS_QUALITY_CUSTOM; i++) {
+        MS_Quality p = MS_QualityPreset((MS_QualityLevel)i);
+        if (MS_QualityEqual(q, &p)) return (MS_QualityLevel)i;
+    }
+    return MS_QUALITY_CUSTOM;
+}
+
+void MS_ApplyQuality(MS_Scene *s, const MS_Quality *q)
+{
+    MS_RenderSettings rs = MS_GetRenderSettings(s);
+    rs.renderScale = q->renderScale;
+    rs.upscale = q->upscale;
+    rs.sunShadow = q->sunShadow;
+    rs.shadowRange = q->shadowRange;
+    rs.shadowSoftness = q->shadowSoftness;
+    rs.shadowMode = q->shadowMode;
+    rs.fogCacheVoxel = q->fogCacheVoxel;
+    rs.fogCacheSub = q->fogCacheSub;
+    rs.depthPrepass = q->depthPrepass;
+    if (q->ao == MS_AO_BAKED) {
+        // 0.6 matched the mean brightness of full SSAO + SSIL in views 1-3 within 1.3/255
+        rs.aoVolumeVoxel = q->aoVolumeVoxel > 0.0f ? q->aoVolumeVoxel : 0.5f;
+        rs.aoVolumeIntensity = q->aoVolumeIntensity > 0.0f ? q->aoVolumeIntensity : 0.6f;
+    } else {
+        rs.aoVolumeVoxel = q->aoVolumeVoxel;
+        rs.aoVolumeIntensity = q->aoVolumeIntensity > 0.0f ? q->aoVolumeIntensity : 1.0f;
+    }
+    MS_SetRenderSettings(s, rs);
+    if (s->priv->gpu && R3D_GetAntiAliasingMode() != q->antiAliasing) R3D_SetAntiAliasingMode(q->antiAliasing);
+
+    // The environment: relative to the map's, which MS_ApplyEnvironment just wrote
+    R3D_Environment *env = R3D_GetEnvironment();
+    switch (q->ao) {
+    case MS_AO_SSAO: env->ssil.enabled = false; break;
+    case MS_AO_LITE: env->ssil.enabled = false; env->ssao.sampleCount = 8; break;
+    case MS_AO_BAKED:
+    case MS_AO_OFF: env->ssil.enabled = false; env->ssao.enabled = false; break;
+    default: break;
+    }
+    if (q->ssaoSamples > 0) env->ssao.sampleCount = q->ssaoSamples;
+    if (q->ssaoRadius > 0.0f) env->ssao.radius = q->ssaoRadius;
+    if (q->ssaoIntensity > 0.0f) env->ssao.intensity = q->ssaoIntensity;
+    if (q->ssilSamples > 0) env->ssil.sampleCount = q->ssilSamples;
+    if (q->ssilRadius > 0.0f) env->ssil.radius = q->ssilRadius;
+    if (!q->volumetricFog) env->volumetricFog.enabled = false;
+    if (q->fogStepScale > 0.0f && q->fogStepScale != 1.0f) env->volumetricFog.stepSize *= q->fogStepScale;
+    if (q->fogLengthScale > 0.0f && q->fogLengthScale != 1.0f) env->volumetricFog.length *= q->fogLengthScale;
+    if (!q->distanceFog) env->fog.mode = R3D_FOG_DISABLED;
+    // Bloom here is mostly a uniform ~20% lift (threshold 0, MIX 0.04): without it, exposure
+    // x1.19 keeps the mean brightness (matched over the 26 verification shots)
+    if (!q->bloom && env->bloom.mode != R3D_BLOOM_DISABLED) {
+        env->bloom.mode = R3D_BLOOM_DISABLED;
+        env->tonemap.exposure *= 1.19f;
+    }
+    if (q->bloomIntensityScale != 1.0f) env->bloom.intensity *= q->bloomIntensityScale;
+    if (q->ssr) env->ssr.enabled = q->ssr > 0;
+    if (q->ssgi) env->ssgi.enabled = q->ssgi > 0;
+    if (q->exposure != 1.0f) env->tonemap.exposure *= q->exposure;
+    if (q->brightness != 1.0f) env->color.brightness *= q->brightness;
+    if (q->contrast != 1.0f) env->color.contrast *= q->contrast;
+    if (q->saturation != 1.0f) env->color.saturation *= q->saturation;
+}
+
 static R3D_ShadowMap SunShadowMap(const MS_Private *p, int slot)
 {
     R3D_ShadowMap m = p->sunShadow[slot];
-    m.softness = p->d->env.sun.softness;
+    m.softness = p->rs.shadowSoftness > 0.0f ? p->rs.shadowSoftness : p->d->env.sun.softness;
     m.depthBias = p->d->env.sun.depthBias;
     m.slopeBias = p->d->env.sun.slopeBias;
     return m;
@@ -3364,8 +3505,10 @@ bool MS_PushLights(MS_Scene *s, Camera3D camera, float aspect)
     bool update = false;
     if (p->rs.sunOn && d->env.sun.enabled) {
         R3D_Light sun = d->sunLight;
+        // (the tiles and the camera-fitted cache key on the range, so a new one redraws them)
+        if (p->rs.shadowRange > 0.0f) sun.range = p->rs.shadowRange;
         int mapSize = R3D_GetHint(R3D_HINT_SHADOW_DIR_SIZE);
-        if (!d->env.sun.shadow) R3D_PushLight(sun);
+        if (!d->env.sun.shadow || !p->rs.sunShadow) R3D_PushLight(sun);
 #ifdef MS_PATCHED_R3D
         else if (p->rs.shadowMode == MS_SHADOW_TILES) {
             // Static tiles: drawn once per map load (per tile), chosen by eye position only
@@ -3409,7 +3552,7 @@ void MS_DrawGeometry(MS_Scene *s)
         if (!BakeOcclusionVolume(d, p->rs.aoVolumeVoxel, p->rs.aoVolumeIntensity)) R3D_ClearWorldOcclusion();
         p->aoVersion = s->version;
     }
-    if (p->rs.sunOn && d->env.sun.enabled && d->env.sun.shadow && p->rs.fogCacheVoxel > 0.0f && p->fogCacheVersion != s->version) {
+    if (p->rs.sunOn && d->env.sun.enabled && d->env.sun.shadow && p->rs.sunShadow && p->rs.fogCacheVoxel > 0.0f && p->fogCacheVersion != s->version) {
         // Fog sun visibility, baked once per map load into the shadow layer this frame
         // doesn't sample (that tile slot is forgotten: it holds the bake map now)
         bool tiles = p->rs.shadowMode == MS_SHADOW_TILES;

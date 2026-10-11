@@ -13,6 +13,7 @@ extern int benchFrames;
 extern bool benchStill;      // --bench-still: the camera doesn't spin
 extern bool benchFrameReuse; // --frame-reuse: timed frames composite the cached scene image
 extern bool benchProfile;    // per-pass GPU timings (R3D profiler), default on if compiled in
+extern const char *benchQuality;    // quality preset name of the run (settings.c), for the report
 
 // Profiler tag of a timed bench frame (warmup frames use -1)
 #define BENCH_TAG(view, frame) ((view) * benchFrames + (frame))

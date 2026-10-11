@@ -80,6 +80,8 @@ monolith/
 │   ├── dumpscene.c/.h           # --dump-scene: boxes, models, colliders, materials, lights as text
 │   ├── bench.c/.h               # --bench statistics and Markdown report
 │   ├── windowemu.c/.h           # --bench-window: offscreen stand-in for the visible window (MSAA, HUD, resolve)
+│   ├── settings.c/.h            # graphics settings: MS_Quality + window options, rows, settings file
+│   ├── settingspanel.c/.h       # F2: the in-game graphics settings panel
 │   └── glibc_compat.c           # Linux only: binds a few symbols to old glibc versions (§4)
 └── submodules/
     └── r3d/                     # vendored R3D (+ raylib, assimp); local fixes in patches.md
@@ -147,6 +149,7 @@ The header comment at the top of `src/main.c` is the source of truth; keep it up
 | F | Toggle fly (noclip) |
 | 1–6 | Toggle volumetric fog / distance fog / SSAO / SSIL / bloom / sun |
 | F1 | Toggle HUD (also hides the crosshair and selection overlay) |
+| F2 | Graphics settings panel (both modes; "Graphics settings" below) |
 | F12 | Save `screenshot.png` |
 | F9 | Export the map into `export/<map>-<YYYY-MM-DD_HHMMSS>/` next to `requests/` (as `--export`; the result shows in the bottom HUD line; not while the package has a load error) |
 | TAB | Toggle spectator mode |
@@ -203,6 +206,12 @@ Selected boxes get an orange tint and outline, plus a faint always-on-top outlin
 | `--render-scale <s>` | **Trade-off, default 1.** R3D renders at `s` (0.25–1) times the window / shot size and upscales (`--upscale nearest\|linear\|bicubic\|lanczos`, default bicubic; `MS_RenderSettings.renderScale` / `upscale`, `MS_ApplyRenderResolution`). |
 | `--window-msaa` | 4× multisampled window, as before 2026-10-11: smoother designer overlay lines for ~0.1 ms GPU per frame. The scene image is the same either way (R3D writes one colour per pixel). Default: single-sampled. |
 | `--bloom on\|off` | `off` skips the bloom pass (−0.25 ms) and raises exposure ×1.19 instead: bloom (threshold 0, MIX 0.04) is mostly a uniform ~20% lift here, so the mean brightness stays within ±1.2/255; only the faint halo around bright openings goes. |
+| `--quality low\|medium\|high\|ultra` | Graphics quality preset for this run ("Graphics settings" below; `MS_Quality` in the runtime). Default: the settings file in the interactive game, else ultra (= the map exactly). Not saved. |
+| `--settings <file>` | Graphics settings file to read (and, from the panel, write) instead of `~/.config/monolith/settings.ini` (`$XDG_CONFIG_HOME`; Windows `%APPDATA%\monolith\settings.ini`; else next to the executable). |
+| `--no-settings` | Neither read nor save a settings file. |
+| `--settings-set key=value` | Change one setting as if in the panel (repeatable, applied after every other flag): it applies to this run **and is saved** to the settings file (if one is in use). Keys are the file's, e.g. `preset=medium`, `render_scale=0.75`, `ao=baked`, `shadow_size=4096`, `fps_cap=monitor`. Works without a window with `--dump-boxes` (to write the file). |
+| `--settings-change key=value` | With `--shot`: after 10 frames apply the change through the panel's live path (repeatable; `shadow_size` restarts the renderer). The shot must equal one started with `--settings-set key=value` (verified for every preset, shadow size, AO, fog cache, render scale, range, AA, sun shadow: 0 pixels differ). |
+| `--settings-panel` | With `--shot --shot-hud`: draw the open settings panel into the shot (to review it). |
 | `--fx key=value` | Override one effect setting, repeatable, applied after `--ao`/`--bloom`: `ssao.samples`, `ssao.radius`, `ssao.intensity`, `ssao.power`, `ssil.samples`, `ssil.radius`, `ssil.gi`, `ssil.ao`, `bloom.levels`, `bloom.intensity`, `exposure`, `vfog.step`, `vfog.length`. For experiments. |
 | `--map <path>` | Load this map package (folder) or `.map` file instead of `maps/monolith/` (path relative to the working directory). A folder loads `<folder>/<folder name>.map`, else its only `.map`. It is hot-reloaded like the default map (every file of the package). |
 | `--new-map <name>` | Create the package `maps/<name>/` (`<name>.map` with a ground slab, the default material, the built-in environment written out, a spawn and two viewpoints; a `MAP.md` template; empty `shaders/ models/ textures/` and `ASSETS.md`), check that it loads, and exit without a window. Refuses to overwrite. |
@@ -260,7 +269,40 @@ In `--submit`, `--type` and `--classify` text, a literal `\n` becomes a new line
 | `MONOLITH_CLOSE_ON_EXIT` | `1`: when the game quits, close the terminals of all finished requests (default off). |
 | `MONOLITH_CLOSE_METHOD` | `wm` or `signal`: close terminals only through i3 / sway or only by signals (for tests; default both, WM first). |
 
-Vsync is **off** and rendered frames are uncapped; reused (cached) frames sleep to the monitor refresh rate (frame reuse, §6). For benchmarks, also disable driver vsync:
+### Graphics settings (F2, `settings.c`, `settingspanel.c`, runtime `MS_Quality`)
+
+**F2** (walk and spectator mode) opens a panel: the preset selector, then Display, Shadows, Ambient occlusion, Fog, Post and Performance rows, a frame time readout (fps, CPU ms, GPU ms from R3D's profiler, which the panel switches on while it is open), **Reset to preset** and **Close**. UP/DOWN select, LEFT/RIGHT change (or the mouse: hover, click the arrows or either half of the value, wheel); values that differ from the preset are drawn in blue. Changes apply at once; heavy ones (shadow map size, AO mode, fog cache, shadow mode/range, preset) one frame later behind an "applying ..." note. A new **shadow map size** closes and re-initialises R3D and loads the map again (~1 s; the selection is kept); window MSAA applies at the next start. While the panel is open the camera and game keys are frozen and the cursor is free. ESC / F2 close it, and closing saves the settings file.
+
+**The map stays the source of the look.** Every scene setting is relative to the map's environment (0 / x1 / "map's" = unchanged): ultra renders exactly what the map describes (pixel-identical, the default), and an effect the map turns off stays off. The toggles 1-6 still flip effects on top, `--fx` still applies after the settings. Everything that changes the image is in `FrameKey` (the whole `GfxSettings` plus R3D's AA mode).
+
+**Settings and their cost** (estimates from the trade-off measurements in §7.3 "Trade-off knobs", headless 1920×1006, default 3.59 ms; *not* measured per preset yet):
+
+| Group | Setting (file key) | Values | Cost / effect |
+|---|---|---|---|
+| Display | render scale (`render_scale`), upscale filter (`upscale`) | 0.5–1, nearest/linear/bicubic/lanczos | 0.75: −39%, 0.5: −55%; softer edges and grain |
+| | anti-aliasing (`anti_aliasing`) | none / fxaa / smaa | FXAA is today's; SMAA sharper, a bit more GPU |
+| | window MSAA (`window_msaa`) | on/off, next start | ~0.1 ms, overlay lines only |
+| | exposure, brightness, contrast, saturation | multipliers, 1 = the map's | display trims, free |
+| Shadows | sun shadow (`sun_shadow`), map size (`shadow_size`), range (`shadow_range`), softness (`shadow_softness`), mode (`shadow_mode`) | on/off; map's/2048–16384; map's/60–300 m; map's/0.5–6; tiles/camera/always | 8192 = 3.7 cm texels, 256 MB VRAM; 4096 = 7.4 cm, 64 MB. Range below the fog length (90 m) fades the shafts early |
+| Ambient occlusion | mode (`ao`), baked voxel / intensity, SSAO samples/radius/intensity, SSIL samples/radius | full/ssao/lite/baked/off | baked: −27% (crisper wall-foot contact shadow, no SSIL bounce); off: ~−0.9 ms |
+| Fog | volumetric fog, march step (`fog_step`, x the map's 0.75 m), length, fog cache voxel/samples, distance fog | | fog cache 0.5 m + step x2: −16%, shaft edges ~0.5 m softer |
+| Post | bloom, bloom intensity, SSR, SSGI (off / map's / on) | | bloom off: −6% (exposure x1.19 keeps the mean); SSR/SSGI cost extra (off in the default map) |
+| Performance | frame reuse, fps cap (off/monitor/30–240), vsync, depth pre-pass | | pre-pass off = same image, slower |
+
+**Presets** (`MS_QualityPreset`; frame estimates stack P's single-knob gains and **must be confirmed by interleaved benchmarks**):
+
+| Preset | What changes vs. ultra | Estimate (headless, default map) |
+|---|---|---:|
+| **ultra** (default) | nothing: the map exactly | 3.59 ms |
+| **high** | AO baked (0.5 m, 0.6) instead of SSAO + SSIL; fog cache 0.5 m | ~2.4 ms |
+| **medium** | high + render scale 0.75 (bicubic), fog march step x2, shadow map 4096 | ~1.5 ms |
+| **low** | render scale 0.5, AO off, bloom off (exposure x1.19), fog cache 0.5 m + step x2, shadow map 4096 | ~1.0 ms |
+
+**The settings file** is plain `key = value` text (`settings.c`: `preset = low|medium|high|ultra` sets every scene setting, later keys override single ones; `custom` files list every key). Only the interactive game reads the default file; **`--shot`, `--bench`, `--dump-*`, `--export` and `--classify` never read it** unless `--settings <file>` names one, so verification shots and benchmarks stay deterministic. Command-line flags (`--quality` first, then `--ao`, `--bloom`, `--shadow`, `--render-scale`, ...) override for one run and are never saved, also when the panel saves later: a panel change is written to the saved settings field by field, so a flag's override of another field stays out of the file. Unknown keys and bad values are logged and ignored.
+
+**In your own program** the same presets come from the runtime: `MS_QualityPreset(level)`, `MS_ApplyQuality(scene, &q)` right after every `MS_ApplyEnvironment`, then `MS_ApplyRenderResolution`; `q.shadowSize` goes to `MS_LoadOptions.shadowSizeOverride` (an R3D init hint). `examples/01_minimal --quality medium` (= every export's `viewer.c`) renders the same pixels as `monolith --quality medium`.
+
+Vsync is **off** by default and rendered frames are uncapped (the settings' vsync and fps cap change that in the interactive game only); reused (cached) frames sleep to the monitor refresh rate (frame reuse, §6). For benchmarks, also disable driver vsync:
 `__GL_SYNC_TO_VBLANK=0 ./build/linux/monolith --bench` (NVIDIA) or `vblank_mode=0` (Mesa).
 
 ## 6. Code architecture (`src/*.c`)
@@ -290,15 +332,16 @@ The program is split into modules, and each one has a header with the interface.
      - If launching fails, the bundle is kept, the HUD names its path, and the log prints the command to run by hand.
    - `LauncherUpdate()` polls every open request (a heap list; finished ones leave it once the HUD stops showing them) for `result.md` and shows its first line in the HUD for 20 s. `LauncherLastDone()` gives the camera for **R**.
    - **Windows**: the same bundle, then `cmd /c start "monolith-claude: <slug>" /D <exe dir> cmd /k "<claude>" … "<prompt>"` via `_spawnvp`. This path is only compile-tested.
-7. **Atmosphere**: the environment is map data (`env` lines; built-in defaults in `BuiltinEnvironment()` in `monolith_scene.c`, applied by `MS_ApplyEnvironment`); `atmosphere.c` only keeps the `--ao` / `--bloom` / `--fx` overrides, applied after it, and `main.c` re-applies map environment, overrides and the 1-6 toggle flips after every reload. The environment covers the procedural sky, the IBL ambient map (generated from a separate ambient-only sky, §7.5), distance fog, volumetric fog, SSAO, SSIL, bloom, tonemap and colour grading.
+7. **Atmosphere**: the environment is map data (`env` lines; built-in defaults in `BuiltinEnvironment()` in `monolith_scene.c`, applied by `MS_ApplyEnvironment`); the graphics settings (`MS_ApplyQuality`, which also covers `--ao` / `--bloom`) go on top, and `atmosphere.c` keeps the `--ao` names and the `--fx` overrides, applied after them, and `main.c` re-applies map environment, overrides and the 1-6 toggle flips after every reload. The environment covers the procedural sky, the IBL ambient map (generated from a separate ambient-only sky, §7.5), distance fog, volumetric fog, SSAO, SSIL, bloom, tonemap and colour grading.
 8. **Sun shadow** (in `monolith_scene.c`): the default **static world-fixed tiles** (`SunShadowTileSelect`, drawn once per map load, §7.3), and the camera-fitted reuse path for `--shadow-camera` / `--shadow-always` (`SunShadowFit`, `ShadowEdgeFade`, `SunShadowNeedsUpdate`). `SunShadowBoxMatrix` gives the light matrix for the `--fog-cache` bake.
 9. **Benchmark** (`bench.c`): frame statistics and the Markdown report for `--bench`.
 10. **Main** (`main.c`):
     - the header comment (controls and flags), argument parsing, `InitDataPaths()`, and map loading (+ `--dump-boxes`);
     - the shadow-size hint, `R3D_Init`, `MS_InitRenderer()` (`glEnable(GL_DEPTH_CLAMP)`), then `MS_Load` (the boxes as **one instanced draw per material**: a unit cube, per-instance position = box centre, scale = box size; the default map has one material) and `MS_SetRenderSettings` (shadow mode, fog cache, pre-pass, the trade-off knobs `renderScale` / `upscale` / `aoVolumeVoxel`), then `MS_ApplyRenderResolution` (R3D's internal resolution = window × `renderScale`; also on resize). The window is single-sampled (`--window-msaa` brings back 4× MSAA);
-    - the main loop: toggles, TAB, map hot reload, designer update, camera update, draw (with frame reuse, below), overlay, HUD, `--shot` / `--bench` handling;
+    - the graphics settings (`settings.c`: the file, then `--quality` and the single flags, then `--settings-set`), applied by `ApplyEnvironment()` (map environment → `MS_ApplyQuality` → `--fx` → toggles → `MS_ApplyRenderResolution`); the F2 panel (`settingspanel.c`) changes them live, and `RestartRenderer()` handles a new shadow map size (`MS_Unload`, `R3D_Close`, hint, `R3D_Init`, `MS_Load`);
+    - the main loop: toggles, TAB, settings panel, map hot reload, designer update, camera update, draw (with frame reuse, below), overlay, HUD, `--shot` / `--bench` handling;
     - **depth pre-pass** (R3D patch 6): the concrete material's `alpha_cutoff 0` (the concrete never discards) lets R3D lay depth first, so the procedural shader runs once per visible pixel instead of once per overdrawn fragment. `--no-prepass` turns it off for A/B tests;
-    - **frame reuse** (comment block "Frame reuse" in `main.c`): a `FrameKey` holds everything that changes R3D's image (camera, the whole `R3D_Environment`, the runtime's `MS_RenderSettings` incl. toggle 6, `scene->version`, window size; materials, lights and the sun only change with a reload, i.e. a new version), compared bytewise each frame. While it changes, R3D renders straight into the window. On the first unchanged frame R3D renders once more into a cache target (colour + depth *texture*); later unchanged frames only composite it with a shader that also writes `gl_FragDepth` (with `--window-msaa` the window is multisampled, and a blit into it would be an error), and the overlay/HUD go on top. A reused frame costs ~0.2 ms instead of ~4–5 ms, and the loop then sleeps to the monitor's refresh rate. Interactive only; off in `--shot` / `--bench` unless `--frame-reuse`. **Anything new that changes the image (a uniform, a light, a setting) must go into `FrameKey`**, or a still camera will keep showing the old image;
+    - **frame reuse** (comment block "Frame reuse" in `main.c`): a `FrameKey` holds everything that changes R3D's image (camera, the whole `R3D_Environment`, the runtime's `MS_RenderSettings` incl. toggle 6, the graphics settings and R3D's AA mode, `scene->version`, window size; materials, lights and the sun only change with a reload, i.e. a new version), compared bytewise each frame. While it changes, R3D renders straight into the window. On the first unchanged frame R3D renders once more into a cache target (colour + depth *texture*); later unchanged frames only composite it with a shader that also writes `gl_FragDepth` (with `--window-msaa` the window is multisampled, and a blit into it would be an error), and the overlay/HUD go on top. A reused frame costs ~0.2 ms instead of ~4–5 ms, and the loop then sleeps to the monitor's refresh rate. Interactive only; off in `--shot` / `--bench` unless `--frame-reuse`. **Anything new that changes the image (a uniform, a light, a setting) must go into `FrameKey`**, or a still camera will keep showing the old image;
     - `Submit()`, which renders the request images through the same `DrawScene()` as the main view, and cleanup.
 
 Rendering per frame (`DrawScene()`; `--shot` and the request images render into a `RenderTexture`, the window view into the default framebuffer):

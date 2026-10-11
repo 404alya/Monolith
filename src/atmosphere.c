@@ -6,24 +6,26 @@
 // SSAO and SSIL run every frame at half resolution (~0.2 + ~0.5 ms GPU at 1920x1006, plus
 // the normal / radiance downsamples they need), yet in this scene they change the image
 // very little: the ambient they modulate is small next to the sun, the volumetric fog and
-// the IBL ground fill (PROMPT-INSTRUCTIONS.md 7.5). These presets let the developer trade
-// them away and judge the look live. The default ("full") is the map's setup, unchanged.
+// the IBL ground fill (PROMPT-INSTRUCTIONS.md 7.5). --ao picks one of the runtime's AO modes
+// (MS_Quality.ao, applied by MS_ApplyQuality) so the developer can trade them away and judge
+// the look live. The default ("full") is the map's setup, unchanged. --bloom off is
+// MS_Quality.bloom = false (bloom here is mostly a uniform ~20% lift: threshold 0, MIX 0.04;
+// "off" skips the pass, ~0.18 ms, and raises exposure x1.19 instead, which matched the mean
+// of the 26 verification shots best: +0.07/255 on average, every shot within -1.2..+0.8/255).
 
-typedef struct { const char *name, *help; } AoMode;
+typedef struct { const char *name, *help; MS_AoMode mode; } AoMode;
 static const AoMode AO_MODES[] = {
-    { "full",  "SSAO + SSIL as set up (default)" },
-    { "ssao",  "SSIL off, SSAO unchanged" },
-    { "lite",  "SSIL off, SSAO with 8 samples instead of 16" },
-    { "off",   "SSAO and SSIL off" },
-    { "baked", "SSAO and SSIL off, replaced by the baked world-space occlusion volume (main.c sets it up)" },
+    { "full",  "SSAO + SSIL as set up (default)", MS_AO_FULL },
+    { "ssao",  "SSIL off, SSAO unchanged", MS_AO_SSAO },
+    { "lite",  "SSIL off, SSAO with 8 samples instead of 16", MS_AO_LITE },
+    { "off",   "SSAO and SSIL off", MS_AO_OFF },
+    { "baked", "SSAO and SSIL off, replaced by the baked world-space occlusion volume (0.5 m, 0.6)", MS_AO_BAKED },
 };
 
-bool ApplyAoMode(R3D_Environment *env, const char *mode)
+bool AoModeFromName(const char *name, MS_AoMode *mode)
 {
-    if (strcmp(mode, "full") == 0) return true;
-    if (strcmp(mode, "ssao") == 0) { env->ssil.enabled = false; return true; }
-    if (strcmp(mode, "lite") == 0) { env->ssil.enabled = false; env->ssao.sampleCount = 8; return true; }
-    if (strcmp(mode, "off") == 0 || strcmp(mode, "baked") == 0) { env->ssil.enabled = false; env->ssao.enabled = false; return true; }
+    for (int i = 0; i < (int)(sizeof(AO_MODES) / sizeof(AO_MODES[0])); i++)
+        if (strcmp(name, AO_MODES[i].name) == 0) { *mode = AO_MODES[i].mode; return true; }
     return false;
 }
 
@@ -34,23 +36,6 @@ const char *AoModeHelp(void)
     for (int i = 0; i < (int)(sizeof(AO_MODES) / sizeof(AO_MODES[0])); i++)
         n += snprintf(buf + n, sizeof(buf) - n, "  %-5s %s\n", AO_MODES[i].name, AO_MODES[i].help);
     return buf;
-}
-
-// Bloom here is not a highlight glow: with threshold 0 and R3D's additive upsample chain,
-// MIX at 0.04 blends in a wide blur of the whole frame that is several times brighter than
-// the scene, i.e. mostly a uniform ~20% lift (bloom off: mean luminance -9/255) plus a faint
-// halo at bright openings. "off" skips the pass (~0.18 ms) and replaces the lift with
-// exposure; 1.19 matched the mean of the 26 verification shots best (+0.07/255 on
-// average, every shot within -1.2..+0.8/255).
-bool ApplyBloomMode(R3D_Environment *env, const char *mode)
-{
-    if (strcmp(mode, "on") == 0) return true;
-    if (strcmp(mode, "off") == 0) {
-        env->bloom.mode = R3D_BLOOM_DISABLED;
-        env->tonemap.exposure *= 1.19f;
-        return true;
-    }
-    return false;
 }
 
 // Numeric knobs for experiments: --fx ssil.radius=2.5 etc. Integers are rounded.

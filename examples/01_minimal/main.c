@@ -12,6 +12,8 @@
 //   --view <n>                   start at the map's viewpoint n (1-based, default 1)
 //   --eye x y z --look yaw pitch start at this eye position / view angles (degrees; yaw 0 looks
 //                                toward +Z, yaw 180 toward -Z), like monolith's --eye / --look
+//   --quality low|medium|high|ultra   graphics quality preset of the scene runtime (MS_Quality;
+//                                ultra = the map exactly, the same as leaving it out)
 //
 // The shot renders exactly like `monolith --shot <file> --view n` (same camera math, FXAA,
 // depth clamp, 30 frames into a RenderTexture), so the two images can be compared pixel by
@@ -46,6 +48,8 @@ int main(int argc, char **argv)
     bool eyeSet = false, lookSet = false;
     Vector3 eye = { 0 };
     float yaw = 0.0f, pitch = 0.0f;
+    bool qualitySet = false;
+    MS_Quality quality = MS_QualityPreset(MS_QUALITY_ULTRA);
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--shot") == 0 && i + 1 < argc) shotPath = argv[++i];
         else if (strcmp(argv[i], "--size") == 0 && i + 2 < argc) { width = atoi(argv[i + 1]); height = atoi(argv[i + 2]); i += 2; }
@@ -59,6 +63,11 @@ int main(int argc, char **argv)
             pitch = (float)atof(argv[i + 2]) * DEG2RAD;
             lookSet = true;
             i += 2;
+        } else if (strcmp(argv[i], "--quality") == 0 && i + 1 < argc) {
+            MS_QualityLevel level;
+            if (!MS_QualityFromName(argv[++i], &level)) { fprintf(stderr, "unknown quality: %s\n", argv[i]); return 1; }
+            quality = MS_QualityPreset(level);
+            qualitySet = true;
         } else if (argv[i][0] != '-' && !package) package = argv[i];
         else { fprintf(stderr, "unknown argument: %s\n", argv[i]); return 1; }
     }
@@ -71,7 +80,9 @@ int main(int argc, char **argv)
     // Parse the package once without the GPU: errors show before a window opens, and the
     // sun's shadow map size (an R3D init hint) is known before R3D_Init
     char err[512];
-    MS_Scene *peek = MS_Load(package, &(MS_LoadOptions){ .noGpu = true }, err, sizeof(err));
+    // (the quality's shadow map size is an R3D init hint too: 0 = the map's)
+    MS_LoadOptions opt = { .shadowSizeOverride = quality.shadowSize };
+    MS_Scene *peek = MS_Load(package, &(MS_LoadOptions){ .noGpu = true, .shadowSizeOverride = quality.shadowSize }, err, sizeof(err));
     if (!peek) { fprintf(stderr, "%s\n", err); return 1; }
 
     // A shot opens a hidden window that is never mapped. The title "monolith-shot" lets a
@@ -84,9 +95,15 @@ int main(int argc, char **argv)
     R3D_SetAntiAliasingMode(R3D_ANTI_ALIASING_MODE_FXAA);
     MS_InitRenderer();                  // depth clamp for the sun's shadow (see monolith_scene.h)
 
-    MS_Scene *scene = MS_Load(package, NULL, err, sizeof(err));
+    MS_Scene *scene = MS_Load(package, &opt, err, sizeof(err));
     if (!scene) { fprintf(stderr, "%s\n", err); R3D_Close(); CloseWindow(); return 1; }
     MS_ApplyEnvironment(scene);
+    // Quality presets scale the cost on top of the map's look (render scale, baked AO, fog
+    // cache, ...): right after every MS_ApplyEnvironment, then R3D's resolution for the scale
+    if (qualitySet) {
+        MS_ApplyQuality(scene, &quality);
+        MS_ApplyRenderResolution(scene, width, height);
+    }
 
     if (view < 1 || view > scene->viewpointCount) view = 1;
     Camera3D camera = CameraFromViewpoint(&scene->viewpoints[view - 1]);
@@ -107,7 +124,7 @@ int main(int argc, char **argv)
     bool orbitReady = false;
     for (int frame = 0; !WindowShouldClose(); frame++) {
         if (!shotPath) {
-            if (IsWindowResized()) R3D_SetResolution(GetScreenWidth(), GetScreenHeight());
+            if (IsWindowResized()) MS_ApplyRenderResolution(scene, GetScreenWidth(), GetScreenHeight());
             int step = IsKeyPressed(KEY_RIGHT) - IsKeyPressed(KEY_LEFT);
             if (step) {
                 view = (view - 1 + step + scene->viewpointCount) % scene->viewpointCount + 1;

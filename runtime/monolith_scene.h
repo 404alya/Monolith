@@ -265,10 +265,90 @@ typedef struct {
                             // (needs MS_PATCHED_R3D, patch 11); usually with SSAO + SSIL off,
                             // which it replaces. 0 = off (default)
     float aoVolumeIntensity;    // strength of that occlusion, default 1
+    // Sun shadow overrides (quality settings; the defaults keep the map's):
+    bool sunShadow;         // default true; false = the sun is pushed without a shadow map
+    float shadowRange;      // > 0: shadow distance in m (10..2000) instead of the map's sun.range; 0 = the map's
+    float shadowSoftness;   // > 0: PCF softness instead of the map's sun.softness; 0 = the map's
 } MS_RenderSettings;
 
 MS_RenderSettings MS_GetRenderSettings(const MS_Scene *scene);
 void MS_SetRenderSettings(MS_Scene *scene, MS_RenderSettings settings);
+
+// ======================================================================================
+// Graphics quality (presets for games and the editor; monolith's settings panel uses these)
+// ======================================================================================
+// The map stays the source of the look: every setting is relative to the map's environment
+// (0 / 1 / "the map's" = unchanged), so MS_QUALITY_ULTRA renders exactly what the map
+// describes, and an effect the map turns off stays off. Lower presets scale the cost down:
+//     MS_Quality q = MS_QualityPreset(MS_QUALITY_MEDIUM);
+//     MS_LoadOptions opt = { .shadowSizeOverride = q.shadowSize };  // the shadow map size is an
+//     ... peek with opt + .noGpu, MS_SetInitHints(peek), R3D_Init, MS_InitRenderer ...  // init hint
+//     MS_Scene *scene = MS_Load(path, &opt, err, sizeof(err));
+//     MS_ApplyEnvironment(scene);
+//     MS_ApplyQuality(scene, &q);                  // right after every MS_ApplyEnvironment
+//     MS_ApplyRenderResolution(scene, w, h);
+// Changing shadowSize later needs R3D_Close / R3D_Init (and a new MS_Load); everything else
+// applies live with MS_ApplyEnvironment + MS_ApplyQuality + MS_ApplyRenderResolution.
+
+typedef enum { MS_QUALITY_LOW = 0, MS_QUALITY_MEDIUM, MS_QUALITY_HIGH, MS_QUALITY_ULTRA, MS_QUALITY_CUSTOM } MS_QualityLevel;
+
+// Screen-space AO / indirect light: what the map sets up (full), less of it, or the baked volume
+typedef enum {
+    MS_AO_FULL = 0,         // the map's SSAO + SSIL
+    MS_AO_SSAO,             // SSIL off
+    MS_AO_LITE,             // SSIL off, SSAO 8 samples
+    MS_AO_BAKED,            // SSAO + SSIL off, the baked occlusion volume instead (needs MS_PATCHED_R3D)
+    MS_AO_OFF,              // SSAO + SSIL off
+} MS_AoMode;
+
+typedef struct {
+    // Resolution and anti-aliasing
+    float renderScale;              // 0.25..1 (MS_RenderSettings.renderScale)
+    R3D_UpscaleMode upscale;
+    R3D_AntiAliasingMode antiAliasing;  // default FXAA
+    // Sun shadow
+    bool sunShadow;
+    int shadowSize;                 // px, 0 = the map's shadow.size (an R3D init hint, see above)
+    float shadowRange;              // m, 0 = the map's sun.range
+    float shadowSoftness;           // 0 = the map's sun.softness
+    MS_ShadowMode shadowMode;
+    // Ambient occlusion / indirect light
+    MS_AoMode ao;
+    float aoVolumeVoxel;            // m; with MS_AO_BAKED 0 = 0.5. > 0 with another mode: the volume on top
+    float aoVolumeIntensity;        // with MS_AO_BAKED 0 = 0.6, else 0 = 1
+    int ssaoSamples, ssilSamples;   // 0 = the map's
+    float ssaoRadius, ssaoIntensity, ssilRadius;    // 0 = the map's
+    // Fog
+    bool volumetricFog;             // false turns the map's volumetric fog off
+    float fogStepScale;             // x the map's march step (1 = the map's; 2 = half the steps)
+    float fogLengthScale;           // x the map's march length (1 = the map's)
+    float fogCacheVoxel;            // > 0: bake the fog's sun visibility (m), 0 = off
+    int fogCacheSub;                // sub^3 samples per voxel (1..4)
+    bool distanceFog;               // false turns the map's distance fog off
+    // Post
+    bool bloom;                     // false: bloom off, exposure x1.19 instead (same mean brightness)
+    float bloomIntensityScale;      // x the map's bloom intensity
+    int ssr, ssgi;                  // -1 off, 0 the map's, 1 on (with the map's parameters)
+    // Display trims on top of the map's grading (multipliers, 1 = the map's)
+    float exposure, brightness, contrast, saturation;
+    // Performance (same image)
+    bool depthPrepass;
+} MS_Quality;
+
+// Low / medium / high / ultra (= the map exactly); MS_QUALITY_CUSTOM returns ultra
+MS_Quality MS_QualityPreset(MS_QualityLevel level);
+const char *MS_QualityName(MS_QualityLevel level);  // "low" .. "ultra", "custom"
+bool MS_QualityFromName(const char *name, MS_QualityLevel *level);
+// The preset q equals field by field, else MS_QUALITY_CUSTOM
+MS_QualityLevel MS_QualityMatch(const MS_Quality *q);
+bool MS_QualityEqual(const MS_Quality *a, const MS_Quality *b);
+
+// Applies q: the render settings (renderScale, upscale, sun shadow, shadow mode, fog cache,
+// AO volume, pre-pass; sunOn is kept), R3D's anti-aliasing mode, and the environment part on
+// top of R3D_GetEnvironment(). Call it right after MS_ApplyEnvironment (it scales the map's
+// values, so applying it twice would scale twice), then MS_ApplyRenderResolution.
+// q->shadowSize is not applied here (init hint: MS_LoadOptions.shadowSizeOverride).
+void MS_ApplyQuality(MS_Scene *scene, const MS_Quality *q);
 
 // R3D's internal resolution for an output of outW x outH pixels (the window, or the target
 // passed to MS_Draw): renderScale x output (at least 1 px), plus the upscale filter. Only calls

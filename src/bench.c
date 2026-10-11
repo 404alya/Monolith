@@ -13,6 +13,7 @@ int benchFrames = BENCH_FRAMES;
 bool benchStill = false;
 bool benchFrameReuse = false;
 bool benchProfile = true;
+const char *benchQuality = "ultra";
 
 #ifndef R3D_BUILD_TYPE_NAME
 #   define R3D_BUILD_TYPE_NAME "unknown"   // set by build.sh
@@ -256,6 +257,7 @@ void WriteBenchReport(const double *times, const int *shadowUpdates, int shadowS
     // Frame times from before 2026-10-10 were measured with an unoptimised R3D
     fprintf(f, "| R3D build | %s%s |\n", R3D_BUILD_TYPE_NAME, strcmp(R3D_BUILD_TYPE_NAME, "None") == 0
             ? " (no CMAKE_BUILD_TYPE, unoptimised: like the reports before 2026-10-10)" : "");
+    fprintf(f, "| Quality | %s (graphics settings: preset, or custom; the settings file is not read by --bench) |\n", benchQuality);
     fprintf(f, "| Sun shadow | %d px, range %.0f m, %s |\n", shadowSize, shadowRange,
             shadowReuse ? "re-rendered only when the view leaves the cached map" : "re-rendered every frame (`--shadow-always`)");
     fprintf(f, "| Effects | volFog %s, fog %s, SSAO %s, SSIL %s, bloom %s, exposure %.3g |\n",
