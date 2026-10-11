@@ -239,6 +239,7 @@ typedef struct {
     R3D_Model model;            // shallow copy of the file's model with its own materials[] (and meshes[] if shadow off)
     bool ownMeshes;
     R3D_InstanceBuffer inst;
+    bool instLoaded;            // inst exists (a failed BuildModelGroups may stop before it)
     int count;
 } ModelGroup;
 
@@ -2644,7 +2645,7 @@ static bool ResolveModels(SceneData *d, char *err, int errSize)
             snprintf(err, errSize, "%s: out of memory", d->path);
             return false;
         }
-        memcpy(d->colliders, d->boxes, sizeof(BoundingBox) * d->boxCount);
+        if (d->boxCount > 0) memcpy(d->colliders, d->boxes, sizeof(BoundingBox) * d->boxCount);
     }
     for (int i = 0; i < d->modelCount; i++) {
         MS_ModelInstance *M = &d->models[i];
@@ -2684,7 +2685,7 @@ static void FreeModelGroups(SceneData *d)
 {
     for (int g = 0; g < d->modelGroupCount; g++) {
         ModelGroup *G = &d->modelGroups[g];
-        if (G->count > 0) R3D_UnloadInstanceBuffer(G->inst);
+        if (G->instLoaded) R3D_UnloadInstanceBuffer(G->inst);
         free(G->slotMat);
         free(G->model.materials);
         if (G->ownMeshes) free(G->model.meshes);
@@ -2776,6 +2777,7 @@ static bool BuildModelGroups(SceneData *d, char *err, int errSize)
         }
         int count = G->count;
         G->inst = R3D_LoadInstanceBuffer(count, R3D_INSTANCE_POSITION | R3D_INSTANCE_ROTATION | R3D_INSTANCE_SCALE);
+        G->instLoaded = true;
         Vector3 *pos = R3D_MapInstances(G->inst, R3D_INSTANCE_POSITION, false);
         Quaternion *rot = R3D_MapInstances(G->inst, R3D_INSTANCE_ROTATION, false);
         Vector3 *scl = R3D_MapInstances(G->inst, R3D_INSTANCE_SCALE, false);
@@ -3153,6 +3155,11 @@ void MS_Unload(MS_Scene *s)
     MS_Private *p = s->priv;
     if (p) {
         FreeData(p->d);
+#ifdef MS_PATCHED_R3D
+        // The fog bake is R3D-global: without this, the next scene drawn in this R3D context
+        // would sample this scene's sun visibility (R3D frees the volume itself at R3D_Close)
+        if (p->gpu && p->fogCacheVersion) R3D_ClearFogSunVisibility();
+#endif
         if (p->gpu) {
 #ifdef MS_PATCHED_R3D
             if (p->aoVersion) R3D_ClearWorldOcclusion();

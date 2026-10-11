@@ -16,6 +16,7 @@ own project. Each one has its own README.
 ./build.sh                  # once, in the repo root: builds R3D (submodules/r3d) and monolith
 examples/build.sh           # -> examples/build/linux/<example>/
 examples/build.sh --win     # -> examples/build/win/<example>/ (MinGW-w64; run ./build.sh --win first)
+examples/build.sh lsan      # -> examples/build/linux-lsan/<example>/ (LeakSanitizer; tools/leakcheck.sh runs them)
 ```
 
 The examples compile against monolith's R3D copy with `-DMS_PATCHED_R3D`, with the game's

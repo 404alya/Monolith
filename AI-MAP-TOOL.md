@@ -163,9 +163,10 @@ Run every command from the repo root. The binary is `./build/linux/monolith`, an
    - no **floating boxes**: each new box rests on or is attached to something, unless intended. Compare y0 with the top of the support;
    - no **z-fighting** or flickering near-coplanar faces;
    - walkways not blocked: **headroom ≥ 2.2 m**, stairs **rise ≤ 0.45 m** per step, openings ≥ 0.6 m (better ≥ 1 m), and a route from the start through canyon → hall → stairs → terrace still exists;
-   - no unrelated geometry moved (the box diff), and the box count is < 8192;
+   - no unrelated geometry moved (the box diff), and nothing multiplied out of scale (the loader's sanity cap is 1 000 000 objects);
    - for models: scale, support, collision, shadows, licence recorded (§11, "Verification additions for models").
-7. **Write `requests/<id>/result.md`** (§8).
+7. **Code changes only (C, shaders, build): leak check.** Run `tools/leakcheck.sh` (it builds the LeakSanitizer binaries and runs the main code paths in hidden windows, about 1.5 minutes). It must end with `leakcheck: OK: zero leaks of ours`; otherwise fix the leak it prints before writing `result.md`. Map-only edits skip this step.
+8. **Write `requests/<id>/result.md`** (§8).
 
 **Hot reload vs. rebuild.** The game polls the map package (map file, shaders, textures) about twice a second and reloads it when a file's content changes. The HUD then shows `map reloaded (N boxes)`. **A map-only edit needs no rebuild and no restart.** A **code edit** (C or R3D) needs `./build.sh` (and `./build.sh --win` for the warning check), and **the developer restarts the game**. Say so in `result.md`. Edits to the package's shaders (e.g. `maps/monolith/shaders/concrete.glsl`) hot-reload like the map: no rebuild, no restart.
 

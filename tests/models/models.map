@@ -1,0 +1,47 @@
+monolith 2
+# models.map -- a small test package for tools/leakcheck.sh (and any loader test): every kind of
+# statement once. Boxes with plain, textured and shader materials; model instances with
+# overrides, per-slot materials, collision boxes, origin and shadow switches; shadowed and
+# unshadowed point / spot lights; spawn and viewpoints. Paths are relative to this folder.
+
+material "ground" albedo 118 112 100 roughness 0.95
+material "tiles" albedo_map "textures/tiles.png" roughness 0.7 uv_scale 2 2
+material "awning" shader "shaders/stripes.glsl" alpha_cutoff 0
+material "awning" uniform u_colorA 0.55 0.08 0.05 uniform u_colorB 0.85 0.8 0.7 uniform u_width 0.5
+material "bark" albedo 105 72 50 roughness 0.9 metalness 0
+material "leaves" albedo 85 125 55 roughness 0.85 metalness 0
+material "rock" albedo 130 128 120 roughness 0.9 metalness 0 inherit normal
+
+env sun.direction 0.4 -0.8 0.45
+env shadow.size 2048
+env sun.range 60
+env volumetricFog.enabled off
+
+spawn 0 0 12 180
+viewpoint "Overview" 0 8 16 0 1 -2
+viewpoint "Close" 3 1.6 3 -2 1 -4
+
+group "ground"
+use "ground"
+box -30 -1 -30 30 0 30
+
+group "walls: textured and shader"
+use "tiles"
+repeat 4 4 0 0 block -6 0 -8 3 2 0.4
+use "awning"
+box -6 2.5 -9 6 2.7 -7
+
+group "trees: per-slot materials, trunk collision"
+use "default"
+repeat 3 4 0 0 model "models/tree_oak.glb" -4 0 -2 scale 4 origin bottom material.0 "leaves" material.1 "bark" collide box -0.06 -0.05 -0.06 0.06 0.45 0.06
+
+group "rocks: use restyles, rotated, shadow off"
+use "rock"
+model "models/rock_largeA.glb" 5 0 2 rot 30 0 10 scale 2 origin bottom shadow off
+model "models/rock_largeA.glb" -5 0 3 scale 1.5 origin center collide none
+use "default"
+
+group "lights"
+light point 0 3 0 color 255 200 150 energy 4 range 12 shadow on
+light spot 4 4 4 -0.5 -1 -0.5 inner 15 outer 30 energy 6 range 15
+light point -4 2 4 color 150 180 255 energy 2 range 8

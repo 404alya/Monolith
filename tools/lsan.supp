@@ -1,0 +1,71 @@
+# LeakSanitizer suppressions for monolith (tools/leakcheck.sh; build: ./build.sh lsan)
+#
+# Only leaks ALLOCATED BY driver or system library code are listed here: the GPU driver
+# (NVIDIA libnvidia-* / libGLX_nvidia, Mesa), the GL / GLX / EGL dispatch libraries, X11 / xcb
+# and D-Bus. They keep per-process state (context tables, shader caches, connection buffers)
+# that they never free, even after the context, display or connection is closed; there is
+# nothing an application can call to release it, and every GL program on this machine shows
+# them. Never add our code, raylib, GLFW, R3D or assimp here: those are linked statically
+# into the monolith binary, so a pattern for them would have to name that binary and would
+# hide real leaks.
+#
+# How tools/leakcheck.sh applies this file (stricter than LeakSanitizer itself, which
+# suppresses a leak when ANY frame of its stack matches): the programs run without
+# suppressions, and tools/lsan_report.py looks only at the frame that allocated the memory,
+# i.e. the first frame after the allocator (malloc/calloc/realloc/strdup/operator new and
+# libc internals such as fopen's buffer are skipped, so a FILE or string our code leaks is
+# still ours). A leak is suppressed only when that frame is in one of the libraries below;
+# a leak whose allocating frame is in the monolith binary (our code, raylib, R3D, assimp)
+# always counts. The file is still a valid LSAN_OPTIONS=suppressions=... file for manual
+# runs (then with LeakSanitizer's looser any-frame rule).
+#
+# One `leak:<module>` line per library; the pattern is matched against the module path.
+
+# NVIDIA's GL driver. Observed (driver 615.71, every run that opens a window, monolith and the
+# examples alike): 8 allocations, 366 bytes, made by libnvidia-glcore during
+# glXCreateContextAttribsARB (called by GLFW's context creation in InitWindow) and still
+# unreferenced after CloseWindow destroyed the context. The other NVIDIA libraries hold the
+# same kind of per-process state on other driver versions / EGL setups.
+leak:libnvidia-glcore.so
+leak:libnvidia-glsi.so
+leak:libnvidia-tls.so
+leak:libnvidia-gpucomp.so
+leak:libnvidia-eglcore.so
+leak:libGLX_nvidia.so
+leak:libEGL_nvidia.so
+
+# Not observed on the dev machine (NVIDIA); listed so that the check gives the same answer on
+# AMD / Intel machines and in VMs, where these libraries play the part of the ones above.
+# Mesa drivers (other GPUs): the same kind of per-process driver state
+leak:libgallium
+leak:_dri.so
+leak:libglapi.so
+leak:libGLX_mesa.so
+leak:libEGL_mesa.so
+
+# The GL vendor-neutral dispatch libraries (libglvnd): vendor tables and the per-thread
+# current-context state, kept for the life of the process
+leak:libGLX.so
+leak:libGLdispatch.so
+leak:libEGL.so
+leak:libOpenGL.so
+
+# Xlib / xcb / X extension libraries loaded by GLFW: the display connection's caches
+# (atoms, extension data, input method) that XCloseDisplay does not release completely
+leak:libX11.so
+leak:libX11-xcb.so
+leak:libxcb.so
+leak:libXext.so
+leak:libXrandr.so
+leak:libXi.so
+leak:libXcursor.so
+leak:libXrender.so
+leak:libXfixes.so
+leak:libXinerama.so
+leak:libXxf86vm.so
+
+# D-Bus (pulled in by the driver / X11 for some setups): its connection and type caches
+leak:libdbus-1.so
+
+# The dynamic loader: link maps and TLS of libraries the driver and GLFW dlopen
+leak:ld-linux-x86-64.so

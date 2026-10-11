@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Build the examples: examples/build.sh          -> examples/build/linux/<example>/
 #                     examples/build.sh --win    -> examples/build/win/<example>/ (MinGW-w64)
+#                     examples/build.sh lsan     -> examples/build/linux-lsan/<example>/ (LeakSanitizer,
+#                                                   -O1 -g; tools/leakcheck.sh runs these)
 # Each output folder holds the program(s) and the data they load (scene/ or assets/), so it
 # runs from anywhere: e.g. examples/build/linux/01_minimal/minimal --shot /tmp/x.png
 #
@@ -16,8 +18,11 @@ R3D_DIR="${R3D_DIR:-$ROOT/submodules/r3d}"
 
 WIN=0
 [[ "${1:-}" == "--win" ]] && WIN=1
+LSAN=0
+[[ "${1:-}" == "lsan" ]] && LSAN=1
 
 CFLAGS=(-std=c11 -Wall -Wextra -Wno-missing-field-initializers -O2)
+[[ $LSAN == 1 ]] && CFLAGS=(-std=c11 -Wall -Wextra -Wno-missing-field-initializers -g -O1 -fno-omit-frame-pointer -fsanitize=leak)
 RUNTIME=("$ROOT/runtime/monolith_scene.c")
 if [[ $WIN == 1 ]]; then
   CC=x86_64-w64-mingw32-gcc
@@ -30,6 +35,7 @@ else
   CC="${CC:-clang}"
   LIBDIR="$R3D_DIR/build-linux"
   OUT="$HERE/build/linux"
+  [[ $LSAN == 1 ]] && OUT="$HERE/build/linux-lsan"
   EXE=
   # Like ../build.sh: libstdc++ static, symbols newer than glibc 2.34 routed to old versions
   GLIBC_WRAP=acosf,asinf,atan2f,sqrtf,fmod,fmodf,hypot,hypotf,__isoc23_strtoul,arc4random

@@ -4,7 +4,10 @@
 #                                     statically) + maps/ (map packages), the folder can be
 #                                     copied as-is
 #        ./build.sh run [args]     -> build and run
-#        ./build.sh debug          -> debug build (-g -O0 + sanitizers), same output folder
+#        ./build.sh debug          -> debug build (-g -O0, AddressSanitizer + UBSan, leak check at
+#                                     exit) in build/linux-debug/
+#        ./build.sh lsan           -> LeakSanitizer-only build (-O1 -g, fast) in build/linux-lsan/,
+#                                     what tools/leakcheck.sh runs
 #        ./build.sh --win          -> Windows x86_64 build in build/win/ (MinGW-w64):
 #                                     monolith.exe (statically linked) + maps/ (packages),
 #                                     the folder can be zipped and copied as-is
@@ -67,9 +70,9 @@ if [[ "${1:-}" == "--win" ]]; then
 fi
 
 if [[ $WIN == 1 ]]; then
-  if [[ "${1:-}" == "debug" ]]; then
-    echo "build.sh: --win debug is not supported (AddressSanitizer/UBSan don't work with MinGW)." >&2
-    echo "          Use ./build.sh debug for a sanitizer build on Linux." >&2
+  if [[ "${1:-}" == "debug" || "${1:-}" == "lsan" ]]; then
+    echo "build.sh: --win ${1} is not supported (the sanitizers don't work with MinGW)." >&2
+    echo "          Use ./build.sh ${1} for a sanitizer build on Linux." >&2
     exit 1
   fi
 
@@ -132,6 +135,7 @@ BuildR3D "$R3D_LINUX" Linux \
   -DR3D_GPU_PROFILER=ON
 
 OUT="$ROOT/build/linux"
+MODE="${1:-}"
 INCLUDES=(
   -I"$R3D_DIR/include"
   -I"$R3D_LINUX/generated/include"
@@ -142,8 +146,15 @@ INCLUDES=(
 )
 
 CFLAGS=(-std=c11 -Wall -Wextra -Wno-missing-field-initializers -O2)
-if [[ "${1:-}" == "debug" ]]; then
-  CFLAGS=(-std=c11 -Wall -Wextra -Wno-missing-field-initializers -g -O0 -fsanitize=address,undefined)
+# The sanitizer builds go into their own folders, so they never replace the normal binary.
+# R3D, raylib and assimp stay the normal Release static libraries (not instrumented, but
+# their mallocs are intercepted, so leaks inside them are found too).
+if [[ "$MODE" == "debug" ]]; then
+  CFLAGS=(-std=c11 -Wall -Wextra -Wno-missing-field-initializers -g -O0 -fno-omit-frame-pointer -fsanitize=address,undefined)
+  OUT="$ROOT/build/linux-debug"
+elif [[ "$MODE" == "lsan" ]]; then
+  CFLAGS=(-std=c11 -Wall -Wextra -Wno-missing-field-initializers -g -O1 -fno-omit-frame-pointer -fsanitize=leak)
+  OUT="$ROOT/build/linux-lsan"
 fi
 
 mkdir -p "$OUT"
@@ -167,7 +178,7 @@ rm -rf "$OUT/resources" "$OUT/maps"
 cp -r "$ROOT/maps" "$OUT/maps"
 CopyExportTemplate
 
-echo "built: build/linux/monolith"
+echo "built: ${OUT#"$ROOT/"}/monolith"
 if [[ "${1:-}" == "run" ]]; then
   shift
   exec "$OUT/monolith" "$@"

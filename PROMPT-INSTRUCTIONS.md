@@ -57,8 +57,11 @@ monolith/
 │                                #   monolith_capture.h (capture shim for imports, §6.3)
 ├── tools/                       # asset tools for AI sessions (AI-MAP-TOOL.md §11): fetch_asset.py (Poly Haven,
 │                                #   ambientCG, Kenney, Poly Pizza API), normalize_model.py (headless Blender),
-│                                #   record_asset.py (ASSETS.md row + <file>.asset.md sidecar)
+│                                #   record_asset.py (ASSETS.md row + <file>.asset.md sidecar); leakcheck.sh
+│                                #   (LeakSanitizer over the main code paths, §4), lsan.supp + lsan_report.py
+│                                #   (which leaks are the driver's), stub-terminal.sh (launcher tests)
 ├── examples/                    # raylib + R3D programs using map packages + examples/build.sh (§6.3)
+├── tests/models/                # small CC0 test package: every statement kind once (leakcheck, loader tests)
 ├── export/                      # F9 exports (gitignored)
 ├── requests/                    # request bundles written by the game (gitignored), see AI-MAP-TOOL.md §2
 ├── benchmark/                   # --bench reports: <timestamp>_shadow-<size>-<range>.md (gitignored, local)
@@ -91,7 +94,10 @@ monolith/
 ```bash
 ./build.sh              # -> build/linux/monolith + build/linux/maps/  (clang, -O2)
 ./build.sh run [args]   # build, then run with args
-./build.sh debug        # -g -O0 + AddressSanitizer/UBSan, same output folder
+./build.sh debug        # -g -O0 + AddressSanitizer/UBSan -> build/linux-debug/ (never replaces build/linux/)
+./build.sh lsan         # -O1 -g + LeakSanitizer only (fast) -> build/linux-lsan/; examples: examples/build.sh lsan
+tools/leakcheck.sh      # builds the lsan binaries if needed, runs every main code path, exit 1 on a leak
+tools/leakcheck.sh --asan   # the same paths with the ASan + UBSan build (memory errors, UB, leaks)
 R3D_DIR=/other/r3d ./build.sh   # use a different R3D source tree (default submodules/r3d)
 CC=gcc ./build.sh               # use another compiler
 
@@ -120,7 +126,9 @@ Both output folders, `build/linux/` and `build/win/`, are **self-contained**: co
 - `--win debug` is refused: ASan/UBSan don't work with MinGW.
 - Verify like Linux, under wine (it uses the host GL driver, so shots are pixel-identical to the Linux build): `wine build/win/monolith.exe --shot win.png --view 2`, or `__GL_SYNC_TO_VBLANK=0 wine build/win/monolith.exe --bench --headless --bench-frames 150`. The `MESA-EGL: warning` lines wine prints on NVIDIA are harmless.
 
-A change is done only when it **builds with no warnings** on both targets (`./build.sh` and `./build.sh --win`) and has been **checked visually** (see §8).
+A change is done only when it **builds with no warnings** on both targets (`./build.sh` and `./build.sh --win`), **`tools/leakcheck.sh` reports zero leaks**, and it has been **checked visually** (see §8).
+
+**Leak check** (`tools/leakcheck.sh`; required after every code change, not after map-only edits). It builds `build/linux-lsan/monolith` and `examples/build/linux-lsan/` (LeakSanitizer, `-O1 -g`) when a source is newer, then runs, all in hidden windows or without one: `--dump-boxes`, `--dump-scene` (with and without models), `--shot` of the default map (incl. `--shadow-camera --fog-cache`), of the test package `tests/models/` (models, textured and shader materials, shadowed lights; CC0), of `examples/01_minimal/scene` and `maps/pine_forest`, `--render-scale` / `--upscale`, `--ao baked` / `--ao-volume` (also across a reload), `--reload-test` in both directions and into a broken map, a broken map on the command line, `--shot-hud` with `--select` / `--region`, `--submit` on both maps with `tools/stub-terminal.sh` as the terminal and `MONOLITH_WORKSPACE=`, `--export`, `--inspect-model`, `--new-map`, `--import` (stub terminal), `--classify`, and every example's `--shot` (and the capture shim). Created bundles, exports and map packages go to the trash afterwards. It prints one line per run and exits 1 if any leak is ours or a run failed; logs are in `build/leakcheck/latest/logs/`. Classification (`tools/lsan_report.py`): a leak is ignored only when the frame that **allocated** it (the first frame after malloc / operator new / strdup and libc internals) is in a GPU driver or system library listed in `tools/lsan.supp` (NVIDIA / Mesa GL drivers, libglvnd, X11 / xcb, D-Bus, the dynamic loader); anything allocated in the monolith binary (our code, raylib, GLFW, R3D, assimp: all static) always counts. On the dev machine the only ignored leak is the NVIDIA driver's: 8 allocations, 366 bytes, from context creation, in every program that opens a window. `--bench` adds a 10-frame headless bench with `--bench-window` (opt-in: only one benchmark may run at a time). `--asan` runs the same paths with the ASan + UBSan build and also fails on any sanitizer error. GL objects that are never deleted are not heap leaks (the driver frees them with the context), so `Unload*` calls still need care by review.
 
 Notes on the build type (unoptimised vs. Release R3D on Linux) and on how it affects comparability with older benchmark reports may follow here.
 
@@ -482,6 +490,7 @@ From a fixed eye, merely rotating the camera used to change how a given world sp
 There's no test suite; verification is **visual and numeric**:
 
 1. **Build cleanly:** `./build.sh` and `./build.sh --win` with no warnings.
+1. **No leaks:** `tools/leakcheck.sh` ends with `leakcheck: OK: zero leaks of ours` (§4). After larger changes also `tools/leakcheck.sh --asan` (memory errors, UB).
 2. **Screenshots from fixed views:**
    ```bash
    ./build/linux/monolith --shot a.png --view 2                       # preset viewpoint

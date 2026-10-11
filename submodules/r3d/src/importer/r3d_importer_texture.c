@@ -480,6 +480,10 @@ r3d_importer_texture_cache_t* r3d_importer_load_texture_cache(
             }
         }
 
+        // The entries live on the scratch stack, but uthash malloc'd its table and buckets:
+        // free those (HASH_CLEAR frees no entries). Local patch 12, see patches.md.
+        HASH_CLEAR(hh, hashTable);
+
         // Parallel texture loading to RAM
         loader_context_t ctx = {
             .importer = importer,

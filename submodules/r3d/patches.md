@@ -3807,3 +3807,40 @@ index beb67f7..7e2266b 100644
      R3D_RENDER_SCREEN();
  }
 ```
+
+## Patch 12: the model importer leaks uthash's table for every model with textures (2026-10-11)
+
+**Symptom.** LeakSanitizer (`tools/leakcheck.sh`, monolith stream M) reported, for every model
+file with at least one texture loaded with `R3D_LoadModel*` / `R3D_LoadMaterials*`: a direct
+leak of 64 bytes (uthash's `UT_hash_table`) and an indirect one of 512 bytes (its bucket
+array), allocated in `r3d_importer_load_texture_cache` (`maps/pine_forest`: 2 files, 128 + 1024
+bytes per load). Every hot reload of such a package leaked it again.
+
+**Cause.** `r3d_importer_load_texture_cache` deduplicates the material textures in a uthash
+table whose entries live on R3D's scratch stack (`R3D_STACK_SCOPE`), so nothing frees them,
+which is right; but `HASH_ADD` also `malloc`s the table header and the buckets, and the
+function returned without `HASH_CLEAR`, so those were lost when the scope ended.
+
+**Fix.** `HASH_CLEAR(hh, hashTable)` once the collection loop is done (the table is not used
+after it). `HASH_CLEAR` frees only uthash's own table and buckets, never the entries.
+
+**Files.** `src/importer/r3d_importer_texture.c`.
+
+```diff
+@@ -480,6 +480,10 @@ r3d_importer_texture_cache_t* r3d_importer_load_texture_cache(
+             }
+         }
+ 
++        // The entries live on the scratch stack, but uthash malloc'd its table and buckets:
++        // free those (HASH_CLEAR frees no entries). Local patch 12, see patches.md.
++        HASH_CLEAR(hh, hashTable);
++
+         // Parallel texture loading to RAM
+         loader_context_t ctx = {
+             .importer = importer,
+```
+
+**Verification.** `tools/leakcheck.sh`: the `shot-pine-forest` run went from 2 direct + 2
+indirect leaks of ours (1152 bytes) to none; every other run unchanged (zero leaks of ours).
+Rendering is unaffected (the table is freed after its last use): `--shot` of
+`maps/pine_forest` views 1-3 and of `tests/models` pixel-identical with and without the patch.

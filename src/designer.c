@@ -258,7 +258,7 @@ static bool BuildRegionCull(const RayFrame *f, Rectangle rect, const RegionCull 
         c->models[c->modelCount++] = m;
     }
     if (!in) {
-        qsort(c->models, c->modelCount, sizeof(c->models[0]), CompareModelCull);
+        if (c->modelCount > 1) qsort(c->models, c->modelCount, sizeof(c->models[0]), CompareModelCull);
         for (int k = 0; k < c->modelCount; k++) c->modelDist[k] = modelDist[c->models[k]];
     }
 
@@ -278,7 +278,7 @@ static bool BuildRegionCull(const RayFrame *f, Rectangle rect, const RegionCull 
         c->list[c->count++] = b;
     }
     if (in) return true;
-    qsort(c->list, c->count, sizeof(c->list[0]), CompareCull);
+    if (c->count > 1) qsort(c->list, c->count, sizeof(c->list[0]), CompareCull);
     for (int k = 0; k < c->count; k++) c->minDist[k] = boxDist[c->list[k]];
     return true;
 }
@@ -374,7 +374,7 @@ void DesignerAnalyzeRegion(Camera3D cam, int w, int h, Rectangle rect, DesignReg
     n = 0;
     for (unsigned int i = 0; i < tallySize; i++)
         if (tally[i].samples > 0) out->objects[n++] = (DesignRegionObject){ tally[i].obj, tally[i].samples, (float)tally[i].samples / total };
-    qsort(out->objects, n, sizeof(out->objects[0]), CompareRegionObjects);
+    if (n > 1) qsort(out->objects, n, sizeof(out->objects[0]), CompareRegionObjects);
     out->objectCount = n;
     out->ms = (GetTime() - t0) * 1000.0;
     free(tally);
@@ -1315,9 +1315,9 @@ int DesignerDrawHud(const Designer *d, int x, int y)
         if (models == 0) n = snprintf(text, sizeof(text), "selected: %d box%s  [", boxes, boxes == 1 ? "" : "es");
         else n = snprintf(text, sizeof(text), "selected: %d box%s, %d model%s  [", boxes, boxes == 1 ? "" : "es",
                           models, models == 1 ? "" : "s");
-        unsigned char *seen = MS_RESERVE(scratch.seen, scratch.seenCap, scene->groupCount) ? scratch.seen : NULL;
+        unsigned char *seen = MS_RESERVE(scratch.seen, scratch.seenCap, scene->groupCount + 1) ? scratch.seen : NULL;
         if (!seen) return 0;
-        memset(seen, 0, scene->groupCount);
+        if (scene->groupCount > 0) memset(seen, 0, scene->groupCount);
         int shown = 0, more = 0;
         bool ungrouped = false;
         for (int i = 0; i < d->selectedCount; i++) {
@@ -1495,7 +1495,7 @@ void DesignerDrawPrompt(Designer *d, int w, int h)
             int n = l.end - l.start;
             if (!MS_RESERVE(scratch.line, scratch.lineCap, n + 1)) break;
             char *buf = scratch.line;
-            memcpy(buf, d->prompt + l.start, n);
+            if (n > 0) memcpy(buf, d->prompt + l.start, n);
             buf[n] = 0;
             int ly = ty + (i - d->scroll) * PROMPT_LINE_H;
             DrawTextEx(font, buf, (Vector2){ (float)tx, (float)ly }, PROMPT_FONT, PROMPT_SPACING, ink);
