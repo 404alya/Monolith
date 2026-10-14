@@ -93,6 +93,9 @@ struct FX_VFog {
     float maxDistance;
     float stepSize;
     bool enabled;
+    float fadeStart;    // local patch 13: density fades out by distance from the eye
+    float fadeEnd;      // <= 0: no fade
+    float fadeNear;     // local patch 15: density fades in from 0 at the eye; <= 0: none
 };
 
 struct FX_Dof {

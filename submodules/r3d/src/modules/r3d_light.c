@@ -674,6 +674,9 @@ void r3d_light_push(const R3D_Light* light, const R3D_ShadowMap* map, bool updat
         map = NULL;
     }
 
+    // Clip box (local patch 16): set on the entry the type's push adds (none when culled)
+    size_t before = R3D_MOD_LIGHT.listLightData->elemCount;
+
     switch (light->type)
     {
     case R3D_LIGHT_DIR:
@@ -690,6 +693,14 @@ void r3d_light_push(const R3D_Light* light, const R3D_ShadowMap* map, bool updat
 
     default:
         break;
+    }
+
+    if (R3D_MOD_LIGHT.listLightData->elemCount > before)
+    {
+        r3d_light_data_t* data = r3d_light_get((int)before);
+        bool clip = light->clip;
+        data->clipMin = clip ? light->clipMin : (Vector3){ -R3D_LIGHT_NO_CLIP, -R3D_LIGHT_NO_CLIP, -R3D_LIGHT_NO_CLIP };
+        data->clipMax = clip ? light->clipMax : (Vector3){ R3D_LIGHT_NO_CLIP, R3D_LIGHT_NO_CLIP, R3D_LIGHT_NO_CLIP };
     }
 }
 

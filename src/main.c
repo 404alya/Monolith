@@ -23,9 +23,10 @@
 //                  and the cursor is free while it is open
 //   "(cached)" after the fps: nothing changed, the frame reused the last R3D image
 //   F12            screenshot           TAB    toggle spectator camera
-//   F9             export the map: package + scene runtime + README into
-//                  export/<map>-<YYYY-MM-DD_HHMMSS>/ next to requests/ (export.c, like --export)
-//   ESC            quit (closes the prompt box / leaves snip mode instead while open)
+//   F9             export the open map as a self-contained folder (package, scene runtime,
+//                  R3D, build.sh, README) into export/<map>-<YYYY-MM-DD_HHMMSS>/ next to
+//                  requests/ (export.c, like --export)
+//   ESC            closes the prompt box / leaves snip mode / closes the panel (no quit: close the window)
 //   The HUD's bottom line shows "map reloaded (N boxes)" after an edit to any file of the
 //   map package (map, shaders, textures), or the error (file:line: message) in red while
 //   the package is broken (the old map stays loaded).
@@ -193,10 +194,12 @@
 //                  without opening a window. A path (anything with a '/') creates the package
 //                  in that folder instead (its parent must exist; the name is its last
 //                  component), e.g. a scratch draft. Refuses to overwrite an existing folder
-//   --export <dir>  write the map (--map or the default) as a folder for a plain raylib + R3D
-//                  project and exit without opening a window: the package with every file it
-//                  references, monolith_scene.h/.c, viewer.c and a README.md (export.c).
-//                  Refuses a non-empty <dir>
+//   --export <dir>  write the map (--map or the default) as a self-contained folder that
+//                  builds and runs on its own, and exit without opening a window: the package
+//                  with every file it references, the scene runtime without its editor parts,
+//                  viewer.c, build.sh, the bundled R3D (+ raylib, assimp), licences and a
+//                  README.md (export.c). Refuses a non-empty <dir>; writes nothing when a
+//                  referenced file is missing. Needs the repo (not a copied build folder)
 //   --import <project dir> <name|path>   create maps/<name>/ or the package folder a path
 //                  names (as --new-map) and open a Claude Code
 //                  import session on a bundle requests/<stamp>_import-<name>/ that translates
@@ -1088,8 +1091,9 @@ static int Run(int argc, char **argv)
     InitWindow(headlessBench ? 1920 : shotPath ? shotW : 1600, headlessBench ? 1006 : shotPath ? shotH : 900,
                bench ? "monolith-bench" : (shotPath || dumpScenePath) ? "monolith-shot" : "monolith");
     SetTargetFPS(hidden || bench ? 0 : FpsTarget(gfx.fpsCap));
-    // Esc must close the prompt box without quitting, so quitting on Esc is done by hand
-    // in the main loop (the window's close button still ends WindowShouldClose())
+    // Esc closes the prompt box, snip mode, the panel and request-close prompts; it no longer
+    // quits (the window's close button ends WindowShouldClose()). Raylib's default Esc exit
+    // would quit even while those are open, so the exit key stays off.
     SetExitKey(KEY_NULL);
 
     // Sun shadow resolution (the map's shadow.size or --shadow; R3D_SetHint needs the GL
@@ -1247,10 +1251,6 @@ static int Run(int argc, char **argv)
         float dt = fminf(GetFrameTime(), 1.0f / 20.0f);
 
         if (IsWindowResized()) MS_ApplyRenderResolution(scene, GetScreenWidth(), GetScreenHeight());
-
-        // Esc quits, unless the prompt box is open or snip mode is on (the designer handles it)
-        if (IsKeyPressed(KEY_ESCAPE) && !designer.promptOpen && !designer.snipping && closePickTime <= 0.0f &&
-            !PanelCapturesInput(&panel)) break;
 
         // While the prompt box is open (and a couple of frames after it closed) every
         // game key and the camera are frozen: the keys are text now

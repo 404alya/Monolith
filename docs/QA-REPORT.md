@@ -1,6 +1,6 @@
 # QA report: monolith v2 (2026-10-11)
 
-A full QA pass after the v2 work (`AI-MAP-DESIGNER-V2-PROMPT.md`), run while the developer was away.
+A full QA pass after the v2 work (round 2, `docs/knowledge/history.md`), run while the developer was away.
 
 **Process:**
 1. Three independent testers worked on copies of the maps and never edited the repo.

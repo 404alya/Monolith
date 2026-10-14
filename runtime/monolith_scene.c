@@ -1,4 +1,4 @@
-// monolith_scene -- map packages: parse, hot-reload, draw, collide, pick (see monolith_scene.h)
+// monolith_scene -- map packages: parse, draw, collide, pick (see monolith_scene.h)
 //
 // ======================================================================================
 // Map format reference (.map), one statement per line
@@ -23,7 +23,10 @@
 //   light spot  x y z dx dy dz [key value ...]      spot light shining along (dx, dy, dz)
 //   light dir   dx dy dz [key value ...]            extra directional light (no static tiles)
 //       keys: color R G B, energy f, range f, falloff f, specular f, fogEnergy f,
-//             inner deg, outer deg (spot cone), shadow on|off (default off)
+//             inner deg, outer deg (spot cone), shadow on|off (default off),
+//             clip x0 y0 z0 x1 y1 z1 (world box, shifted like the position: the light reaches
+//             only points inside it, so an unshadowed light stays out of the room below or
+//             beside it; R3D patch 16, ignored with upstream R3D; default none)
 //       defaults: white, energy 1, range 16 (dir: 50, its shadow distance), falloff 1, specular 1, fogEnergy 1, cone 22.5/45
 //   model "models/x.glb" x y z [key value ...]      a model file placed at x y z (glTF/GLB best;
 //                                                   also OBJ, FBX, DAE through R3D's importer)
@@ -41,7 +44,7 @@
 //                                     a surface; center: the same x z, the middle between its
 //                                     lowest and highest vertex at y
 //       material "name"               every material slot drawn with this map material
-//       material.N "name"             slot N only (0-based; --inspect-model lists the slots)
+//       material.N "name"             slot N only (0-based, in the file's material order)
 //                                     Precedence: material.N, then material, then the active
 //                                     `use` (when it is not "default"), else the file's own.
 //                                     An override material with `inherit albedo|normal|orm|
@@ -58,7 +61,7 @@
 //     (unlit: no light or shadow on it, e.g. Kenney's kits): override with a lit material to
 //     light it. Animations and skins are ignored (static pose). Files a .gltf/.glb names
 //     (buffers, images) and an .obj's material libraries and textures must be inside the
-//     package; they are watched for hot reload like the model file.
+//     package.
 //
 // Placement prefixes, written before a primitive on the same line:
 //   repeat n dx dy dz          [1] n copies, copy i (0-based) shifted by i * (dx, dy, dz); up to 3
@@ -114,8 +117,18 @@
 //   sun.enabled on|off, sun.direction x y z (the direction the light travels), sun.color,
 //   sun.energy, sun.specular, sun.fogEnergy, sun.range (shadow distance), sun.shadow on|off,
 //   sun.softness, sun.depthBias, sun.slopeBias; shadow.size n (px, read before R3D_Init:
-//   MS_SetInitHints). The biases are for shadow.size: with a smaller shadow map (quality
-//   preset, --shadow) they are scaled up by shadow.size / actual size (the texel ratio).
+//   MS_SetInitHints). The biases are for shadow.size: with a smaller shadow map (a quality
+//   preset, MS_LoadOptions.shadowSizeOverride) they are scaled up by shadow.size / actual
+//   size (the texel ratio).
+//   volumetricFog.fadeStart f, volumetricFog.fadeEnd f: the volumetric fog's density fades
+//   out by distance from the eye, 1 up to fadeStart, smoothstep to 0 at fadeEnd (fadeEnd >
+//   fadeStart; default 0 0 = no fade, the fog stops hard at volumetricFog.length). Keeps the
+//   near light shafts while far buildings stay clear. R3D patch 13: ignored without
+//   MS_PATCHED_R3D (upstream R3D then renders the unfaded fog).
+//   volumetricFog.fadeNear f: the density also fades in, smoothstep from 0 at the eye to full
+//   at f m (default 0 = off; at most fadeStart when a fade-out is set, larger values are
+//   clamped to it). Without it the sunlit fog around the eye veils the whole view, so the
+//   scene looks brighter when the player stands in sunlight than in shadow. R3D patch 15.
 //   bloom.offExposure f: exposure factor applied when a quality setting turns bloom off, so
 //   the mean brightness stays (default 1.19, matched on the default map).
 //   Cache hints (optional; derived from the map bounds without them, see "Caches"):
@@ -127,7 +140,7 @@
 //
 // Player and cameras (format 2):
 //   spawn x y z yawDeg [pitchDeg]          player start, feet position (default 0 0 0, yaw 0)
-//   viewpoint "Name" ex ey ez tx ty tz     spectator viewpoint (eye, target), in order 1..n;
+//   viewpoint "Name" ex ey ez tx ty tz     camera viewpoint (eye, target), in order 1..n;
 //                                          without any, one viewpoint is made from the spawn
 //
 // Paths are relative to the package root (the folder of the map file). Absolute paths and
@@ -139,7 +152,7 @@
 // models + lights; a `repeat` grid multiplying to more fails), MS_MAX_FILE_BYTES (4 MB file),
 // spawn / viewpoint / light positions within +-1000000 m.
 // Every box remembers the map line of the statement that made it (boxRefs[]).
-// Errors are reported as "file:line: message" and the previous scene is kept.
+// Errors are reported as "file:line: message".
 //
 // ======================================================================================
 
@@ -157,13 +170,15 @@
 
 #define MS_FILE_MAX         MS_MAX_FILE_BYTES
 #define MS_REPEATS_MAX      3       // `repeat` prefixes per line (the grammar: a 3D grid at most)
+#ifdef MONOLITH_EDITOR
 #define MS_POLL_INTERVAL    0.5f
 // After an mtime change, keep re-reading for this long: GetFileModTime has 1 s resolution,
 // and editors that truncate + write (or rename) can leave an empty or partial file for a
 // moment, then finish within the same second (same mtime).
 #define MS_SETTLE_TIME      2.0f
+#endif
 #define SUN_TILE_COUNT      2       // = the 2 layers R3D allocates for directional shadows anyway
-// --fog-cache without a region hint: at most this many voxels (bytes of VRAM)
+// The fog cache without a region hint: at most this many voxels (bytes of VRAM)
 #define FOG_CACHE_BUDGET    (64.0 * 1024.0 * 1024.0)
 // The occlusion volume (aoVolumeVoxel): at most this many voxels (bytes of VRAM), and the
 // distance range it stores (the AO probes reach 3.2 m out; inside geometry only the first
@@ -180,9 +195,8 @@
 // MS_RESERVE / MS_PUSH and every name or path stored per element is a heap string; all of it
 // belongs to the SceneData of one load and is freed with it (FreeData). Fixed char arrays are
 // left only for one-off values bounded by the loader (EnvDef.skyPanorama: a package path,
-// <= MS_PATH_MAX), the last error message and stack scratch for formatting one path or message.
-// Allocation happens while parsing / uploading a load and in MS_Poll when a file changed;
-// drawing, picking and collision never allocate.
+// <= MS_PATH_MAX) and stack scratch for formatting one path or message. Allocation happens
+// only while a map loads; drawing, picking and collision never allocate.
 
 typedef struct { char *name; int count; float v[4]; } MatUniform;
 typedef struct { char *name; char *path; int line; } MatSampler;
@@ -225,6 +239,8 @@ typedef struct {
     unsigned ambientSet;                // bit i = SKY_KEYS[i] was set
     SunDef sun;
     float bloomOffExposure;             // exposure factor when a quality setting turns bloom off
+    float vfogFadeStart, vfogFadeEnd;   // volumetric fog density fade (R3D patch 13); end <= 0: none
+    float vfogFadeNear;                 // and fade-in from the eye (R3D patch 15); <= 0: none
     bool homeSet, fogRegionSet;
     Vector3 home;
     BoundingBox fogRegion;
@@ -255,14 +271,17 @@ typedef struct {
     int count;
 } ModelGroup;
 
-// One parsed (and possibly uploaded) map. A reload builds a new one and swaps it in.
+// One parsed (and possibly uploaded) map
 typedef struct {
     int formatVersion;
-    char *path, *root, *brief;          // brief: "" when the package has no MAP.md
+    char *path, *root;
+#ifdef MONOLITH_EDITOR
+    char *brief;                        // "" when the package has no MAP.md
     unsigned long long hash;            // FNV-1a 64 of the map file
     long mtime;
     char *text;                         // the map file, for MS_GetLine
     int textSize;
+#endif
 
     // Heap arrays: count = used, cap = allocated (MS_RESERVE / MS_PUSH)
     BoundingBox *boxes;
@@ -300,8 +319,10 @@ typedef struct {
     BoundingBox *colliders;             // boxes, then model colliders (only with models)
     int colliderCount;
 
+#ifdef MONOLITH_EDITOR
     char **deps;                        // files it depends on; [0] = the map file
     int depCount, depCap;
+#endif
 
     // GPU (when uploaded)
     bool gpu;
@@ -347,6 +368,7 @@ struct MS_Private {
     SceneData *d;
     MS_LoadOptions opt;
     MS_RenderSettings rs;
+#ifdef MONOLITH_EDITOR
     char error[512];
 
     // Hot reload: the files of the last load attempt and their mtimes, the combined hash
@@ -356,6 +378,7 @@ struct MS_Private {
     int watchCount, watchCap, watchMtimeCap;
     float pollTimer, settleTime;
     unsigned long long triedHash;
+#endif
 
     // GPU state that lives as long as the scene (not per load)
     bool gpu;
@@ -440,6 +463,7 @@ static char *ReadWholeFile(const char *path, int *size, char *err, int errSize)
     return buf;
 }
 
+#ifdef MONOLITH_EDITOR
 // Map text + the bytes of every other watched file: changes when any file of the package does
 static unsigned long long CombinedHash(const char *text, int size, char *const *files, int count)
 {
@@ -455,8 +479,9 @@ static unsigned long long CombinedHash(const char *text, int size, char *const *
     }
     return h;
 }
+#endif
 
-// --map accepts a package folder or a map file (docs/design-v2.md section 1)
+// A package folder (<name>/<name>.map, or its only .map file) or a map file
 static bool ResolveMapPath(const char *in, char *out, int outSize, char *err, int errSize)
 {
     if (!DirectoryExists(in)) {
@@ -610,6 +635,9 @@ static const KeyDef DEF_KEYS[] = {
     KD("sun.slopeBias", T_F, sun.slopeBias),
     KD("shadow.size", T_I, sun.shadowSize),
     KD("bloom.offExposure", T_F, bloomOffExposure),
+    KD("volumetricFog.fadeStart", T_F, vfogFadeStart),
+    KD("volumetricFog.fadeEnd", T_F, vfogFadeEnd),
+    KD("volumetricFog.fadeNear", T_F, vfogFadeNear),
     KD("shadow.home", T_V3, home),
     KD("fogCache.region", T_BOX, fogRegion),
 };
@@ -634,6 +662,7 @@ static const SkyKeyDef SKY_KEYS[] = {
 };
 #define COUNT(a) ((int)(sizeof(a) / sizeof((a)[0])))
 
+#ifdef MS_PATCHED_R3D   // the shadow tiles and the occlusion volume
 // floorf(v) as an int, clamped (NaN -> 0): a camera or box far outside any sane map (e.g. a
 // player falling for hours) must not overflow a cell index (float -> int out of range is UB)
 static int CellKey(float v)
@@ -642,6 +671,7 @@ static int CellKey(float v)
     if (f != f) return 0;
     return f < -1e8f ? -100000000 : f > 1e8f ? 100000000 : (int)f;
 }
+#endif
 
 static const char *const FOG_NAMES[] = { "disabled", "linear", "exp2", "exp" };
 static const char *const BLOOM_NAMES[] = { "disabled", "mix", "additive", "screen" };
@@ -756,6 +786,8 @@ static void FormatFloat(char *buf, int size, float v)
         }
 }
 
+#ifdef MONOLITH_EDITOR
+// A value as the map file writes it (MS_WriteEnvironment)
 static int FormatValue(char *buf, int size, int type, const void *p)
 {
     char a[32], b[32], c[32], d[32];
@@ -808,6 +840,7 @@ static int FormatValue(char *buf, int size, int type, const void *p)
     }
     return 0;
 }
+#endif
 
 // #endregion
 
@@ -932,6 +965,7 @@ static bool Tokenize(Parser *P, char *line, int *count)
     return true;
 }
 
+#ifdef MONOLITH_EDITOR
 // Adds a file to the scene's dependencies (hot reload watches them)
 static bool AddDep(Parser *P, const char *full)
 {
@@ -944,6 +978,7 @@ static bool AddDep(Parser *P, const char *full)
     *slot = copy;
     return true;
 }
+#endif
 
 // A heap copy of s for the scene (names, paths); "out of memory" on failure
 static bool Dup(Parser *P, const char *s, char **out)
@@ -966,9 +1001,11 @@ static bool PackagePath(Parser *P, Token t, char *full, int fullSize)
     }
     if (bad) return Fail(P, "path must stay inside the package: \"%s\"", s);
     if (snprintf(full, fullSize, "%s%s", P->d->root, s) >= fullSize) return Fail(P, "path too long: \"%s\"", s);
+#ifdef MONOLITH_EDITOR
     // Watched before the existence check: after a failed load the watch list is this attempt's
     // dependencies, so a file that is still missing reloads the package once it appears
     if (!AddDep(P, full)) return false;
+#endif
     if (!FileExists(full)) return Fail(P, "file not found: \"%s\" (paths are relative to the package folder)", s);
     return true;
 }
@@ -1273,6 +1310,8 @@ static bool ParseLight(Parser *P, Token *args, int n, const Placement *pl)
     L.fogEnergy = 1.0f;
     L.type = (R3D_LightType)type;
     bool shadow = false;
+    bool clip = false;
+    float cb[6] = { 0 };
 
     for (int t = 1 + nPos + nDir; t < n; ) {
         const char *k = args[t].s;
@@ -1285,12 +1324,17 @@ static bool ParseLight(Parser *P, Token *args, int n, const Placement *pl)
         else if (strcmp(k, "shadow") == 0) {
             if (t + 1 >= n || !OnOff(P, args[t + 1], &shadow)) return t + 1 >= n ? Fail(P, "shadow takes on or off", NULL) : false;
             nv = 1;
+        } else if (strcmp(k, "clip") == 0) {
+            if (nv != 6) return Fail(P, "light key 'clip' takes six numbers: x0 y0 z0 x1 y1 z1", NULL);
+            for (int i = 0; i < 6; i++) if (!NumPos(P, val[i], &cb[i])) return false;
+            for (int i = 0; i < 3; i++) if (cb[i] == cb[i + 3]) return Fail(P, "light clip box must not be flat", NULL);
+            clip = true;
         } else {
             float *dst = strcmp(k, "energy") == 0 ? &L.energy : strcmp(k, "range") == 0 ? &L.range :
                          strcmp(k, "falloff") == 0 ? &L.falloff : strcmp(k, "specular") == 0 ? &L.specular :
                          strcmp(k, "fogEnergy") == 0 ? &L.fogEnergy : strcmp(k, "inner") == 0 ? &L.innerCutOff :
                          strcmp(k, "outer") == 0 ? &L.outerCutOff : NULL;
-            if (!dst) return Fail(P, "unknown light key '%s' (color energy range falloff specular fogEnergy inner outer shadow)", k);
+            if (!dst) return Fail(P, "unknown light key '%s' (color energy range falloff specular fogEnergy inner outer shadow clip)", k);
             if (nv != 1) return Fail(P, "light key '%s' takes one number", k);
             if (!NumF(P, val[0], &f)) return false;
             *dst = f;
@@ -1313,9 +1357,17 @@ static bool ParseLight(Parser *P, Token *args, int n, const Placement *pl)
         CopyOffset(pl, idx, off);
         R3D_Light c = L;
         if (shifted && nPos) c.position = (Vector3){ off[0] + pos.x, off[1] + pos.y, off[2] + pos.z };
+        BoundingBox cbox = { 0 };
+        if (clip) {
+            // shifted like box corners: (at + i * d) + value
+            float a[6];
+            for (int k = 0; k < 6; k++) a[k] = shifted ? off[k % 3] + cb[k] : cb[k];
+            cbox.min = (Vector3){ fminf(a[0], a[3]), fminf(a[1], a[4]), fminf(a[2], a[5]) };
+            cbox.max = (Vector3){ fmaxf(a[0], a[3]), fmaxf(a[1], a[4]), fmaxf(a[2], a[5]) };
+        }
         MS_LightDef *slot = MS_PUSH(d->lights, d->lightCount, d->lightCap);
         if (!slot) return Fail(P, "out of memory", NULL);
-        *slot = (MS_LightDef){ c, shadow, P->cur };
+        *slot = (MS_LightDef){ c, shadow, P->cur, clip, cbox };
     }
     return true;
 }
@@ -1547,8 +1599,11 @@ static const EnvRange ENV_RANGES[] = {
     { "background.energy", 0, 1e6f, false }, { "ambient.energy", 0, 1e6f, false },
     { "sun.energy", 0, 1e6f, false }, { "sun.fogEnergy", 0, 1e6f, false }, { "sun.softness", 0, 1e6f, false },
     { "bloom.offExposure", 0, 100, true },
+    { "volumetricFog.fadeStart", 0, 10000, false }, { "volumetricFog.fadeEnd", 0, 10000, false },
+    { "volumetricFog.fadeNear", 0, 10000, false },
 };
 
+#ifdef MONOLITH_EDITOR
 bool MS_EnvKeyRange(const char *key, float *lo, float *hi, bool *loOpen)
 {
     for (int i = 0; i < COUNT(ENV_RANGES); i++) {
@@ -1560,6 +1615,7 @@ bool MS_EnvKeyRange(const char *key, float *lo, float *hi, bool *loOpen)
     }
     return false;
 }
+#endif
 
 static bool CheckEnvRange(Parser *P, const char *key, int type, const void *p)
 {
@@ -1673,9 +1729,9 @@ static bool RefResolve(Parser *P, const char *modelRel, const char *base, const 
 }
 
 // One file reference in a model file (`ref`, refLen bytes, JSON escapes already decoded),
-// relative to the folder of `base`. REF_DEP: it must exist and becomes a dependency (hot
-// reload; outRel, if given, gets its package path); REF_TEXTURE: R3D's importer opens it
-// relative to the model's folder (length guard).
+// relative to the folder of `base`. REF_DEP: it must exist (and outRel, if given, gets its
+// package path); REF_TEXTURE: R3D's importer opens it relative to the model's folder
+// (length guard).
 static bool ModelRef(Parser *P, const char *modelRel, const char *base, const char *ref, int refLen, int flags, char *outRel)
 {
     if (refLen == 0 || (refLen >= 5 && strncmp(ref, "data:", 5) == 0)) return true;    // embedded
@@ -1709,7 +1765,9 @@ static bool ModelRef(Parser *P, const char *modelRel, const char *base, const ch
     if (!(flags & REF_DEP)) return true;
     char full[MS_PATH_MAX], msg[MS_PATH_MAX + 200];
     if (snprintf(full, sizeof(full), "%s%s", P->d->root, out) >= (int)sizeof(full)) return Fail(P, "path too long: \"%s\"", out);
-    if (!AddDep(P, full)) return false;
+#ifdef MONOLITH_EDITOR
+    if (!AddDep(P, full)) return false;     // (a dependency: hot reload watches it)
+#endif
     if (!FileExists(full)) {
         snprintf(msg, sizeof(msg), "file not found: \"%s\" (named by \"%s\")", out, modelRel);
         return Fail(P, "%s", msg);
@@ -1944,6 +2002,7 @@ static bool ModelDeps(Parser *P, const char *modelRel, const char *full)
     return ok;
 }
 
+#ifdef MONOLITH_EDITOR
 bool MS_CheckModelReferences(const char *root, const char *modelRel, char *err, int errSize)
 {
     if (errSize > 0) err[0] = 0;
@@ -1963,6 +2022,7 @@ bool MS_CheckModelReferences(const char *root, const char *modelRel, char *err, 
     free(d);
     return ok;
 }
+#endif
 
 // model "models/x.glb" x y z [rot y p r] [scale s | sx sy sz] [origin model|bottom|center]
 //       [material "m"] [material.N "m"] [collide aabb|none|box ...] [shadow on|off]
@@ -2343,7 +2403,7 @@ static BoundingBox BudgetRegion(const SceneData *d, float voxel, double budget, 
     return r;
 }
 
-// The --fog-cache region: the hint, else the content bounds (+2 m), shrunk around the play
+// The fog cache region: the hint, else the content bounds (+2 m), shrunk around the play
 // centre until it fits FOG_CACHE_BUDGET voxels
 static BoundingBox FogCacheRegion(const SceneData *d, float voxel)
 {
@@ -2750,17 +2810,22 @@ static void FinishGeometry(SceneData *d)
 static bool ParseScene(SceneData *d, const char *mapPath, const char *text, int size, const MS_LoadOptions *opt,
                        char *err, int errSize)
 {
-    char root[MS_PATH_MAX + 2], brief[MS_PATH_MAX + 16];
+    char root[MS_PATH_MAX + 2];
     RootOf(mapPath, root, sizeof(root));
-    snprintf(brief, sizeof(brief), "%sMAP.md", root);
     d->path = MS_StrDup(mapPath);
     d->root = MS_StrDup(root);
+    d->formatVersion = 1;
+    BuiltinEnvironment(&d->env);
+    bool mem = d->path && d->root;
+#ifdef MONOLITH_EDITOR
+    char brief[MS_PATH_MAX + 16];
+    snprintf(brief, sizeof(brief), "%sMAP.md", root);
     d->brief = MS_StrDup(FileExists(brief) ? brief : "");
     char **dep0 = MS_PUSH(d->deps, d->depCount, d->depCap);
     if (dep0) *dep0 = MS_StrDup(mapPath);
-    d->formatVersion = 1;
-    BuiltinEnvironment(&d->env);
-    if (!d->path || !d->root || !d->brief || !dep0 || !*dep0 || !DefaultMaterial(d)) {
+    mem = mem && d->brief && dep0 && *dep0;
+#endif
+    if (!mem || !DefaultMaterial(d)) {
         snprintf(err, errSize, "%s: out of memory", mapPath);
         return false;
     }
@@ -2907,6 +2972,14 @@ static void BuildModelPick(MS_ModelFile *F, ModelPick *mp)
     }
 }
 
+// A model file R3D / assimp cannot read: "map:line: message"
+#ifdef MONOLITH_EDITOR
+#define MODEL_LOAD_ERROR "%s:%d: cannot load the model \"%s\" (unsupported or broken file; see the log; " \
+                         "--inspect-model shows why)"
+#else
+#define MODEL_LOAD_ERROR "%s:%d: cannot load the model \"%s\" (unsupported or broken file; see the log)"
+#endif
+
 // Loads every model file of `d` (GPU). On failure: "map:line: message"
 static bool LoadModelFiles(SceneData *d, char *err, int errSize)
 {
@@ -2916,8 +2989,7 @@ static bool LoadModelFiles(SceneData *d, char *err, int errSize)
         snprintf(full, sizeof(full), "%s%s", d->root, F->path);
         F->model = R3D_LoadModelEx(full, R3D_IMPORT_RETAIN_MESH_DATA);
         if (F->model.meshCount <= 0 || !F->model.meshes) {
-            snprintf(err, errSize, "%s:%d: cannot load the model \"%s\" (unsupported or broken file; see the log; "
-                     "--inspect-model shows why)", d->path, F->line, F->path);
+            snprintf(err, errSize, MODEL_LOAD_ERROR, d->path, F->line, F->path);
             return false;
         }
         F->loaded = true;
@@ -2932,7 +3004,7 @@ static bool LoadModelFiles(SceneData *d, char *err, int errSize)
     return true;
 }
 
-// noGpu loads (--dump-boxes, --export, the peek before R3D_Init) don't upload models, but a
+// noGpu loads (the peek before R3D_Init, reading a map without a window) don't upload models, but a
 // broken model file must still fail the load the way the GPU load would. So every model
 // file is imported here with assimp on the CPU (no GL) and dropped: the same call and
 // post-processing flags as R3D_LoadImporter (r3d_importer.c: POST_PROCESS_BASELINE +
@@ -2962,8 +3034,7 @@ static bool CheckModelFiles(SceneData *d, char *err, int errSize)
                                                                          ? aiGetErrorString() : "no meshes in the file");
         if (sc) aiReleaseImport(sc);
         if (!ok) {
-            snprintf(err, errSize, "%s:%d: cannot load the model \"%s\" (unsupported or broken file; see the log; "
-                     "--inspect-model shows why)", d->path, F->line, F->path);
+            snprintf(err, errSize, MODEL_LOAD_ERROR, d->path, F->line, F->path);
             return false;
         }
     }
@@ -3224,8 +3295,8 @@ static void FreeGpu(SceneData *d)
     d->gpu = false;
 }
 
-// Creates every GPU resource of `d` (the old scene's are still alive: new before old, see
-// the instance-buffer note in MS_Reload). On failure everything created so far is freed.
+// Creates every GPU resource of `d` (a previous load's are still alive: new before old, see
+// the instance-buffer note in LoadText). On failure everything created so far is freed.
 static bool UploadGpu(SceneData *d, char *err, int errSize)
 {
     d->gpu = true;
@@ -3353,15 +3424,17 @@ static void FreeData(SceneData *d)
     free(d->groups);
     for (int i = 0; i < d->viewpointCount; i++) free((char *)d->viewpoints[i].name);
     free(d->viewpoints);
-    for (int i = 0; i < d->depCount; i++) free(d->deps[i]);
-    free(d->deps);
     free(d->boxes);
     free(d->boxRefs);
     free(d->lights);
     free(d->path);
     free(d->root);
+#ifdef MONOLITH_EDITOR
+    for (int i = 0; i < d->depCount; i++) free(d->deps[i]);
+    free(d->deps);
     free(d->brief);
     free(d->text);
+#endif
     free(d);
 }
 
@@ -3371,9 +3444,11 @@ static void Publish(MS_Scene *s, SceneData *d)
     s->formatVersion = d->formatVersion;
     s->path = d->path;
     s->root = d->root;
+#ifdef MONOLITH_EDITOR
     s->brief = d->brief;
     s->hash = d->hash;
     s->mtime = d->mtime;
+#endif
     s->boxes = d->boxes;
     s->boxRefs = d->boxRefs;
     s->boxCount = d->boxCount;
@@ -3403,6 +3478,7 @@ static void Publish(MS_Scene *s, SceneData *d)
     s->bounds = d->bounds;
 }
 
+#ifdef MONOLITH_EDITOR
 static void FreeWatch(MS_Private *p)
 {
     for (int i = 0; i < p->watchCount; i++) free(p->watch[i]);
@@ -3420,6 +3496,7 @@ static void SetWatch(MS_Private *p, const SceneData *d)
         p->watchCount = i + 1;
     }
 }
+#endif
 
 // Parses `text` (takes ownership), uploads it and swaps it in on success
 static bool LoadText(MS_Scene *s, const char *mapPath, char *text, int size, char *err, int errSize)
@@ -3428,18 +3505,23 @@ static bool LoadText(MS_Scene *s, const char *mapPath, char *text, int size, cha
     SceneData *d = calloc(1, sizeof(*d));
     if (!d) {
         snprintf(err, errSize, "%s: out of memory", mapPath);
-        snprintf(p->error, sizeof(p->error), "%s", err);
         free(text);
         return false;
     }
+    bool ok = ParseScene(d, mapPath, text, size, &p->opt, err, errSize);
+#ifdef MONOLITH_EDITOR
     d->text = text;
     d->textSize = size;
-    bool ok = ParseScene(d, mapPath, text, size, &p->opt, err, errSize);
+    d->hash = Fnv1a64Update(FNV_OFFSET, text, (size_t)size);
+    d->mtime = GetFileModTime(mapPath);
     // Watch the files of this attempt (also after a failure: a shader that is still missing
     // reloads the package once it appears)
     SetWatch(p, d);
     p->triedHash = CombinedHash(text, size, p->watch, p->watchCount);
     p->settleTime = 0.0f;
+#else
+    free(text);                         // (the parser copied what it keeps)
+#endif
     if (ok && p->gpu) {
         d->gpu = true;                  // (so FreeData unloads what LoadModelFiles loaded)
         ok = LoadModelFiles(d, err, errSize);
@@ -3456,48 +3538,37 @@ static bool LoadText(MS_Scene *s, const char *mapPath, char *text, int size, cha
         }
     }
     if (!ok) {
-        snprintf(p->error, sizeof(p->error), "%s", err);
         FreeData(d);
         return false;
     }
-    d->hash = Fnv1a64Update(FNV_OFFSET, text, (size_t)size);
-    d->mtime = GetFileModTime(mapPath);
 
-    // Swap: the new GPU resources exist already, the old ones are freed after. R3D caches
-    // the instance buffer names it last bound (instances_enable in r3d_render.c) and skips
-    // re-binding when they match; freeing first let GL hand out the same names again, so the
-    // reloaded map was drawn with the old boxes.
+    // Swap: the new GPU resources exist already, a previous load's are freed after. R3D
+    // caches the instance buffer names it last bound (instances_enable in r3d_render.c) and
+    // skips re-binding when they match; freeing first let GL hand out the same names again,
+    // so the new map was drawn with the old boxes.
     SceneData *old = p->d;
     p->d = d;
     s->version++;
     Publish(s, d);
     FreeData(old);
-    p->error[0] = '\0';
     if (errSize > 0) err[0] = '\0';
     return true;
 }
 
 static bool LoadPath(MS_Scene *s, const char *path, char *err, int errSize)
 {
-    MS_Private *p = s->priv;
     char mapPath[MS_PATH_MAX];
-    if (!ResolveMapPath(path, mapPath, sizeof(mapPath), err, errSize)) {
-        snprintf(p->error, sizeof(p->error), "%s", err);
-        return false;
-    }
+    if (!ResolveMapPath(path, mapPath, sizeof(mapPath), err, errSize)) return false;
     int size;
     char *text = ReadWholeFile(mapPath, &size, err, errSize);
-    if (!text) {
-        snprintf(p->error, sizeof(p->error), "%s", err);
-        return false;
-    }
+    if (!text) return false;
     return LoadText(s, mapPath, text, size, err, errSize);
 }
 
 // #endregion
 
 // ======================================================================================
-// #region Public API: loading and hot reload
+// #region Public API: loading
 // ======================================================================================
 
 MS_Scene *MS_Load(const char *path, const MS_LoadOptions *opt, char *err, int errSize)
@@ -3513,13 +3584,16 @@ MS_Scene *MS_Load(const char *path, const MS_LoadOptions *opt, char *err, int er
     if (opt) p->opt = *opt;
     p->gpu = !p->opt.noGpu;
 #ifdef MS_PATCHED_R3D
-    p->rs = (MS_RenderSettings){ .sunOn = true, .shadowMode = MS_SHADOW_TILES, .fogCacheSub = 2, .depthPrepass = true,
+    p->rs = (MS_RenderSettings){ .shadowMode = MS_SHADOW_TILES, .fogCacheSub = 2, .depthPrepass = true,
                                  .renderScale = 1.0f, .upscale = R3D_UPSCALE_BICUBIC, .aoVolumeIntensity = 1.0f,
                                  .sunShadow = true };
 #else
-    p->rs = (MS_RenderSettings){ .sunOn = true, .shadowMode = MS_SHADOW_CAMERA, .fogCacheSub = 2, .depthPrepass = true,
+    p->rs = (MS_RenderSettings){ .shadowMode = MS_SHADOW_CAMERA, .fogCacheSub = 2, .depthPrepass = true,
                                  .renderScale = 1.0f, .upscale = R3D_UPSCALE_BICUBIC, .aoVolumeIntensity = 1.0f,
                                  .sunShadow = true };
+#endif
+#ifdef MONOLITH_EDITOR
+    p->rs.sunOn = true;
 #endif
     p->tiles.current = -1;
     if (p->gpu) {
@@ -3562,14 +3636,17 @@ void MS_Unload(MS_Scene *s)
                 for (int i = 0; i < SUN_TILE_COUNT; i++) R3D_UnloadShadowMap(p->sunShadow[i]);
             R3D_UnloadMesh(p->cube);
         }
+#ifdef MONOLITH_EDITOR
         FreeWatch(p);
         free(p->watch);
         free(p->watchMtime);
+#endif
         free(p);
     }
     free(s);
 }
 
+#ifdef MONOLITH_EDITOR
 MS_ReloadResult MS_Reload(MS_Scene *s, const char *path, char *err, int errSize)
 {
     char *cur = MS_StrDup(path ? path : s->path);     // (s->path is freed by a successful load)
@@ -3579,6 +3656,7 @@ MS_ReloadResult MS_Reload(MS_Scene *s, const char *path, char *err, int errSize)
     }
     bool ok = LoadPath(s, cur, err, errSize);
     free(cur);
+    snprintf(s->priv->error, sizeof(s->priv->error), "%s", ok ? "" : err);
     return ok ? MS_RELOADED : MS_RELOAD_FAILED;
 }
 
@@ -3620,6 +3698,7 @@ MS_ReloadResult MS_Poll(MS_Scene *s, float dt)
     float settle = p->settleTime;
     bool ok = LoadText(s, mapPath, text, size, err, sizeof(err));
     p->settleTime = settle;                     // keep watching while the editor may still write
+    snprintf(p->error, sizeof(p->error), "%s", ok ? "" : err);
     return ok ? MS_RELOADED : MS_RELOAD_FAILED;
 }
 
@@ -3656,6 +3735,7 @@ bool MS_GetLine(const MS_Scene *s, int line, char *out, int outSize)
     out[len] = '\0';
     return true;
 }
+#endif
 
 // Declared by hand rather than via <GL/gl.h> / <windows.h> (which clash with raylib). On
 // Windows x64 there is a single calling convention, so this matches opengl32.dll.
@@ -3685,6 +3765,13 @@ void MS_ApplyEnvironment(const MS_Scene *s)
     *env = d->env.env;
     env->background.sky = d->sky;
     env->ambient.map = d->ambientMap;
+#ifdef MS_PATCHED_R3D   // R3D patch 13; upstream R3D has no density fade
+    env->volumetricFog.fadeStart = d->env.vfogFadeStart;
+    env->volumetricFog.fadeEnd = d->env.vfogFadeEnd;
+    // patch 15's transmittance integral assumes the fade-in ends before the fade-out starts
+    env->volumetricFog.fadeNear = d->env.vfogFadeEnd > 0.0f && d->env.vfogFadeNear > d->env.vfogFadeStart
+                                ? d->env.vfogFadeStart : d->env.vfogFadeNear;
+#endif
 }
 
 MS_RenderSettings MS_GetRenderSettings(const MS_Scene *s)
@@ -3924,7 +4011,7 @@ static R3D_ShadowMap SunShadowMap(const MS_Private *p, int slot)
     m.softness = p->rs.shadowSoftness > 0.0f ? p->rs.shadowSoftness : p->d->env.sun.softness;
     m.depthBias = p->d->env.sun.depthBias;
     m.slopeBias = p->d->env.sun.slopeBias;
-    // The map's biases are tuned for its shadow.size. A smaller map (a quality preset, --shadow)
+    // The map's biases are tuned for its shadow.size. A smaller map (a quality preset, an override)
     // has larger texels and so larger depth steps across a texel on sloped receivers: scale
     // both biases with the texel size, or low sun angles show acne stripes on flat tops.
     int size = R3D_GetHint(R3D_HINT_SHADOW_DIR_SIZE);
@@ -3936,12 +4023,21 @@ static R3D_ShadowMap SunShadowMap(const MS_Private *p, int slot)
     return m;
 }
 
+// The sun is pushed (and its fog visibility baked)
+static bool SunOn(const MS_Private *p)
+{
+#ifdef MONOLITH_EDITOR
+    if (!p->rs.sunOn) return false;     // the editor's sun toggle
+#endif
+    return p->d->env.sun.enabled;
+}
+
 bool MS_PushLights(MS_Scene *s, Camera3D camera, float aspect)
 {
     MS_Private *p = s->priv;
     SceneData *d = p->d;
     bool update = false;
-    if (p->rs.sunOn && d->env.sun.enabled) {
+    if (SunOn(p)) {
         R3D_Light sun = d->sunLight;
         // (the tiles and the camera-fitted cache key on the range, so a new one redraws them)
         if (p->rs.shadowRange > 0.0f) sun.range = p->rs.shadowRange;
@@ -3965,10 +4061,17 @@ bool MS_PushLights(MS_Scene *s, Camera3D camera, float aspect)
     }
     for (int i = 0; i < d->lightCount; i++) {
         const MS_LightDef *L = &d->lights[i];
-        if (!L->shadow || !d->lightShadow[i].handle) { R3D_PushLight(L->light); continue; }
+        R3D_Light light = L->light;
+#ifdef MS_PATCHED_R3D
+        // Clip box (patch 16): keeps an unshadowed light out of the room below / beside it
+        light.clip = L->clip;
+        light.clipMin = L->clipBox.min;
+        light.clipMax = L->clipBox.max;
+#endif
+        if (!L->shadow || !d->lightShadow[i].handle) { R3D_PushLight(light); continue; }
         // Static scene: point / spot shadows are drawn once; extra directional lights follow the camera
         bool draw = !d->lightShadowDrawn[i] || L->light.type == R3D_LIGHT_DIR;
-        R3D_PushLightEx(L->light, d->lightShadow[i], draw);
+        R3D_PushLightEx(light, d->lightShadow[i], draw);
         d->lightShadowDrawn[i] = true;
     }
     return update;
@@ -3990,7 +4093,7 @@ void MS_DrawGeometry(MS_Scene *s)
         if (!BakeOcclusionVolume(d, p->rs.aoVolumeVoxel, p->rs.aoVolumeIntensity)) R3D_ClearWorldOcclusion();
         p->aoVersion = s->version;
     }
-    if (p->rs.sunOn && d->env.sun.enabled && d->env.sun.shadow && p->rs.sunShadow && p->rs.fogCacheVoxel > 0.0f && p->fogCacheVersion != s->version) {
+    if (SunOn(p) && d->env.sun.shadow && p->rs.sunShadow && p->rs.fogCacheVoxel > 0.0f && p->fogCacheVersion != s->version) {
         // Fog sun visibility, baked once per map load into the shadow layer this frame
         // doesn't sample (that tile slot is forgotten: it holds the bake map now)
         bool tiles = p->rs.shadowMode == MS_SHADOW_TILES;
@@ -4188,8 +4291,9 @@ BoundingBox MS_ObjectBounds(const MS_Scene *s, MS_ObjRef obj)
 
 // #endregion
 
+#ifdef MONOLITH_EDITOR
 // ======================================================================================
-// #region Public API: writing the environment
+// #region Public API: writing the environment (editor)
 // ======================================================================================
 
 static void WriteKey(FILE *f, const char *prefix, const char *key, int type, const void *p)
@@ -4208,6 +4312,8 @@ static void WriteDefKeys(FILE *f, const EnvDef *e, const char *prefix)
         if (strcmp(k->key, "sky.panorama") == 0 && e->skyMode != SKY_PANORAMA) continue;
         if (strcmp(k->key, "shadow.home") == 0 && !e->homeSet) continue;
         if (strcmp(k->key, "fogCache.region") == 0 && !e->fogRegionSet) continue;
+        if (strcmp(k->key, "volumetricFog.fadeNear") == 0) { if (!(e->vfogFadeNear > 0.0f)) continue; }
+        else if (strncmp(k->key, "volumetricFog.fade", 18) == 0 && !(e->vfogFadeEnd > 0.0f)) continue;
         WriteKey(f, "", k->key, k->type, (const char *)e + k->off);
     }
 }
@@ -4238,6 +4344,7 @@ bool MS_WriteEnvironment(const MS_Scene *s, FILE *f)
     fprintf(f, "# R3D environment\n");
     for (int i = 0; i < COUNT(ENV_KEYS); i++)
         WriteKey(f, "", ENV_KEYS[i].key, ENV_KEYS[i].type, (const char *)&e->env + ENV_KEYS[i].off);
+    WriteDefKeys(f, e, "volumetricFog.");   // the density fade, only when the map sets one
     fprintf(f, "# Quality presets: exposure factor when a preset turns bloom off (keeps the mean brightness)\n");
     WriteDefKeys(f, e, "bloom.");
     return !ferror(f);
@@ -4246,7 +4353,7 @@ bool MS_WriteEnvironment(const MS_Scene *s, FILE *f)
 // #endregion
 
 // ======================================================================================
-// #region Public API: package files, R3D environment export (--export, capture shim)
+// #region Public API: package files, R3D environment export (editor: --export, capture shim)
 // ======================================================================================
 
 int MS_DependencyCount(const MS_Scene *s)
@@ -4268,3 +4375,4 @@ bool MS_WriteR3DEnvironment(const R3D_Environment *env, FILE *f)
 }
 
 // #endregion
+#endif

@@ -54,6 +54,9 @@ typedef struct R3D_Light {
     float outerCutOff;      ///< Spot light outer cutoff angle (degrees)
     float fogEnergy;        ///< Volumetric fog energy multiplier
     R3D_LightType type;     ///< Light type (directional/spot/omni)
+    bool clip;              ///< Light only reaches points inside [clipMin, clipMax] (local patch 16)
+    Vector3 clipMin;        ///< World-space clip box minimum corner (when clip is true)
+    Vector3 clipMax;        ///< World-space clip box maximum corner (when clip is true)
 } R3D_Light;
 
 /**

@@ -29,6 +29,8 @@ struct Light {
     float shadowFar;
     int shadowLayer;        //< less than zero if no shadows
     int type;
+    vec3 clipMin;           //< world-space clip box (local patch 16); +-1e30 without one
+    vec3 clipMax;
 };
 
 #ifdef MAX_LIGHTS_FORWARD

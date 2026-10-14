@@ -5,7 +5,7 @@ own project. Each one has its own README.
 
 | Example | Shows |
 |---|---|
-| [`01_minimal`](01_minimal/) | Load an exported package and orbit around it. The same file is the `viewer.c` of every export. |
+| [`01_minimal`](01_minimal/) | Load an exported package and orbit around it (with `--shot` for comparisons; an export's own `viewer.c` is `runtime/export/viewer.c`). |
 | [`02_existing_project`](02_existing_project/) | A small existing game (own camera, player, objects, lights) before and after integrating a scene, drawn inside the game's own R3D frame, with `MS_Collides` for collision. |
 | [`03_live_editing`](03_live_editing/) | A game that hot-reloads the package monolith is editing, side by side with the editor. |
 | [`04_import_source`](04_import_source/) | A hand-written R3D scene (CC0 models, lights, fog, sky): the test input for `monolith --import` and for the capture shim (`runtime/monolith_capture.h`). |

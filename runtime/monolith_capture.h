@@ -5,8 +5,8 @@
 // compile this header into the program, run it once with MONOLITH_CAPTURE set, and it writes a
 // package from what actually reached R3D. No change to the program's own source is needed:
 //
-//   cc -c main.c -include monolith_capture.h -DMONOLITH_CAPTURE_IMPLEMENTATION -I<monolith>/runtime ...
-//   cc main.o <monolith>/runtime/monolith_scene.c ... -o game_capture     (link the runtime too)
+//   cc -c main.c -include monolith_capture.h -DMONOLITH_CAPTURE_IMPLEMENTATION -DMONOLITH_EDITOR -I<monolith>/runtime ...
+//   cc -DMONOLITH_EDITOR main.o <monolith>/runtime/monolith_scene.c ... -o game_capture   (link the runtime too)
 //   MONOLITH_CAPTURE=/tmp/cap/forest ./game_capture --shot /tmp/x.png     (any run that renders)
 //
 // (-include puts the header in front of the file; or #include it after <r3d/r3d.h> in every
@@ -69,6 +69,9 @@ void MSC_DrawModelInstanced(R3D_Model model, R3D_InstanceBuffer instances, int c
 #endif
 
 #ifdef MONOLITH_CAPTURE_IMPLEMENTATION
+#ifndef MONOLITH_EDITOR
+#error "monolith_capture.h: compile the program and runtime/monolith_scene.c with -DMONOLITH_EDITOR (MS_WriteR3DEnvironment)"
+#endif
 #include "monolith_scene.h"     // MS_WriteR3DEnvironment (link monolith_scene.c)
 #include <raymath.h>
 #include <math.h>

@@ -1,7 +1,7 @@
 // 01_minimal -- load a monolith map package and orbit around it (raylib + R3D)
 //
-// Also the viewer.c that --export puts next to an exported scene, so it depends on nothing
-// but raylib, R3D and the scene runtime (monolith_scene.h/.c).
+// Depends on nothing but raylib, R3D and the scene runtime (monolith_scene.h/.c). (The
+// viewer.c that --export writes is runtime/export/viewer.c: a fly camera, no tool flags.)
 //
 //   minimal [package]            open a window: the camera orbits the map's first viewpoint;
 //                                mouse wheel zooms, LEFT/RIGHT switch viewpoints, ESC quits.

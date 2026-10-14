@@ -1054,6 +1054,8 @@ void upload_light_array_block_for_mesh(const r3d_render_call_t* call, bool shado
         data->shadowFar       = light->shadowFar;
         data->shadowLayer     = shadow ? light->shadowLayer : -1;
         data->type            = light->type;
+        data->clipMin         = light->clipMin;
+        data->clipMax         = light->clipMax;
 
         if (++lights.uNumLights == R3D_HINT(R3D_HINT_FORWARD_LIGHT_PER_MESH))
         {
@@ -1217,6 +1219,9 @@ void upload_fx_block(void)
         block.uVFog.maxDistance       = env->volumetricFog.length;
         block.uVFog.stepSize          = env->volumetricFog.stepSize;
         block.uVFog.enabled           = env->volumetricFog.enabled;
+        block.uVFog.fadeStart         = env->volumetricFog.fadeStart;   // local patch 13
+        block.uVFog.fadeEnd           = env->volumetricFog.fadeEnd;
+        block.uVFog.fadeNear          = env->volumetricFog.fadeNear;    // local patch 15
     }
 
     if (env->dof.mode != R3D_DOF_DISABLED)
@@ -2630,6 +2635,8 @@ void pass_deferred_lights(void)
             .shadowFar       = light->shadowFar,
             .shadowLayer     = light->shadowLayer,
             .type            = light->type,
+            .clipMin         = light->clipMin,
+            .clipMax         = light->clipMax,
         };
         r3d_shader_set_uniform_block(R3D_SHADER_BLOCK_LIGHT, &data, true);
 
@@ -2800,6 +2807,8 @@ void pass_deferred_volumetric_fog(r3d_target_t sceneTarget)
             .shadowFar       = light->shadowFar,
             .shadowLayer     = light->shadowLayer,
             .type            = light->type,
+            .clipMin         = light->clipMin,
+            .clipMax         = light->clipMax,
         };
         r3d_shader_set_uniform_block(R3D_SHADER_BLOCK_LIGHT, &data, true);
 

@@ -151,6 +151,27 @@ float VFog_SunVisibility(vec3 Pws, float fadeDist, mat2 diskRot)
     return VFog_SampleShadowDir(Pws, fadeDist, diskRot);
 }
 
+// Distance fade of the fog density (local patch 13, see patches.md): 1 up to
+// uVFog.fadeStart from the eye, smoothstep down to 0 at uVFog.fadeEnd. Local patch 15:
+// with uVFog.fadeNear > 0 it also fades in, smoothstep from 0 at the eye to 1 at fadeNear,
+// so the fog around the eye (sunlit or not) doesn't veil the whole view. Only called when
+// a fade is set; without one the march below runs the unpatched arithmetic.
+float VFog_DensityFade(float t)
+{
+    float f = 1.0;
+    if (uVFog.fadeEnd > 0.0)
+    {
+        float u = clamp((t - uVFog.fadeStart) / max(uVFog.fadeEnd - uVFog.fadeStart, 1e-3), 0.0, 1.0);
+        f = 1.0 - u * u * (3.0 - 2.0 * u);
+    }
+    if (uVFog.fadeNear > 0.0)
+    {
+        float v = clamp(t / uVFog.fadeNear, 0.0, 1.0);
+        f *= v * v * (3.0 - 2.0 * v);
+    }
+    return f;
+}
+
 // Computes the march range [tEnter, tExit] along rayDir (from rayOrigin),
 // clamped to uVFog.maxDistance and to the light's range sphere when applicable.
 // tEnter/tExit are both 0.0 when the ray never enters the light's range
@@ -179,6 +200,19 @@ void VFog_GetMarchRange(vec3 rayOrigin, vec3 rayDir, float maxDist, out float tE
 
     tEnter = max(tCenter - halfChord, 0.0);
     tExit = min(tCenter + halfChord, maxDist);
+
+    // Clip box (local patch 16): march only where the ray is inside it. Lights without one
+    // have +-1e30 bounds; the slab test is skipped for them, so their march is unchanged.
+    if (uLight.clipMin.x > -1e29)
+    {
+        vec3 invDir = 1.0 / rayDir;   // +-inf on axis-parallel rays: the slab test still holds
+        vec3 t0 = (uLight.clipMin - rayOrigin) * invDir;
+        vec3 t1 = (uLight.clipMax - rayOrigin) * invDir;
+        vec3 tMin = min(t0, t1), tMax = max(t0, t1);
+        tEnter = max(tEnter, max(max(tMin.x, tMin.y), tMin.z));
+        tExit = min(tExit, min(min(tMax.x, tMax.y), tMax.z));
+        if (tExit <= tEnter) { tEnter = 0.0; tExit = 0.0; }
+    }
 }
 
 // ================================
@@ -221,6 +255,13 @@ void main()
     vec3 radiance = vec3(0.0);
     float transmittance = 1.0;
 
+    // Density fade (local patch 13): t = distance of the march position from the eye.
+    // Past fadeEnd the density is 0, so those steps add nothing: stop the march there.
+    // A near fade-in alone (local patch 15) takes the same per-step path.
+    bool fadeOn = uVFog.fadeEnd > 0.0 || uVFog.fadeNear > 0.0;
+    float tStart = tEnter + uVFog.stepSize * jitter;
+    if (uVFog.fadeEnd > 0.0) rayDist = min(rayDist, uVFog.fadeEnd - tStart);
+
     // Extinction coefficient and per-step transmittance factor (constant along the ray)
     float sigmaT = uVFog.scatteringDensity + uVFog.absortionDensity;
     float transmittanceStep = exp(-sigmaT * uVFog.stepSize);
@@ -233,7 +274,9 @@ void main()
     // VFog_SampleShadowDir fades the shadow out by the distance to the surface behind the
     // march (constant along the ray) and weights it by exactly 0 at fragDist >= range,
     // e.g. on sky pixels. Skip its taps there: same result, no wasted PCF lookups.
-    if (uLight.type == LIGHT_DIR && fragDist >= uLight.range) hasShadow = false;
+    // With a density fade (local patch 14) the shadow fades by each step's own distance
+    // from the eye instead, so the per-step branch below decides.
+    if (uLight.type == LIGHT_DIR && fragDist >= uLight.range && !fadeOn) hasShadow = false;
 
     // Precompute inverses used inside the loop
     float invRange = 1.0 / max(uLight.range, 1e-4);
@@ -247,10 +290,31 @@ void main()
         float phase = PhaseFunction_Schlick(-uLight.direction, fragToCameraNorm);
         vec3 LiDir = uVFog.scatteringDensity * uVFog.scatteringColor.rgb * phase * lightColor;
 
+        // With a density fade (local patch 13) the per-step factors vary: plain loop.
+        if (fadeOn)
+        {
+            // Shadow fade by the step's distance from the eye (local patch 14), not by
+            // fragDist: fragDist is constant along the ray, so all fog in front of a surface
+            // past 0.75 range went fully sunlit at once, a hard line across the haze where
+            // the ground crosses that distance. Steps closer than range lie inside the shadow
+            // map's fade-free area (static tiles and camera fit alike), so edgeFade stays 1.
+            for (float l = 0; l < rayDist; l += uVFog.stepSize)
+            {
+                float t = tStart + l;
+                float visibility = (hasShadow && t < uLight.range) ? VFog_SunVisibility(marchPos, t, diskRot) : 1.0;
+                float fade = VFog_DensityFade(t);
+
+                transmittance *= exp(-sigmaT * uVFog.stepSize * fade);
+                radiance += LiDir * (visibility * fade) * transmittance * uVFog.stepSize;
+
+                marchPos += deltaStep;
+            }
+            rayDist = 0.0;
+        }
         // Unshadowed rays (sky, surfaces >= range away): every step adds LiDir times the
         // transmittance so far, a geometric series with a closed form. n = the loop's
         // step count (equal up to float rounding of the accumulated l).
-        if (!hasShadow)
+        else if (!hasShadow)
         {
             float n = ceil(rayDist / uVFog.stepSize);
             float series = (transmittanceStep < 0.99999)
@@ -313,7 +377,13 @@ void main()
         vec3 Li = uVFog.scatteringDensity * uVFog.scatteringColor.rgb * phase * lightColor * visibility;
 
         // Accumulate transmittance then integrate radiance (order matters)
-        transmittance *= transmittanceStep;
+        if (fadeOn)
+        {
+            float fade = VFog_DensityFade(tStart + l);
+            Li *= fade;
+            transmittance *= exp(-sigmaT * uVFog.stepSize * fade);
+        }
+        else transmittance *= transmittanceStep;
         radiance += Li * transmittance * uVFog.stepSize;
 
         marchPos += deltaStep;

@@ -19,6 +19,8 @@
 # the build dir is re-configured in place (a full R3D rebuild). Delete those
 # directories to force a fresh configure.
 # R3D_DIR can be overridden: R3D_DIR=/path/to/r3d ./build.sh
+# The runtime (runtime/monolith_scene.c) is built with -DMONOLITH_EDITOR: hot reload, source
+# lines and the writers; --export writes it without them (src/export.c).
 # R3D_BUILD_TYPE (Linux only): CMake build type of R3D/raylib/assimp, default Release.
 #   R3D_BUILD_TYPE=None ./build.sh  -> the old unoptimised build (no CMAKE_BUILD_TYPE),
 #   only for comparisons with benchmark reports from before 2026-10-10.
@@ -55,14 +57,6 @@ BuildR3D() {
   cmake --build "$dir" -j"$(nproc)" >> "$log" 2>&1 || { tail -50 "$log"; exit 1; }
 }
 
-# --export / F9 (src/export.c) put the scene runtime and the minimal viewer into every
-# export; a copied build folder (no repo around) finds them in $OUT/runtime/
-CopyExportTemplate() {
-  mkdir -p "$OUT/runtime"
-  cp -f "$ROOT"/runtime/monolith_scene.h "$ROOT"/runtime/monolith_scene.c "$OUT/runtime/"
-  cp -f "$ROOT/examples/01_minimal/main.c" "$OUT/runtime/viewer.c"
-}
-
 WIN=0
 if [[ "${1:-}" == "--win" ]]; then
   WIN=1
@@ -97,16 +91,16 @@ if [[ $WIN == 1 ]]; then
     -I"$R3D_WIN/external/raylib/raylib/include" \
     -I"$R3D_DIR/external/assimp/include" -I"$R3D_WIN/external/assimp/include" \
     -DR3D_BUILD_TYPE_NAME='"Release"' \
-    -I"$ROOT/runtime" -DMS_PATCHED_R3D \
+    -I"$ROOT/runtime" -DMS_PATCHED_R3D -DMONOLITH_EDITOR \
     "$ROOT"/src/*.c "$ROOT"/runtime/*.c -o "$OUT/monolith.exe" \
     -s -static -L"$R3D_WIN/lib" -lr3d -lraylib -lassimp -lzlibstatic -lstdc++ \
     -lopengl32 -lgdi32 -lwinmm -lshell32 -lm
 
   # Map packages are found next to the .exe (see InitDataPaths in src/main.c); resources/ is
-  # from builds before map packages (the shaders now live in the packages)
-  rm -rf "$OUT/resources" "$OUT/maps"
+  # from builds before map packages (the shaders now live in the packages), runtime/ from
+  # builds before --export needed the repo (src/export.c)
+  rm -rf "$OUT/resources" "$OUT/maps" "$OUT/runtime"
   cp -r "$ROOT/maps" "$OUT/maps"
-  CopyExportTemplate
 
   echo "built: build/win/monolith.exe"
   if [[ "${1:-}" == "run" ]]; then
@@ -167,16 +161,15 @@ mkdir -p "$OUT"
 GLIBC_WRAP=acosf,asinf,atan2f,sqrtf,fmod,fmodf,hypot,hypotf,__isoc23_strtoul,arc4random
 "$CC" "${CFLAGS[@]}" "${INCLUDES[@]}" \
   -DBENCHMARK_PATH="\"$ROOT/benchmark/\"" \
-  -DMAPS_PATH="\"$ROOT/maps/\"" -DPROJECT_PATH="\"$ROOT/\"" \
+  -DMAPS_PATH="\"$ROOT/maps/\"" -DPROJECT_PATH="\"$ROOT/\"" -DR3D_SOURCE_PATH="\"$R3D_DIR/\"" \
   -DR3D_BUILD_TYPE_NAME="\"$R3D_BUILD_TYPE\"" \
-  -I"$ROOT/runtime" -DMS_PATCHED_R3D \
+  -I"$ROOT/runtime" -DMS_PATCHED_R3D -DMONOLITH_EDITOR \
   "$ROOT"/src/*.c "$ROOT"/runtime/*.c -o "$OUT/monolith" \
   -L"$R3D_LINUX/lib" -lr3d -lraylib -lassimp -lzlibstatic \
   -l:libstdc++.a -lgcc_s -lGL -lm -lpthread -ldl -Wl,--wrap="${GLIBC_WRAP//,/,--wrap=}"
 
-rm -rf "$OUT/resources" "$OUT/maps"
+rm -rf "$OUT/resources" "$OUT/maps" "$OUT/runtime"
 cp -r "$ROOT/maps" "$OUT/maps"
-CopyExportTemplate
 
 echo "built: ${OUT#"$ROOT/"}/monolith"
 if [[ "${1:-}" == "run" ]]; then

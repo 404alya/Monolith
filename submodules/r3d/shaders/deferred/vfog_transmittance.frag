@@ -50,6 +50,31 @@ void main()
     float sigmaT = uVFog.scatteringDensity + uVFog.absortionDensity;
     float transmittance = exp(-sigmaT * rayDist);
 
+    // Density fade (local patch 13): the density is 1 - smoothstep(fadeStart, fadeEnd, t),
+    // so the optical depth is sigmaT times its integral over [0, rayDist]. With
+    // s(u) = 3u^2 - 2u^3 and w = fadeEnd - fadeStart: int_0^u s = u^3 - u^4 / 2.
+    // Near fade-in (local patch 15): the density is also multiplied by s(t / fadeNear), which
+    // removes n (v - v^3 + v^4 / 2) of it (v = clamped d / n). Exact while fadeNear <=
+    // fadeStart (the two ramps don't overlap); monolith clamps it to that.
+    if (uVFog.fadeEnd > 0.0 || uVFog.fadeNear > 0.0)
+    {
+        float depthInt = rayDist;
+        if (uVFog.fadeEnd > 0.0)
+        {
+            float a = min(uVFog.fadeStart, rayDist);
+            float w = max(uVFog.fadeEnd - uVFog.fadeStart, 1e-3);
+            float u = clamp((rayDist - uVFog.fadeStart) / w, 0.0, 1.0);
+            depthInt = a + w * (u - (u * u * u - 0.5 * u * u * u * u));
+        }
+        if (uVFog.fadeNear > 0.0)
+        {
+            float n = uVFog.fadeNear;
+            float v = clamp(rayDist / n, 0.0, 1.0);
+            depthInt = max(depthInt - n * (v - (v * v * v - 0.5 * v * v * v * v)), 0.0);
+        }
+        transmittance = exp(-sigmaT * depthInt);
+    }
+
     // Emission fills the volume proportionally to extinction
     float extinction = 1.0 - transmittance;
     vec3 emission = uVFog.emissionColor.rgb * (uVFog.emissionEnergy * extinction);

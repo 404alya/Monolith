@@ -115,6 +115,9 @@
             .skyAffect         = 0.5f,                  \
             .length            = 50.0f,                 \
             .stepSize          = 1.0f,                  \
+            .fadeStart         = 0.0f,                  \
+            .fadeEnd           = 0.0f,                  \
+            .fadeNear          = 0.0f,                  \
             .enabled           = false,                 \
         },                                              \
         .dof = {                                        \
@@ -313,6 +316,9 @@ typedef struct R3D_VolumetricFog {
     float skyAffect;            ///< Fog influence on the skybox [0-1] (default: 0.5)
     float length;               ///< Maximum fog render distance in world units (default: 50.0)
     float stepSize;             ///< Ray-march step size; smaller = higher quality, lower performance (default: 1.0)
+    float fadeStart;            ///< Distance from the eye where the fog starts thinning out (local patch 13; default: 0.0)
+    float fadeEnd;              ///< Distance where it is gone, smoothstep in between; <= 0 disables the fade (local patch 13; default: 0.0)
+    float fadeNear;             ///< Density fades in from 0 at the eye to full at this distance (smoothstep); <= 0: off (local patch 15; default: 0.0)
     bool enabled;               ///< Enables or disables the volumetric fog (default: false)
 } R3D_VolumetricFog;
 

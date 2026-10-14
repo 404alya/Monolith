@@ -19,3 +19,7 @@ submodules/r3d/external/raylib/examples/
 
 # Map exports written by F9 (src/export.c); examples/build/ is covered by build/ above
 export/
+
+# Maps are local, except the pine_forest package
+maps/*
+!maps/pine_forest/

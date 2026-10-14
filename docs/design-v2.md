@@ -1,11 +1,12 @@
 # monolith v2: design record (interfaces for the parallel work streams)
 
 > **Design record.** This note was written before the v2 work fanned out
-> (`AI-MAP-DESIGNER-V2-PROMPT.md`) and fixed the shared interfaces; the streams appended
+> (the round-2 task prompt, now retired: its reasons are in `docs/knowledge/history.md`, its
+> working method in `docs/knowledge/working-method.md`) and fixed the shared interfaces; the streams appended
 > implementation notes (§8–§10) as they merged. It is kept as the record of *why* things are
 > the way they are. It is not the reference: where it and the code differ, the code wins, and
 > the current, authoritative descriptions are
-> - the map format: the header comment of `runtime/monolith_scene.c` and `AI-MAP-TOOL.md` §5–6;
+> - the map format: the header comment of `runtime/monolith_scene.c` and `docs/knowledge/map-format.md`;
 > - the runtime API: `runtime/monolith_scene.h` and `PROMPT-INSTRUCTIONS.md` §6.1;
 > - request bundles: `AI-MAP-TOOL.md` §2 (and `src/launcher.c`);
 > - flags, keys and environment variables: the header comment of `src/main.c` and

@@ -68,6 +68,15 @@ void main()
     vec3 N = V_GetWorldNormal(uNormalTex, pixCoord);
     vec3 P = V_GetWorldPosition(vTexCoord, depth);
 
+    /* Outside the light's clip box: no light (local patch 16, keeps unshadowed lights out of the floor below) */
+
+    if (any(lessThan(P, uLight.clipMin)) || any(greaterThan(P, uLight.clipMax)))
+    {
+        FragRadiance = vec4(0.0);
+        FragSpecular = vec4(0.0);
+        return;
+    }
+
     /* Compute light direction and the dot product of the normal and light direction */
 
     vec3 Ldelta = uLight.position - P;

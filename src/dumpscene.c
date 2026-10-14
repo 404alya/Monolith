@@ -11,7 +11,7 @@
 //         bounds <6 hex> colliders <first> <count> slots <N=m,...|->
 //   collider <i> <6 hex>        (model colliders only; i >= boxes)
 //   material <i> "<name>" line <l> shader "<path>" unlit <on|off>
-//   light <i> <point|spot|dir> line <l> position <3 hex> direction <3 hex> color r g b energy <hex> range <hex> shadow <on|off>
+//   light <i> <point|spot|dir> line <l> position <3 hex> direction <3 hex> color r g b energy <hex> range <hex> shadow <on|off> [clip <3 hex> <3 hex>]
 //   sun direction <3 hex> energy <hex> range <hex> shadow <on|off>
 //
 // --dump-scene-diff writes the same items without anything that shifts when lines are
@@ -129,8 +129,10 @@ bool DumpScene(const MS_Scene *s, const char *path, bool diff)
         fprintf(f, " position");
         Hex3(f, L->position);
         fprintf(f, " direction"); Hex3(f, L->direction);
-        fprintf(f, " color %d %d %d energy %a range %a shadow %s\n", L->color.r, L->color.g, L->color.b, L->energy, L->range,
+        fprintf(f, " color %d %d %d energy %a range %a shadow %s", L->color.r, L->color.g, L->color.b, L->energy, L->range,
                 s->lights[i].shadow ? "on" : "off");
+        if (s->lights[i].clip) { fprintf(f, " clip"); Hex3(f, s->lights[i].clipBox.min); Hex3(f, s->lights[i].clipBox.max); }
+        fprintf(f, "\n");
     }
     fprintf(f, "sun direction");
     Hex3(f, s->sun.light.direction);

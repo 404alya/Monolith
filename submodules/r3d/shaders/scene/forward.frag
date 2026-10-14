@@ -125,6 +125,9 @@ void main()
     {
         Light light = uLights[i];
 
+        // Outside the light's clip box: no light (local patch 16)
+        if (any(lessThan(vPosition, light.clipMin)) || any(greaterThan(vPosition, light.clipMax))) continue;
+
         /* Compute light direction and the dot product of the normal and light direction */
 
         vec3 Ldelta = light.position - vPosition;

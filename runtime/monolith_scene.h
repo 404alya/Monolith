@@ -1,11 +1,17 @@
-// monolith_scene -- load, hot-reload, draw, collide with and pick a monolith map package
-// in any raylib + R3D program. C11; depends only on raylib (raymath, rlgl) and R3D.
+// monolith_scene -- load, draw, collide with and pick a monolith map package in any
+// raylib + R3D program. C11; depends only on raylib (raymath, rlgl) and R3D.
 //
-// The monolith editor uses exactly this module, so a scene shows the same in the editor
-// and in your game. Map format: docs/design-v2.md section 2 (and the header comment of
-// monolith_scene.c). Compile with -DMS_PATCHED_R3D when building against monolith's R3D
-// copy (submodules/r3d, see its patches.md); without it the runtime uses upstream R3D APIs
-// only (camera-fitted sun shadow, no depth pre-pass toggle, no fog cache).
+// monolith draws its maps with this same module, so a scene looks the same there and in
+// your game. Map format: the header comment of monolith_scene.c. Compile with
+// -DMS_PATCHED_R3D when building against monolith's patched R3D (see its patches.md);
+// without it the runtime uses upstream R3D APIs only (camera-fitted sun shadow, no depth
+// pre-pass toggle, no fog cache).
+#ifdef MONOLITH_EDITOR
+//
+// Built with -DMONOLITH_EDITOR (the monolith editor, its tools and the examples), the module
+// also has hot reload, the map's source lines and the package / environment writers (the
+// sections marked "editor"). --export writes the module without them.
+#endif
 //
 // Minimal use:
 //     char err[512];
@@ -19,7 +25,6 @@
 //     if (!scene) { puts(err); return 1; }
 //     MS_ApplyEnvironment(scene);
 //     while (!WindowShouldClose()) {
-//         if (MS_Poll(scene, GetFrameTime()) == MS_RELOADED) MS_ApplyEnvironment(scene);  // optional
 //         BeginDrawing();
 //             MS_Draw(scene, camera, (RenderTexture){ 0 });   // R3D_Begin .. R3D_End
 //         EndDrawing();
@@ -33,10 +38,9 @@
 //         ... your R3D_Draw* calls ...
 //     R3D_End();
 //
-// The map format reference is the header comment of monolith_scene.c (and docs/design-v2.md
-// section 2). Scene contents are read-only for callers; everything the runtime owns (GPU
-// resources, file text, caches) is freed by MS_Unload. One scene can be drawn at a time
-// per R3D context (R3D's environment and fog bake are global).
+// Scene contents are read-only for callers; everything the runtime owns (GPU resources,
+// parsed data, caches) is freed by MS_Unload. One scene can be drawn at a time per R3D
+// context (R3D's environment and fog bake are global).
 #ifndef MONOLITH_SCENE_H
 #define MONOLITH_SCENE_H
 
@@ -57,7 +61,7 @@
 #define MS_DEFAULT_EYE_HEIGHT   1.62f   // eye above the spawn's feet (for the viewpoint made from the spawn)
 
 // ======================================================================================
-// Scene contents (read-only for callers; valid until the next MS_Poll / MS_Reload)
+// Scene contents (read-only for callers; valid until MS_Unload)
 // ======================================================================================
 
 typedef enum { MS_OBJ_NONE = 0, MS_OBJ_BOX, MS_OBJ_MODEL } MS_ObjKind;
@@ -65,7 +69,7 @@ typedef enum { MS_OBJ_NONE = 0, MS_OBJ_BOX, MS_OBJ_MODEL } MS_ObjKind;
 // An object of the scene: a box (index into boxes[]) or a model instance (into models[])
 typedef struct { MS_ObjKind kind; int index; } MS_ObjRef;
 
-// Where an object came from, so tools can point at the map file
+// Where an object came from in the map file
 typedef struct {
     int line;               // 1-based source line in the map file, 0 = not from a file
     int prim;               // index of the statement (map line) that generated it, -1 = none
@@ -118,6 +122,8 @@ typedef struct {
     R3D_Light light;            // type, position/direction, colour, energy, range, ...
     bool shadow;
     MS_Ref ref;
+    bool clip;                  // `clip x0 y0 z0 x1 y1 z1`: the light only reaches points in clipBox
+    BoundingBox clipBox;        //   (world space; needs the patched R3D, ignored with upstream R3D)
 } MS_LightDef;
 
 typedef struct {
@@ -130,7 +136,7 @@ typedef struct {
     bool enabled, shadow;
     R3D_Light light;            // light.direction = direction the light travels; light.range = shadow distance
     float softness, depthBias, slopeBias;
-    int shadowSize;             // px (env shadow.size, or --shadow)
+    int shadowSize;             // px (env shadow.size, or MS_LoadOptions.shadowSizeOverride)
 } MS_Sun;
 
 typedef struct MS_Private MS_Private;
@@ -139,10 +145,13 @@ typedef struct {
     int formatVersion;              // 1 or 2 (of the loaded file)
     const char *path;               // the map file
     const char *root;               // package root (folder of the map file), trailing '/'
+    unsigned int version;           // 1 after MS_Load (the runtime's caches key on it)
+#ifdef MONOLITH_EDITOR
+    // editor: version is +1 on every successful reload
     const char *brief;              // root + "MAP.md" if it exists, else "" (never NULL)
-    unsigned int version;           // +1 on every successful (re)load
     unsigned long long hash;        // FNV-1a 64 of the map file bytes
     long mtime;
+#endif
 
     const BoundingBox *boxes;       // axis-aligned boxes
     const MS_Ref *boxRefs;
@@ -176,15 +185,15 @@ typedef struct {
 
     BoundingBox bounds;             // everything (boxes, models, lights)
 
-    MS_Private *priv;               // GPU resources, caches, file text, hot-reload state
+    MS_Private *priv;               // GPU resources, caches, parsed data
 } MS_Scene;
 
 // ======================================================================================
-// Loading and hot reload
+// Loading
 // ======================================================================================
 
 typedef struct {
-    bool noGpu;             // parse + geometry only, no R3D calls (e.g. a box dump without a window).
+    bool noGpu;             // parse + geometry only, no R3D calls (e.g. a peek before R3D_Init).
                             // Model files are parsed on the CPU (assimp, no GL) so a broken one
                             // fails the load like a GPU load would, then dropped; their bounds are
                             // unknown (zero box, loaded = false), so model bounds, colliders and
@@ -193,30 +202,14 @@ typedef struct {
     float shadowRangeOverride;  // > 0: overrides sun.range
 } MS_LoadOptions;
 
-// Loads a package folder or a .map file (docs/design-v2.md section 1). Needs R3D_Init first
-// unless opt->noGpu. Returns NULL and "file:line: message" in err on failure.
+// Loads a package folder (<name>/<name>.map, or its only .map file) or a .map file. Needs
+// R3D_Init first unless opt->noGpu. Returns NULL and "file:line: message" in err on failure.
 MS_Scene *MS_Load(const char *path, const MS_LoadOptions *opt, char *err, int errSize);
 void MS_Unload(MS_Scene *scene);
 
-typedef enum {
-    MS_UNCHANGED = 0,
-    MS_RELOADED,            // new contents swapped in (version + 1): re-apply environment overrides
-    MS_RELOAD_FAILED,       // a file changed but the package is invalid; old scene kept, see MS_Error
-} MS_ReloadResult;
-
-// Hot reload: call once per frame. About twice a second it checks every file the scene
-// depends on (map, shaders, models, textures) and reloads the package when one changed.
-MS_ReloadResult MS_Poll(MS_Scene *scene, float dt);
-
-// Reloads now, from `path` (NULL = the current one). Same swap rules as MS_Poll.
-MS_ReloadResult MS_Reload(MS_Scene *scene, const char *path, char *err, int errSize);
-
-const char *MS_Error(const MS_Scene *scene);    // last failed (re)load, "" after a success
-
 // R3D hints that only take effect before R3D_Init (today: the sun's shadow map size, from
 // env shadow.size or MS_LoadOptions.shadowSizeOverride). Call it after InitWindow (R3D_SetHint
-// queries GL) and before R3D_Init, e.g. with a noGpu scene. A reload that changes shadow.size
-// keeps the old size until a restart.
+// queries GL) and before R3D_Init, e.g. with a noGpu scene.
 void MS_SetInitHints(const MS_Scene *scene);
 
 // GL state the scene needs that R3D doesn't set. Call once right after R3D_Init (before or
@@ -227,6 +220,28 @@ void MS_SetInitHints(const MS_Scene *scene);
 // geometry closer than the camera's near plane (1 cm) is clamped rather than cut away.
 void MS_InitRenderer(void);
 
+#ifdef MONOLITH_EDITOR
+// ======================================================================================
+// Hot reload and source lines (editor)
+// ======================================================================================
+// Scene contents stay valid until the next MS_Poll / MS_Reload that swaps a new load in.
+
+typedef enum {
+    MS_UNCHANGED = 0,
+    MS_RELOADED,            // new contents swapped in (version + 1): re-apply environment overrides
+    MS_RELOAD_FAILED,       // a file changed but the package is invalid; old scene kept, see MS_Error
+} MS_ReloadResult;
+
+// Hot reload: call once per frame. About twice a second it checks every file the scene
+// depends on (map, shaders, models, textures) and reloads the package when one changed.
+// A reload that changes shadow.size keeps the old shadow map size until a restart.
+MS_ReloadResult MS_Poll(MS_Scene *scene, float dt);
+
+// Reloads now, from `path` (NULL = the current one). Same swap rules as MS_Poll.
+MS_ReloadResult MS_Reload(MS_Scene *scene, const char *path, char *err, int errSize);
+
+const char *MS_Error(const MS_Scene *scene);    // last failed (re)load, "" after a success
+
 // Line `line` (1-based) of the loaded map's text, without the newline (cut to outSize - 1 bytes)
 bool MS_GetLine(const MS_Scene *scene, int line, char *out, int outSize);
 
@@ -234,14 +249,15 @@ bool MS_GetLine(const MS_Scene *scene, int line, char *out, int outSize);
 // bytes, not NUL-terminated (print it with "%.*s"); NULL if there is no such line. Valid
 // until the next reload. Lines have no length limit.
 const char *MS_LineText(const MS_Scene *scene, int line, int *length);
+#endif
 
 // ======================================================================================
 // Environment and drawing
 // ======================================================================================
 
 // Writes the scene's sky, ambient map, fog, volumetric fog, SSAO/SSIL/..., bloom, tonemap
-// and colour settings into R3D_GetEnvironment(). Call after MS_Load and after a reload;
-// apply your own overrides afterwards.
+// and colour settings into R3D_GetEnvironment(). Call after MS_Load; apply your own
+// overrides afterwards.
 void MS_ApplyEnvironment(const MS_Scene *scene);
 
 typedef enum {
@@ -250,9 +266,12 @@ typedef enum {
     MS_SHADOW_ALWAYS,       // camera-fitted, re-rendered every frame
 } MS_ShadowMode;
 
-// Runtime switches that are not part of the map (the editor's toggles and A/B flags)
+// Render switches that are not part of the map. MS_ApplyQuality sets them from a quality
+// preset; set them directly only for finer control.
 typedef struct {
-    bool sunOn;             // default true
+#ifdef MONOLITH_EDITOR
+    bool sunOn;             // default true (editor: the sun toggle)
+#endif
     MS_ShadowMode shadowMode;   // default MS_SHADOW_TILES (without MS_PATCHED_R3D: MS_SHADOW_CAMERA)
     float fogCacheVoxel;    // > 0: bake the fog's sun visibility (needs MS_PATCHED_R3D), 0 = off (default)
     int fogCacheSub;        // subsamples^3 per voxel, default 2
@@ -276,7 +295,7 @@ MS_RenderSettings MS_GetRenderSettings(const MS_Scene *scene);
 void MS_SetRenderSettings(MS_Scene *scene, MS_RenderSettings settings);
 
 // ======================================================================================
-// Graphics quality (presets for games and the editor; monolith's settings panel uses these)
+// Graphics quality presets
 // ======================================================================================
 // The map stays the source of the look: every setting is relative to the map's environment
 // (0 / 1 / "the map's" = unchanged), so MS_QUALITY_ULTRA renders exactly what the map
@@ -345,7 +364,7 @@ MS_QualityLevel MS_QualityMatch(const MS_Quality *q);
 bool MS_QualityEqual(const MS_Quality *a, const MS_Quality *b);
 
 // Applies q: the render settings (renderScale, upscale, sun shadow, shadow mode, fog cache,
-// AO volume, pre-pass; sunOn is kept), R3D's anti-aliasing mode, and the environment part on
+// AO volume, pre-pass), R3D's anti-aliasing mode, and the environment part on
 // top of R3D_GetEnvironment(). Call it right after MS_ApplyEnvironment (it scales the map's
 // values, so applying it twice would scale twice), then MS_ApplyRenderResolution.
 // q->shadowSize is not applied here (init hint: MS_LoadOptions.shadowSizeOverride).
@@ -364,12 +383,6 @@ bool MS_Draw(MS_Scene *scene, Camera3D camera, RenderTexture target);
 // The parts, for use inside your own R3D_Begin*/R3D_End. aspect = target width / height.
 bool MS_PushLights(MS_Scene *scene, Camera3D camera, float aspect);
 void MS_DrawGeometry(MS_Scene *scene);
-
-// Writes the scene's environment as format-2 `env` lines: every R3D_Environment field,
-// sky.*, the ambientSky.* keys that are set, sun.*, shadow.size and the cache hints that are
-// set. scene NULL = the built-in defaults (docs/design-v2.md section 2.6). For --new-map
-// and export. Values are written so that they read back as the same floats.
-bool MS_WriteEnvironment(const MS_Scene *scene, FILE *f);
 
 // ======================================================================================
 // Queries
@@ -399,9 +412,16 @@ bool MS_Collides(const MS_Scene *scene, BoundingBox box);
 const MS_Ref *MS_ObjectRef(const MS_Scene *scene, MS_ObjRef obj);     // NULL for MS_OBJ_NONE
 BoundingBox MS_ObjectBounds(const MS_Scene *scene, MS_ObjRef obj);    // world AABB
 
+#ifdef MONOLITH_EDITOR
 // ======================================================================================
-// Package files and environment export (for --export, the capture shim and other tools)
+// Package files and environment writers (editor: --export, --new-map, the capture shim)
 // ======================================================================================
+
+// Writes the scene's environment as format-2 `env` lines: every R3D_Environment field,
+// sky.*, the ambientSky.* keys that are set, sun.*, shadow.size and the cache hints that are
+// set. scene NULL = the built-in defaults (docs/design-v2.md section 2.6). For --new-map
+// and export. Values are written so that they read back as the same floats.
+bool MS_WriteEnvironment(const MS_Scene *scene, FILE *f);
 
 // Files the loaded scene depends on, each once: [0] is the map file, then every shader,
 // texture, panorama and model file a statement references, as scene->root + the
@@ -427,10 +447,11 @@ bool MS_CheckModelReferences(const char *root, const char *modelRel, char *err, 
 // lo..hi, lo excluded when *loOpen. False if the key has no range. For tools that set
 // environment values from elsewhere (monolith's --fx), so they can't do what a map can't.
 bool MS_EnvKeyRange(const char *key, float *lo, float *hi, bool *loOpen);
+#endif
 
 // ======================================================================================
-// Growable arrays and strings (plain heap memory; the runtime's own helpers, also used by
-// the monolith editor so that both follow one rule: content-sized data is never a fixed array)
+// Growable arrays and strings (plain heap memory: the runtime's own helpers, free to use;
+// content-sized data is never a fixed array)
 // ======================================================================================
 
 // `arrayPtr` is the address of a `T *` with room for *cap elements of elemSize bytes. Makes

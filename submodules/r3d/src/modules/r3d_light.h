@@ -59,7 +59,11 @@ typedef struct {
     float shadowFar;            // Far plane for shadow projection
     int shadowLayer;            // Shadow map layer index, -1 if no shadow
     R3D_LightType type;
+    Vector3 clipMin, clipMax;   // World-space clip box, +-R3D_LIGHT_NO_CLIP without one (local patch 16)
 } r3d_light_data_t;
+
+// Clip box bound of a light without one (local patch 16): every point is inside
+#define R3D_LIGHT_NO_CLIP 1e30f
 
 typedef struct {
     R3D_Frustum   frustum;

@@ -9,7 +9,9 @@
 # Builds against monolith's R3D copy (submodules/r3d, with -DMS_PATCHED_R3D) and its static
 # libraries, which ../build.sh builds (run it once first, or ../build.sh --win for --win).
 # Same compiler flags as the game (zero warnings), same static linking and glibc
-# compatibility shim (src/glibc_compat.c) on Linux. R3D_DIR overrides the R3D tree.
+# compatibility shim (src/glibc_compat.c) on Linux. R3D_DIR overrides the R3D tree. The
+# runtime is built with -DMONOLITH_EDITOR like in the game (03_live_editing uses MS_Poll,
+# the capture shim MS_WriteR3DEnvironment).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -54,7 +56,7 @@ Example() {
   local dir="$1" prog="$2"
   shift 2
   mkdir -p "$OUT/$dir"
-  "$CC" "${CFLAGS[@]}" "${INCLUDES[@]}" -DMS_PATCHED_R3D "$@" "${EXTRA_SRC[@]}" -o "$OUT/$dir/$prog$EXE" "${LIBS[@]}"
+  "$CC" "${CFLAGS[@]}" "${INCLUDES[@]}" -DMS_PATCHED_R3D -DMONOLITH_EDITOR "$@" "${EXTRA_SRC[@]}" -o "$OUT/$dir/$prog$EXE" "${LIBS[@]}"
   echo "built: ${OUT#"$ROOT/"}/$dir/$prog$EXE"
 }
 
@@ -83,6 +85,6 @@ Data 04_import_source "$HERE/04_import_source/assets" assets
 # source: -include puts the shim in front of main.c. Two steps, so the shim's implementation
 # only goes into main.c, not into the runtime it links. MONOLITH_CAPTURE=<dir> ./import_source_capture
 mkdir -p "$OUT/04_import_source"
-"$CC" "${CFLAGS[@]}" "${INCLUDES[@]}" -DMS_PATCHED_R3D -include monolith_capture.h -DMONOLITH_CAPTURE_IMPLEMENTATION \
+"$CC" "${CFLAGS[@]}" "${INCLUDES[@]}" -DMS_PATCHED_R3D -DMONOLITH_EDITOR -include monolith_capture.h -DMONOLITH_CAPTURE_IMPLEMENTATION \
   -c "$HERE/04_import_source/main.c" -o "$OUT/04_import_source/main-capture.o"
 Example 04_import_source import_source_capture "$OUT/04_import_source/main-capture.o" "${RUNTIME[@]}"

@@ -557,6 +557,10 @@ typedef struct {
         alignas(4) float maxDistance;
         alignas(4) float stepSize;
         alignas(4) int32_t enabled;
+        alignas(4) float fadeStart;     // local patch 13
+        alignas(4) float fadeEnd;
+        alignas(4) float fadeNear;      // local patch 15
+        uint8_t _pad[4];                // std140: the struct is padded to 16 bytes
     } uVFog;
 
     struct r3d_shader_block_fx_dof {
@@ -609,6 +613,8 @@ typedef struct {
     alignas(4)  float   shadowFar;
     alignas(4)  int32_t shadowLayer;
     alignas(4)  int32_t type;
+    alignas(16) Vector3 clipMin;    // local patch 16
+    alignas(16) Vector3 clipMax;
 } r3d_shader_block_light_t;
 
 typedef struct {

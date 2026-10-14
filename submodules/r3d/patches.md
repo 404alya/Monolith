@@ -3844,3 +3844,591 @@ after it). `HASH_CLEAR` frees only uthash's own table and buckets, never the ent
 indirect leaks of ours (1152 bytes) to none; every other run unchanged (zero leaks of ours).
 Rendering is unaffected (the table is freed after its last use): `--shot` of
 `maps/pine_forest` views 1-3 and of `tests/models` pixel-identical with and without the patch.
+
+## Patch 13: volumetric fog density fade by distance from the eye (2026-10-13)
+
+**Symptom.** Not a bug, a missing control. In `maps/monolith`, looking toward the sun across
+the open terrace, the sunlit volumetric fog veiled the apartment tower ~100 m away. Thinning the
+fog (`scatteringDensity`, `sun.fogEnergy`) also weakened the light shafts in the hall, which the
+developer rejected. And the fog stops hard at `volumetricFog.length` (no fade at the end of the
+march).
+
+**Change.** Two new `R3D_VolumetricFog` fields, `fadeStart` and `fadeEnd` (default 0 = off).
+With `fadeEnd > 0` the fog density is multiplied by `1 - smoothstep(fadeStart, fadeEnd, t)`,
+t = distance from the eye along the view ray (never view depth, PROMPT-INSTRUCTIONS 7.6):
+- `vfog_radiance.frag`: per step the in-scatter and the step's extinction are scaled by the
+  fade; the march stops at `fadeEnd` (the density is 0 beyond it). The directional light's
+  closed form for unshadowed rays (patch 9) is skipped when fading (the per-step factors vary).
+  Without a fade every path runs the unpatched arithmetic.
+- `vfog_transmittance.frag`: the optical depth uses the analytic integral of the fade,
+  `a + w (u - u^3 + u^4 / 2)` (u = clamped (d - fadeStart) / w, w = fadeEnd - fadeStart,
+  a = min(fadeStart, d)), so transmittance and emission thin out the same way.
+- `FX_VFog` / `r3d_shader_block_fx_vfog` get the two floats (std140: C struct padded to 80 bytes),
+  `r3d_draw.c` uploads them.
+
+**Build note.** R3D's CMake does not track `#include`s of shaders: after changing
+`shaders/include/ubo/fx.glsl`, only the shaders whose own file changed were regenerated, and the
+others kept the old FxBlock layout (a nearly black image). Touch every shader source
+(`find shaders -type f -exec touch {} +`) after changing a shared include.
+
+**monolith side.** `env volumetricFog.fadeStart` / `fadeEnd` (EnvDef keys, so a map using them
+also parses against upstream R3D, where they are ignored); `MS_ApplyEnvironment` sets the fields
+under `MS_PATCHED_R3D`. `MS_WriteEnvironment` writes them only when a map sets a fade.
+
+**Files.** `include/r3d/r3d_environment.h`, `shaders/include/ubo/fx.glsl`,
+`shaders/deferred/vfog_radiance.frag`, `shaders/deferred/vfog_transmittance.frag`,
+`src/modules/r3d_shader.h`, `src/r3d_draw.c`.
+
+```diff
+diff --git a/include/r3d/r3d_environment.h b/include/r3d/r3d_environment.h
+index 466d1e9..9028b74 100644
+--- a/include/r3d/r3d_environment.h
++++ b/include/r3d/r3d_environment.h
+@@ -115,6 +115,8 @@
+             .skyAffect         = 0.5f,                  \
+             .length            = 50.0f,                 \
+             .stepSize          = 1.0f,                  \
++            .fadeStart         = 0.0f,                  \
++            .fadeEnd           = 0.0f,                  \
+             .enabled           = false,                 \
+         },                                              \
+         .dof = {                                        \
+@@ -313,6 +315,8 @@ typedef struct R3D_VolumetricFog {
+     float skyAffect;            ///< Fog influence on the skybox [0-1] (default: 0.5)
+     float length;               ///< Maximum fog render distance in world units (default: 50.0)
+     float stepSize;             ///< Ray-march step size; smaller = higher quality, lower performance (default: 1.0)
++    float fadeStart;            ///< Distance from the eye where the fog starts thinning out (local patch 13; default: 0.0)
++    float fadeEnd;              ///< Distance where it is gone, smoothstep in between; <= 0 disables the fade (local patch 13; default: 0.0)
+     bool enabled;               ///< Enables or disables the volumetric fog (default: false)
+ } R3D_VolumetricFog;
+ 
+diff --git a/shaders/deferred/vfog_radiance.frag b/shaders/deferred/vfog_radiance.frag
+index d18e236..c97c51f 100644
+--- a/shaders/deferred/vfog_radiance.frag
++++ b/shaders/deferred/vfog_radiance.frag
+@@ -151,6 +151,15 @@ float VFog_SunVisibility(vec3 Pws, float fadeDist, mat2 diskRot)
+     return VFog_SampleShadowDir(Pws, fadeDist, diskRot);
+ }
+ 
++// Distance fade of the fog density (local patch 13, see patches.md): 1 up to
++// uVFog.fadeStart from the eye, smoothstep down to 0 at uVFog.fadeEnd. Only called when
++// uVFog.fadeEnd > 0; without a fade the march below runs the unpatched arithmetic.
++float VFog_DensityFade(float t)
++{
++    float u = clamp((t - uVFog.fadeStart) / max(uVFog.fadeEnd - uVFog.fadeStart, 1e-3), 0.0, 1.0);
++    return 1.0 - u * u * (3.0 - 2.0 * u);
++}
++
+ // Computes the march range [tEnter, tExit] along rayDir (from rayOrigin),
+ // clamped to uVFog.maxDistance and to the light's range sphere when applicable.
+ // tEnter/tExit are both 0.0 when the ray never enters the light's range
+@@ -221,6 +230,12 @@ void main()
+     vec3 radiance = vec3(0.0);
+     float transmittance = 1.0;
+ 
++    // Density fade (local patch 13): t = distance of the march position from the eye.
++    // Past fadeEnd the density is 0, so those steps add nothing: stop the march there.
++    bool fadeOn = uVFog.fadeEnd > 0.0;
++    float tStart = tEnter + uVFog.stepSize * jitter;
++    if (fadeOn) rayDist = min(rayDist, uVFog.fadeEnd - tStart);
++
+     // Extinction coefficient and per-step transmittance factor (constant along the ray)
+     float sigmaT = uVFog.scatteringDensity + uVFog.absortionDensity;
+     float transmittanceStep = exp(-sigmaT * uVFog.stepSize);
+@@ -247,10 +262,25 @@ void main()
+         float phase = PhaseFunction_Schlick(-uLight.direction, fragToCameraNorm);
+         vec3 LiDir = uVFog.scatteringDensity * uVFog.scatteringColor.rgb * phase * lightColor;
+ 
++        // With a density fade (local patch 13) the per-step factors vary: plain loop.
++        if (fadeOn)
++        {
++            for (float l = 0; l < rayDist; l += uVFog.stepSize)
++            {
++                float visibility = hasShadow ? VFog_SunVisibility(marchPos, fragDist, diskRot) : 1.0;
++                float fade = VFog_DensityFade(tStart + l);
++
++                transmittance *= exp(-sigmaT * uVFog.stepSize * fade);
++                radiance += LiDir * (visibility * fade) * transmittance * uVFog.stepSize;
++
++                marchPos += deltaStep;
++            }
++            rayDist = 0.0;
++        }
+         // Unshadowed rays (sky, surfaces >= range away): every step adds LiDir times the
+         // transmittance so far, a geometric series with a closed form. n = the loop's
+         // step count (equal up to float rounding of the accumulated l).
+-        if (!hasShadow)
++        else if (!hasShadow)
+         {
+             float n = ceil(rayDist / uVFog.stepSize);
+             float series = (transmittanceStep < 0.99999)
+@@ -313,7 +343,13 @@ void main()
+         vec3 Li = uVFog.scatteringDensity * uVFog.scatteringColor.rgb * phase * lightColor * visibility;
+ 
+         // Accumulate transmittance then integrate radiance (order matters)
+-        transmittance *= transmittanceStep;
++        if (fadeOn)
++        {
++            float fade = VFog_DensityFade(tStart + l);
++            Li *= fade;
++            transmittance *= exp(-sigmaT * uVFog.stepSize * fade);
++        }
++        else transmittance *= transmittanceStep;
+         radiance += Li * transmittance * uVFog.stepSize;
+ 
+         marchPos += deltaStep;
+diff --git a/shaders/deferred/vfog_transmittance.frag b/shaders/deferred/vfog_transmittance.frag
+index 9413740..7a40855 100644
+--- a/shaders/deferred/vfog_transmittance.frag
++++ b/shaders/deferred/vfog_transmittance.frag
+@@ -50,6 +50,18 @@ void main()
+     float sigmaT = uVFog.scatteringDensity + uVFog.absortionDensity;
+     float transmittance = exp(-sigmaT * rayDist);
+ 
++    // Density fade (local patch 13): the density is 1 - smoothstep(fadeStart, fadeEnd, t),
++    // so the optical depth is sigmaT times its integral over [0, rayDist]. With
++    // s(u) = 3u^2 - 2u^3 and w = fadeEnd - fadeStart: int_0^u s = u^3 - u^4 / 2.
++    if (uVFog.fadeEnd > 0.0)
++    {
++        float a = min(uVFog.fadeStart, rayDist);
++        float w = max(uVFog.fadeEnd - uVFog.fadeStart, 1e-3);
++        float u = clamp((rayDist - uVFog.fadeStart) / w, 0.0, 1.0);
++        float depthInt = a + w * (u - (u * u * u - 0.5 * u * u * u * u));
++        transmittance = exp(-sigmaT * depthInt);
++    }
++
+     // Emission fills the volume proportionally to extinction
+     float extinction = 1.0 - transmittance;
+     vec3 emission = uVFog.emissionColor.rgb * (uVFog.emissionEnergy * extinction);
+diff --git a/shaders/include/ubo/fx.glsl b/shaders/include/ubo/fx.glsl
+index 898f0be..34c2414 100644
+--- a/shaders/include/ubo/fx.glsl
++++ b/shaders/include/ubo/fx.glsl
+@@ -93,6 +93,8 @@ struct FX_VFog {
+     float maxDistance;
+     float stepSize;
+     bool enabled;
++    float fadeStart;    // local patch 13: density fades out by distance from the eye
++    float fadeEnd;      // <= 0: no fade
+ };
+ 
+ struct FX_Dof {
+diff --git a/src/modules/r3d_shader.h b/src/modules/r3d_shader.h
+index e17518a..cf7ee93 100644
+--- a/src/modules/r3d_shader.h
++++ b/src/modules/r3d_shader.h
+@@ -557,6 +557,9 @@ typedef struct {
+         alignas(4) float maxDistance;
+         alignas(4) float stepSize;
+         alignas(4) int32_t enabled;
++        alignas(4) float fadeStart;     // local patch 13
++        alignas(4) float fadeEnd;
++        uint8_t _pad[8];                // std140: the struct is padded to 16 bytes
+     } uVFog;
+ 
+     struct r3d_shader_block_fx_dof {
+diff --git a/src/r3d_draw.c b/src/r3d_draw.c
+index 7e2266b..31314a5 100644
+--- a/src/r3d_draw.c
++++ b/src/r3d_draw.c
+@@ -1217,6 +1217,8 @@ void upload_fx_block(void)
+         block.uVFog.maxDistance       = env->volumetricFog.length;
+         block.uVFog.stepSize          = env->volumetricFog.stepSize;
+         block.uVFog.enabled           = env->volumetricFog.enabled;
++        block.uVFog.fadeStart         = env->volumetricFog.fadeStart;   // local patch 13
++        block.uVFog.fadeEnd           = env->volumetricFog.fadeEnd;
+     }
+ 
+     if (env->dof.mode != R3D_DOF_DISABLED)
+```
+
+**Verification.** All embedded shaders that compile standalone pass `glslangValidator`
+(the 5 that do not are templates needing surface-shader injection, unchanged). Without a fade
+(old and new binary, same map files): `maps/pine_forest` views 1-3, `tests/models` view 1, the
+default map's request view, steep view and `--fog-cache` view identical; default map views
+1-7: 5 of 7 identical, views 3 and 5 differ in 2 pixels each (max 6/255, shader codegen
+rounding). `--dump-scene-diff` identical for all three packages. `tools/leakcheck.sh`: zero
+leaks of ours. Both targets and the examples build without warnings. Performance not benchmarked
+(with a fade the sun's march stops at fadeEnd instead of `length`, but sky rays lose the patch 9
+closed form).
+
+## Patch 14: hard line in the volumetric fog where the ground crosses 75 % of sun.range (2026-10-13)
+
+**Symptom.** In `maps/monolith`, looking down across open ground from ~14 m up (request
+`fog-ends-so-instantly-sharply-as-you-can`), the haze over the ground stopped abruptly: the
+ground within ~75 m lay under dark, nearly clear air, and everything beyond it under bright,
+beige, sunlit fog, with a hard line between them. The canyon exit and the hall openings glowed
+the same way.
+
+**Cause.** The fog's sun shadow is faded by `fadeDist` = the distance from the eye to the
+*surface behind the march* (upstream: its view depth; patch 4 made it a distance), constant along
+the ray. Rays that end on a surface past 0.75 `range` get an unshadowed sun for **every** step,
+even the steps a few metres from the eye that lie in deep shadow. So the whole fog column in
+front of far ground or sky switches from shadowed to sunlit over 75-100 m of *surface* distance,
+which on screen is a few pixels. Noted as an upstream quirk in patch 2.
+
+**Change.** Only in the density-fade path (patch 13, `fadeEnd > 0`; without a fade every path is
+unchanged): the shadow of each step is faded by that step's own distance from the eye `t`
+(`VFog_SunVisibility(marchPos, t, …)`), steps at `t >= range` skip the lookup (visibility 1), and
+the per-ray skip `fragDist >= range` no longer applies (sky and far rays now take shadow lookups
+for their steps closer than `range`). Steps closer than `range` lie inside the fade-free area of
+monolith's static tiles (patch 7) and of R3D's camera fit, so edgeFade stays 1, as before.
+
+**Files.** `shaders/deferred/vfog_radiance.frag`.
+
+```diff
+--- a/shaders/deferred/vfog_radiance.frag
++++ b/shaders/deferred/vfog_radiance.frag
+@@ -248,7 +248,9 @@
+     // VFog_SampleShadowDir fades the shadow out by the distance to the surface behind the
+     // march (constant along the ray) and weights it by exactly 0 at fragDist >= range,
+     // e.g. on sky pixels. Skip its taps there: same result, no wasted PCF lookups.
+-    if (uLight.type == LIGHT_DIR && fragDist >= uLight.range) hasShadow = false;
++    // With a density fade (local patch 14) the shadow fades by each step's own distance
++    // from the eye instead, so the per-step branch below decides.
++    if (uLight.type == LIGHT_DIR && fragDist >= uLight.range && !fadeOn) hasShadow = false;
+ 
+     // Precompute inverses used inside the loop
+     float invRange = 1.0 / max(uLight.range, 1e-4);
+@@ -265,10 +267,16 @@
+         // With a density fade (local patch 13) the per-step factors vary: plain loop.
+         if (fadeOn)
+         {
++            // Shadow fade by the step's distance from the eye (local patch 14), not by
++            // fragDist: fragDist is constant along the ray, so all fog in front of a surface
++            // past 0.75 range went fully sunlit at once, a hard line across the haze where
++            // the ground crosses that distance. Steps closer than range lie inside the shadow
++            // map's fade-free area (static tiles and camera fit alike), so edgeFade stays 1.
+             for (float l = 0; l < rayDist; l += uVFog.stepSize)
+             {
+-                float visibility = hasShadow ? VFog_SunVisibility(marchPos, fragDist, diskRot) : 1.0;
+-                float fade = VFog_DensityFade(tStart + l);
++                float t = tStart + l;
++                float visibility = (hasShadow && t < uLight.range) ? VFog_SunVisibility(marchPos, t, diskRot) : 1.0;
++                float fade = VFog_DensityFade(t);
+ 
+                 transmittance *= exp(-sigmaT * uVFog.stepSize * fade);
+                 radiance += LiDir * (visibility * fade) * transmittance * uVFog.stepSize;
+```
+
+**Verification.** `glslangValidator` passes on the preprocessed shader. `maps/pine_forest`
+(no fade) views 1-3: 0 pixels differ. `maps/monolith`: the request view loses the line (the fog
+over near and far ground matches; the edge left there is the real ground shadow of a
+megastructure); views 1-7 vs. before: 1 (Canyon) and 2 (Hypostyle hall) lose the false sunlit glow
+at the far end (max 62-64/255), 4-6 slightly less beige haze in front of distant shadowed
+buildings, 3 and 7 unchanged (max 6/255). Both targets and the examples build without warnings;
+`tools/leakcheck.sh`: zero leaks of ours. **Cost** (headless `--bench`, 3 interleaved A/B pairs,
+RTX 4050 laptop): vfog radiance 0.504 / 0.433 / 0.529 → 0.763 / 0.852 / 0.860 ms (+0.34 ms,
+Tower +0.8 ms, Overview and Terrace +0.5 ms, Canyon +0.01 ms); frame time +0.3-0.4 ms at matching GPU clocks
+(8.11 / 8.03 → 8.37 / 8.42 ms; 4.36 → 4.75 ms in the low-clock pair).
+
+## Patch 15: volumetric fog fade-in near the eye (2026-10-13)
+
+**Symptom.** In `maps/monolith` the apartment tower looked washed out when the player stood in
+sunlight and normal when they stood in shadow (request "player location changes how apartment
+looks"). Shots from a sunlit and a shaded spot on the terrace, both looking at the same tower
+windows (toward the sun): mean grey of the tower 95 (sun) vs 64 (shade); with `--off 1` (no
+volumetric fog) 74 vs 73.
+
+**Cause.** Not a bug in the march: the fog around a sunlit eye is lit, and looking toward the
+sun (anisotropy 0.4) it scatters strongly into the camera, so it veils the whole frame. Fog
+limited to 0-15 m from the eye alone gave 98 in the sunlit shot; fog from 12 m or 20 m onward
+gave 78 / 72. Patch 13's fade only thins the far end, and thinning the fog everywhere was
+rejected (weaker shafts).
+
+**Change.** A new `R3D_VolumetricFog` field `fadeNear` (default 0 = off). With `fadeNear > 0`
+the density is also multiplied by `smoothstep(0, fadeNear, t)` (t = distance from the eye):
+- `vfog_radiance.frag`: `VFog_DensityFade` multiplies both ramps; `fadeOn` is true when either
+  fade is set (so a fade-in alone takes the per-step path, incl. patch 14's per-step shadow
+  fade); the march is still cut at `fadeEnd` only when a fade-out is set.
+- `vfog_transmittance.frag`: the optical depth loses `n (v - v^3 + v^4 / 2)` (v = clamped
+  d / n). Exact while `fadeNear <= fadeStart` (the ramps don't overlap); monolith clamps
+  `fadeNear` to `fadeStart` when a fade-out is set. The patch 13 integral is unchanged.
+- `FX_VFog` / `r3d_shader_block_fx_vfog` get the float (C padding 8 -> 4 bytes, still 80),
+  `r3d_draw.c` uploads it. Touched every shader source before building (patch 13 build note).
+
+**monolith side.** `env volumetricFog.fadeNear` (EnvDef key, range 0-10000, written by
+`MS_WriteEnvironment` only when set), applied under `MS_PATCHED_R3D`. `maps/monolith`:
+`fadeStart 10 -> 15`, `fadeNear 15`.
+
+**Files.** `include/r3d/r3d_environment.h`, `shaders/include/ubo/fx.glsl`,
+`shaders/deferred/vfog_radiance.frag`, `shaders/deferred/vfog_transmittance.frag`,
+`src/modules/r3d_shader.h`, `src/r3d_draw.c`.
+
+```diff
+--- a/include/r3d/r3d_environment.h
++++ b/include/r3d/r3d_environment.h
+@@ -117,6 +117,7 @@
+             .stepSize          = 1.0f,                  \
+             .fadeStart         = 0.0f,                  \
+             .fadeEnd           = 0.0f,                  \
++            .fadeNear          = 0.0f,                  \
+             .enabled           = false,                 \
+         },                                              \
+         .dof = {                                        \
+@@ -317,6 +318,7 @@
+     float stepSize;             ///< Ray-march step size; smaller = higher quality, lower performance (default: 1.0)
+     float fadeStart;            ///< Distance from the eye where the fog starts thinning out (local patch 13; default: 0.0)
+     float fadeEnd;              ///< Distance where it is gone, smoothstep in between; <= 0 disables the fade (local patch 13; default: 0.0)
++    float fadeNear;             ///< Density fades in from 0 at the eye to full at this distance (smoothstep); <= 0: off (local patch 15; default: 0.0)
+     bool enabled;               ///< Enables or disables the volumetric fog (default: false)
+ } R3D_VolumetricFog;
+ 
+--- a/shaders/include/ubo/fx.glsl
++++ b/shaders/include/ubo/fx.glsl
+@@ -95,6 +95,7 @@
+     bool enabled;
+     float fadeStart;    // local patch 13: density fades out by distance from the eye
+     float fadeEnd;      // <= 0: no fade
++    float fadeNear;     // local patch 15: density fades in from 0 at the eye; <= 0: none
+ };
+ 
+ struct FX_Dof {
+--- a/shaders/deferred/vfog_radiance.frag
++++ b/shaders/deferred/vfog_radiance.frag
+@@ -152,12 +152,24 @@
+ }
+ 
+ // Distance fade of the fog density (local patch 13, see patches.md): 1 up to
+-// uVFog.fadeStart from the eye, smoothstep down to 0 at uVFog.fadeEnd. Only called when
+-// uVFog.fadeEnd > 0; without a fade the march below runs the unpatched arithmetic.
++// uVFog.fadeStart from the eye, smoothstep down to 0 at uVFog.fadeEnd. Local patch 15:
++// with uVFog.fadeNear > 0 it also fades in, smoothstep from 0 at the eye to 1 at fadeNear,
++// so the fog around the eye (sunlit or not) doesn't veil the whole view. Only called when
++// a fade is set; without one the march below runs the unpatched arithmetic.
+ float VFog_DensityFade(float t)
+ {
+-    float u = clamp((t - uVFog.fadeStart) / max(uVFog.fadeEnd - uVFog.fadeStart, 1e-3), 0.0, 1.0);
+-    return 1.0 - u * u * (3.0 - 2.0 * u);
++    float f = 1.0;
++    if (uVFog.fadeEnd > 0.0)
++    {
++        float u = clamp((t - uVFog.fadeStart) / max(uVFog.fadeEnd - uVFog.fadeStart, 1e-3), 0.0, 1.0);
++        f = 1.0 - u * u * (3.0 - 2.0 * u);
++    }
++    if (uVFog.fadeNear > 0.0)
++    {
++        float v = clamp(t / uVFog.fadeNear, 0.0, 1.0);
++        f *= v * v * (3.0 - 2.0 * v);
++    }
++    return f;
+ }
+ 
+ // Computes the march range [tEnter, tExit] along rayDir (from rayOrigin),
+@@ -232,9 +244,10 @@
+ 
+     // Density fade (local patch 13): t = distance of the march position from the eye.
+     // Past fadeEnd the density is 0, so those steps add nothing: stop the march there.
+-    bool fadeOn = uVFog.fadeEnd > 0.0;
++    // A near fade-in alone (local patch 15) takes the same per-step path.
++    bool fadeOn = uVFog.fadeEnd > 0.0 || uVFog.fadeNear > 0.0;
+     float tStart = tEnter + uVFog.stepSize * jitter;
+-    if (fadeOn) rayDist = min(rayDist, uVFog.fadeEnd - tStart);
++    if (uVFog.fadeEnd > 0.0) rayDist = min(rayDist, uVFog.fadeEnd - tStart);
+ 
+     // Extinction coefficient and per-step transmittance factor (constant along the ray)
+     float sigmaT = uVFog.scatteringDensity + uVFog.absortionDensity;
+--- a/shaders/deferred/vfog_transmittance.frag
++++ b/shaders/deferred/vfog_transmittance.frag
+@@ -53,12 +53,25 @@
+     // Density fade (local patch 13): the density is 1 - smoothstep(fadeStart, fadeEnd, t),
+     // so the optical depth is sigmaT times its integral over [0, rayDist]. With
+     // s(u) = 3u^2 - 2u^3 and w = fadeEnd - fadeStart: int_0^u s = u^3 - u^4 / 2.
+-    if (uVFog.fadeEnd > 0.0)
++    // Near fade-in (local patch 15): the density is also multiplied by s(t / fadeNear), which
++    // removes n (v - v^3 + v^4 / 2) of it (v = clamped d / n). Exact while fadeNear <=
++    // fadeStart (the two ramps don't overlap); monolith clamps it to that.
++    if (uVFog.fadeEnd > 0.0 || uVFog.fadeNear > 0.0)
+     {
+-        float a = min(uVFog.fadeStart, rayDist);
+-        float w = max(uVFog.fadeEnd - uVFog.fadeStart, 1e-3);
+-        float u = clamp((rayDist - uVFog.fadeStart) / w, 0.0, 1.0);
+-        float depthInt = a + w * (u - (u * u * u - 0.5 * u * u * u * u));
++        float depthInt = rayDist;
++        if (uVFog.fadeEnd > 0.0)
++        {
++            float a = min(uVFog.fadeStart, rayDist);
++            float w = max(uVFog.fadeEnd - uVFog.fadeStart, 1e-3);
++            float u = clamp((rayDist - uVFog.fadeStart) / w, 0.0, 1.0);
++            depthInt = a + w * (u - (u * u * u - 0.5 * u * u * u * u));
++        }
++        if (uVFog.fadeNear > 0.0)
++        {
++            float n = uVFog.fadeNear;
++            float v = clamp(rayDist / n, 0.0, 1.0);
++            depthInt = max(depthInt - n * (v - (v * v * v - 0.5 * v * v * v * v)), 0.0);
++        }
+         transmittance = exp(-sigmaT * depthInt);
+     }
+ 
+--- a/src/modules/r3d_shader.h
++++ b/src/modules/r3d_shader.h
+@@ -559,7 +559,8 @@
+         alignas(4) int32_t enabled;
+         alignas(4) float fadeStart;     // local patch 13
+         alignas(4) float fadeEnd;
+-        uint8_t _pad[8];                // std140: the struct is padded to 16 bytes
++        alignas(4) float fadeNear;      // local patch 15
++        uint8_t _pad[4];                // std140: the struct is padded to 16 bytes
+     } uVFog;
+ 
+     struct r3d_shader_block_fx_dof {
+@@ -612,6 +613,8 @@
+     alignas(4)  float   shadowFar;
+     alignas(4)  int32_t shadowLayer;
+     alignas(4)  int32_t type;
++    alignas(16) Vector3 clipMin;    // local patch 16
++    alignas(16) Vector3 clipMax;
+ } r3d_shader_block_light_t;
+ 
+ typedef struct {
+--- a/src/r3d_draw.c
++++ b/src/r3d_draw.c
+@@ -1054,6 +1054,8 @@
+         data->shadowFar       = light->shadowFar;
+         data->shadowLayer     = shadow ? light->shadowLayer : -1;
+         data->type            = light->type;
++        data->clipMin         = light->clipMin;
++        data->clipMax         = light->clipMax;
+ 
+         if (++lights.uNumLights == R3D_HINT(R3D_HINT_FORWARD_LIGHT_PER_MESH))
+         {
+@@ -1219,6 +1221,7 @@
+         block.uVFog.enabled           = env->volumetricFog.enabled;
+         block.uVFog.fadeStart         = env->volumetricFog.fadeStart;   // local patch 13
+         block.uVFog.fadeEnd           = env->volumetricFog.fadeEnd;
++        block.uVFog.fadeNear          = env->volumetricFog.fadeNear;    // local patch 15
+     }
+ 
+     if (env->dof.mode != R3D_DOF_DISABLED)
+@@ -2632,6 +2635,8 @@
+             .shadowFar       = light->shadowFar,
+             .shadowLayer     = light->shadowLayer,
+             .type            = light->type,
++            .clipMin         = light->clipMin,
++            .clipMax         = light->clipMax,
+         };
+         r3d_shader_set_uniform_block(R3D_SHADER_BLOCK_LIGHT, &data, true);
+ 
+@@ -2802,6 +2807,8 @@
+             .shadowFar       = light->shadowFar,
+             .shadowLayer     = light->shadowLayer,
+             .type            = light->type,
++            .clipMin         = light->clipMin,
++            .clipMax         = light->clipMax,
+         };
+         r3d_shader_set_uniform_block(R3D_SHADER_BLOCK_LIGHT, &data, true);
+ 
+```
+
+**Verification.** Without `fadeNear` (old and new binary, same map files): default map views
+1-7, the request view and `maps/pine_forest` view 2 pixel-identical (0 pixels differ).
+`vfog_radiance`, `vfog_transmittance`, `vfog_compose` pass `glslangValidator` (includes
+resolved with `scripts/glsl_processor.py`). With `fadeNear 15` on the default map: tower from
+the sunlit spot 95 -> 75, from the shaded spot 64 -> 66 (no fog: 74 / 73); the request's own
+view (eye in a narrow sunlit strip) 108 -> 89 vs 64 -> 67 in shade (no fog 77 / 73: the rest
+is sunlit fog 15-50 m away). Hall shafts (views 1, 2) unchanged by eye; view 5 (Terrace) mean
+120 -> 106. `--dump-boxes` identical. Both targets and the examples build without warnings;
+`tools/leakcheck.sh`: zero leaks of ours. Performance not benchmarked (one smoothstep per
+march step, on a path the map already ran).
+
+## Patch 16: per-light clip box (unshadowed lights shine through floors) (2026-10-13)
+
+**Symptom.** In `maps/monolith`'s tower every flat has an unshadowed point or spot light (range
+5-9 m). The 0.3 m floor slabs don't stop them: the storey below (and the lobby) got warm pools
+on the upper walls and floor from the lamps one floor up. Shadow maps for ~290 omni lights would
+take ~100 MB each at the default 2048 px cube size.
+
+**Cause.** R3D's point / spot lights reach every surface inside their range sphere; only a
+shadow map occludes them.
+
+**Change.** `R3D_Light` gets `bool clip; Vector3 clipMin, clipMax;` (zero-initialised = off, so
+existing callers are unchanged). The light only reaches world points inside the box: deferred
+lighting returns 0 outside it, the forward pass skips the light, and the volumetric fog march is
+cut to the ray's span inside the box. Lights without a clip carry +-1e30 bounds
+(`R3D_LIGHT_NO_CLIP`), which no point fails, and the fog skips the slab test for them.
+monolith: `light ... clip x0 y0 z0 x1 y1 z1` in map files (`runtime/monolith_scene.c`, under
+`MS_PATCHED_R3D`).
+
+Files: `include/r3d/r3d_lighting.h`, `src/modules/r3d_light.h`, `src/modules/r3d_light.c`,
+`src/modules/r3d_shader.h`, `src/r3d_draw.c`, `shaders/include/ubo/light.glsl`,
+`shaders/deferred/lighting.frag`, `shaders/scene/forward.frag`, `shaders/deferred/vfog_radiance.frag`.
+
+```diff
+--- include/r3d/r3d_lighting.h  (struct R3D_Light)
+     R3D_LightType type;     ///< Light type (directional/spot/omni)
++    bool clip;              ///< Light only reaches points inside [clipMin, clipMax] (local patch 16)
++    Vector3 clipMin;        ///< World-space clip box minimum corner (when clip is true)
++    Vector3 clipMax;        ///< World-space clip box maximum corner (when clip is true)
+ } R3D_Light;
+--- src/modules/r3d_light.h  (r3d_light_data_t)
+     R3D_LightType type;
++    Vector3 clipMin, clipMax;   // World-space clip box, +-R3D_LIGHT_NO_CLIP without one (local patch 16)
+ } r3d_light_data_t;
++
++// Clip box bound of a light without one (local patch 16): every point is inside
++#define R3D_LIGHT_NO_CLIP 1e30f
+--- src/modules/r3d_light.c  (r3d_light_push)
++    // Clip box (local patch 16): set on the entry the type's push adds (none when culled)
++    size_t before = R3D_MOD_LIGHT.listLightData->elemCount;
+     switch (light->type)
+     ...
+     }
++
++    if (R3D_MOD_LIGHT.listLightData->elemCount > before)
++    {
++        r3d_light_data_t* data = r3d_light_get((int)before);
++        bool clip = light->clip;
++        data->clipMin = clip ? light->clipMin : (Vector3){ -R3D_LIGHT_NO_CLIP, -R3D_LIGHT_NO_CLIP, -R3D_LIGHT_NO_CLIP };
++        data->clipMax = clip ? light->clipMax : (Vector3){ R3D_LIGHT_NO_CLIP, R3D_LIGHT_NO_CLIP, R3D_LIGHT_NO_CLIP };
++    }
+ }
+--- src/modules/r3d_shader.h  (r3d_shader_block_light_t; std140: each vec3 on a 16-byte boundary)
+     alignas(4)  int32_t type;
++    alignas(16) Vector3 clipMin;    // local patch 16
++    alignas(16) Vector3 clipMax;
+ } r3d_shader_block_light_t;
+--- shaders/include/ubo/light.glsl  (struct Light)
+     int type;
++    vec3 clipMin;           //< world-space clip box (local patch 16); +-1e30 without one
++    vec3 clipMax;
+ };
+--- src/r3d_draw.c  (forward light array, deferred lighting pass, volumetric fog pass)
++        data->clipMin         = light->clipMin;
++        data->clipMax         = light->clipMax;
+ ...
++            .clipMin         = light->clipMin,      (both designated initialisers)
++            .clipMax         = light->clipMax,
+--- shaders/deferred/lighting.frag  (after P is reconstructed)
++    if (any(lessThan(P, uLight.clipMin)) || any(greaterThan(P, uLight.clipMax)))
++    {
++        FragRadiance = vec4(0.0);
++        FragSpecular = vec4(0.0);
++        return;
++    }
+--- shaders/scene/forward.frag  (light loop)
+         Light light = uLights[i];
++        if (any(lessThan(vPosition, light.clipMin)) || any(greaterThan(vPosition, light.clipMax))) continue;
+--- shaders/deferred/vfog_radiance.frag  (end of VFog_GetMarchRange)
++    if (uLight.clipMin.x > -1e29)
++    {
++        vec3 invDir = 1.0 / rayDir;
++        vec3 t0 = (uLight.clipMin - rayOrigin) * invDir;
++        vec3 t1 = (uLight.clipMax - rayOrigin) * invDir;
++        vec3 tMin = min(t0, t1), tMax = max(t0, t1);
++        tEnter = max(tEnter, max(max(tMin.x, tMin.y), tMin.z));
++        tExit = min(tExit, min(min(tMax.x, tMax.y), tMax.z));
++        if (tExit <= tEnter) { tEnter = 0.0; tExit = 0.0; }
++    }
+```
+
+**Verification.** Without clip boxes, old vs new binary: `maps/pine_forest` views 2 and 3 and
+`tests/models` view 1 pixel-identical (0 pixels differ; pine_forest has a shadowed and several
+unshadowed point lights). `maps/monolith` with the 288 tower lights clipped to their storey:
+the lobby and storey-1 views lose the warm pools from the lamps one floor up, and each storey
+stays lit by its own lights (request `2026-10-13_104917_dark-places-gets-lightning-from-up`,
+before/after images). `lighting.frag`, `vfog_radiance.frag`, `forward.frag` pass
+`glslangValidator` (includes resolved with `scripts/glsl_processor.py -I shaders/include`,
+forward.frag with the runtime `MAX_*` defines). Both targets and the examples build without
+warnings; `tools/leakcheck.sh`: zero leaks of ours. Performance not benchmarked (one box test
+per light pixel; clipped lights still use their full scissor rect).

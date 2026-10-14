@@ -32,5 +32,6 @@ are pixel-identical (same 1600 x 900 default, the same viewpoint-to-camera math 
 spectator, FXAA, `MS_InitRenderer()` (depth clamp), 30 frames into a `RenderTexture`). The same holds
 for an exported default map built in a folder outside the repo.
 
-`--export` copies this file into every export as `viewer.c`, so keep it dependent on raylib,
-R3D and `monolith_scene.h` only.
+Keep it dependent on raylib, R3D and `monolith_scene.h` only. (An export's own `viewer.c` is
+`runtime/export/viewer.c`: a fly camera and the map's viewpoints, without `--shot` or other
+tool flags.)

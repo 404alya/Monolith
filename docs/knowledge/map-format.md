@@ -1,0 +1,196 @@
+# Map packages and the map format
+
+Reference for everything inside a map package: the package layout, the design brief (`MAP.md`) and the `.map` file format. Read it before editing a map. The request workflow is in `AI-MAP-TOOL.md`; models and textures in `models-and-textures.md`; import and export in `import-export.md` (all of `docs/knowledge/` is listed in `docs/knowledge/README.md`). The parser's header comment in `runtime/monolith_scene.c` is authoritative where this file and the code differ.
+
+## 1. Map packages and the design brief
+
+### 1.1 Package layout
+
+```
+maps/<name>/
+├── <name>.map     geometry, models, materials, lights, environment, spawn, viewpoints (format 2)
+├── MAP.md         the design brief: read first on every request
+├── shaders/       surface shaders the map's materials use (e.g. maps/monolith/shaders/concrete.glsl)
+├── models/        model files (+ the .bin / textures a .gltf names), each with a <file>.asset.md sidecar
+├── textures/      textures (PNG, JPG; HDR panoramas for the sky)
+└── ASSETS.md      every external file: source URL, author, licence (+ URL), date, sha256, changes
+```
+
+- Every path in a map file is **relative to the package root** (the folder of the map file). Absolute paths and `..` are rejected, so a package can be copied anywhere (and exported, `import-export.md` §2).
+- `--map <path>` takes a package folder (it loads `<folder>/<folder name>.map`, else its only `.map`) or a `.map` file. A single `.map` file outside a package (format 1 or 2) loads too; its folder is its root.
+- Hot reload watches every file the package uses: the map, shaders, textures, panoramas, model files and the files a model file names.
+
+### 1.2 `MAP.md`: the design brief
+
+Free-form Markdown with these sections (the `--new-map` template has them): *Style and mood*, *Scale and walkability* (player, steps, headroom, typical dimensions, routes that must stay walkable), *Materials and palette* (each material and what it is for, colours, how dark or bright albedos may be), *Lighting and atmosphere* (sun, sky, fog, lights, and why), *Rules for new content* (boxes or models, how models are restyled, polygon and texture budgets), *Groups and landmarks*. Examples: `maps/monolith/MAP.md` (brutalist, boxes only, one procedural concrete shader), `maps/pine_forest/MAP.md` (stylised low-poly, models restyled to a flat palette).
+
+- **Follow it.** It overrides the project defaults in these docs wherever it is more specific (budgets, materials, whether models are allowed). When a request conflicts with it ("add a chrome sports car" in a brutalist map), do what the request asks if it is explicit, in the brief's style as far as possible, and say in `result.md` that it departs from the brief.
+- **Keep it current.** When a request adds a landmark, a group, a material or a new kind of content, update the matching section (one line in *Groups and landmarks* is usually enough). Don't rewrite the brief unless the request is about the brief or the style.
+- **New maps.** The developer creates a package with `monolith --new-map <name>` (in `maps/`; `--new-map <path>`, any argument with a `/`, creates it in that folder instead, e.g. a scratch draft): a 200 × 200 m ground slab (group `ground`), the plain grey `"default"` material, the built-in environment written out as `env` lines (the default map's daylight look), a `spawn`, two viewpoints, empty `shaders/ models/ textures/`, an empty `ASSETS.md` and a `MAP.md` **template** whose sections only hold placeholders in parentheses. The first request on such a map ("a foggy pine forest at dusk", "a neon market street at night, wet asphalt, stalls on both sides") is a design request: **write `MAP.md` first** from the request (style and mood, scale and the player's routes, materials and palette, lighting and atmosphere, rules for new content, the groups you are going to build), then build to it: materials, the `env` lines (sky, sun, fog, effects, exposure: replace the built-in daylight values where the brief needs a different mood), lights, geometry, models, viewpoints that show the result. Also write the brief before building when an existing map has no `MAP.md` or only the template.
+
+### 1.3 Format versions
+
+The first statement `monolith 2` makes a file format 2: everything in §2. Without it a file is **format 1** (only `group`, `box`, `block`, `stairs`, `waffle`, `repeat`, `at`; everything else takes the built-in defaults, and boxes use the plain `"default"` material). To give a format-1 file materials, models or `env` lines, add `monolith 2` as its first statement. A file with `monolith N` newer than the runtime supports is rejected with a clear message.
+
+## 2. Map format reference
+
+Each statement takes one line, so a line number identifies an object. The parser is in `runtime/monolith_scene.c`, and the header comment there is authoritative.
+
+```
+# comment                      '#' starts a comment anywhere outside "quotes"
+monolith 2                     format version, the first statement
+group "name"                   every following box, model and light belongs to this group, until the next group
+```
+
+### 2.1 Box primitives
+
+Numbers are plain decimals (`12`, `-4.5`, `0.75`). Corners can be given in any order.
+
+| Primitive | Arguments | Makes |
+|---|---|---|
+| `box` | `x0 y0 z0 x1 y1 z1` | 1 box between two opposite corners |
+| `block` | `cx y0 cz sx sy sz` | 1 box centred on (cx, cz), from y0 up to y0 + sy, size sx × sy × sz |
+| `stairs` | `cx baseY startZ width steps rise run` | `steps` boxes (integer) climbing toward **−Z**. Step *i* (0-based) spans z from `startZ − i·run` to `startZ − (i+1)·run`, x `cx ± width/2`, y from `baseY` up to `baseY + (i+1)·rise`. The steps are solid down to baseY. |
+| `waffle` | `x0 x1 y0 y1 z depth bayW floorH` | A facade facing **+Z**: a back wall (x0..x1, y0..y1, z−1..z), 0.6 m vertical fins centred at x = x0, x0+bayW, … while ≤ x1, and 0.5 m ledges with their tops at y0+floorH, y0+2·floorH, … while ≤ y1. Fins and ledges stick out from z to z + depth. bayW and floorH must be > 0. |
+
+Examples, from the default brutalist map and the pine forest, plus a sketch for a neon street:
+
+```
+box -4.5 0 40 -3 34 95                  # monolith: canyon wall, 1.5 m thick, 34 m tall, 55 m long
+stairs 0 0 -40 22 40 0.3 0.75           # monolith: 40 steps 22 m wide, 0.3 m rise, 0.75 m run: z -40 -> -70, up to y 12
+waffle -30 30 12 92 -100 2 4 4          # monolith: tower facade, fins every 4 m, ledges every 4 m, 2 m deep
+box 22 0 -42 52 2 -10                   # pine_forest: the lowest rock terrace of the ridge, top at y 2
+block 6 0 -12 3 2.6 2                   # neon street: a 3 x 2 m market stall, 2.6 m high, against the facade
+```
+
+### 2.2 Placement prefixes
+
+They go in front of a primitive (box primitive, `model` or `light`) on the same line.
+
+- `repeat n dx dy dz` makes n copies (n ≥ 0). Copy *i* (0-based) is shifted by `i · (dx, dy, dz)`. Up to **3** repeats on one line make a grid. The first repeat is the outer loop, so it decides the object order.
+- `at x y z` shifts the primitive by (x, y, z), so its own coordinates become relative to that point. Only one `at` is allowed per line.
+- Shifts move **position arguments only** (box: all six numbers; block: `cx y0 cz`; stairs: `cx baseY startZ`; waffle: `x0 x1 y0 y1 z`; model and light: `x y z`, never a direction). Sizes, `steps`, `rise`, `run`, `depth`, `bayW`, `floorH`, rotations and scales are never shifted.
+
+```
+repeat 4 9 0 0 repeat 8 0 0 9 block -36 0 -32 2.2 20 2.2   # monolith: 4 x 8 pillar grid, x -36..-9, z -32..31
+repeat 5 1 0.4 0 box 17 -1 -28 18 0.4 -25                  # pine_forest: 5 steps climbing +X, 0.4 m each
+repeat 8 4 0 0 light point -14 3.2 -11 color 255 40 160 energy 2 range 6   # neon street: a row of pink signs
+```
+
+**Why `at` exists.** Each position is computed as `(at + i·d) + value` in float. `at` reproduces the original C loops of the default map, which computed `(start + i·step) + 2.6`, bit for bit (needed for identical box lists). With whole or half numbers the order doesn't matter. **For new content, don't use `at`**: write the first copy's real coordinates and a `repeat`.
+
+### 2.3 Groups
+
+A box, model or light belongs to the most recent `group` above it. Each `group` statement creates a new group, even when the name repeats, so **don't reuse a group name** in a second place: add the lines to the existing block instead. In-game Ctrl+click selects one group statement's objects. Group names can be any length but can't contain `"`. A map's groups are listed in its `MAP.md` (*Groups and landmarks*).
+
+### 2.4 Materials
+
+```
+material "name" key value [key value ...]     define a material, or add keys to one (long definitions may span lines)
+use "name"                                    following boxes (and models, as an override) use it, like `group`
+```
+
+- `"default"` always exists (plain PBR: albedo 180 180 180, roughness 0.9, metalness 0) and may be redefined. A material must be defined before a `use` names it; `use "default"` goes back.
+- Keys: `shader "shaders/x.glsl"` (an R3D surface shader), `uniform <name> f [f f f]`, `sampler <name> "textures/x.png"`, `albedo R G B [A]` (0–255 sRGB), `albedo_map`, `normal_map`, `normal_scale`, `orm_map`, `occlusion`, `roughness`, `metalness`, `specular`, `emission R G B`, `emission_energy`, `emission_map`, `uv_scale u v`, `uv_offset u v`, `wrap repeat|clamp|mirror` (default repeat), `alpha_cutoff` (0 = never discards, allows the depth pre-pass), `cull back|front|none`, `transparency off|prepass|alpha`, `blend …`, `unlit on|off`, `priority n`, and `inherit albedo|normal|orm|emission|all` (model overrides only: keep that map of the model's own material, `models-and-textures.md` step 8). Unset keys keep R3D's defaults.
+- Boxes are drawn with one instanced draw per material, so a handful of materials costs nothing; dozens are fine.
+- **Box UVs are per face (0–1)**: a texture stretches with the box. A textured material only looks right on boxes of one size, or with a `uv_scale` matched to that size (`maps/pine_forest`: `uv_scale 286 286` tiles a 2.1 m texture over the 600 m ground). For many box sizes, prefer flat colours or a world-position shader like the default map's `concrete.glsl`.
+
+```
+material "concrete" shader "shaders/concrete.glsl" uniform u_scale 1 alpha_cutoff 0             # monolith
+material "needles" albedo 62 94 72 roughness 0.9 metalness 0                                    # pine_forest
+material "embers" albedo 30 14 8 emission 255 110 40 emission_energy 5 roughness 1 metalness 0  # pine_forest
+material "wet asphalt" albedo 28 28 32 roughness 0.15 metalness 0                               # neon street
+```
+
+### 2.5 Environment
+
+`env <key> <value...>`, one key per line. Every key has a built-in default (`BuiltinEnvironment()` in `runtime/monolith_scene.c`: the values the default map was built with); `--new-map` writes them all out, so a map's file shows its whole look.
+
+- **R3D environment:** every `R3D_Environment` field by its C name: `background.*`, `ambient.*`, `ssao.*`, `ssil.*`, `ssgi.*`, `ssr.*`, `fog.*` (`fog.mode disabled|linear|exp2|exp`, `fog.color`, `fog.density`, …), `volumetricFog.*`, `dof.*`, `bloom.*`, `autoExposure.*`, `tonemap.*` (`tonemap.mode linear|reinhard|filmic|aces|agx`, `tonemap.exposure`), `color.*`. Booleans `on`/`off`, colours `R G B [A]`.
+- **Sky:** `sky.mode procedural|color|panorama`, `sky.size`, `sky.panorama "textures/x.hdr"`, and the procedural sky's colours, curves and sun disc (`sky.skyTopColor`, `sky.skyHorizonColor`, `sky.groundBottomColor`, `sky.sunSizeDeg`, …; `sky.sunDirection` follows `sun.direction` unless set).
+- **Ambient light (IBL):** `ambientSky.mode procedural|same|off`, `ambientSky.size`, and `ambientSky.<sky key>`: the ambient map comes from a copy of the visible sky with these keys changed. A brighter `ambientSky.groundBottomColor` is the fill light for undersides (`PROMPT-INSTRUCTIONS.md` 7.5).
+- **Sun** (the one shadowed directional light, with static shadow tiles): `sun.enabled`, `sun.direction x y z` (the direction the light travels), `sun.color`, `sun.energy`, `sun.specular`, `sun.fogEnergy`, `sun.range` (shadow distance), `sun.shadow`, `sun.softness`, `sun.depthBias`, `sun.slopeBias` (tuned for `shadow.size`; a quality preset or `--shadow` with a smaller map scales both up by the texel ratio, so they need no retuning per preset); `shadow.size` (px, read at start-up only).
+- **Volumetric fog fade:** `volumetricFog.fadeStart`, `volumetricFog.fadeEnd` (m from the eye; default 0 0 = off, `fadeEnd` > `fadeStart`): the fog's density is full up to `fadeStart` and fades out smoothly by `fadeEnd`. Keeps close light shafts while buildings further away stay clear, and gives the fog a soft end instead of the hard stop at `volumetricFog.length` (`maps/monolith`: 10 50). R3D patch 13; ignored with upstream R3D. With a fade the fog's sun shadow also fades by each step's own distance from the eye (patch 14), so the haze has no hard line where the ground crosses 75% of `sun.range` (without a fade, fog in front of anything past that distance is unshadowed). `volumetricFog.fadeNear` (m, default 0 = off, ≤ `fadeStart`): the density also fades *in*, from 0 at the eye to full at that distance (patch 15). Without it the fog around a sunlit eye veils the whole view, so the scene looks brighter when the player stands in sun than in shade (`maps/monolith`: 15 15 50).
+- **Quality presets:** `bloom.offExposure` (default 1.19): the exposure factor that replaces bloom when the low preset (or `--bloom off`) turns it off. A map whose bloom is stronger than the default map's (intensity 0.04) sets its own value, measured so the mean brightness of its viewpoints stays the same (`maps/pine_forest`: bloom 0.06, `bloom.offExposure 1.3`).
+- **Cache hints** (optional): `shadow.home x y z`, `fogCache.region x0 y0 z0 x1 y1 z1`. Without them both follow the map's bounds; don't add them to new maps.
+- Out-of-range values (e.g. `volumetricFog.stepSize` < 0.05) and zero directions are rejected with `file:line: message`.
+- **Engine pitfalls to respect** (`PROMPT-INSTRUCTIONS.md` §7): dense volumetric fog turns shadowed areas into a black curtain (keep `scatteringDensity` low, add a little `emissionEnergy`, raise shafts with `sun.fogEnergy`); keep `sun.range` ≥ `volumetricFog.length`; washed-out images want less `sun.energy` or `tonemap.exposure`, not brighter fog.
+
+- **Dark maps** (dusk, night): keep `color.contrast` at **1**. R3D applies contrast in linear space after the tonemap, so any value > 1 clips the darkest tones to pure black (`maps/pine_forest` lost 25% of its path view to black at 1.08). Darken the mood with `tonemap.exposure` and `ambient.energy` instead, and keep the ambient sky (`ambientSky.*`) brighter and bluer than the visible sky, or shadows go black. Count pure-black pixels of a few shots: outside genuinely black objects there should be none.
+- **Bloom and the low preset:** if a map's bloom is stronger than the default map's (`bloom.intensity` 0.04, threshold 0), set `bloom.offExposure` so `--bloom off` keeps the mean brightness of its viewpoints (Sun / quality keys above).
+
+Two moods, side by side:
+```
+env sun.direction 0.55 -0.78 0.3        # monolith: high side sun through roof gaps
+env fog.density 0.0085                  # monolith: megastructures fade into grey haze
+env sun.direction 0.7 -0.32 0.64        # pine_forest: low, warm dusk sun between the trunks
+env fog.color 62 70 102                 # pine_forest: blue-violet dusk fog
+```
+
+**Dusk**: copy the whole `env` block of `maps/pine_forest/pine_forest.map` (low warm sun, mauve horizon, blue-violet fog and ambient, exposure 0.95, contrast 1) and change colours from there. **Night** (moonlight + neon; the keys that differ from the `--new-map` daylight template, tested on a scratch street with wet asphalt and neon signs: no pure black, mean ~40/255):
+```
+env sky.skyTopColor 6 8 22               # near-black blue zenith
+env sky.skyHorizonColor 40 34 60         # violet city glow on the horizon
+env sky.groundHorizonColor 40 34 60      # = the horizon colour: no line where the ground ends
+env sky.groundHorizonCurve 0.5
+env sky.groundBottomColor 10 10 16
+env sky.sunColor 190 205 255             # the "sun" is the moon
+env sky.sunSizeDeg 1.5
+env sky.sunEnergy 1.5
+env ambientSky.skyTopColor 70 84 140     # the fill light: brighter than the visible night sky
+env ambientSky.groundBottomColor 60 56 72
+env ambient.energy 1.2
+env sun.direction -0.35 -0.55 -0.76
+env sun.color 160 180 255
+env sun.energy 0.5
+env sun.fogEnergy 0.8
+env fog.color 22 24 42
+env fog.density 0.012
+env volumetricFog.emissionColor 22 24 42
+env volumetricFog.emissionEnergy 0.06
+env ssr.enabled on                       # wet, low-roughness ground reflects the signs
+env bloom.intensity 0.08
+env tonemap.exposure 1.6
+env color.contrast 1
+```
+The light then comes from the map's lights: emissive sign materials with a weak point light in front of each (`energy 2 range 8`), lamps, windows (§2.6, `models-and-textures.md` step 8 "Neon / night").
+
+### 2.6 Lights, spawn, viewpoints
+
+```
+light point x y z [key value ...]           point light
+light spot  x y z dx dy dz [key value ...]  spot light shining along (dx, dy, dz)
+light dir   dx dy dz [key value ...]        extra directional light (camera-fitted shadow, expensive)
+    keys: color R G B, energy f, range f, falloff f, specular f, fogEnergy f, inner deg, outer deg, shadow on|off,
+          clip x0 y0 z0 x1 y1 z1
+    defaults: white, energy 1, range 16 (dir: 50), falloff 1, specular 1, fogEnergy 1, cone 22.5/45, shadow off, no clip
+spawn x y z yawDeg [pitchDeg]               player start (feet)
+viewpoint "Name" ex ey ez tx ty tz          spectator viewpoint (eye, target), in order: --view 1..n, --bench, ← / →
+```
+
+- Lights belong to the current group and are shifted by `repeat` / `at`. A shadowed point or spot light renders its shadow map once per map load; use `shadow on` only for the few lights that matter (`maps/pine_forest`: the campfire, `light point 0 1.1 0 color 255 130 50 energy 5 range 18 falloff 1 fogEnergy 0.8 shadow on`; its lanterns are unshadowed).
+- **Unshadowed lights shine through walls and floors.** A light's `range` is a sphere, so a lamp in a room also lights the room below, above and beside it. `clip x0 y0 z0 x1 y1 z1` (a world box, shifted by `repeat` / `at` like a box) limits the light to points inside the box: give every interior light the box of its own room or storey, from the middle of the slab below to the middle of the slab above, so the slab's top face is lit and the storey below is not (`maps/monolith` tower: `clip -31 15.85 -141 31 19.85 -99` on storey 1). It costs nothing and also clips the light's volumetric fog. R3D patch 16; ignored with upstream R3D.
+- Without `spawn` the player starts at feet (0, 0, 0), yaw 0; without viewpoints one is made from the spawn. Add a viewpoint when a request builds a new area worth flying to.
+
+### 2.7 Models
+
+```
+model "models/x.glb" x y z [rot yawDeg pitchDeg rollDeg] [scale s | scale sx sy sz] [origin model|bottom|center]
+      [material "name"] [material.N "name"] [collide aabb|none|box x0 y0 z0 x1 y1 z1 [box ...]] [shadow on|off]
+```
+(one line; wrapped here)
+
+- glTF/GLB preferred (also OBJ, FBX, DAE through R3D's importer). Each file is loaded once per map load and drawn instanced. Animations and skins are ignored (static pose).
+- `rot`: yaw about +Y, pitch about +X, roll about +Z, applied roll, then pitch, then yaw (`R = Ry · Rx · Rz`); yaw 90 turns the model's +Z to +X. `scale` > 0 (files have no unit scale: a model in centimetres needs `scale 0.01`).
+- `origin bottom` stands the model on y by its lowest vertex after scale and rotation, centred over x z by its file bounds: the safe way to stand a model on a surface. `center`: the same x z and the middle between its lowest and highest vertex; `model` (default): the file's own origin. World bounds, `collide aabb` and picking use the rotated vertices, not the rotated file box.
+- Materials: `material "name"` overrides every slot, `material.N "name"` slot N (`--inspect-model` lists the slots). Precedence: `material.N`, then `material`, then the active `use` (when it is not `"default"`), else the file's own materials.
+- `collide`: `aabb` (default: the world bounds block the player), `none`, or `box …` boxes in model space (before scale and rotation), each turned into a world AABB (a tree's trunk only). `shadow off` stops it casting the sun shadow (it still receives shadows).
+- Finding, licensing, normalising, recording and restyling models: `models-and-textures.md`.
+
+```
+model "models/tree_pineTallC.glb" -30.07 0 15.26 rot 35 0 0 scale 12.84 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025   # pine_forest
+```
+
+### 2.8 Limits and errors
+
+**No limits on content:** any number of boxes, models, groups, materials, lights and viewpoints, and lines of any length (everything is allocated as needed). Sanity caps only: at most 1 000 000 objects (boxes + model instances + lights) per map, so a `repeat` grid that multiplies to millions fails with a clear message, and a 4 MB map file. **Errors** (unknown keyword, wrong argument count, bad number, a missing file, a path outside the package, an undefined material, too many objects, a map with no boxes and no models) are reported as `file:line: message`.
