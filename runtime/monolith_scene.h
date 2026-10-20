@@ -381,6 +381,8 @@ void MS_ApplyRenderResolution(const MS_Scene *scene, int outW, int outH);
 bool MS_Draw(MS_Scene *scene, Camera3D camera, RenderTexture target);
 
 // The parts, for use inside your own R3D_Begin*/R3D_End. aspect = target width / height.
+// MS_DrawGeometry submits R3D clusters (R3D_BeginCluster / R3D_EndCluster, one per map cell,
+// so R3D frustum-culls the level): don't call it between your own BeginCluster and EndCluster.
 bool MS_PushLights(MS_Scene *scene, Camera3D camera, float aspect);
 void MS_DrawGeometry(MS_Scene *scene);
 

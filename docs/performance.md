@@ -114,3 +114,13 @@ After the fix: fully sunlit 0.25-albedo ground would be ~0.12 linear (albedo · 
 ## Camera turning (R3D patch 4)
 
 View depth is distance · cos of the angle off-axis, only 0.57 · distance at a 16:9 corner, so terms keyed on it changed when the camera only turned: the hall's far opening glowed in the screen centre and dimmed at the edge, distance fog thinned toward the edges. Measurements in `submodules/r3d/patches.md`.
+
+## Box culling and hidden faces (2026-10-20, GTX 1660 Ti)
+
+The default map had grown to 46,322 boxes (555,864 triangles, 85 materials). R3D never culls an instanced draw outside a cluster, so all of it was vertex-processed every frame, twice with the depth pre-pass. Headless `--bench`, 1920×1006, spinning, 600 frames, the map snapshot of that day: the geometry pass was 70% of GPU time at `low` (1.66 of 2.38 ms), and `--off 12345` on top of `low` gained nothing.
+
+- **Clusters** (one per 32 m cell and material, models 128 m; 307 box draws): low 4.41 → 3.44 ms, ultra 10.51 → 9.56 ms (3 interleaved pairs). Models at 32 m cells made pine_forest 25% slower (513 draws for 719 instances); at 128 m (93 draws) it is within noise.
+- **Hidden faces** (opaque boxes as one mesh per cluster without the faces covered by other opaque boxes: 70,754 faces, 414,356 triangles drawn): vs. clusters alone low 2.73 → 2.56 ms, ultra 7.70 → 7.53 ms (3 interleaved triples). Requiring 0.25 m of cover (`HIDE_MIN_COVER`): 2.69 / 7.59 ms. Load +~110 ms, ~32 MB of vertex/index data.
+- **Both vs. before** (same session, 3 pairs): low 3.28 → 2.61 ms (305 → 383 fps), ultra 8.39 → 7.62 ms; pine_forest low 1.09 → 1.11 ms.
+
+Session-to-session swings were large (the clusters-alone low run measured 3.44 in one session and 2.73 in the next): compare only rows of one session. Not done: merging coplanar faces into larger quads (UV and T-junction risk), a larger near plane.

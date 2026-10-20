@@ -97,6 +97,11 @@
 //         inherit albedo|normal|orm|emission|all   (model overrides: keep the model's own map)
 //         wrap repeat|clamp|mirror   wrapping of this material's textures and samplers
 //                                    (default repeat, so uv_scale > 1 tiles; trilinear + mipmaps)
+//         instanced on|off   [off] keep this material's boxes as instanced unit cubes. Off: boxes
+//                                    are drawn as one mesh per cell of the faces no other box hides
+//                                    (see UploadBoxes). On is for shaders that read INSTANCE_* or the
+//                                    model-space POSITION in vertex(); a scan of the source turns it
+//                                    on with a warning when it finds those
 //   Colours are 0-255 sRGB. Unset keys keep R3D's defaults (R3D_MATERIAL_BASE).
 //
 // Environment (format 2):  env <key> <value...>
@@ -170,6 +175,12 @@
 
 #define MS_FILE_MAX         MS_MAX_FILE_BYTES
 #define MS_REPEATS_MAX      3       // `repeat` prefixes per line (the grammar: a 3D grid at most)
+// Boxes and model instances are drawn in clusters (R3D frustum-culls a cluster as a whole, and never
+// culls an instanced draw outside one): one per grid cell of this size on the XZ plane, by centre
+#define MS_CELL_SIZE        32.0f
+// Models get coarser cells: their instances are few and cheap (a tree is ~100-200 triangles),
+// so a cluster per 32 m cell cost more in draw calls than the culling saved (pine_forest)
+#define MS_MODEL_CELL_SIZE  128.0f
 #ifdef MONOLITH_EDITOR
 #define MS_POLL_INTERVAL    0.5f
 // After an mtime change, keep re-reading for this long: GetFileModTime has 1 s resolution,
@@ -214,6 +225,8 @@ typedef struct {
     unsigned inherit;                   // INHERIT_* (for model overrides)
     int shaderLine, mapLine[MAP_COUNT];  // map lines of the keys, for load errors
     int wrap;                           // texture wrapping: 0 repeat (default), 1 clamp, 2 mirror
+    bool instanced;                     // `instanced on`: boxes stay instanced cubes
+    bool merge, occluder;               // set at upload: boxes become a visible-face mesh / may hide other boxes' faces
 } MatDef;
 
 typedef struct {
@@ -258,6 +271,15 @@ typedef struct {
     BvhNode *nodes;
     int nodeCount;
 } ModelPick;
+
+// One draw: instances [first, first + count) of a buffer (group = the material for boxes, the
+// ModelGroup for models), bounds = the union of their boxes. Clustered and instanced, except a
+// merged box range (MatDef.merge): its draw is `mesh`, the visible faces of its boxes (empty: none)
+typedef struct { int group, first, count; BoundingBox bounds; R3D_Mesh mesh; } DrawRange;
+
+// An object to sort into cells: group, then big (wider than a cell in x or z: one cluster per
+// group), then cell, then index (keeps map order within a cluster)
+typedef struct { int group, big, cx, cz, index; BoundingBox bounds; } CellItem;
 
 // One instanced draw: the model instances of one file with the same material set and shadow flag
 typedef struct {
@@ -328,6 +350,12 @@ typedef struct {
     bool gpu;
     R3D_InstanceBuffer *inst;           // per material (materialCount)
     int *instCount;
+    DrawRange *boxRanges;               // the box draws: one cluster each
+    int boxRangeCount, boxRangeCap;
+    R3D_InstanceBuffer unit;            // one instance at the origin, scale 1: how merged meshes are drawn
+    int boxMeshCount;                   // merged ranges that have a mesh
+    long long boxTrisDrawn;             // triangles the boxes draw per pass (12 per instanced box)
+    float mergeMs;                      // time the hidden-face search and the meshes took
     TexEntry *textures;
     int textureCount, textureCap;
     R3D_Cubemap sky;
@@ -336,6 +364,8 @@ typedef struct {
     bool *lightShadowDrawn;
     ModelGroup *modelGroups;
     int modelGroupCount;
+    DrawRange *modelRanges;
+    int modelRangeCount, modelRangeCap;
 } SceneData;
 
 typedef struct {
@@ -1549,6 +1579,9 @@ static bool ParseMaterial(Parser *P, Token *tok, int n)
         } else if (strcmp(k, "unlit") == 0) {
             ONE_WORD();
             if (!OnOff(P, v[0], &m->unlit)) return false;
+        } else if (strcmp(k, "instanced") == 0) {
+            ONE_WORD();
+            if (!OnOff(P, v[0], &D->instanced)) return false;
         } else if (strcmp(k, "priority") == 0) {
             NEED(1);
             if (!NumI(P, v[0], -1000000, 1000000, &m->priority)) return false;
@@ -3142,6 +3175,45 @@ static bool ResolveModels(SceneData *d, char *err, int errSize)
     return true;
 }
 
+static CellItem MakeCellItem(int group, int index, BoundingBox b, float cell)
+{
+    CellItem it = { .group = group, .index = index, .bounds = b };
+    it.big = b.max.x - b.min.x > cell || b.max.z - b.min.z > cell;
+    if (!it.big) {
+        it.cx = (int)floorf((b.min.x + b.max.x) * 0.5f / cell);
+        it.cz = (int)floorf((b.min.z + b.max.z) * 0.5f / cell);
+    }
+    return it;
+}
+
+static int CompareCellItems(const void *pa, const void *pb)
+{
+    const CellItem *a = pa, *b = pb;
+    if (a->group != b->group) return a->group < b->group ? -1 : 1;
+    if (a->big != b->big) return a->big < b->big ? -1 : 1;
+    if (a->cx != b->cx) return a->cx < b->cx ? -1 : 1;
+    if (a->cz != b->cz) return a->cz < b->cz ? -1 : 1;
+    return a->index < b->index ? -1 : a->index > b->index;
+}
+
+// Appends the ranges of items[0..count) (one group, sorted): a new one wherever the cell changes
+static bool AddRanges(DrawRange **ranges, int *n, int *cap, int group, const CellItem *items, int count)
+{
+    for (int k = 0; k < count; k++) {
+        const CellItem *it = &items[k];
+        if (k == 0 || it->big != items[k - 1].big || it->cx != items[k - 1].cx || it->cz != items[k - 1].cz) {
+            DrawRange *r = MS_PUSH(*ranges, *n, *cap);
+            if (!r) return false;
+            *r = (DrawRange){ .group = group, .first = k, .bounds = it->bounds };
+        }
+        DrawRange *r = &(*ranges)[*n - 1];
+        r->count++;
+        r->bounds.min = Vector3Min(r->bounds.min, it->bounds.min);
+        r->bounds.max = Vector3Max(r->bounds.max, it->bounds.max);
+    }
+    return true;
+}
+
 static void FreeModelGroups(SceneData *d)
 {
     for (int g = 0; g < d->modelGroupCount; g++) {
@@ -3154,6 +3226,9 @@ static void FreeModelGroups(SceneData *d)
     free(d->modelGroups);
     d->modelGroups = NULL;
     d->modelGroupCount = 0;
+    free(d->modelRanges);
+    d->modelRanges = NULL;
+    d->modelRangeCount = d->modelRangeCap = 0;
 }
 
 // The material of slot s for instance M: material.N, then the instance's override, else -1
@@ -3208,8 +3283,18 @@ static bool BuildModelGroups(SceneData *d, char *err, int errSize)
     }
     free(tmp);
 
+    // Instances sorted by (group, cell): each group's buffer holds its cells one after the other
+    CellItem *items = malloc(sizeof(CellItem) * d->modelCount);
+    if (!items) {
+        free(groupOf);
+        snprintf(err, errSize, "%s: out of memory", d->path);
+        return false;
+    }
+    for (int i = 0; i < d->modelCount; i++) items[i] = MakeCellItem(groupOf[i], i, d->models[i].bounds, MS_MODEL_CELL_SIZE);
+    qsort(items, d->modelCount, sizeof(CellItem), CompareCellItems);
+
     bool ok = true;
-    for (int g = 0; g < d->modelGroupCount && ok; g++) {
+    for (int g = 0, at = 0; g < d->modelGroupCount && ok; at += d->modelGroups[g++].count) {
         ModelGroup *G = &d->modelGroups[g];
         const MS_ModelFile *F = &d->modelFiles[G->file];
         G->model = F->model;
@@ -3239,19 +3324,21 @@ static bool BuildModelGroups(SceneData *d, char *err, int errSize)
         int count = G->count;
         G->inst = R3D_LoadInstanceBuffer(count, R3D_INSTANCE_POSITION | R3D_INSTANCE_ROTATION | R3D_INSTANCE_SCALE);
         G->instLoaded = true;
+        if (G->inst.capacity < count) { ok = false; break; }
         Vector3 *pos = R3D_MapInstances(G->inst, R3D_INSTANCE_POSITION, false);
         Quaternion *rot = R3D_MapInstances(G->inst, R3D_INSTANCE_ROTATION, false);
         Vector3 *scl = R3D_MapInstances(G->inst, R3D_INSTANCE_SCALE, false);
         if (!pos || !rot || !scl) ok = false;
-        for (int i = 0, k = 0; i < d->modelCount && ok; i++) {
-            if (groupOf[i] != g) continue;
-            pos[k] = d->models[i].translation;
-            rot[k] = d->models[i].rotation;
-            scl[k] = d->models[i].scale;
-            k++;
+        for (int k = 0; k < count && ok; k++) {
+            const MS_ModelInstance *M = &d->models[items[at + k].index];
+            pos[k] = M->translation;
+            rot[k] = M->rotation;
+            scl[k] = M->scale;
         }
-        R3D_UnmapInstances(G->inst, R3D_INSTANCE_POSITION | R3D_INSTANCE_ROTATION | R3D_INSTANCE_SCALE);
+        R3D_UnmapInstances(G->inst, (pos ? R3D_INSTANCE_POSITION : 0) | (rot ? R3D_INSTANCE_ROTATION : 0) | (scl ? R3D_INSTANCE_SCALE : 0));
+        if (ok && !AddRanges(&d->modelRanges, &d->modelRangeCount, &d->modelRangeCap, g, items + at, count)) ok = false;
     }
+    free(items);
     free(groupOf);
     if (!ok) snprintf(err, errSize, "%s: out of memory (model instances)", d->path);
     return ok;
@@ -3267,14 +3354,20 @@ static void FreeGpu(SceneData *d)
             memset(&d->modelFiles[i].model, 0, sizeof(R3D_Model));
         }
     for (int i = 0; i < d->materialCount; i++) {
-        if (d->instCount && d->instCount[i] > 0) R3D_UnloadInstanceBuffer(d->inst[i]);
+        if (d->inst && d->inst[i].capacity > 0) R3D_UnloadInstanceBuffer(d->inst[i]);
         if (d->materials[i].material.shader) R3D_UnloadSurfaceShader(d->materials[i].material.shader);
         d->materials[i].material.shader = NULL;
     }
+    if (d->unit.capacity > 0) R3D_UnloadInstanceBuffer(d->unit);
+    d->unit = (R3D_InstanceBuffer){ 0 };
     free(d->inst);
     free(d->instCount);
     d->inst = NULL;
     d->instCount = NULL;
+    for (int r = 0; r < d->boxRangeCount; r++) R3D_UnloadMesh(d->boxRanges[r].mesh);
+    free(d->boxRanges);
+    d->boxRanges = NULL;
+    d->boxRangeCount = d->boxRangeCap = 0;
     for (int i = 0; i < d->textureCount; i++) {
         R3D_UnloadTexture(d->textures[i].tex);
         free(d->textures[i].path);
@@ -3293,6 +3386,339 @@ static void FreeGpu(SceneData *d)
     d->lightShadow = NULL;
     d->lightShadowDrawn = NULL;
     d->gpu = false;
+}
+
+// --- Hidden box faces
+// A face of box i is hidden when its rectangle lies inside the union of the rectangles (on its
+// plane) of the occluders: opaque boxes B != i that occupy the space right outside it (a face
+// toward +a at plane p: B.min[a] <= p < B.max[a]; toward -a: B.min[a] < p <= B.max[a]). Exact
+// float compares, no epsilon (touching boxes come from identical arithmetic), and a face stays
+// whenever it isn't proven covered. The occluders are looked up in a grid of HIDE_CELL cells
+// (sorted entries, binary search); boxes in too many cells are tested against every face.
+#define HIDE_CELL           4.0f
+#define HIDE_CELLS_MAX      1024        // a box in more cells goes to the "big" list; a face over more cells stays
+#define HIDE_ENTRIES_MAX    (1 << 22)   // grid entries (40 B each): more and nothing is hidden (a map of huge overlapping boxes)
+#define HIDE_PIECES         64          // a face the occluders leave in more pieces stays
+// An occluder must reach this far (m) beyond the face's plane. 0: every covered face goes (25 % of
+// maps/monolith's box triangles), but a face lying only a few cm behind its covering surface shows
+// through the 24-bit depth buffer at some pixels past ~30 m (z-fighting), so the image changes
+// there (0.03 % of the pixels). 0.25 keeps such faces: 9 % of the triangles go, and the image of
+// maps/monolith stays the same within its render noise (0.05: 13 %, a few pixels differ)
+#define HIDE_MIN_COVER      0.0f
+
+typedef struct { float mn[3], mx[3]; } Box6;
+typedef struct { float x0, y0, x1, y1; } Rect;                  // on the two axes other than the face's
+typedef struct { unsigned long long key; int id; } GridEntry;
+
+static int HideCell(float v)
+{
+    float c = floorf(v / HIDE_CELL);
+    return c < -1e9f ? -1000000000 : c > 1e9f ? 1000000000 : (int)c;
+}
+
+// Cell range of a box; false when it covers more than HIDE_CELLS_MAX cells
+static bool HideCells(const Box6 *b, int lo[3], int hi[3])
+{
+    double n = 1.0;
+    for (int a = 0; a < 3; a++) {
+        lo[a] = HideCell(b->mn[a]);
+        hi[a] = HideCell(b->mx[a]);
+        n *= (double)hi[a] - lo[a] + 1.0;
+    }
+    return n <= HIDE_CELLS_MAX;
+}
+
+static unsigned long long HideKey(const int cell[3])
+{
+    unsigned long long k = 0;
+    for (int a = 0; a < 3; a++) {
+        long long c = (long long)cell[a] + (1 << 20);           // (clamped: far cells share a key, the exact test follows)
+        k = k << 21 | (unsigned long long)(c < 0 ? 0 : c > 0x1FFFFF ? 0x1FFFFF : c);
+    }
+    return k;
+}
+
+static int CompareGridEntries(const void *pa, const void *pb)
+{
+    const GridEntry *a = pa, *b = pb;
+    if (a->key != b->key) return a->key < b->key ? -1 : 1;
+    return a->id < b->id ? -1 : a->id > b->id;
+}
+
+// Does B occupy the space right outside the face (axis a, plane p, toward dir) and overlap its rect?
+static inline bool Covers(const Box6 *B, int a, int dir, float p, int u, int v, const Rect *face)
+{
+    return (dir > 0 ? B->mn[a] <= p && p + HIDE_MIN_COVER < B->mx[a] : B->mn[a] + HIDE_MIN_COVER < p && p <= B->mx[a]) &&
+           B->mn[u] < face->x1 && B->mx[u] > face->x0 && B->mn[v] < face->y1 && B->mx[v] > face->y0;
+}
+
+// Takes B's rectangle out of the pieces; false when that leaves too many pieces
+static bool CoverPieces(Rect *piece, int *n, const Box6 *B, int u, int v)
+{
+    for (int k = 0; k < *n; ) {
+        Rect P = piece[k];
+        float x0 = P.x0 > B->mn[u] ? P.x0 : B->mn[u], y0 = P.y0 > B->mn[v] ? P.y0 : B->mn[v];
+        float x1 = P.x1 < B->mx[u] ? P.x1 : B->mx[u], y1 = P.y1 < B->mx[v] ? P.y1 : B->mx[v];
+        if (x0 >= x1 || y0 >= y1) { k++; continue; }
+        if (*n + 3 >= HIDE_PIECES) return false;
+        piece[k] = piece[--*n];                                 // P is replaced by what B leaves of it
+        if (P.x0 < x0) piece[(*n)++] = (Rect){ P.x0, P.y0, x0, P.y1 };
+        if (x1 < P.x1) piece[(*n)++] = (Rect){ x1, P.y0, P.x1, P.y1 };
+        if (P.y0 < y0) piece[(*n)++] = (Rect){ x0, P.y0, x1, y0 };
+        if (y1 < P.y1) piece[(*n)++] = (Rect){ x0, y1, x1, P.y1 };
+    }
+    return true;
+}
+
+// nb: the boxes that touch or overlap box i (the only ones that can cover its faces)
+static bool FaceHidden(const Box6 *bx, const int *nb, int nbCount, int i, int a, int dir, Rect *piece)
+{
+    const Box6 *A = &bx[i];
+    int u = a == 0 ? 1 : 0, v = a == 2 ? 1 : 2;
+    float p = dir > 0 ? A->mx[a] : A->mn[a];
+    Rect face = { A->mn[u], A->mn[v], A->mx[u], A->mx[v] };
+    if (face.x0 >= face.x1 || face.y0 >= face.y1) return true;     // no area: nothing to see
+    int n = 1;
+    piece[0] = face;
+    for (int k = 0; k < nbCount; k++) {
+        if (!Covers(&bx[nb[k]], a, dir, p, u, v, &face)) continue;
+        if (!CoverPieces(piece, &n, &bx[nb[k]], u, v)) return false;
+        if (n == 0) return true;
+    }
+    return false;
+}
+
+// hidden[b] bit f: face f of box b (R3D's cube face order) is hidden; only for boxes of merged
+// materials. False when out of memory.
+static bool FindHiddenFaces(const SceneData *d, const R3D_MeshData *cube, unsigned char *hidden)
+{
+    int count = d->boxCount;
+    size_t cap = count > 0 ? (size_t)count : 1;
+    Box6 *bx = malloc(sizeof(Box6) * cap);
+    int *big = malloc(sizeof(int) * cap), *nb = malloc(sizeof(int) * cap), *stamp = malloc(sizeof(int) * cap);
+    Rect *piece = malloc(sizeof(Rect) * HIDE_PIECES);
+    GridEntry *grid = NULL;
+    Box6 *gbox = NULL;
+    int bigCount = 0, gridCount = 0;
+    bool ok = bx && big && nb && stamp && piece;
+    long long total = 0;
+    for (int i = 0; i < count && ok; i++) {
+        const BoundingBox *B = &d->boxes[i];
+        bx[i] = (Box6){ { B->min.x, B->min.y, B->min.z }, { B->max.x, B->max.y, B->max.z } };
+        stamp[i] = -1;
+        int m = d->boxRefs[i].material, lo[3], hi[3];
+        if (m < 0 || m >= d->materialCount || !d->matDefs[m].occluder) continue;
+        if (!HideCells(&bx[i], lo, hi)) big[bigCount++] = i;
+        else total += (long long)(hi[0] - lo[0] + 1) * (hi[1] - lo[1] + 1) * (hi[2] - lo[2] + 1);
+    }
+    if (ok && total <= HIDE_ENTRIES_MAX) {
+        grid = malloc(sizeof(GridEntry) * (total > 0 ? (size_t)total : 1));
+        gbox = malloc(sizeof(Box6) * (total > 0 ? (size_t)total : 1));
+        ok = grid && gbox;
+        for (int i = 0; i < count && ok; i++) {
+            int m = d->boxRefs[i].material, lo[3], hi[3], cell[3];
+            if (m < 0 || m >= d->materialCount || !d->matDefs[m].occluder || !HideCells(&bx[i], lo, hi)) continue;
+            for (cell[0] = lo[0]; cell[0] <= hi[0]; cell[0]++)
+                for (cell[1] = lo[1]; cell[1] <= hi[1]; cell[1]++)
+                    for (cell[2] = lo[2]; cell[2] <= hi[2]; cell[2]++)
+                        grid[gridCount++] = (GridEntry){ HideKey(cell), i };
+        }
+        if (ok) qsort(grid, gridCount, sizeof(GridEntry), CompareGridEntries);
+        for (int k = 0; k < gridCount && ok; k++) gbox[k] = bx[grid[k].id];
+    }
+    if (ok && grid) {
+        int axis[6], dir[6];
+        for (int f = 0; f < 6; f++) {
+            Vector3 nrm = R3D_UnpackNormal(cube->vertices[f * 4].normal);
+            axis[f] = fabsf(nrm.x) > 0.5f ? 0 : fabsf(nrm.y) > 0.5f ? 1 : 2;
+            dir[f] = (axis[f] == 0 ? nrm.x : axis[f] == 1 ? nrm.y : nrm.z) > 0.0f ? 1 : -1;
+        }
+        for (int i = 0; i < count; i++) {
+            int m = d->boxRefs[i].material, nbCount = 0, lo[3], hi[3], cell[3];
+            if (m < 0 || m >= d->materialCount || !d->matDefs[m].merge) continue;
+            const Box6 *A = &bx[i];
+            // Neighbours: the occluders in A's cells (a touching box shares a cell with A), once
+            // each, and the big ones. A box in too many cells only has the big ones.
+            if (HideCells(A, lo, hi)) {
+                for (cell[0] = lo[0]; cell[0] <= hi[0]; cell[0]++)
+                    for (cell[1] = lo[1]; cell[1] <= hi[1]; cell[1]++)
+                        for (cell[2] = lo[2]; cell[2] <= hi[2]; cell[2]++) {
+                            unsigned long long key = HideKey(cell);
+                            int first = 0, last = gridCount;        // first entry with this key
+                            while (first < last) {
+                                int mid = (first + last) / 2;
+                                if (grid[mid].key < key) first = mid + 1; else last = mid;
+                            }
+                            for (int e = first; e < gridCount && grid[e].key == key; e++) {
+                                const Box6 *B = &gbox[e];
+                                if (!((B->mn[0] <= A->mx[0]) & (B->mx[0] >= A->mn[0]) & (B->mn[1] <= A->mx[1]) &
+                                      (B->mx[1] >= A->mn[1]) & (B->mn[2] <= A->mx[2]) & (B->mx[2] >= A->mn[2]))) continue;
+                                int id = grid[e].id;
+                                if (id == i || stamp[id] == i) continue;
+                                stamp[id] = i;
+                                nb[nbCount++] = id;
+                            }
+                        }
+            }
+            for (int k = 0; k < bigCount; k++) {
+                const Box6 *B = &bx[big[k]];
+                if (big[k] == i || B->mn[0] > A->mx[0] || B->mx[0] < A->mn[0] || B->mn[1] > A->mx[1] || B->mx[1] < A->mn[1] ||
+                    B->mn[2] > A->mx[2] || B->mx[2] < A->mn[2]) continue;
+                nb[nbCount++] = big[k];
+            }
+            for (int f = 0; f < 6; f++)
+                if (FaceHidden(bx, nb, nbCount, i, axis[f], dir[f], piece)) hidden[i] |= (unsigned char)(1u << f);
+        }
+    }
+    free(gbox);
+    free(grid);
+    free(piece);
+    free(stamp);
+    free(nb);
+    free(big);
+    free(bx);
+    return ok;
+}
+
+// One mesh of the visible faces of the boxes items[0..R->count): R3D's own unit-cube faces (vertex
+// format, UVs, normals, winding), each corner placed the way the GPU placed an instanced cube's,
+// local * scale + position with the same position and scale floats
+static bool BuildBoxMesh(SceneData *d, DrawRange *R, const CellItem *items, const unsigned char *hidden, const R3D_MeshData *cube)
+{
+    int visible = 0;
+    for (int k = 0; k < R->count; k++)
+        for (int f = 0; f < 6; f++) visible += !(hidden[items[k].index] >> f & 1);
+    d->boxTrisDrawn += 2LL * visible;
+    if (visible == 0) return true;
+    R3D_MeshData md = R3D_LoadMeshData(4 * visible, 6 * visible);
+    if (!md.vertices || !md.indices) {
+        R3D_UnloadMeshData(md);
+        return false;
+    }
+    for (int k = 0; k < R->count; k++) {
+        const BoundingBox *B = &d->boxes[items[k].index];
+        Vector3 pos = Vector3Scale(Vector3Add(B->min, B->max), 0.5f), scl = Vector3Subtract(B->max, B->min);
+        for (int f = 0; f < 6; f++) {
+            if (hidden[items[k].index] >> f & 1) continue;
+            unsigned int base = (unsigned int)md.vertexCount;
+            for (int c = 0; c < 4; c++) {
+                R3D_Vertex vx = cube->vertices[f * 4 + c];
+                vx.position = (Vector3){ pos.x + vx.position.x * scl.x, pos.y + vx.position.y * scl.y, pos.z + vx.position.z * scl.z };
+                md.vertices[md.vertexCount++] = vx;
+            }
+            for (int j = 0; j < 6; j++) md.indices[md.indexCount++] = base + cube->indices[f * 6 + j] - (unsigned int)(f * 4);
+        }
+    }
+    R->mesh = R3D_LoadMesh(R3D_PRIMITIVE_TRIANGLES, md, &R->bounds);
+    R3D_UnloadMeshData(md);
+    d->boxMeshCount += R->mesh.vertexCount > 0;
+    return R->mesh.vertexCount > 0;
+}
+
+// Boxes -> draws per material and 32 m cell (boxRanges: one cluster each). A material that is
+// `merge` gets, per range, one mesh of its boxes' visible faces (BuildBoxMesh): fewer triangles,
+// and it casts the same shadow (a hidden face lies inside an opaque box, so it was never the
+// nearest depth of any shadow texel). The others get an instance buffer of unit cubes (centre and
+// size per box) shared by their ranges. `unit` draws a mesh as an instance (see MS_DrawGeometry).
+static bool UploadBoxes(SceneData *d, char *err, int errSize)
+{
+    CellItem *items = malloc(sizeof(CellItem) * (d->boxCount > 0 ? d->boxCount : 1));
+    if (!items) {
+        snprintf(err, errSize, "%s: out of memory", d->path);
+        return false;
+    }
+    bool anyMerge = false;
+    int n = 0;
+    for (int b = 0; b < d->boxCount; b++) {
+        int m = d->boxRefs[b].material;
+        if (m < 0 || m >= d->materialCount) continue;
+        items[n++] = MakeCellItem(m, b, d->boxes[b], MS_CELL_SIZE);
+        d->instCount[m]++;
+        anyMerge |= d->matDefs[m].merge;
+    }
+    qsort(items, n, sizeof(CellItem), CompareCellItems);
+
+    double t0 = GetTime();
+    R3D_MeshData cube = { 0 };
+    unsigned char *hidden = NULL;
+    bool ok = true;
+    if (anyMerge) {
+        cube = R3D_GenMeshDataCube(1.0f, 1.0f, 1.0f);
+        hidden = calloc(d->boxCount, 1);
+        ok = cube.vertexCount == 24 && cube.indexCount == 36 && hidden && FindHiddenFaces(d, &cube, hidden);
+        d->unit = R3D_LoadInstanceBuffer(1, R3D_INSTANCE_POSITION | R3D_INSTANCE_SCALE);
+        Vector3 *pos = R3D_MapInstances(d->unit, R3D_INSTANCE_POSITION, false);
+        Vector3 *scl = R3D_MapInstances(d->unit, R3D_INSTANCE_SCALE, false);
+        if (pos && scl) {
+            pos[0] = Vector3Zero();
+            scl[0] = Vector3One();
+        } else {
+            ok = false;
+        }
+        R3D_UnmapInstances(d->unit, (pos ? R3D_INSTANCE_POSITION : 0) | (scl ? R3D_INSTANCE_SCALE : 0));
+    }
+    d->mergeMs = (float)((GetTime() - t0) * 1000.0);
+    for (int m = 0, at = 0; m < d->materialCount && ok; at += d->instCount[m++]) {
+        int count = d->instCount[m];
+        if (count == 0) continue;
+        int first = d->boxRangeCount;
+        if (!d->matDefs[m].merge) {
+            d->inst[m] = R3D_LoadInstanceBuffer(count, R3D_INSTANCE_POSITION | R3D_INSTANCE_SCALE);
+            if (d->inst[m].capacity < count) { ok = false; break; }
+            Vector3 *pos = R3D_MapInstances(d->inst[m], R3D_INSTANCE_POSITION, false);
+            Vector3 *scl = R3D_MapInstances(d->inst[m], R3D_INSTANCE_SCALE, false);
+            if (!pos || !scl) ok = false;
+            for (int k = 0; k < count && ok; k++) {
+                const BoundingBox *B = &d->boxes[items[at + k].index];
+                pos[k] = Vector3Scale(Vector3Add(B->min, B->max), 0.5f);
+                scl[k] = Vector3Subtract(B->max, B->min);
+            }
+            R3D_UnmapInstances(d->inst[m], (pos ? R3D_INSTANCE_POSITION : 0) | (scl ? R3D_INSTANCE_SCALE : 0));
+            d->boxTrisDrawn += 12LL * count;
+        }
+        if (ok && !AddRanges(&d->boxRanges, &d->boxRangeCount, &d->boxRangeCap, m, items + at, count)) ok = false;
+        if (d->matDefs[m].merge) {
+            t0 = GetTime();
+            for (int r = first; ok && r < d->boxRangeCount; r++)
+                ok = BuildBoxMesh(d, &d->boxRanges[r], items + at + d->boxRanges[r].first, hidden, &cube);
+            d->mergeMs += (float)((GetTime() - t0) * 1000.0);
+        }
+    }
+    R3D_UnloadMeshData(cube);
+    free(hidden);
+    free(items);
+    if (!ok) snprintf(err, errSize, "%s: out of memory (box meshes)", d->path);
+    return ok;
+}
+
+// Whole-identifier search for `word` in s[0..end)
+static bool HasWord(const char *s, const char *end, const char *word)
+{
+    size_t n = strlen(word);
+    for (const char *p = s; p + n <= end; p++) {
+        if (memcmp(p, word, n) != 0) continue;
+        if ((p > s && (isalnum((unsigned char)p[-1]) || p[-1] == '_')) || (p + n < end && (isalnum((unsigned char)p[n]) || p[n] == '_'))) continue;
+        return true;
+    }
+    return false;
+}
+
+// What a surface shader's source says (a text scan, conservative: comments count too).
+// needsCube: it reads the box instance (INSTANCE_*) or the model-space POSITION in vertex(), so
+// it only works on instanced unit cubes. cutout: it may discard or write ALPHA.
+static void ScanShader(const char *src, bool *needsCube, bool *cutout)
+{
+    *needsCube = strstr(src, "INSTANCE_") != NULL;
+    *cutout = strstr(src, "ALPHA") != NULL || strstr(src, "discard") != NULL;
+    const char *fn = strstr(src, "void vertex()");
+    const char *open = fn ? strchr(fn, '{') : NULL;
+    if (!open || *needsCube) return;
+    const char *end = open;
+    for (int depth = 0; *end; end++) {
+        if (*end == '{') depth++;
+        else if (*end == '}' && --depth == 0) break;
+    }
+    *needsCube = HasWord(open, end, "POSITION");
 }
 
 // Creates every GPU resource of `d` (a previous load's are still alive: new before old, see
@@ -3338,21 +3764,39 @@ static bool UploadGpu(SceneData *d, char *err, int errSize)
             *slot[k] = GetTexture(d, D->maps[k], IS_COLOR[k], D->wrap, D->mapLine[k], err, errSize);
             if (!slot[k]->id) { FreeGpu(d); return false; }
         }
+    }
 
-        // Box centres and sizes -> instance buffer of unit cubes, in box order
-        int count = 0;
-        for (int b = 0; b < d->boxCount; b++) count += d->boxRefs[b].material == i;
-        d->instCount[i] = count;
-        if (count == 0) continue;
-        d->inst[i] = R3D_LoadInstanceBuffer(count, R3D_INSTANCE_POSITION | R3D_INSTANCE_SCALE);
-        Vector3 *pos = R3D_MapInstances(d->inst[i], R3D_INSTANCE_POSITION, false);
-        for (int b = 0, k = 0; b < d->boxCount; b++)
-            if (d->boxRefs[b].material == i) pos[k++] = Vector3Scale(Vector3Add(d->boxes[b].min, d->boxes[b].max), 0.5f);
-        R3D_UnmapInstances(d->inst[i], R3D_INSTANCE_POSITION);
-        Vector3 *scl = R3D_MapInstances(d->inst[i], R3D_INSTANCE_SCALE, false);
-        for (int b = 0, k = 0; b < d->boxCount; b++)
-            if (d->boxRefs[b].material == i) scl[k++] = Vector3Subtract(d->boxes[b].max, d->boxes[b].min);
-        R3D_UnmapInstances(d->inst[i], R3D_INSTANCE_SCALE);
+    // How the boxes of each material are drawn. After the loop above: reading the shader sources
+    // between the shader loads moved the shaders' addresses, and R3D sorts draws by them, so the
+    // draw order (which of two exactly overlapping boxes shows) changed from run to run
+    for (int i = 0; i < d->materialCount; i++) {
+        MS_Material *M = &d->materials[i];
+        MatDef *D = &d->matDefs[i];
+        R3D_Material *m = &M->material;
+        bool needsCube = false, cutout = false;
+        if (M->shader) {
+            char full[MS_PATH_MAX + MS_PATH_MAX];
+            snprintf(full, sizeof(full), "%s%s", d->root, M->shader);
+            char *src = LoadFileText(full);
+            if (src) ScanShader(src, &needsCube, &cutout);
+            else needsCube = cutout = true;
+            if (src && needsCube && !D->instanced)
+                TraceLog(LOG_WARNING, "monolith_scene: %s:%d: material \"%s\": shader \"%s\" reads the box instance (INSTANCE_*, "
+                         "or POSITION in vertex()): add `instanced on` to the material", d->path, D->shaderLine, M->name, M->shader);
+            UnloadFileText(src);
+        }
+        // Boxes are merged into a visible-face mesh unless the shader needs the instanced cubes. Only
+        // opaque materials: R3D picks the lights of a blended (forward) draw by the mesh's own bounds,
+        // which for the instanced unit cube are the cube at the origin, so a mesh would be lit differently.
+        // Those that also never discard can hide another box's face (see FindHiddenFaces)
+        D->merge = !D->instanced && !needsCube && m->cullMode == R3D_CULL_BACK && m->transparencyMode == R3D_TRANSPARENCY_OPAQUE;
+        D->occluder = D->merge && !cutout && m->billboardMode == R3D_BILLBOARD_DISABLED && m->albedo.color.a == 255 &&
+                      !D->maps[MAP_ALBEDO] && m->alphaCutoff <= 1.0f;
+    }
+
+    if (!UploadBoxes(d, err, errSize)) {
+        FreeGpu(d);
+        return false;
     }
 
     // Sky, and the ambient map from the ambient-only copy of it
@@ -3610,8 +4054,9 @@ MS_Scene *MS_Load(const char *path, const MS_LoadOptions *opt, char *err, int er
         for (int i = 0; i < SUN_TILE_COUNT; i++) p->sunShadow[i] = R3D_LoadShadowMap(R3D_LIGHT_DIR);
         p->sunShadowLoaded = true;
         int mapSize = R3D_GetHint(R3D_HINT_SHADOW_DIR_SIZE);
-        TraceLog(LOG_INFO, "monolith_scene: %s: %d boxes, %d models (%d files), %d groups, %d materials, %d lights; sun shadow %d px, %.2f cm texels",
-                 s->path, s->boxCount, s->modelCount, s->modelFileCount, s->groupCount, s->materialCount, s->lightCount, mapSize,
+        TraceLog(LOG_INFO, "monolith_scene: %s: %d boxes (%d draws, %d merged meshes: %lld of %lld triangles drawn, %.0f ms), %d models (%d files, %d draws), %d groups, %d materials, %d lights; sun shadow %d px, %.2f cm texels",
+                 s->path, s->boxCount, p->d->boxRangeCount, p->d->boxMeshCount, p->d->boxTrisDrawn, 12LL * s->boxCount, p->d->mergeMs,
+                 s->modelCount, s->modelFileCount, p->d->modelRangeCount, s->groupCount, s->materialCount, s->lightCount, mapSize,
                  100.0f * 2.0f * FitRadius(s->sun.light.range, TILE_FIT_FOVY, TILE_FIT_ASPECT) / (float)mapSize);
     }
     return s;
@@ -4081,12 +4526,33 @@ void MS_DrawGeometry(MS_Scene *s)
 {
     MS_Private *p = s->priv;
     SceneData *d = p->d;
-    for (int i = 0; i < d->materialCount; i++)
-        if (d->instCount[i] > 0) R3D_DrawMeshInstanced(p->cube, d->materials[i].material, d->inst[i], d->instCount[i]);
-    // Models: one instanced draw per (file, materials, shadow); they go into the sun's
+    // One draw per cell and material. Instanced ones are clusters: R3D tests a cluster against
+    // each view's frustum (the camera, the shadow maps) and skips its draw when outside
+    for (int r = 0; r < d->boxRangeCount; r++) {
+        const DrawRange *R = &d->boxRanges[r];
+        const R3D_Material mat = d->materials[R->group].material;
+        if (!d->matDefs[R->group].merge) {
+            R3D_BeginCluster(R->bounds);
+            R3D_DrawMeshInstancedEx(p->cube, mat, d->inst[R->group], R->first, R->count);
+            R3D_EndCluster();
+        } else if (R->mesh.vertexCount > 0) {
+            // A merged range is its mesh drawn as one instance at the origin: it stays in R3D's
+            // instanced draw list, sorted like the cubes were (where boxes overlap exactly, the
+            // draw order decides which one shows), and the cluster culls it the same way
+            R3D_BeginCluster(R->bounds);
+            R3D_DrawMeshInstancedEx(R->mesh, mat, d->unit, 0, 1);
+            R3D_EndCluster();
+        }
+    }
+    // Models: the same per (file, materials, shadow) group; they go into the sun's
     // shadow tiles too, which are drawn once per map load like for the boxes
-    for (int g = 0; g < d->modelGroupCount; g++)
-        R3D_DrawModelInstanced(d->modelGroups[g].model, d->modelGroups[g].inst, d->modelGroups[g].count);
+    for (int r = 0; r < d->modelRangeCount; r++) {
+        const DrawRange *R = &d->modelRanges[r];
+        const ModelGroup *G = &d->modelGroups[R->group];
+        R3D_BeginCluster(R->bounds);
+        R3D_DrawModelInstancedEx(G->model, G->inst, R->first, R->count);
+        R3D_EndCluster();
+    }
 #ifdef MS_PATCHED_R3D
     // Occlusion volume: once per map load (CPU bake + upload; not a pass of this frame)
     if (p->rs.aoVolumeVoxel > 0.0f && p->aoVersion != s->version) {
