@@ -74,11 +74,11 @@ static void PickModels(Vector3 origin, Vector3 dir, const int *list, const float
     }
 }
 
+// PickBoxes + PickModels over everything are MS_Raycast's rules; it goes through the scene's BVH
 DesignerHit DesignerPick(Vector3 origin, Vector3 dir)
 {
-    DesignerHit h = PickBoxes(origin, dir, NULL, NULL, scene->boxCount);
-    PickModels(origin, dir, NULL, NULL, scene->modelCount, &h);
-    return h;
+    MS_Hit h = MS_Raycast(scene, origin, dir, 0.0f);
+    return (DesignerHit){ h.obj, h.point, h.normal, h.dist };
 }
 
 // Name of an object's material (the HUD, --pick and request bundles show it). Models

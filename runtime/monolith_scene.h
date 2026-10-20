@@ -410,6 +410,8 @@ bool MS_RaycastModel(const MS_Scene *scene, int model, Vector3 origin, Vector3 d
 
 // Strict overlap (touching is not a hit) of `box` with any collider
 bool MS_Collides(const MS_Scene *scene, BoundingBox box);
+// The lowest index into scene->colliders that `box` strictly overlaps, -1 for none
+int MS_FirstCollision(const MS_Scene *scene, BoundingBox box);
 
 const MS_Ref *MS_ObjectRef(const MS_Scene *scene, MS_ObjRef obj);     // NULL for MS_OBJ_NONE
 BoundingBox MS_ObjectBounds(const MS_Scene *scene, MS_ObjRef obj);    // world AABB

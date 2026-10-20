@@ -340,6 +340,9 @@ typedef struct {
     int modelSlotCount, modelSlotCap;
     BoundingBox *colliders;             // boxes, then model colliders (only with models)
     int colliderCount;
+    BvhNode *colliderNodes;             // BVH over the published colliders (MS_Raycast, MS_FirstCollision)
+    int *colliderOrder;                 // collider indices in leaf order
+    int colliderNodeCount;
 
 #ifdef MONOLITH_EDITOR
     char **deps;                        // files it depends on; [0] = the map file
@@ -2840,6 +2843,75 @@ static void FinishGeometry(SceneData *d)
     d->bounds = b;
 }
 
+// The colliders MS_Scene publishes: boxes, then model colliders (without models: the box array itself)
+static const BoundingBox *PublishedColliders(const SceneData *d, int *count)
+{
+    *count = d->modelCount > 0 ? d->colliderCount : d->boxCount;
+    return d->modelCount > 0 ? d->colliders : d->boxes;
+}
+
+// Node `ni` over colliderOrder[first, first + count): leaves of <= 4 colliders, split at the
+// middle of the longest axis of the centres' bounds (in place, like BvhBuild)
+static void ColliderBvhBuild(SceneData *d, const BoundingBox *c, int ni, int first, int count, int depth)
+{
+    BvhNode *nd = &d->colliderNodes[ni];
+    nd->mn = (Vector3){ INFINITY, INFINITY, INFINITY };
+    nd->mx = (Vector3){ -INFINITY, -INFINITY, -INFINITY };
+    Vector3 cmn = nd->mn, cmx = nd->mx;
+    for (int k = first; k < first + count; k++) {
+        const BoundingBox *b = &c[d->colliderOrder[k]];
+        nd->mn = Vector3Min(nd->mn, b->min);
+        nd->mx = Vector3Max(nd->mx, b->max);
+        Vector3 m = Vector3Scale(Vector3Add(b->min, b->max), 0.5f);
+        cmn = Vector3Min(cmn, m);
+        cmx = Vector3Max(cmx, m);
+    }
+    nd->left = -1;
+    nd->first = first;
+    nd->count = count;
+    if (count <= 4 || depth >= 60) return;
+    Vector3 ext = Vector3Subtract(cmx, cmn);
+    int axis = (ext.x >= ext.y && ext.x >= ext.z) ? 0 : (ext.y >= ext.z) ? 1 : 2;
+    float split = (((float *)&cmn)[axis] + ((float *)&cmx)[axis]) * 0.5f;
+    int i = first, j = first + count - 1;
+    while (i <= j) {
+        const BoundingBox *b = &c[d->colliderOrder[i]];
+        Vector3 m = Vector3Scale(Vector3Add(b->min, b->max), 0.5f);
+        if (((float *)&m)[axis] < split) i++;
+        else {
+            int s = d->colliderOrder[i];
+            d->colliderOrder[i] = d->colliderOrder[j];
+            d->colliderOrder[j--] = s;
+        }
+    }
+    int leftCount = i - first;
+    if (leftCount == 0 || leftCount == count) leftCount = count / 2;    // all centres equal
+    int l = d->colliderNodeCount;
+    d->colliderNodeCount += 2;
+    nd->left = l;
+    nd->count = 0;
+    ColliderBvhBuild(d, c, l, first, leftCount, depth + 1);
+    ColliderBvhBuild(d, c, l + 1, first + leftCount, count - leftCount, depth + 1);
+}
+
+// The queries' BVH over the colliders (noGpu loads too: tools pick and collide as well)
+static bool BuildColliderBvh(SceneData *d, char *err, int errSize)
+{
+    int n;
+    const BoundingBox *c = PublishedColliders(d, &n);
+    if (n == 0) return true;
+    d->colliderOrder = malloc(sizeof(int) * (size_t)n);
+    d->colliderNodes = malloc(sizeof(BvhNode) * 2 * (size_t)n);
+    if (!d->colliderOrder || !d->colliderNodes) {
+        snprintf(err, errSize, "%s: out of memory (collider BVH)", d->path);
+        return false;
+    }
+    for (int i = 0; i < n; i++) d->colliderOrder[i] = i;
+    d->colliderNodeCount = 1;
+    ColliderBvhBuild(d, c, 0, 0, n, 0);
+    return true;
+}
+
 static bool ParseScene(SceneData *d, const char *mapPath, const char *text, int size, const MS_LoadOptions *opt,
                        char *err, int errSize)
 {
@@ -3851,6 +3923,8 @@ static void FreeData(SceneData *d)
     free(d->localColliders);
     free(d->modelSlots);
     free(d->colliders);
+    free(d->colliderNodes);
+    free(d->colliderOrder);
     for (int i = 0; i < d->materialCount; i++) {
         free((char *)d->materials[i].name);
         free((char *)d->materials[i].shader);
@@ -3903,8 +3977,7 @@ static void Publish(MS_Scene *s, SceneData *d)
     s->modelSlots = d->modelSlots;
     s->modelSlotCount = d->modelSlotCount;
     // Boxes first, then the model colliders (without models: the box array itself)
-    s->colliders = d->modelCount > 0 ? d->colliders : d->boxes;
-    s->colliderCount = d->modelCount > 0 ? d->colliderCount : d->boxCount;
+    s->colliders = PublishedColliders(d, &s->colliderCount);
     s->materials = d->materials;
     s->materialCount = d->materialCount;
     s->groups = (const char *const *)d->groups;
@@ -3972,7 +4045,10 @@ static bool LoadText(MS_Scene *s, const char *mapPath, char *text, int size, cha
     }
     if (ok && !p->gpu) ok = CheckModelFiles(d, err, errSize);
     if (ok) ok = ResolveModels(d, err, errSize);
-    if (ok) FinishGeometry(d);
+    if (ok) {
+        FinishGeometry(d);
+        ok = BuildColliderBvh(d, err, errSize);
+    }
     if (ok && p->gpu) {
         ok = UploadGpu(d, err, errSize);
         if (ok && !p->warnedShadowSize && R3D_GetHint(R3D_HINT_SHADOW_DIR_SIZE) != d->env.sun.shadowSize) {
@@ -4593,6 +4669,8 @@ bool MS_Draw(MS_Scene *s, Camera3D camera, RenderTexture target)
 // #region Public API: queries
 // ======================================================================================
 
+static bool RayBox(Vector3 o, Vector3 d, Vector3 mn, Vector3 mx, float *tNear, float *tFar, int *axis);
+
 MS_Hit MS_Raycast(const MS_Scene *s, Vector3 origin, Vector3 dir, float maxDist)
 {
     MS_Hit best = { .obj = { MS_OBJ_NONE, -1 }, .dist = INFINITY };
@@ -4600,35 +4678,54 @@ MS_Hit MS_Raycast(const MS_Scene *s, Vector3 origin, Vector3 dir, float maxDist)
     const float d[3] = { dir.x, dir.y, dir.z };
     float limit = maxDist > 0.0f ? maxDist : INFINITY;
 
-    for (int i = 0; i < s->boxCount; i++) {
-        const BoundingBox *b = &s->boxes[i];
-        const float mn[3] = { b->min.x, b->min.y, b->min.z };
-        const float mx[3] = { b->max.x, b->max.y, b->max.z };
-        float tNear = -INFINITY, tFar = INFINITY;
-        int axis = -1;
-        bool miss = false;
-        for (int a = 0; a < 3 && !miss; a++) {
-            if (fabsf(d[a]) < 1e-12f) {
-                // Parallel to this slab: inside it or never
-                if (o[a] < mn[a] || o[a] > mx[a]) miss = true;
-                continue;
-            }
-            float t1 = (mn[a] - o[a]) / d[a], t2 = (mx[a] - o[a]) / d[a];
-            if (t1 > t2) { float t = t1; t1 = t2; t2 = t; }
-            if (t1 > tNear) { tNear = t1; axis = a; }
-            if (t2 < tFar) tFar = t2;
-            if (tNear > tFar) miss = true;
+    // The boxes, through the colliders' BVH: a node's slab interval (the same arithmetic) holds
+    // those of its boxes, so a node is skipped only when none of its boxes can be the hit. The
+    // order of the visits doesn't matter: the nearest box wins, on equal distances the lower index.
+    const SceneData *sd = s->priv->d;
+    int stack[128], sp = 0;
+    if (sd->colliderNodeCount > 0) stack[sp++] = 0;
+    while (sp > 0) {
+        const BvhNode *nd = &sd->colliderNodes[stack[--sp]];
+        float nodeNear, nodeFar;
+        if (!RayBox(origin, dir, nd->mn, nd->mx, &nodeNear, &nodeFar, NULL) || nodeFar < 0.0f ||
+            nodeNear > best.dist || nodeNear > limit) continue;
+        if (nd->count == 0) {
+            if (sp + 2 <= 128) { stack[sp++] = nd->left; stack[sp++] = nd->left + 1; }
+            continue;
         }
-        // tNear < 0: the origin is inside this box. Skip it, so flying through a wall
-        // still lets you pick what is beyond.
-        if (miss || axis < 0 || tNear < 0.0f || tNear >= best.dist || tNear > limit) continue;
+        for (int k = nd->first; k < nd->first + nd->count; k++) {
+            int i = sd->colliderOrder[k];
+            if (i >= s->boxCount) continue;     // a model collider: models are hit by their triangles below
+            const BoundingBox *b = &s->boxes[i];
+            const float mn[3] = { b->min.x, b->min.y, b->min.z };
+            const float mx[3] = { b->max.x, b->max.y, b->max.z };
+            float tNear = -INFINITY, tFar = INFINITY;
+            int axis = -1;
+            bool miss = false;
+            for (int a = 0; a < 3 && !miss; a++) {
+                if (fabsf(d[a]) < 1e-12f) {
+                    // Parallel to this slab: inside it or never
+                    if (o[a] < mn[a] || o[a] > mx[a]) miss = true;
+                    continue;
+                }
+                float t1 = (mn[a] - o[a]) / d[a], t2 = (mx[a] - o[a]) / d[a];
+                if (t1 > t2) { float t = t1; t1 = t2; t2 = t; }
+                if (t1 > tNear) { tNear = t1; axis = a; }
+                if (t2 < tFar) tFar = t2;
+                if (tNear > tFar) miss = true;
+            }
+            // tNear < 0: the origin is inside this box. Skip it, so flying through a wall
+            // still lets you pick what is beyond.
+            if (miss || axis < 0 || tNear < 0.0f || tNear > best.dist || tNear > limit) continue;
+            if (tNear == best.dist && i > best.obj.index) continue;
 
-        best.obj = (MS_ObjRef){ MS_OBJ_BOX, i };
-        best.dist = tNear;
-        best.point = Vector3Add(origin, Vector3Scale(dir, tNear));
-        float n[3] = { 0, 0, 0 };
-        n[axis] = d[axis] > 0.0f ? -1.0f : 1.0f;
-        best.normal = (Vector3){ n[0], n[1], n[2] };
+            best.obj = (MS_ObjRef){ MS_OBJ_BOX, i };
+            best.dist = tNear;
+            best.point = Vector3Add(origin, Vector3Scale(dir, tNear));
+            float n[3] = { 0, 0, 0 };
+            n[axis] = d[axis] > 0.0f ? -1.0f : 1.0f;
+            best.normal = (Vector3){ n[0], n[1], n[2] };
+        }
     }
     // Models: only strictly nearer than the best box (a box wins a tie)
     for (int i = 0; i < s->modelCount; i++) {
@@ -4731,14 +4828,36 @@ bool MS_RaycastModel(const MS_Scene *s, int mi, Vector3 origin, Vector3 dir, flo
     return true;
 }
 
+static inline bool Overlaps(BoundingBox a, Vector3 mn, Vector3 mx)
+{
+    return a.min.x < mx.x && a.max.x > mn.x && a.min.y < mx.y && a.max.y > mn.y && a.min.z < mx.z && a.max.z > mn.z;
+}
+
+int MS_FirstCollision(const MS_Scene *s, BoundingBox a)
+{
+    // Through the colliders' BVH (a node strictly overlaps `a` whenever one of its colliders does)
+    const SceneData *d = s->priv->d;
+    int first = -1;
+    int stack[128], sp = 0;
+    if (d->colliderNodeCount > 0) stack[sp++] = 0;
+    while (sp > 0) {
+        const BvhNode *nd = &d->colliderNodes[stack[--sp]];
+        if (!Overlaps(a, nd->mn, nd->mx)) continue;
+        if (nd->count == 0) {
+            if (sp + 2 <= 128) { stack[sp++] = nd->left; stack[sp++] = nd->left + 1; }
+            continue;
+        }
+        for (int k = nd->first; k < nd->first + nd->count; k++) {
+            int i = d->colliderOrder[k];
+            if ((first < 0 || i < first) && Overlaps(a, s->colliders[i].min, s->colliders[i].max)) first = i;
+        }
+    }
+    return first;
+}
+
 bool MS_Collides(const MS_Scene *s, BoundingBox a)
 {
-    for (int i = 0; i < s->colliderCount; i++) {
-        const BoundingBox *b = &s->colliders[i];
-        if (a.min.x < b->max.x && a.max.x > b->min.x && a.min.y < b->max.y && a.max.y > b->min.y &&
-            a.min.z < b->max.z && a.max.z > b->min.z) return true;
-    }
-    return false;
+    return MS_FirstCollision(s, a) >= 0;
 }
 
 const MS_Ref *MS_ObjectRef(const MS_Scene *s, MS_ObjRef obj)

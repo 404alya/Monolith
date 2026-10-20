@@ -23,7 +23,6 @@ typedef struct {
     float bobPhase;
 } Player;
 
-bool BoxesOverlap(BoundingBox a, BoundingBox b);
 void UpdatePlayer(Player *p, float dt);
 Camera3D PlayerCamera(const Player *p);
 

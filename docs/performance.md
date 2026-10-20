@@ -124,3 +124,9 @@ The default map had grown to 46,322 boxes (555,864 triangles, 85 materials). R3D
 - **Both vs. before** (same session, 3 pairs): low 3.28 → 2.61 ms (305 → 383 fps), ultra 8.39 → 7.62 ms; pine_forest low 1.09 → 1.11 ms.
 
 Session-to-session swings were large (the clusters-alone low run measured 3.44 in one session and 2.73 in the next): compare only rows of one session. Not done: merging coplanar faces into larger quads (UV and T-junction risk), a larger near plane.
+
+## CPU: collider BVH (2026-10-20, i5-10400F + GTX 1660 Ti)
+
+Profiled with `perf record --call-graph lbr` (LBR stacks unwind through the NVIDIA driver, which has no CFI) and `__GL_YIELD=USLEEP` (so `glFinish`'s spin-wait in headless benches doesn't pose as work). On the default map the crosshair pick (`DesignerPickCamera` → linear `PickBoxes` over 46,322 boxes) was ~21% of the CPU samples, ~0.57 ms per frame in spectator mode; walking (`player.c` `Overlap`, 3–5 linear scans per frame) and `MS_Raycast` / `MS_Collides` had the same shape.
+
+A BVH over the published colliders (built at load, leaves of ≤ 4, also for noGpu loads) now serves `MS_Raycast`, `MS_Collides` and the new `MS_FirstCollision`; the designer's pick and the player go through them. Results are bit-identical to the linear scans (in-process self-test, 700k random/axis-aligned/corner rays and touching/apart boxes over the three test maps: 0 mismatches). A ray: 383 → 2.3 µs. Headless bench, 3 interleaved pairs: low 2.71 → 2.20 ms (CPU until finish 1.07 → 0.57 ms), ultra 8.52 → 7.87 ms. After it, `R3D_End` (draw submission, ~0.34 ms of it the geometry pass) is the largest CPU item.

@@ -12,22 +12,12 @@ static BoundingBox PlayerBox(Vector3 feet)
     };
 }
 
-// Strict overlap: touching faces do not count (raylib's CheckCollisionBoxes is
-// inclusive, which would make standing on the ground block all movement)
-bool BoxesOverlap(BoundingBox a, BoundingBox b)
-{
-    return a.min.x < b.max.x && a.max.x > b.min.x &&
-           a.min.y < b.max.y && a.max.y > b.min.y &&
-           a.min.z < b.max.z && a.max.z > b.min.z;
-}
-
-// Returns the index of the first box overlapping the player at `feet`, or -1
+// Returns the index of the first box overlapping the player at `feet`, or -1. The overlap is
+// strict: touching faces do not count (raylib's CheckCollisionBoxes is inclusive, which would
+// make standing on the ground block all movement)
 static int Overlap(Vector3 feet)
 {
-    BoundingBox pb = PlayerBox(feet);
-    for (int i = 0; i < scene->colliderCount; i++)
-        if (BoxesOverlap(pb, scene->colliders[i])) return i;
-    return -1;
+    return MS_FirstCollision(scene, PlayerBox(feet));
 }
 
 // Moves along one horizontal axis, stepping up onto low obstacles (stairs)
