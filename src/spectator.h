@@ -35,7 +35,9 @@ void SpectatorFlyTo(Spectator *s, int view);
 // Smooth flight (as SpectatorFlyTo) to any eye position and view angles (radians)
 void SpectatorFlyToPose(Spectator *s, Vector3 eye, float yaw, float pitch);
 void SpectatorJumpTo(Spectator *s, int view);
-void UpdateSpectator(Spectator *s, Player *player, float dt);
+// arrows: false while the arrow keys belong to something else (volume mode), so they
+// don't fly to viewpoints
+void UpdateSpectator(Spectator *s, Player *player, float dt, bool arrows);
 Camera3D SpectatorCamera(const Spectator *s);
 
 #endif

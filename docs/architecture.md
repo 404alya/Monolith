@@ -4,7 +4,7 @@ How monolith is built, for anyone reading or changing the code: the technology, 
 
 ## 1. What this is
 
-**monolith** is an AI-assisted map designer: a first-person 3D viewer and editor in plain C on raylib + R3D. You walk or fly through a level; in spectator mode you point, select objects or screen regions and submit a request, which the game writes as a bundle and queues for Claude Code (§5). The game hot-reloads the edited map package ([user-guide.md](user-guide.md)).
+**monolith** is an AI-assisted map designer: a first-person 3D viewer and editor in plain C on raylib + R3D. You walk or fly through a level; in spectator mode you point, select objects, screen regions or world-space volumes and submit a request, which the game writes as a bundle and queues for Claude Code (§5). The game hot-reloads the edited map package ([user-guide.md](user-guide.md)).
 
 Design principles:
 - **The level is data.** A map package (`maps/<name>/`): the map file, its shaders, models, textures and a design brief (`MAP.md`). Nothing in the engine assumes a style.
@@ -81,11 +81,12 @@ The scene (loading, drawing, collision, picking, hot reload) is the **scene runt
    - **Picking**: `DesignerPick()` → `MS_Raycast()`: slab test against every box, then models (bounds, then triangles through a BVH). Boxes containing the eye are skipped. Refreshed every frame in spectator mode and `--shot` runs.
    - **Selection**: `MS_ObjRef` heap arrays with an index → position table; `DesignerSync()` remaps after a reload through a hash of exact bounds.
    - **Screen regions**: at submit `RegionPick` samples each with up to 4096 rays (per-region candidate lists, culled per 8×8-ray tile): objects with ray shares (also per map line), centre hit, depth range, sky share, and **edge objects** (`AnalyzeRegionEdge`: up to 64 rays per side on a ring just outside the rect, nearest first, with sides).
+   - **Volumes** (volume mode, **V**): world-space `BoundingBox` heap array, made from crosshair clicks (snapped on the axes along the clicked face) plus a height step that freezes the camera; `DesignerTakesArrows()` keeps the arrows from the spectator while they edit the active volume. At submit `DesignerAnalyzeVolume` lists every box and model whose world bounds overlap (shares of volume and of object, fully inside), the empty share over a grid of ≤ 4096 cells (exact AABB overlaps per cell, summed and capped), and the floor (a ray down from the centre). `DesignerDrawVolumes()` draws them (an always-on-top faint pass, then depth-tested faces and outlines) with V1, V2 tabs.
    - **Overlay**: `DesignerDrawOverlay()` draws with raylib after `R3D_End()` in `BeginMode3D`, depth-tested against R3D's depth (copied into the target by `R3D_End`) with a 4-step depth bias in the projection and slightly inflated boxes (models: oriented bounds). Also crosshair, snip drawing, HUD.
    - **Prompt box**: UTF-8, word wrap, scrolling, heap text; `DesignerCapturesInput()` freezes game keys and camera.
-   - `DesignerBuildRequest()` snapshots prompt, eye, angles, fovy, size, hit, selection, regions, map version into a `DesignRequest`.
+   - `DesignerBuildRequest()` snapshots prompt, eye, angles, fovy, size, hit, selection, regions, volumes, map version into a `DesignRequest`.
 5. **Launcher** (`launcher.c`, see its header comment):
-   - `LauncherSubmit()` writes `requests/<YYYY-MM-DD_HHMMSS>_<slug>/` (`view.png`, `view-marked.png`, `region-<n>.png`, `request.md`, `request.json`, format 2), then (coordinator mode) `state` = `queued` and, unless `requests/.coordinator/lock` is held (`flock`), starts the coordinator's terminal (a `/bin/sh` wrapper holds the lock around `claude`; region "Coordinator and queue", §5), or (per-request mode) the request's own terminal. Terminals start with `fork` + `execve` from an argv array, no shell: the user's text never reaches a command line. The child `setsid`s, `chdir`s to the repo root, stdin `/dev/null`; exec failures return through a close-on-exec pipe; children are reaped with `waitpid(WNOHANG)`.
+   - `LauncherSubmit()` writes `requests/<YYYY-MM-DD_HHMMSS>_<slug>/` (`view.png`, `view-marked.png`, `region-<n>.png`, `request.md`, `request.json`, format 3), then (coordinator mode) `state` = `queued` and, unless `requests/.coordinator/lock` is held (`flock`), starts the coordinator's terminal (a `/bin/sh` wrapper holds the lock around `claude`; region "Coordinator and queue", §5), or (per-request mode) the request's own terminal. Terminals start with `fork` + `execve` from an argv array, no shell: the user's text never reaches a command line. The child `setsid`s, `chdir`s to the repo root, stdin `/dev/null`; exec failures return through a close-on-exec pipe; children are reaped with `waitpid(WNOHANG)`.
    - Terminal syntax (title, working dir, exec flag) from `TERMINALS[]`; unknown terminals get `-e`. Title `monolith-claude: <slug> <HHMMSS>[-n]`, unique per request. `claude` is looked up in `PATH`, then `~/.local/bin`, passed absolute, with the permission flags (unless `MONOLITH_CLAUDE_SAFE`), `--model <tier's model>` and `MONOLITH_CLAUDE_ARGS` (a bare `--model` there is dropped with a warning). A detached helper moves and marks the window. On launch failure the bundle stays, the HUD names it and the log prints the command.
    - `LauncherUpdate()` polls open requests for `state` and `result.md` (HUD 20 s) and tests the coordinator's lock every 2 s; `LauncherLastDone()` gives the camera for **R**.
    - **Queue**: after `queued` only the coordinator writes `state`, through `tools/request-queue.sh` (claim with a fingerprint in `claim.txt`, question, finish, requeue, recovery after a crash, the background watcher `wait`); the game asks for a cancel with a `cancel` file. Test: `tools/test-coordinator.sh` (stub terminal + `tools/stub-coordinator.sh`, which applies the same scheduling rules).
@@ -115,7 +116,7 @@ R3D_BeginPro((R3D_View){ .camera = R3D_CameraFromRL(camera), .target = target })
                                // mesh, or unit cubes with `instanced on`) / R3D_DrawModelInstancedEx (per model file, slot materials,
                                // shadow flag); fog / AO bakes once per load
 R3D_End();
-// then on the same target: DesignerDrawOverlay (depth-tested), crosshair, HUD, regions, prompt box, settings panel
+// then on the same target: DesignerDrawOverlay (depth-tested), DesignerDrawVolumes, crosshair, HUD, regions, prompt box, settings panel
 ```
 
 ### 4.1 Scene runtime (`runtime/monolith_scene.h` + `runtime/monolith_scene.c`)

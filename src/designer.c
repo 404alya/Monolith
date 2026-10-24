@@ -495,6 +495,125 @@ oom:
 // #endregion
 
 // ======================================================================================
+// #region Volumes: what a volume holds
+// ======================================================================================
+
+void DesignerFreeVolume(DesignVolumeInfo *v)
+{
+    free(v->objects);
+    v->objects = NULL;
+    v->objectCount = 0;
+}
+
+static int CompareVolumeObject(const void *pa, const void *pb)
+{
+    const DesignVolumeObject *a = pa, *b = pb;
+    if (a->shareOfVolume != b->shareOfVolume) return a->shareOfVolume > b->shareOfVolume ? -1 : 1;
+    if (a->obj.kind != b->obj.kind) return (int)a->obj.kind - (int)b->obj.kind;
+    return a->obj.index - b->obj.index;
+}
+
+// Grid cells [*lo, *hi] of `n` cells over [min, min + n * step] that [a, b] overlaps
+static void CellRange(float a, float b, float min, float step, int n, int *lo, int *hi)
+{
+    *lo = (int)floorf((a - min) / step);
+    *hi = (int)ceilf((b - min) / step) - 1;
+    if (*lo < 0) *lo = 0;
+    if (*hi > n - 1) *hi = n - 1;
+}
+
+// Share of cell i (of `step` from `min`) that [a, b] covers; a flat [a, b] inside covers it all
+static float CellCover(float a, float b, float min, float step, int i)
+{
+    float c0 = min + i * step, c1 = c0 + step;
+    if (b <= a) return a >= c0 && a <= c1 ? 1.0f : 0.0f;
+    return fmaxf(fminf(b, c1) - fmaxf(a, c0), 0.0f) / step;
+}
+
+// Objects: every box and model whose world bounds overlap the volume (a positive overlap on
+// every axis; a flat object only needs to lie within the volume on its flat axis). Empty
+// share: a grid of at most VOLUME_SAMPLES cells; each cell sums the exact overlap of every
+// object's bounds with it, capped at the whole cell (models count by their AABB and objects
+// that overlap each other twice, so it errs toward solid; testing only cell centres was off
+// by 5 points for 2.2 m pillars in 2.3 m cells). Floor: a ray straight down
+// from the centre (DesignerPick: boxes that contain the centre are skipped).
+void DesignerAnalyzeVolume(BoundingBox v, float snap, DesignVolumeInfo *out)
+{
+    double t0 = GetTime();
+    memset(out, 0, sizeof(*out));
+    out->box = v;
+    out->snap = snap;
+    out->floor.obj = (MS_ObjRef){ MS_OBJ_NONE, -1 };
+    const float vmn[3] = { v.min.x, v.min.y, v.min.z }, vmx[3] = { v.max.x, v.max.y, v.max.z };
+    double vol = (double)(vmx[0] - vmn[0]) * (vmx[1] - vmn[1]) * (vmx[2] - vmn[2]);
+
+    int cap = 0;
+    for (int i = 0; i < scene->boxCount + scene->modelCount; i++) {
+        MS_ObjRef o = i < scene->boxCount ? (MS_ObjRef){ MS_OBJ_BOX, i } : (MS_ObjRef){ MS_OBJ_MODEL, i - scene->boxCount };
+        BoundingBox b = MS_ObjectBounds(scene, o);
+        const float bmn[3] = { b.min.x, b.min.y, b.min.z }, bmx[3] = { b.max.x, b.max.y, b.max.z };
+        double inVol = 1.0, ofObj = 1.0;
+        bool overlap = true, inside = true;
+        for (int a = 0; a < 3 && overlap; a++) {
+            float lo = fmaxf(vmn[a], bmn[a]), hi = fminf(vmx[a], bmx[a]);
+            float size = bmx[a] - bmn[a];
+            overlap = size > 0.0f ? hi > lo : hi >= lo;
+            inVol *= hi - lo;
+            if (size > 0.0f) ofObj *= (hi - lo) / size;
+            inside = inside && bmn[a] >= vmn[a] - 1e-4f && bmx[a] <= vmx[a] + 1e-4f;
+        }
+        if (!overlap) continue;
+        DesignVolumeObject *slot = MS_PUSH(out->objects, out->objectCount, cap);
+        if (!slot) break;   // out of memory: the list ends here
+        *slot = (DesignVolumeObject){ o, vol > 0.0 ? (float)(inVol / vol) : 0.0f, (float)ofObj, inside };
+    }
+    if (out->objectCount > 1) qsort(out->objects, out->objectCount, sizeof(out->objects[0]), CompareVolumeObject);
+
+    // Grid: cubic cells of the size that gives VOLUME_SAMPLES cells, fewer when an axis is thin
+    float cell = cbrtf((float)(vol / VOLUME_SAMPLES));
+    int total = 1;
+    for (int a = 0; a < 3; a++) {
+        float n = cell > 0.0f ? floorf((vmx[a] - vmn[a]) / cell) : 1.0f;
+        out->grid[a] = n < 1.0f ? 1 : n > VOLUME_SAMPLES ? VOLUME_SAMPLES : (int)n;
+        total *= out->grid[a];
+    }
+    while (total > VOLUME_SAMPLES) {     // rounding: drop a layer off the axis with the most cells
+        int a = out->grid[0] >= out->grid[1] && out->grid[0] >= out->grid[2] ? 0 : out->grid[1] >= out->grid[2] ? 1 : 2;
+        total = total / out->grid[a] * (out->grid[a] - 1);
+        out->grid[a]--;
+    }
+    float *solid = calloc(total, sizeof(float));
+    if (solid) {
+        float step[3];
+        for (int a = 0; a < 3; a++) step[a] = (vmx[a] - vmn[a]) / out->grid[a];
+        for (int k = 0; k < out->objectCount; k++) {
+            BoundingBox b = MS_ObjectBounds(scene, out->objects[k].obj);
+            const float bmn[3] = { b.min.x, b.min.y, b.min.z }, bmx[3] = { b.max.x, b.max.y, b.max.z };
+            int lo[3], hi[3];
+            for (int a = 0; a < 3; a++) CellRange(bmn[a], bmx[a], vmn[a], step[a], out->grid[a], &lo[a], &hi[a]);
+            for (int z = lo[2]; z <= hi[2]; z++) {
+                float cz = CellCover(bmn[2], bmx[2], vmn[2], step[2], z);
+                for (int y = lo[1]; y <= hi[1]; y++) {
+                    float cyz = cz * CellCover(bmn[1], bmx[1], vmn[1], step[1], y);
+                    for (int x = lo[0]; x <= hi[0]; x++)
+                        solid[(z * out->grid[1] + y) * out->grid[0] + x] += cyz * CellCover(bmn[0], bmx[0], vmn[0], step[0], x);
+                }
+            }
+        }
+        double filled = 0.0;
+        for (int i = 0; i < total; i++) filled += fminf(solid[i], 1.0f);
+        out->empty = (float)(1.0 - filled / total);
+        free(solid);
+    } else out->empty = NAN;    // out of memory: unknown ("null" in the bundle)
+
+    Vector3 c = Vector3Scale(Vector3Add(v.min, v.max), 0.5f);
+    out->floor = DesignerPick(c, (Vector3){ 0.0f, -1.0f, 0.0f });
+    out->ms = (GetTime() - t0) * 1000.0;
+}
+
+// #endregion
+
+// ======================================================================================
 // #region Selection
 // ======================================================================================
 
@@ -1034,7 +1153,230 @@ static DesignerAction PromptInput(Designer *d)
 
 bool DesignerCapturesInput(const Designer *d)
 {
-    return d->promptOpen || d->snipping || d->freezeFrames > 0;
+    return d->promptOpen || d->snipping || (d->volumeMode && d->volumeStep == VOLUME_STEP_HEIGHT) || d->freezeFrames > 0;
+}
+
+bool DesignerTakesArrows(const Designer *d)
+{
+    return d->volumeMode;
+}
+
+// #endregion
+
+// ======================================================================================
+// #region Volume mode
+// ======================================================================================
+// V in spectator mode. Click a surface for the first corner, a second one for the opposite
+// footprint corner, then set the height (mouse up / down or the wheel; the camera is
+// frozen meanwhile) and click again. Points snap to a grid of d->volumeSnap metres on the
+// axes along the clicked face (the face's own plane stays exact); Ctrl turns snapping off.
+// Arrows / PgUp / PgDn move the active volume by one step, with Alt they grow the face on
+// that side, with Alt+Shift they shrink it. Volumes stay until deleted (Delete, Shift+Delete).
+
+static const float VOLUME_SNAPS[] = { 0.1f, 0.25f, 0.5f, 1.0f, 2.0f };
+#define VOLUME_DEFAULT_HEIGHT 2.0f  // metres, when both corner clicks are at the same height
+
+static float VolumeSnap(const Designer *d) { return d->volumeSnap > 0.0f ? d->volumeSnap : VOLUME_SNAP_DEFAULT; }
+
+static float SnapTo(float x, float step) { return roundf(x / step) * step; }
+
+// The crosshair hit point, snapped on the axes along the hit face (none with Ctrl)
+static Vector3 VolumePoint(const Designer *d)
+{
+    Vector3 p = d->hit.point, n = d->hit.normal;
+    if (IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL)) return p;
+    float s = VolumeSnap(d);
+    if (fabsf(n.x) < 0.9f) p.x = SnapTo(p.x, s);
+    if (fabsf(n.y) < 0.9f) p.y = SnapTo(p.y, s);
+    if (fabsf(n.z) < 0.9f) p.z = SnapTo(p.z, s);
+    return p;
+}
+
+// The volume being made, from the clicks so far: after the first click a flat footprint up
+// to the crosshair, after the second one the footprint with its (snapped) height
+static BoundingBox VolumeDraft(const Designer *d)
+{
+    bool second = d->volumeStep == VOLUME_STEP_SECOND;
+    Vector3 a = d->volA, b = second ? VolumePoint(d) : d->volB;
+    float base = second ? fminf(a.y, b.y) : d->volBase;
+    float h = 0.0f;
+    if (!second) {
+        float s = (IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL)) ? VOLUME_MIN_SIZE : VolumeSnap(d);
+        h = fmaxf(s == VOLUME_MIN_SIZE ? d->volHeight : SnapTo(d->volHeight, s), s);
+    }
+    return (BoundingBox){ { fminf(a.x, b.x), base, fminf(a.z, b.z) }, { fmaxf(a.x, b.x), base + h, fmaxf(a.z, b.z) } };
+}
+
+bool DesignerAddVolume(Designer *d, BoundingBox box)
+{
+    Vector3 a = box.min, b = box.max;
+    if (!isfinite(a.x) || !isfinite(a.y) || !isfinite(a.z) || !isfinite(b.x) || !isfinite(b.y) || !isfinite(b.z)) return false;
+    BoundingBox v = { Vector3Min(a, b), Vector3Max(a, b) };
+    if (v.max.x - v.min.x < VOLUME_MIN_SIZE) v.max.x = v.min.x + VOLUME_MIN_SIZE;
+    if (v.max.y - v.min.y < VOLUME_MIN_SIZE) v.max.y = v.min.y + VOLUME_MIN_SIZE;
+    if (v.max.z - v.min.z < VOLUME_MIN_SIZE) v.max.z = v.min.z + VOLUME_MIN_SIZE;
+    DesignVolume *slot = MS_PUSH(d->volumes, d->volumeCount, d->volumeCap);
+    if (!slot) {
+        DesignerMessage(d, true, "out of memory: volume not added");
+        return false;
+    }
+    slot->box = v;
+    d->activeVolume = d->volumeCount - 1;
+    return true;
+}
+
+// Shift+V: the selection's bounds (or the crosshair object's) as a new volume
+static void VolumeFromSelection(Designer *d)
+{
+    BoundingBox b;
+    if (d->selectedCount > 0) {
+        b = MS_ObjectBounds(scene, d->selected[0]);
+        for (int i = 1; i < d->selectedCount; i++) {
+            BoundingBox o = MS_ObjectBounds(scene, d->selected[i]);
+            b.min = Vector3Min(b.min, o.min);
+            b.max = Vector3Max(b.max, o.max);
+        }
+    } else if (!ObjIsNone(d->hit.obj)) b = MS_ObjectBounds(scene, d->hit.obj);
+    else {
+        DesignerMessage(d, true, "nothing selected and nothing under the crosshair: no volume");
+        return;
+    }
+    if (DesignerAddVolume(d, b))
+        DesignerMessage(d, false, TextFormat("V%d from the %s bounds", d->volumeCount,
+                        d->selectedCount > 0 ? "selection's" : "crosshair object's"));
+}
+
+static void VolumeCancel(Designer *d)
+{
+    // The height step froze the camera: let the mouse settle before it looks around again
+    if (d->volumeStep == VOLUME_STEP_HEIGHT) d->freezeFrames = 2;
+    d->volumeStep = VOLUME_STEP_FIRST;
+}
+
+static void VolumeModeEnd(Designer *d)
+{
+    VolumeCancel(d);
+    d->volumeMode = false;
+}
+
+// Arrows / PgUp / PgDn on the active volume. The horizontal arrows follow the world axis
+// nearest to the camera's forward / right, so "up" pushes the volume away from the eye.
+static void VolumeEdit(Designer *d)
+{
+    if (d->activeVolume < 0 || d->activeVolume >= d->volumeCount) return;
+    static const int KEYS[6] = { KEY_UP, KEY_DOWN, KEY_RIGHT, KEY_LEFT, KEY_PAGE_UP, KEY_PAGE_DOWN };
+    Vector3 f = fabsf(d->viewFwd.x) > fabsf(d->viewFwd.z) ? (Vector3){ d->viewFwd.x > 0 ? 1.0f : -1.0f, 0, 0 }
+                                                         : (Vector3){ 0, 0, d->viewFwd.z >= 0 ? 1.0f : -1.0f };
+    Vector3 right = { -f.z, 0.0f, f.x };    // as the spectator's right = (-cos yaw, 0, sin yaw)
+    const Vector3 dirs[6] = { f, Vector3Negate(f), right, Vector3Negate(right), { 0, 1, 0 }, { 0, -1, 0 } };
+    bool alt = IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT);
+    bool shift = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+    float s = VolumeSnap(d);
+    BoundingBox *v = &d->volumes[d->activeVolume].box;
+    for (int k = 0; k < 6; k++) {
+        if (!KeyRepeat(KEYS[k])) continue;
+        Vector3 dir = dirs[k];
+        float *mn[3] = { &v->min.x, &v->min.y, &v->min.z }, *mx[3] = { &v->max.x, &v->max.y, &v->max.z };
+        int a = dir.x != 0.0f ? 0 : dir.y != 0.0f ? 1 : 2;
+        float sign = dir.x + dir.y + dir.z;
+        if (!alt) {
+            *mn[a] += sign * s;
+            *mx[a] += sign * s;
+        } else if (!shift) {
+            if (sign > 0) *mx[a] += s;
+            else *mn[a] -= s;
+        } else {
+            // Shrink, but never thinner than one step (or VOLUME_MIN_SIZE when already thinner)
+            float keep = fminf(s, *mx[a] - *mn[a]);
+            if (sign > 0) *mx[a] = fmaxf(*mx[a] - s, *mn[a] + keep);
+            else *mn[a] = fminf(*mn[a] + s, *mx[a] - keep);
+        }
+    }
+}
+
+static DesignerAction VolumeInput(Designer *d)
+{
+    bool shift = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+    bool enter = IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER);
+
+    if (d->volumeStep != VOLUME_STEP_FIRST) {
+        if (IsKeyPressed(KEY_ESCAPE) || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) {
+            VolumeCancel(d);
+            return DESIGNER_NONE;
+        }
+        if (d->volumeStep == VOLUME_STEP_SECOND) {
+            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                if (ObjIsNone(d->hit.obj)) { DesignerMessage(d, true, "no surface under the crosshair"); return DESIGNER_NONE; }
+                d->volB = VolumePoint(d);
+                d->volBase = fminf(d->volA.y, d->volB.y);
+                float dy = fabsf(d->volA.y - d->volB.y);
+                d->volHeight = dy >= VolumeSnap(d) ? dy : VOLUME_DEFAULT_HEIGHT;
+                d->volumeStep = VOLUME_STEP_HEIGHT;
+            }
+            return DESIGNER_NONE;
+        }
+        // Height: the top face follows the mouse at the angle the look would turn, so it
+        // moves about as far on screen as the mouse did
+        BoundingBox draft = VolumeDraft(d);
+        Vector3 top = { (draft.min.x + draft.max.x) * 0.5f, draft.max.y, (draft.min.z + draft.max.z) * 0.5f };
+        float dist = fmaxf(Vector3Distance(d->eye, top), 1.0f);
+        d->volHeight -= GetMouseDelta().y * 0.0022f * dist;
+        float wheel = GetMouseWheelMove();
+        if (wheel != 0.0f) d->volHeight = SnapTo(d->volHeight, VolumeSnap(d)) + wheel * VolumeSnap(d) * (shift ? 4.0f : 1.0f);
+        d->volHeight = fmaxf(d->volHeight, VOLUME_MIN_SIZE);
+        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) || enter) {
+            if (DesignerAddVolume(d, VolumeDraft(d))) {
+                BoundingBox v = d->volumes[d->activeVolume].box;
+                DesignerMessage(d, false, TextFormat("V%d: %.2f x %.2f x %.2f m", d->volumeCount,
+                                v.max.x - v.min.x, v.max.y - v.min.y, v.max.z - v.min.z));
+            }
+            VolumeCancel(d);
+        }
+        return DESIGNER_NONE;
+    }
+
+    if (IsKeyPressed(KEY_ESCAPE) || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) {
+        VolumeModeEnd(d);
+        return DESIGNER_NONE;
+    }
+    if (enter) {
+        DesignerOpenPrompt(d, NULL);
+        return DESIGNER_NONE;
+    }
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        if (ObjIsNone(d->hit.obj)) DesignerMessage(d, true, "no surface under the crosshair");
+        else {
+            d->volA = VolumePoint(d);
+            d->volumeStep = VOLUME_STEP_SECOND;
+        }
+        return DESIGNER_NONE;
+    }
+    if (IsKeyPressed(KEY_N)) {
+        float s = VolumeSnap(d);
+        int n = (int)(sizeof(VOLUME_SNAPS) / sizeof(VOLUME_SNAPS[0])), k = 0;
+        while (k < n && VOLUME_SNAPS[k] != s) k++;
+        d->volumeSnap = VOLUME_SNAPS[(k + 1) % n];
+        DesignerMessage(d, false, TextFormat("volume snap %g m", d->volumeSnap));
+    }
+    if (d->volumeCount > 0 && (IsKeyPressed(KEY_LEFT_BRACKET) || IsKeyPressed(KEY_RIGHT_BRACKET))) {
+        int step = IsKeyPressed(KEY_RIGHT_BRACKET) ? 1 : -1;
+        d->activeVolume = ((d->activeVolume < 0 ? 0 : d->activeVolume) + step + d->volumeCount) % d->volumeCount;
+    }
+    if (IsKeyPressed(KEY_DELETE) && d->volumeCount > 0) {
+        if (shift) {
+            DesignerMessage(d, false, TextFormat("%d volume%s cleared", d->volumeCount, d->volumeCount == 1 ? "" : "s"));
+            d->volumeCount = 0;
+            d->activeVolume = -1;
+        } else if (d->activeVolume >= 0 && d->activeVolume < d->volumeCount) {
+            DesignerMessage(d, false, TextFormat("V%d removed", d->activeVolume + 1));
+            memmove(&d->volumes[d->activeVolume], &d->volumes[d->activeVolume + 1],
+                    sizeof(DesignVolume) * (d->volumeCount - d->activeVolume - 1));
+            d->volumeCount--;
+            if (d->activeVolume >= d->volumeCount) d->activeVolume = d->volumeCount - 1;
+        }
+    }
+    VolumeEdit(d);
+    return DESIGNER_NONE;
 }
 
 // #endregion
@@ -1129,7 +1471,9 @@ static DesignerAction SnipInput(Designer *d)
 
 void DesignerPickCamera(Designer *d, Camera3D cam)
 {
-    d->hit = DesignerPick(cam.position, Vector3Normalize(Vector3Subtract(cam.target, cam.position)));
+    d->eye = cam.position;
+    d->viewFwd = Vector3Normalize(Vector3Subtract(cam.target, cam.position));
+    d->hit = DesignerPick(cam.position, d->viewFwd);
 }
 
 DesignerHit DesignerPickAt(Camera3D cam, int w, int h, float x, float y)
@@ -1147,6 +1491,24 @@ DesignerAction DesignerUpdate(Designer *d, float dt)
     if (d->promptOpen) return PromptInput(d);
     if (d->snipping) return SnipInput(d);
     if (frozen) return DESIGNER_NONE;   // the frame(s) right after the box closed
+
+    if (IsKeyPressed(KEY_V)) {
+        if (IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT)) VolumeFromSelection(d);
+        else if (d->volumeMode) VolumeModeEnd(d);
+        else {
+            d->volumeMode = true;
+            d->volumeStep = VOLUME_STEP_FIRST;
+        }
+        return DESIGNER_NONE;
+    }
+    if (d->volumeMode) {
+        if (d->volumeStep == VOLUME_STEP_FIRST && IsKeyPressed(KEY_C)) {
+            VolumeModeEnd(d);
+            DesignerSnipBegin(d);
+            return DESIGNER_NONE;
+        }
+        return VolumeInput(d);
+    }
 
     if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) {
         DesignerOpenPrompt(d, NULL);
@@ -1184,6 +1546,8 @@ void DesignerFreeRequest(DesignRequest *req)
     free(req->selected);
     for (int i = 0; i < req->regionCount; i++) DesignerFreeRegion(&req->regions[i]);
     free(req->regions);
+    for (int i = 0; i < req->volumeCount; i++) DesignerFreeVolume(&req->volumes[i]);
+    free(req->volumes);
     memset(req, 0, sizeof(*req));
 }
 
@@ -1194,7 +1558,8 @@ bool DesignerBuildRequest(const Designer *d, Camera3D cam, float yaw, float pitc
     req->prompt = MS_StrNDup(d->prompt ? d->prompt : "", d->promptLen);
     req->selected = malloc(sizeof(MS_ObjRef) * (d->selectedCount > 0 ? d->selectedCount : 1));
     req->regions = calloc(d->regionCount > 0 ? d->regionCount : 1, sizeof(DesignRegionInfo));
-    if (!req->prompt || !req->selected || !req->regions) {
+    req->volumes = calloc(d->volumeCount > 0 ? d->volumeCount : 1, sizeof(DesignVolumeInfo));
+    if (!req->prompt || !req->selected || !req->regions || !req->volumes) {
         DesignerFreeRequest(req);
         return false;
     }
@@ -1219,6 +1584,15 @@ bool DesignerBuildRequest(const Designer *d, Camera3D cam, float yaw, float pitc
                  i + 1, r->rect.width, r->rect.height, r->gridW, r->gridH, objects, objects == 1 ? "" : "s",
                  100.0f * r->sky, r->ms, scene->boxCount, scene->modelCount);
     }
+    // Volumes: likewise
+    req->volumeCount = d->volumeCount;
+    for (int i = 0; i < d->volumeCount; i++) {
+        DesignVolumeInfo *v = &req->volumes[i];
+        DesignerAnalyzeVolume(d->volumes[i].box, VolumeSnap(d), v);
+        TraceLog(LOG_INFO, "monolith: volume %d: %.2f x %.2f x %.2f m, %d object%s, empty %.0f%%, %d cells, %.1f ms",
+                 i + 1, v->box.max.x - v->box.min.x, v->box.max.y - v->box.min.y, v->box.max.z - v->box.min.z,
+                 v->objectCount, v->objectCount == 1 ? "" : "s", 100.0f * v->empty, v->grid[0] * v->grid[1] * v->grid[2], v->ms);
+    }
     return true;
 }
 
@@ -1241,6 +1615,7 @@ static struct {
 #define SEL_COLOR   (Color){ 255, 160, 40, 255 }
 #define HIT_COLOR   (Color){ 90, 220, 255, 255 }
 #define REGION_COLOR (Color){ 240, 90, 220, 255 }
+#define VOLUME_COLOR (Color){ 70, 235, 170, 255 }
 
 // Distance from the eye to the nearest point of a box (0 inside)
 static float BoxDistance(BoundingBox b, Vector3 p)
@@ -1335,19 +1710,17 @@ static void DrawObjTint(MS_ObjRef o, Vector3 eye, Color col)
     DrawCubeV(c, s, col);
 }
 
-void DesignerDrawOverlay(const Designer *d, Camera3D cam, bool hover)
+// BeginMode3D for overlays drawn on top of an R3D frame, depth-tested against its depth.
+// R3D_End copies its depth buffer into the target, and BeginMode3D builds the same
+// projection (same fovy, aspect and rlGetCullDistanceNear/Far), so the overlay can be
+// depth-tested against the scene. Shift the overlay's depth 4 steps of the 24-bit depth
+// buffer toward the camera (z_ndc -= bias): a constant step in depth-buffer units is
+// the precision the scene's depth has at every distance, so lines on faces don't
+// z-fight. With the 1 cm near plane one step is z^2 / 168 km, i.e. 0.6 mm at 10 m,
+// 13 cm at 150 m; more bias would let the overlay show through nearby walls far away.
+static void BeginOverlay3D(Camera3D cam)
 {
-    if (d->selectedCount == 0 && ObjIsNone(d->hit.obj)) return;
-    Vector3 eye = cam.position;
-
     BeginMode3D(cam);
-    // R3D_End copies its depth buffer into the target, and BeginMode3D builds the same
-    // projection (same fovy, aspect and rlGetCullDistanceNear/Far), so the overlay can be
-    // depth-tested against the scene. Shift the overlay's depth 4 steps of the 24-bit depth
-    // buffer toward the camera (z_ndc -= bias): a constant step in depth-buffer units is
-    // the precision the scene's depth has at every distance, so lines on faces don't
-    // z-fight. With the 1 cm near plane one step is z^2 / 168 km, i.e. 0.6 mm at 10 m,
-    // 13 cm at 150 m; more bias would let the overlay show through nearby walls far away.
     Matrix proj = rlGetMatrixProjection();
     const float bias = 4.0f / 16777216.0f * 2.0f;
     proj.m2 -= bias * proj.m3;
@@ -1355,6 +1728,23 @@ void DesignerDrawOverlay(const Designer *d, Camera3D cam, bool hover)
     proj.m10 -= bias * proj.m11;
     proj.m14 -= bias * proj.m15;
     rlSetMatrixProjection(proj);
+}
+
+// Back to what R3D_End leaves and raylib's 2D drawing expects
+static void EndOverlay3D(void)
+{
+    rlDrawRenderBatchActive();
+    rlEnableDepthMask();
+    rlDisableDepthTest();
+    EndMode3D();
+}
+
+void DesignerDrawOverlay(const Designer *d, Camera3D cam, bool hover)
+{
+    if (d->selectedCount == 0 && ObjIsNone(d->hit.obj)) return;
+    Vector3 eye = cam.position;
+
+    BeginOverlay3D(cam);
 
     // Selected objects: a faint always-on-top outline, so selected objects behind walls
     // stay findable...
@@ -1377,12 +1767,97 @@ void DesignerDrawOverlay(const Designer *d, Camera3D cam, bool hover)
         if (hover && SelectionIndexOf(d, d->hit.obj) < 0) DrawObjWires(d->hit.obj, eye, (Color){ 255, 255, 255, 110 });
         DrawHitMarker(d->hit, eye, HIT_COLOR);
     }
-    rlDrawRenderBatchActive();
+    EndOverlay3D();
+}
 
-    // Back to what R3D_End leaves and raylib's 2D drawing expects
-    rlEnableDepthMask();
+// Volume label: a tab with the text, centred above screen point p (kept on screen)
+static void DrawVolumeTab(Vector2 p, const char *text, int w, int h)
+{
+    int tw = MeasureText(text, 16) + 8, th = 20;
+    int lx = (int)p.x - tw / 2, ly = (int)p.y - th - 4;
+    if (lx + tw > w) lx = w - tw;
+    if (lx < 0) lx = 0;
+    if (ly + th > h) ly = h - th;
+    if (ly < 0) ly = 0;
+    DrawRectangle(lx - 1, ly - 1, tw + 2, th + 2, (Color){ 0, 0, 0, 170 });
+    DrawRectangle(lx, ly, tw, th, VOLUME_COLOR);
+    DrawText(text, lx + 4, ly + 2, 16, (Color){ 10, 24, 18, 255 });
+}
+
+// The tab of volume `v` at the middle of its top face, if that is in front of the camera
+static void VolumeTab(BoundingBox v, const char *text, Camera3D cam, int w, int h)
+{
+    Vector3 top = { (v.min.x + v.max.x) * 0.5f, v.max.y, (v.min.z + v.max.z) * 0.5f };
+    Vector3 fwd = Vector3Subtract(cam.target, cam.position);
+    if (Vector3DotProduct(Vector3Subtract(top, cam.position), fwd) <= 0.0f) return;
+    DrawVolumeTab(GetWorldToScreenEx(top, cam, w, h), text, w, h);
+}
+
+void DesignerDrawVolumes(const Designer *d, Camera3D cam, int w, int h, bool marked)
+{
+    bool live = !marked && d->volumeMode;
+    bool making = live && d->volumeStep != VOLUME_STEP_FIRST;
+    bool aim = live && d->volumeStep != VOLUME_STEP_HEIGHT && !ObjIsNone(d->hit.obj);
+    if (d->volumeCount == 0 && !live) return;
+    BoundingBox draft = making ? VolumeDraft(d) : (BoundingBox){ 0 };
+    // The active volume stands out only while it can be edited
+    int active = live ? d->activeVolume : -1;
+
+    BeginOverlay3D(cam);
+    // Volumes are often behind walls (that is what they are for): a faint outline on top of
+    // everything first, then, depth-tested, translucent faces and the strong outline
     rlDisableDepthTest();
-    EndMode3D();
+    for (int i = 0; i < d->volumeCount; i++) DrawBoundingBox(d->volumes[i].box, Fade(VOLUME_COLOR, i == active ? 0.5f : 0.3f));
+    if (making) DrawBoundingBox(draft, Fade(VOLUME_COLOR, 0.5f));
+    rlDrawRenderBatchActive();
+    rlEnableDepthTest();
+    rlDisableDepthMask();
+    for (int i = 0; i < d->volumeCount; i++) {
+        BoundingBox v = d->volumes[i].box;
+        DrawCubeV(Vector3Scale(Vector3Add(v.min, v.max), 0.5f), Vector3Subtract(v.max, v.min), Fade(VOLUME_COLOR, i == active ? 0.12f : 0.07f));
+    }
+    if (making) DrawCubeV(Vector3Scale(Vector3Add(draft.min, draft.max), 0.5f), Vector3Subtract(draft.max, draft.min), Fade(VOLUME_COLOR, 0.12f));
+    rlDrawRenderBatchActive();
+    for (int i = 0; i < d->volumeCount; i++)
+        DrawBoundingBox(d->volumes[i].box, Fade(VOLUME_COLOR, active < 0 || i == active ? 1.0f : 0.6f));
+    if (making) DrawBoundingBox(draft, VOLUME_COLOR);
+    if (aim) {
+        // Where a click would put the corner (snapped)
+        Vector3 p = VolumePoint(d);
+        float s = 0.012f * Vector3Distance(cam.position, p) + 0.03f;
+        DrawLine3D((Vector3){ p.x - s, p.y, p.z }, (Vector3){ p.x + s, p.y, p.z }, VOLUME_COLOR);
+        DrawLine3D((Vector3){ p.x, p.y - s, p.z }, (Vector3){ p.x, p.y + s, p.z }, VOLUME_COLOR);
+        DrawLine3D((Vector3){ p.x, p.y, p.z - s }, (Vector3){ p.x, p.y, p.z + s }, VOLUME_COLOR);
+    }
+    EndOverlay3D();
+
+    char text[96];
+    for (int i = 0; i < d->volumeCount; i++) {
+        BoundingBox v = d->volumes[i].box;
+        if (i == active) snprintf(text, sizeof(text), "V%d   %.2f x %.2f x %.2f m", i + 1, v.max.x - v.min.x, v.max.y - v.min.y, v.max.z - v.min.z);
+        else snprintf(text, sizeof(text), "V%d", i + 1);
+        VolumeTab(v, text, cam, w, h);
+    }
+    if (making) {
+        snprintf(text, sizeof(text), "V%d   %.2f x %.2f x %.2f m", d->volumeCount + 1, draft.max.x - draft.min.x,
+                 draft.max.y - draft.min.y, draft.max.z - draft.min.z);
+        VolumeTab(draft, text, cam, w, h);
+    }
+
+    if (live && !d->promptOpen) {
+        const char *help;
+        if (d->volumeStep == VOLUME_STEP_SECOND)
+            help = "VOLUME   LMB: opposite footprint corner  |  CTRL: no snap  |  RMB / ESC: cancel";
+        else if (d->volumeStep == VOLUME_STEP_HEIGHT)
+            help = "VOLUME   mouse up / down or wheel: height (SHIFT x4)  |  CTRL: no snap  |  LMB / ENTER: done  |  RMB / ESC: cancel";
+        else
+            help = TextFormat("VOLUME   LMB: first corner  |  [ ]: active  |  arrows, PGUP / PGDN: move (ALT grow, ALT+SHIFT shrink)  |  "
+                              "N: snap %g m  |  DEL / SHIFT+DEL: remove / clear  |  ENTER: request  |  V / ESC: leave   (%d volume%s)",
+                              VolumeSnap(d), d->volumeCount, d->volumeCount == 1 ? "" : "s");
+        int tw = MeasureText(help, 16);
+        DrawRectangle((w - tw) / 2 - 10, h - 64, tw + 20, 26, (Color){ 16, 16, 18, 200 });
+        DrawText(help, (w - tw) / 2, h - 59, 16, (Color){ 240, 238, 232, 230 });
+    }
 }
 
 void DesignerDrawCrosshair(int w, int h)
@@ -1472,6 +1947,18 @@ int DesignerDrawHud(const Designer *d, int x, int y)
         }
     } else {
         HudText("crosshair: sky", x, y, dim);
+        y += 20;
+    }
+
+    if (d->volumeCount > 0 || d->volumeMode) {
+        char text[256];
+        int n = snprintf(text, sizeof(text), "volumes: %d", d->volumeCount);
+        if (d->activeVolume >= 0 && d->activeVolume < d->volumeCount) {
+            BoundingBox v = d->volumes[d->activeVolume].box;
+            snprintf(text + n, sizeof(text) - n, "  |  V%d min %.2f %.2f %.2f  max %.2f %.2f %.2f%s", d->activeVolume + 1,
+                     v.min.x, v.min.y, v.min.z, v.max.x, v.max.y, v.max.z, d->volumeMode ? "  (arrows edit it)" : "");
+        }
+        HudText(text, x, y, Fade(VOLUME_COLOR, 0.95f));
         y += 20;
     }
     return y - y0;
@@ -1581,8 +2068,10 @@ void DesignerDrawPrompt(Designer *d, int w, int h)
         DrawRectangleLinesEx(box, 1.0f, (Color){ 230, 230, 230, 90 });
 
         int tx = (int)box.x + PROMPT_PAD, ty = (int)box.y + PROMPT_PAD;
-        char regions[32] = "";
-        if (d->regionCount > 0) snprintf(regions, sizeof(regions), " + %d region%s", d->regionCount, d->regionCount == 1 ? "" : "s");
+        char regions[64] = "";
+        int rn = 0;
+        if (d->regionCount > 0) rn = snprintf(regions, sizeof(regions), " + %d region%s", d->regionCount, d->regionCount == 1 ? "" : "s");
+        if (d->volumeCount > 0) snprintf(regions + rn, sizeof(regions) - rn, " + %d volume%s", d->volumeCount, d->volumeCount == 1 ? "" : "s");
         DrawText(TextFormat("Request for Claude   (%d selected%s%s)   Enter send  |  Shift+Enter new line  |  Ctrl+V paste  |  Esc %s",
                  d->selectedCount, !ObjIsNone(d->hit.obj) ? " + crosshair point" : "", regions,
                  d->snipping ? "back to snip" : "cancel"), tx, ty, 16, (Color){ 230, 230, 230, 140 });
@@ -1594,8 +2083,8 @@ void DesignerDrawPrompt(Designer *d, int w, int h)
         Font font = GetFontDefault();
         Color ink = { 240, 238, 232, 255 };
         if (d->promptLen == 0) {
-            DrawTextEx(font, d->regionCount > 0
-                       ? "Describe the change. The crosshair point, the selected boxes and the screen regions are sent along."
+            DrawTextEx(font, d->regionCount > 0 || d->volumeCount > 0
+                       ? "Describe the change. The crosshair point, the selected boxes, the screen regions and the volumes are sent along."
                        : "Describe the change. The crosshair point and the selected boxes are sent along.",
                        (Vector2){ (float)tx, (float)ty }, PROMPT_FONT, PROMPT_SPACING, (Color){ 240, 238, 232, 90 });
         }
@@ -1636,10 +2125,13 @@ void DesignerFree(Designer *d)
     free(d->keys);
     for (int k = 0; k < 3; k++) free(d->selPos[k]);
     free(d->regions);
+    free(d->volumes);
     free(d->prompt);
     d->selected = NULL;
     d->keys = NULL;
     d->regions = NULL;
+    d->volumes = NULL;
+    d->volumeCount = d->volumeCap = 0;
     d->prompt = NULL;
     d->selectedCap = d->keyCap = d->regionCount = d->regionCap = d->promptLen = d->promptCap = d->cursor = 0;
     for (int k = 0; k < 3; k++) { d->selPos[k] = NULL; d->selPosCap[k] = 0; }

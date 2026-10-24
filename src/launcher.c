@@ -445,9 +445,10 @@ static const char *const COLLIDE_NAMES[] = { "aabb", "none", "box" };
 //              finding / importing models
 //           4. a look / engine word (shader, material, texture, light, fog, sky, sun, ...)
 //           5. a large-design word (build, design, create, district, city, building, ...)
-//           6. long text: > 280 bytes or 3+ sentences; or more than 2 screen regions
+//           6. long text: > 280 bytes or 3+ sentences; or more than 2 screen regions +
+//              volumes together
 //   fast    7. at most 120 bytes, one sentence, a target (crosshair hit, a selection of at
-//              most 100 objects, or exactly one region), a local edit word (move, raise,
+//              most 100 objects, or exactly one region or volume and not both), a local edit word (move, raise,
 //              taller, delete, rename, mirror, ..., or "make"/"set" + a number), and no
 //              creation word (add, put, place, insert, open, replace, row, ...)
 //   default 8. everything else
@@ -585,21 +586,26 @@ static ModelTier Classify(const ModelQuery *q, const Words *wordsIn, char *reaso
     if ((k = FindKeyword(&W, KW_DESIGN))) { snprintf(reason, reasonSize, "design word \"%s\"", k); return MODEL_TIER_HEAVY; }
     if (bytes > HEAVY_MIN_BYTES) { snprintf(reason, reasonSize, "long prompt (%d bytes)", bytes); return MODEL_TIER_HEAVY; }
     if (sentences >= 3) { snprintf(reason, reasonSize, "%d sentences", sentences); return MODEL_TIER_HEAVY; }
-    if (q->regions > 2) { snprintf(reason, reasonSize, "%d screen regions", q->regions); return MODEL_TIER_HEAVY; }
+    if (q->regions + q->volumes > 2) {
+        if (q->volumes == 0) snprintf(reason, reasonSize, "%d screen regions", q->regions);
+        else if (q->regions == 0) snprintf(reason, reasonSize, "%d volumes", q->volumes);
+        else snprintf(reason, reasonSize, "%d screen regions + %d volumes", q->regions, q->volumes);
+        return MODEL_TIER_HEAVY;
+    }
 
     const char *edit = FindKeyword(&W, KW_EDIT);
     for (int i = 0; !edit && i + 1 < W.n; i++)
         if ((strcmp(W.w[i], "make") == 0 || strcmp(W.w[i], "set") == 0))
             for (int j = i + 1; j < W.n && j <= i + 4 && !edit; j++) if (IsNumber(W.w[j])) edit = "make/set + number";
     const char *create = FindKeyword(&W, KW_CREATE);
-    bool target = q->hit || (q->selected > 0 && q->selected <= FAST_MAX_SELECTION) || q->regions == 1;
+    bool target = q->hit || (q->selected > 0 && q->selected <= FAST_MAX_SELECTION) || q->regions + q->volumes == 1;
     if (q->selected > FAST_MAX_SELECTION) target = false;
 
     if (!edit) snprintf(reason, reasonSize, "no local edit word");
     else if (create) snprintf(reason, reasonSize, "creation word \"%s\"", create);
     else if (bytes > FAST_MAX_BYTES) snprintf(reason, reasonSize, "edit \"%s\" but %d bytes", edit, bytes);
     else if (sentences > 1) snprintf(reason, reasonSize, "edit \"%s\" but %d sentences", edit, sentences);
-    else if (!target) snprintf(reason, reasonSize, "edit \"%s\" but no small target (hit/selection/1 region)", edit);
+    else if (!target) snprintf(reason, reasonSize, "edit \"%s\" but no small target (hit/selection/1 region or volume)", edit);
     else {
         snprintf(reason, reasonSize, "short local edit \"%s\" with a target", edit);
         return MODEL_TIER_FAST;
@@ -1036,6 +1042,156 @@ static void WriteRegionsMd(FILE *f, const Bundle *B)
     }
 }
 
+#define VOLUME_JSON_OBJECTS 10000   // objects per volume in request.json (sanity cap; the
+                                    // lines[] and groups[] summaries always cover all of them)
+
+// A volume's objects summed per map line or per group (heap, free it): largest summed
+// shareOfVolume first
+typedef struct { int key; MS_ObjRef first; int objects, inside; float share; } VolumeTally;
+
+static int CompareTallyKey(const void *pa, const void *pb)
+{
+    const VolumeTally *a = pa, *b = pb;
+    return a->key - b->key;
+}
+
+static int CompareTallyShare(const void *pa, const void *pb)
+{
+    const VolumeTally *a = pa, *b = pb;
+    if (a->share != b->share) return a->share > b->share ? -1 : 1;
+    return a->key - b->key;
+}
+
+// byGroup false: per map line (key = line); true: per group (key = group index, -1 = none).
+// Sorted by key, then merged, so thousands of objects stay cheap.
+static VolumeTally *VolumeTallies(const DesignVolumeInfo *v, bool byGroup, int *count)
+{
+    *count = 0;
+    VolumeTally *t = v->objectCount > 0 ? malloc(sizeof(VolumeTally) * v->objectCount) : NULL;
+    if (!t) return NULL;
+    int n = 0;
+    for (int k = 0; k < v->objectCount; k++) {
+        MS_ObjRef o = v->objects[k].obj;
+        if (!ObjValid(o)) continue;
+        t[n++] = (VolumeTally){ byGroup ? ObjGroup(o) : ObjLine(o), o, 1, v->objects[k].fullyInside, v->objects[k].shareOfVolume };
+    }
+    // (first: any object of the key; one map line makes one kind of object)
+    if (n > 1) qsort(t, n, sizeof(t[0]), CompareTallyKey);
+    int m = 0;
+    for (int k = 0; k < n; k++) {
+        if (m > 0 && t[m - 1].key == t[k].key) {
+            t[m - 1].objects++;
+            t[m - 1].inside += t[k].inside;
+            t[m - 1].share += t[k].share;
+        } else t[m++] = t[k];
+    }
+    if (m > 1) qsort(t, m, sizeof(t[0]), CompareTallyShare);
+    *count = m;
+    return t;
+}
+
+static void WriteVolumesMd(FILE *f, const Bundle *B)
+{
+    const DesignRequest *r = B->req;
+    fprintf(f, "## Volumes (%d)\n\n", r->volumeCount);
+    if (r->volumeCount == 0) {
+        fprintf(f, "None: no volume was marked.\n\n");
+        return;
+    }
+    fprintf(f, "The developer marked these axis-aligned boxes in world space (map coordinates, metres, +Y up); "
+               "`view-marked.png` draws them in green and labels them V1, V2, ... \"This volume\", \"in here\" or "
+               "\"V2\" in the prompt mean such a box: the space itself, which may be hidden from the camera or "
+               "empty. *Objects* are every box and model whose world bounds overlap the volume: *of volume* = the "
+               "overlap / the volume, *of object* = the overlap / the object's bounds, *inside* = the object lies "
+               "entirely in the volume. *Empty* = the share of the volume outside every object's bounds, over a "
+               "grid of cells (models count by their bounds, overlapping objects twice). *Floor* = the first surface straight down from the "
+               "volume's centre. Computed at submit time.\n\n");
+    for (int i = 0; i < r->volumeCount; i++) {
+        const DesignVolumeInfo *v = &r->volumes[i];
+        Vector3 size = Vector3Subtract(v->box.max, v->box.min);
+        fprintf(f, "### Volume V%d\n\n", i + 1);
+        fprintf(f, "| | |\n|---|---|\n");
+        fprintf(f, "| min | "); MdVec(f, v->box.min); fprintf(f, " |\n");
+        fprintf(f, "| max | "); MdVec(f, v->box.max); fprintf(f, " |\n");
+        fprintf(f, "| centre | "); MdVec(f, Vector3Scale(Vector3Add(v->box.min, v->box.max), 0.5f)); fprintf(f, " |\n");
+        fprintf(f, "| size | %.3f x %.3f x %.3f m (%.2f m^3), snap %g m |\n", size.x, size.y, size.z, size.x * size.y * size.z, v->snap);
+        if (isfinite(v->empty)) fprintf(f, "| empty | %.1f%% (%d x %d x %d cells) |\n", 100.0f * v->empty, v->grid[0], v->grid[1], v->grid[2]);
+        else fprintf(f, "| empty | unknown (out of memory) |\n");
+        fprintf(f, "| floor | ");
+        if (ObjValid(v->floor.obj)) {
+            fprintf(f, "y %.3f (%.3f m below the volume's bottom): ", v->floor.point.y, v->box.min.y - v->floor.point.y);
+            MdRegionObject(f, v->floor.obj);
+            fprintf(f, " |\n\n");
+        } else fprintf(f, "nothing below the centre |\n\n");
+
+        if (v->objectCount == 0) { fprintf(f, "No objects overlap this volume: it is empty space.\n\n"); continue; }
+
+        int groupCount = 0, lineCount = 0;
+        VolumeTally *groups = VolumeTallies(v, true, &groupCount);
+        VolumeTally *lines = VolumeTallies(v, false, &lineCount);
+        if (groups && groupCount > 0) {
+            fprintf(f, "Groups it touches: ");
+            for (int k = 0; k < groupCount; k++)
+                fprintf(f, "%s\"%s\" (%d object%s, %d inside)", k ? ", " : "", GroupName(groups[k].key), groups[k].objects,
+                        groups[k].objects == 1 ? "" : "s", groups[k].inside);
+            fprintf(f, ".\n\n");
+        }
+        if (lines && lineCount > 0) {
+            fprintf(f, "By map line:\n\n| of volume | line | group | objects | inside |\n|---|---|---|---|---|\n");
+            int rows = lineCount < MD_REGION_ROWS ? lineCount : MD_REGION_ROWS;
+            for (int k = 0; k < rows; k++) {
+                const VolumeTally *t = &lines[k];
+                fprintf(f, "| %.2f%% | %d | %s | %d %s%s", 100.0f * t->share, t->key, GroupName(ObjGroup(t->first)), t->objects,
+                        ObjKindName(t->first), t->objects == 1 ? "" : t->first.kind == MS_OBJ_BOX ? "es" : "s");
+                if (t->first.kind == MS_OBJ_MODEL) fprintf(f, " (`%s`)", scene->modelFiles[scene->models[t->first.index].file].path);
+                fprintf(f, " | %d |\n", t->inside);
+            }
+            if (lineCount > rows) fprintf(f, "| | %d more lines (see `request.json`) | | | |\n", lineCount - rows);
+            fprintf(f, "\n");
+        }
+        fprintf(f, "Objects:\n\n| of volume | of object | inside | object | group | line | min | max |\n|---|---|---|---|---|---|---|---|\n");
+        int rows = v->objectCount < MD_REGION_ROWS ? v->objectCount : MD_REGION_ROWS;
+        for (int k = 0; k < rows; k++) {
+            const DesignVolumeObject *vo = &v->objects[k];
+            if (!ObjValid(vo->obj)) continue;
+            BoundingBox b = ObjBounds(vo->obj);
+            fprintf(f, "| %.2f%% | %.1f%% | %s | %s #%d", 100.0f * vo->shareOfVolume, 100.0f * vo->shareOfObject,
+                    vo->fullyInside ? "yes" : "no", ObjKindName(vo->obj), vo->obj.index);
+            if (vo->obj.kind == MS_OBJ_MODEL) fprintf(f, " `%s`", scene->modelFiles[scene->models[vo->obj.index].file].path);
+            fprintf(f, " | %s | %d | ", GroupName(ObjGroup(vo->obj)), ObjLine(vo->obj));
+            MdVec(f, b.min); fprintf(f, " | "); MdVec(f, b.max); fprintf(f, " |\n");
+        }
+        if (v->objectCount > rows) fprintf(f, "| | | | %d more object%s (see `request.json`) | | | | |\n", v->objectCount - rows,
+                                           v->objectCount - rows == 1 ? "" : "s");
+        fprintf(f, "\n");
+
+        // The map lines, largest share first, each quoted once
+        int quoted = 0, n = 0, cap = 0;
+        char *block = NULL;
+        for (int k = 0; lines && k < lineCount && k < MD_REGION_ROWS; k++) {
+            int line = lines[k].key, len;
+            const char *text = line > 0 ? MS_LineText(scene, line, &len) : NULL;
+            if (!text) continue;
+            quoted++;
+            char num[16];
+            int nl = snprintf(num, sizeof(num), "%d: ", line);
+            if (!MS_RESERVE(block, cap, n + nl + len + 2)) break;
+            memcpy(block + n, num, nl);
+            memcpy(block + n + nl, text, len);
+            n += nl + len;
+            block[n++] = '\n';
+            block[n] = 0;
+        }
+        if (quoted > 0 && block) {
+            fprintf(f, "Map lines of these objects:\n\n");
+            MdFence(f, block, "");
+        }
+        free(block);
+        free(groups);
+        free(lines);
+    }
+}
+
 static bool WriteRequestMd(const char *path, const Bundle *B)
 {
     const DesignRequest *r = B->req;
@@ -1044,9 +1200,10 @@ static bool WriteRequestMd(const char *path, const Bundle *B)
 
     fprintf(f, "# Map edit request: %s\n\n", B->slug);
     fprintf(f, "Model: %s (%s tier: %s)\n\n", B->model.name, ModelTierName(B->model.tier), B->model.reason);
-    fprintf(f, "Request `%s`, submitted %s from the monolith map designer. Bundle format 2: besides the "
+    fprintf(f, "Request `%s`, submitted %s from the monolith map designer. Bundle format 3: besides the "
                "crosshair hit and the selected objects it may contain **screen regions** the developer "
-               "dragged over the frame (see *Screen regions* below and `.claude/skills/map-request/bundle-reference.md`).\n\n", B->id, B->created);
+               "dragged over the frame and **volumes**, boxes marked in world space (see *Screen regions* and "
+               "*Volumes* below and `.claude/skills/map-request/bundle-reference.md`).\n\n", B->id, B->created);
     fprintf(f, "**First** read `CLAUDE.md` and the map-request skill `.claude/skills/map-request/SKILL.md` in the repository root (if they "
                "are not loaded already); they explain the workflow, the map format and how to verify an edit. "
                "Then carry out the request below.\n\n"
@@ -1074,8 +1231,8 @@ static bool WriteRequestMd(const char *path, const Bundle *B)
     fprintf(f, "- right: "); MdVec(f, B->right); fprintf(f, " = (-cos yaw, 0, sin yaw); up is +Y\n");
     fprintf(f, "- fovy %.1f deg (vertical), aspect %.4f, resolution %d x %d\n\n", r->fovy, B->aspect, r->width, r->height);
     fprintf(f, "Images in this folder: `view.png` (the frame without HUD) and `view-marked.png` (the same "
-               "frame with the selection highlighted, the crosshair hit marked and the screen regions "
-               "outlined and numbered)%s.\n\n", r->regionCount ? ", plus one crop `region-<n>.png` per region" : "");
+               "frame with the selection highlighted, the crosshair hit marked, the screen regions "
+               "outlined and numbered and the volumes drawn as green boxes labelled V1, V2, ...)%s.\n\n", r->regionCount ? ", plus one crop `region-<n>.png` per region" : "");
 
     fprintf(f, "## Crosshair hit\n\n");
     if (B->hit) {
@@ -1145,6 +1302,7 @@ static bool WriteRequestMd(const char *path, const Bundle *B)
     }
 
     WriteRegionsMd(f, B);
+    WriteVolumesMd(f, B);
 
     fprintf(f, "## Nearby\n\nGroups with an object (box or model) within %.0f m of the %s ", NEARBY_RADIUS, B->hit ? "hit point" : "eye");
     MdVec(f, B->nearbyCenter);
@@ -1266,13 +1424,90 @@ static void JsonModel(FILE *f, int index)
     fprintf(f, "] }");
 }
 
+static void WriteVolumesJson(FILE *f, const DesignRequest *r)
+{
+    fprintf(f, ",\n  \"volumes\": [");
+    for (int i = 0; i < r->volumeCount; i++) {
+        const DesignVolumeInfo *v = &r->volumes[i];
+        Vector3 size = Vector3Subtract(v->box.max, v->box.min);
+        fprintf(f, "%s\n    {\n      \"index\": %d,\n      \"label\": \"V%d\",\n      \"min\": ", i ? "," : "", i + 1, i + 1);
+        JsonVec(f, v->box.min);
+        fprintf(f, ",\n      \"max\": "); JsonVec(f, v->box.max);
+        fprintf(f, ",\n      \"center\": "); JsonVec(f, Vector3Scale(Vector3Add(v->box.min, v->box.max), 0.5f));
+        fprintf(f, ",\n      \"size\": "); JsonVec(f, size);
+        fprintf(f, ",\n      \"cubicMetres\": "); JsonNum(f, size.x * size.y * size.z);
+        fprintf(f, ",\n      \"snap\": "); JsonNum(f, v->snap);
+        fprintf(f, ",\n      \"empty\": "); JsonNum(f, v->empty);
+        fprintf(f, ",\n      \"emptyGrid\": [%d, %d, %d]", v->grid[0], v->grid[1], v->grid[2]);
+        fprintf(f, ",\n      \"emptyMethod\": \"per cell of emptyGrid, the overlap of every object's bounds (models: world AABB) with the cell, summed and capped at the cell\"");
+        fprintf(f, ",\n      \"floor\": ");
+        if (ObjValid(v->floor.obj)) {
+            MS_ObjRef o = v->floor.obj;
+            fprintf(f, "{ \"y\": "); JsonNum(f, v->floor.point.y);
+            fprintf(f, ", \"below\": "); JsonNum(f, v->box.min.y - v->floor.point.y);
+            fprintf(f, ", \"point\": "); JsonVec(f, v->floor.point);
+            fprintf(f, ", \"kind\": \"%s\", \"index\": %d, \"line\": %d, \"group\": ", ObjKindName(o), o.index, ObjLine(o));
+            JsonStr(f, GroupName(ObjGroup(o)));
+            fprintf(f, " }");
+        } else fprintf(f, "null");
+        int listed = 0;
+        fprintf(f, ",\n      \"objects\": [");
+        for (int k = 0; k < v->objectCount && listed < VOLUME_JSON_OBJECTS; k++) {
+            const DesignVolumeObject *vo = &v->objects[k];
+            MS_ObjRef o = vo->obj;
+            if (!ObjValid(o)) continue;
+            BoundingBox b = ObjBounds(o);
+            fprintf(f, "%s\n        { \"kind\": \"%s\", \"index\": %d", listed++ ? "," : "", ObjKindName(o), o.index);
+            if (o.kind == MS_OBJ_BOX) fprintf(f, ", \"box\": %d", o.index);
+            fprintf(f, ", \"line\": %d, \"group\": ", ObjLine(o)); JsonStr(f, GroupName(ObjGroup(o)));
+            if (o.kind == MS_OBJ_MODEL) { fprintf(f, ", \"file\": "); JsonStr(f, scene->modelFiles[scene->models[o.index].file].path); }
+            fprintf(f, ", \"material\": "); JsonMaterial(f, o);
+            fprintf(f, ", \"shareOfVolume\": "); JsonNum(f, vo->shareOfVolume);
+            fprintf(f, ", \"shareOfObject\": "); JsonNum(f, vo->shareOfObject);
+            fprintf(f, ", \"fullyInside\": %s", vo->fullyInside ? "true" : "false");
+            fprintf(f, ", \"min\": "); JsonVec(f, b.min);
+            fprintf(f, ", \"max\": "); JsonVec(f, b.max);
+            fprintf(f, " }");
+        }
+        fprintf(f, "%s],\n      \"objectCount\": %d,\n      \"omittedObjects\": %d", listed ? "\n      " : "",
+                v->objectCount, v->objectCount - listed);
+        int lineCount = 0, groupCount = 0;
+        VolumeTally *lines = VolumeTallies(v, false, &lineCount);
+        VolumeTally *groups = VolumeTallies(v, true, &groupCount);
+        fprintf(f, ",\n      \"lines\": [");
+        for (int k = 0; k < lineCount; k++) {
+            const VolumeTally *t = &lines[k];
+            fprintf(f, "%s\n        { \"line\": %d, \"lineText\": ", k ? "," : "", t->key);
+            JsonLineText(f, t->key);
+            fprintf(f, ", \"group\": "); JsonStr(f, GroupName(ObjGroup(t->first)));
+            fprintf(f, ", \"kind\": \"%s\", \"objects\": %d, \"fullyInside\": %d, \"shareOfVolume\": ", ObjKindName(t->first), t->objects, t->inside);
+            JsonNum(f, t->share);
+            fprintf(f, " }");
+        }
+        fprintf(f, "%s],\n      \"groups\": [", lineCount ? "\n      " : "");
+        for (int k = 0; k < groupCount; k++) {
+            const VolumeTally *t = &groups[k];
+            fprintf(f, "%s\n        { \"group\": ", k ? "," : "");
+            JsonStr(f, GroupName(t->key));
+            fprintf(f, ", \"objects\": %d, \"fullyInside\": %d, \"shareOfVolume\": ", t->objects, t->inside);
+            JsonNum(f, t->share);
+            fprintf(f, " }");
+        }
+        fprintf(f, "%s]", groupCount ? "\n      " : "");
+        free(lines);
+        free(groups);
+        fprintf(f, "\n    }");
+    }
+    fprintf(f, "%s]", r->volumeCount ? "\n  " : "");
+}
+
 static bool WriteRequestJson(const char *path, const Bundle *B)
 {
     const DesignRequest *r = B->req;
     FILE *f = fopen(path, "wb");
     if (!f) return false;
 
-    fprintf(f, "{\n  \"format\": 2,\n  \"kind\": \"edit\",\n  \"id\": "); JsonStr(f, B->id);
+    fprintf(f, "{\n  \"format\": 3,\n  \"kind\": \"edit\",\n  \"id\": "); JsonStr(f, B->id);
     fprintf(f, ",\n  \"slug\": "); JsonStr(f, B->slug);
     fprintf(f, ",\n  \"created\": "); JsonStr(f, B->created);
     fprintf(f, ",\n  \"instructions\": ");
@@ -1419,6 +1654,7 @@ static bool WriteRequestJson(const char *path, const Bundle *B)
         fprintf(f, "\n    }");
     }
     fprintf(f, "%s]", r->regionCount ? "\n  " : "");
+    WriteVolumesJson(f, r);
 
     fprintf(f, ",\n  \"nearby\": {\n    \"center\": "); JsonVec(f, B->nearbyCenter);
     fprintf(f, ",\n    \"centerIs\": \"%s\",\n    \"radius\": ", B->hit ? "hit" : "eye"); JsonNum(f, NEARBY_RADIUS);
@@ -2765,7 +3001,7 @@ bool LauncherSubmit(const DesignRequest *req, Image view, Image marked, char *ms
         strftime(B.created, sizeof(B.created), "%Y-%m-%d %H:%M:%S", tm);
     }
     ModelQuery mq = { .prompt = req->prompt, .kind = "edit", .selected = req->selectedCount,
-                      .regions = req->regionCount, .hit = req->hit.obj.kind != MS_OBJ_NONE,
+                      .regions = req->regionCount, .volumes = req->volumeCount, .hit = req->hit.obj.kind != MS_OBJ_NONE,
                       .emptyMap = scene->boxCount + scene->modelCount <= 2, .noBrief = !scene->brief[0] };
     LauncherChooseModel(&mq, &B.model);
     B.userPrompt = req->prompt + B.model.promptSkip;

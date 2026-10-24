@@ -14,6 +14,7 @@ typedef struct {
     const char *kind;       // "edit", "import" or "new-map"
     int selected;           // selected objects
     int regions;            // screen regions
+    int volumes;            // volumes (world-space boxes)
     bool hit;               // the crosshair hit something
     bool emptyMap;          // the map has (almost) nothing in it (<= 2 objects)
     bool noBrief;           // the map package has no MAP.md

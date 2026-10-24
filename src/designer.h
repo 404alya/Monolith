@@ -9,6 +9,9 @@
 #define PROMPT_LIMIT    (1024 * 1024)   // bytes of prompt text (a runaway paste stops here)
 #define REGION_SAMPLES  4096    // rays per region at most (a regular grid, see DesignerAnalyzeRegion):
                                 // the analysis cost, not a storage limit
+#define VOLUME_SAMPLES  4096    // cells of a volume's empty-share grid at most (DesignerAnalyzeVolume)
+#define VOLUME_MIN_SIZE 0.01f   // metres: a volume is at least this thick on every axis
+#define VOLUME_SNAP_DEFAULT 0.5f    // metres: the volume snap step until N changes it
 
 // Objects are MS_ObjRef (runtime/monolith_scene.h, .claude/skills/map-request/bundle-reference.md): a box
 // (index into scene->boxes) or a model instance (index into scene->models).
@@ -46,6 +49,31 @@ typedef struct {
     float dist;             // nearest hit, metres from the eye
     Vector3 point;          // that nearest hit point
 } DesignRegionEdge;
+
+// A volume (V in spectator mode, --volume): an axis-aligned box in world space (map
+// coordinates). World-space, so a map reload leaves it alone; an editor overlay, never
+// written to the map.
+typedef struct { BoundingBox box; } DesignVolume;
+
+// An object whose world bounds overlap a volume (models count by their world AABB)
+typedef struct {
+    MS_ObjRef obj;
+    float shareOfVolume;    // overlap of the object's bounds with the volume / the volume
+    float shareOfObject;    // the same overlap / the object's bounds (flat axes count as 1)
+    bool fullyInside;       // the object's bounds lie inside the volume
+} DesignVolumeObject;
+
+// What a volume holds, computed at submit time by DesignerAnalyzeVolume
+typedef struct {
+    BoundingBox box;
+    float snap;             // the snap step when it was submitted (metres)
+    DesignVolumeObject *objects;    // by shareOfVolume descending (heap; DesignerFreeRequest)
+    int objectCount;
+    float empty;            // share of the grid cells whose centre is in no object's bounds
+    int grid[3];            // that grid (x, y, z cells; product <= VOLUME_SAMPLES)
+    DesignerHit floor;      // first surface straight down from the volume's centre (none: obj.kind NONE)
+    double ms;              // time the analysis took
+} DesignVolumeInfo;
 
 // What a region shows, computed at submit time by DesignerAnalyzeRegion (ray sampling)
 typedef struct {
@@ -85,6 +113,8 @@ typedef struct {
     int selectedCount;
     DesignRegionInfo *regions;
     int regionCount;
+    DesignVolumeInfo *volumes;
+    int volumeCount;
     unsigned int mapVersion;
 } DesignRequest;
 
@@ -123,6 +153,19 @@ typedef struct {
     bool dragAdd;           // Shift was down at the drag start: add instead of replace
     Vector2 dragStart, dragEnd;
 
+    // Volume mode (V): world-space boxes made from crosshair clicks. The camera keeps
+    // flying (except while the height is set); the arrows edit the active volume.
+    bool volumeMode;
+    int volumeStep;         // VOLUME_STEP_*: what the next click or the mouse does
+    Vector3 volA, volB;     // snapped corner clicks of the volume being made
+    float volBase;          // its bottom (y)
+    float volHeight;        // its height before snapping (the mouse moves this)
+    DesignVolume *volumes;  // heap
+    int volumeCount, volumeCap;
+    int activeVolume;       // index into volumes[] (edited by the arrows), -1 = none
+    float volumeSnap;       // metres; 0 = VOLUME_SNAP_DEFAULT
+    Vector3 eye, viewFwd;   // the camera of the last DesignerPickCamera (arrow directions)
+
     // Prompt box
     bool promptOpen;
     char *prompt;           // heap, NUL-terminated once anything was typed (NULL = empty)
@@ -137,6 +180,8 @@ typedef struct {
     float messageTime;
     bool messageError;
 } Designer;
+
+enum { VOLUME_STEP_FIRST = 0, VOLUME_STEP_SECOND, VOLUME_STEP_HEIGHT };
 
 typedef enum {
     DESIGNER_NONE = 0,
@@ -163,15 +208,27 @@ DesignerHit DesignerPickAt(Camera3D cam, int w, int h, float x, float y);
 // Call only in spectator mode, before the camera update.
 DesignerAction DesignerUpdate(Designer *d, float dt);
 
-// True while the prompt box is open, snip mode is on, or the camera is still frozen
-// after either closed: the caller must skip game keys and camera movement then
+// True while the prompt box is open, snip mode is on, a volume's height is being set, or
+// the camera is still frozen after one of them: the caller must skip game keys and camera
+// movement then
 bool DesignerCapturesInput(const Designer *d);
+// True in volume mode: the arrow keys edit the active volume, so the spectator must not
+// use them for viewpoints
+bool DesignerTakesArrows(const Designer *d);
 
 // Snip mode. Enter: freezes the camera, frees the cursor. Leave: drops the regions.
 void DesignerSnipBegin(Designer *d);
 void DesignerSnipEnd(Designer *d);
 // Adds a region (pixels, clamped to a w x h frame; --region). False if empty (or out of memory).
 bool DesignerAddRegion(Designer *d, Rectangle rect, int w, int h);
+
+// Adds a volume (any two opposite corners; grown to VOLUME_MIN_SIZE per axis) and makes it
+// the active one. False if a corner is not finite (or out of memory). --volume, Shift+V.
+bool DesignerAddVolume(Designer *d, BoundingBox box);
+// What volume `box` holds: overlapping objects, the empty share, the floor under it.
+// out->objects is heap memory (DesignerFreeVolume, or DesignerFreeRequest).
+void DesignerAnalyzeVolume(BoundingBox box, float snap, DesignVolumeInfo *out);
+void DesignerFreeVolume(DesignVolumeInfo *v);
 
 // What region `rect` (pixels of a w x h frame rendered with `cam`) shows: a regular grid of
 // at most REGION_SAMPLES rays through pixel centres, plus one through the rect's centre.
@@ -223,6 +280,12 @@ int DesignerDrawHud(const Designer *d, int x, int y);
 // dimmed while snipping or while regions are attached, outlines, numbers, pixel sizes,
 // the snip-mode help line); true: outlines + numbers only (view-marked.png)
 void DesignerDrawRegions(const Designer *d, int w, int h, bool marked);
+
+// Volumes on a w x h target rendered with `cam` (the frame's target bound, after R3D_End,
+// like DesignerDrawOverlay): wireframes (dim where hidden), numbers. marked = false: the
+// live look (the volume being made, the active one brighter with its size, the volume-mode
+// help line); true: wireframes + numbers only (view-marked.png). Nothing without volumes.
+void DesignerDrawVolumes(const Designer *d, Camera3D cam, int w, int h, bool marked);
 
 // Prompt box and the designer message (bottom of a w x h screen)
 void DesignerDrawPrompt(Designer *d, int w, int h);

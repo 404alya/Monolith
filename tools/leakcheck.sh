@@ -17,7 +17,7 @@
 # live settings changes incl. the renderer restart, the settings panel), of tests/models (models, textured /
 # shader materials, shadowed lights), of examples/01_minimal/scene and maps/pine_forest
 # (textured ground, many restyled models), --reload-test both ways
-# and into a broken map, a broken map on the command line, --shot-hud with --select / --region,
+# and into a broken map, a broken map on the command line, --shot-hud with --select / --region / --volume,
 # --submit (tools/stub-terminal.sh instead of a terminal, MONOLITH_WORKSPACE=) on both maps, in
 # coordinator mode (queue + coordinator start, a cancel with no coordinator) and per-request mode,
 # --export, --inspect-model, --new-map, --import (stub terminal), --classify, and every
@@ -155,14 +155,15 @@ printf 'monolith 2\nbox 0 0 0 1 1 1\nbogus statement here\n' > "$TMP/broken.map"
 Run reload-to-broken 0  "$M" --shot "$TMP/r3.png" --view 1 --map tests/models --reload-test "$TMP/broken.map"
 Run broken-map 1        "$M" --dump-boxes "$TMP/broken.txt" --map "$TMP/broken.map"
 Run shot-hud 0          "$M" --shot "$TMP/hud.png" --view 2 --shot-hud --select 192 --select 198 \
-                            --region 100 100 300 200 --region 800 300 200 200 --type 'make it\ntaller' --pick \
-                            --pick-at 10 10 --pick-at 1590 890
+                            --region 100 100 300 200 --region 800 300 200 200 --volume -11 0 -34 -7 20 34 \
+                            --volume 3 4 12 -4 0 4 --type 'make it\ntaller' --pick --pick-at 10 10 --pick-at 1590 890
 Run submit-default 0    env MONOLITH_REQUESTS_DIR="$REQ" MONOLITH_TERMINAL="$STUB" MONOLITH_STUB_LOG="$TMP/stub1.txt" MONOLITH_WORKSPACE= \
                             "$M" --shot "$TMP/s1.png" --view 2 --select 192 --select 193 --region 100 100 300 200 \
-                            --region 800 300 200 200 --submit 'leakcheck: make these taller'
+                            --region 800 300 200 200 --volume -11 0 -34 -7 20 34 --volume -4 0 4 3 4 12 \
+                            --submit 'leakcheck: make these taller'
 Run submit-models 0     env MONOLITH_REQUESTS_DIR="$REQ" MONOLITH_TERMINAL="$STUB" MONOLITH_STUB_LOG="$TMP/stub2.txt" MONOLITH_WORKSPACE= \
                             MONOLITH_LAUNCH=per-request "$M" --shot "$TMP/s2.png" --view 1 --map tests/models --select 36 \
-                            --region 0 0 1600 900 --submit '@heavy leakcheck: restyle the trees' --submit-wait 1 --close-submitted
+                            --region 0 0 1600 900 --volume -50 -1 -50 50 30 50 --submit '@heavy leakcheck: restyle the trees' --submit-wait 1 --close-submitted
 Run submit-cancel 0     env MONOLITH_REQUESTS_DIR="$REQ" MONOLITH_TERMINAL="$STUB" MONOLITH_CLAUDE=/nonexistent/claude MONOLITH_WORKSPACE= \
                             "$M" --shot "$TMP/s3.png" --view 2 --submit 'leakcheck: cancel me' --submit-wait 1 --close-submitted
 Run export-default 0    "$M" --export "$TMP/export-default"

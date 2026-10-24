@@ -6,7 +6,7 @@ Flags that never open a visible window, safe for scripts: `--shot` (renders in a
 
 ## Flags
 
-An unknown flag, a missing or unparsable value, a value that is itself a `--flag`, or a non-finite / out-of-range number (positions, angles, regions: |v| ≤ 1e6) prints a message and exits 1 before any window opens.
+An unknown flag, a missing or unparsable value, a value that is itself a `--flag`, or a non-finite / out-of-range number (positions, angles, regions, volumes: |v| ≤ 1e6) prints a message and exits 1 before any window opens.
 
 | Flag | Meaning |
 |---|---|
@@ -58,11 +58,12 @@ For testing the designer without a visible window:
 | `--pick-at x y` | With `--shot`: the same for pixel (x, y), top-left origin (repeatable) |
 | `--select <line>` | Select every object of this map line (repeatable) |
 | `--region x y w h` | Attach a screen region (repeatable) |
+| `--volume x0 y0 z0 x1 y1 z1` | Attach a volume: the axis-aligned box between two opposite corners in map coordinates, any order (repeatable). `--shot-hud` draws it, `--submit` writes it into the bundle |
 | `--submit "text"` | With `--shot`: run the real submit path (bundle + queue + **real coordinator terminal** if none runs). For tests, point `MONOLITH_REQUESTS_DIR` at a scratch folder and `MONOLITH_TERMINAL` at `tools/stub-terminal.sh`, so no real Claude Code session starts |
 | `--submit-wait <s>` / `--close-submitted` | Keep polling the request (state changes are logged) / then close it like Ctrl+K n (coordinator mode: cancel) and report when the terminal process is gone |
 | `--type "text"` | Open the prompt box with this text |
-| `--classify "text"` | No window: print the model tier the launcher would pick (context: map, `--select`, `--region`, hit; `--classify-kind edit\|import\|new-map`) |
-| `--shot-hud` | Draw HUD, crosshair, overlay, regions, prompt box into the shot |
+| `--classify "text"` | No window: print the model tier the launcher would pick (context: map, `--select`, `--region`, `--volume`, hit; `--classify-kind edit\|import\|new-map`) |
+| `--shot-hud` | Draw HUD, crosshair, overlay, regions, volumes, prompt box into the shot |
 | `--shot-size w h` | Shot size (64–8192) |
 | `--reload-test <path>` | With `--shot`: load `<path>` through the hot-reload path after 10 frames; must equal a plain `--shot --map <path>` (proves every static cache is rebuilt) |
 
@@ -81,7 +82,7 @@ How the game starts Claude Code:
 | `MONOLITH_CLAUDE_SAFE` | Non-empty and not `0`: drop the permission flags (they are also dropped when the working folder has no `CLAUDE.md`) |
 | `MONOLITH_ALLOW_WINDOW` | Non-empty and not `0`: open the game (or an example) window even when `CLAUDECODE` or `AI_AGENT` is set. In such an AI agent's shell the game otherwise refuses, with exit status 1, every run that would show its window; the safe flags listed at the top of this page still work |
 | `MONOLITH_MODEL` | One model for every request (turns the tier choice off) |
-| `MONOLITH_MODEL_FAST` / `_DEFAULT` / `_HEAVY` | Model per tier (`haiku`, `sonnet`, `opus`). `ClassifyRequest` ("Model choice" in `launcher.c`): **heavy** for imports / new maps, an empty map or no `MAP.md`, asset, look/engine or large design words, > 280 bytes, 3+ sentences or > 2 regions; **fast** for one short sentence (≤ 120 bytes) with a local edit word, no creation word and a target; **default** otherwise. Written to `request.md` / `request.json`. |
+| `MONOLITH_MODEL_FAST` / `_DEFAULT` / `_HEAVY` | Model per tier (`haiku`, `sonnet`, `opus`). `ClassifyRequest` ("Model choice" in `launcher.c`): **heavy** for imports / new maps, an empty map or no `MAP.md`, asset, look/engine or large design words, > 280 bytes, 3+ sentences or > 2 regions and volumes together; **fast** for one short sentence (≤ 120 bytes) with a local edit word, no creation word and a target (crosshair hit, a selection of ≤ 100 objects, or exactly one region or volume); **default** otherwise. Written to `request.md` / `request.json`. |
 | `@fast` / `@default` / `@heavy` (also `@haiku` / `@sonnet` / `@opus`) | Prompt prefix picking the tier, stripped from the bundle (`model.override: true`); `MONOLITH_MODEL` and a `--model` in the args still win |
 | `MONOLITH_WORKSPACE` | i3 / sway workspace for the terminal (default `10`, empty = stay). `i3-msg` / `swaymsg` on `[title="^monolith-claude: coordinator$"]` (per-request: `^monolith-claude: <slug> <HHMMSS>$`), retried by a detached helper every 0.1 s for 10 s; also sets the `_monolith_coordinator` (`_monolith_<id>`) mark. An i3 `for_window [title="^monolith-claude: "] …` rule avoids the brief flash. |
 | `MONOLITH_CLOSE_ON_EXIT` | Non-empty and not `0`: when the game quits, close the coordinator if none of this run's requests is open (per-request: finished requests' terminals) |

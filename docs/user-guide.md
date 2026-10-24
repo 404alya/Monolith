@@ -16,7 +16,7 @@ The game starts in **walk mode** at the map's spawn point.
 | F2 | graphics settings panel |
 | F9 | export the open map to `export/<map>-<stamp>/` ([export.md](export.md)) |
 | F12 | save `screenshot.png` |
-| Esc | close the prompt box, leave snip mode or close the panel (it does not quit: close the window) |
+| Esc | close the prompt box, leave snip or volume mode or close the panel (it does not quit: close the window) |
 
 In **spectator mode** you fly freely: WASD + mouse, E / Q (or Space) up and down, the mouse wheel sets the base speed (1–400 m/s), Shift ×4 and Alt ×0.25. ← / → fly to the previous / next viewpoint of the map. **P** prints the current view as `--pos … --look …` (the feet position) and copies it, handy for a `viewpoint` line or a command line. **G** moves the walking player to the camera.
 
@@ -33,9 +33,32 @@ All of this happens in spectator mode.
 | Ctrl+click / Ctrl+Shift+click | select / add the object's whole group |
 | Right click | clear the selection |
 | C | snip mode: the camera freezes and the cursor is free. Drag a rectangle over the screen (Shift+drag adds another); Enter opens the prompt with the regions; right click, Esc or C leaves |
+| V | volume mode: mark boxes in world space (below) |
+| Shift+V | a volume from the selection's bounds (or the bounds of the object under the crosshair) |
 | Enter | open the prompt box |
 
-Type what you want ("make this wall twice as tall", "plant three more pines along the path", "hang a neon sign over each of these stalls") and press **Enter** to send it; Shift+Enter starts a new line, Esc cancels. "This" and "here" mean what the crosshair points at, "these" the selection, and the rectangles mean "this area" (useful for "fill this gap" or "make this part darker"). Selections are highlighted in orange and survive map reloads.
+Type what you want ("make this wall twice as tall", "plant three more pines along the path", "hang a neon sign over each of these stalls") and press **Enter** to send it; Shift+Enter starts a new line, Esc cancels. "This" and "here" mean what the crosshair points at, "these" the selection, the rectangles mean "this area" (useful for "fill this gap" or "make this part darker"), and the volumes mean "this space" (V1, V2, ...). Selections are highlighted in orange and survive map reloads.
+
+### Volumes
+
+A volume is a box in the world rather than on the screen: "this room", the space behind a wall, the gap between two buildings at a certain height, or an empty spot to fill. Press **V**; the camera keeps flying, so you can move between the clicks.
+
+1. Click a surface for the first corner.
+2. Click a second surface point for the opposite corner of the footprint.
+3. Move the mouse up or down (or turn the wheel; Shift ×4) to set the height. The camera holds still meanwhile. Click or press Enter to add it.
+
+Points snap to a grid (**N** cycles 0.1, 0.25, 0.5, 1 and 2 m; 0.5 m to start) along the face you clicked; hold **Ctrl** while clicking to place them exactly. Right click or Esc cancels the volume you are making.
+
+| In volume mode | Action |
+|---|---|
+| [ / ] | the previous / next volume becomes the active one |
+| arrows, PgUp / PgDn | move the active volume one step (the arrows follow the world axis nearest to where you look; they don't fly to viewpoints in this mode) |
+| Alt + those keys | grow the volume on that side; Alt+Shift shrinks it |
+| Delete / Shift+Delete | remove the active volume / all volumes |
+| Enter | open the prompt box |
+| V, Esc or right click | leave volume mode (the volumes stay) |
+
+Volumes are drawn as green boxes, fainter where they are hidden, numbered V1, V2, ... They are sent with every request until you remove them, survive map reloads, and are never saved into the map.
 
 **Picking the model.** The game chooses a fast, default or heavy Claude model per request from its wording and context. Start the prompt with `@fast`, `@default` or `@heavy` to choose yourself.
 

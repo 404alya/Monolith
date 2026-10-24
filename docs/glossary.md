@@ -6,7 +6,7 @@ Terms used across these pages, in alphabetical order.
 
 **Brief, design brief:** a map's `MAP.md`: its style, scale, materials, lighting, rules for new content and named groups. Every request on the map is carried out in its style ([map-format.md](map-format.md) §1.2).
 
-**Bundle:** the folder the game writes for one request, `requests/<date>_<slug>/`: the prompt, screenshots, the camera, what the crosshair hit, the selection and the regions, and later the result.
+**Bundle:** the folder the game writes for one request, `requests/<date>_<slug>/`: the prompt, screenshots, the camera, what the crosshair hit, the selection, the regions and the volumes, and later the result.
 
 **Coordinator:** the one Claude Code session the game opens in its own terminal. It takes requests from the queue and hands each to a subagent ([request-queue.md](request-queue.md)).
 
@@ -29,6 +29,8 @@ Terms used across these pages, in alphabetical order.
 **R3D pitfall N:** a numbered R3D behaviour found by debugging (fog in shadow turning black, clipped shadow casters, …), in `.claude/skills/lighting-fog-shadows/r3d-pitfalls.md`. Read it before changing lighting, fog or shadows.
 
 **Regions, snip mode:** rectangles dragged over the screen (key C in spectator mode) to point at an area rather than an object.
+
+**Volumes, volume mode:** axis-aligned boxes marked in world space (key V in spectator mode, or Shift+V from the selection) to point at a space rather than at what the screen shows: a room behind a wall, an empty spot to fill. Sent with requests as V1, V2, ...; never saved into the map.
 
 **Shadow tiles:** the sun's shadow map rendered for fixed tiles of the world and then only sampled, instead of every frame. The two tiles around the map's play area are drawn once per load; moving far away draws a new one about every 90 m. Which tile is used depends only on the camera position, so turning never re-renders them (`--shadow-camera` switches back to R3D's per-view shadow map).
 

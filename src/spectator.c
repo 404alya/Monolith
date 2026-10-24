@@ -56,13 +56,13 @@ void SpectatorJumpTo(Spectator *s, int view)
     LookAngles(scene->viewpoints[view].eye, scene->viewpoints[view].target, &s->yaw, &s->pitch);
 }
 
-void UpdateSpectator(Spectator *s, Player *player, float dt)
+void UpdateSpectator(Spectator *s, Player *player, float dt, bool arrows)
 {
     if (s->messageTime > 0.0f) s->messageTime -= dt;
 
     // Viewpoints: arrows cycle with a smooth flight
-    if (IsKeyPressed(KEY_RIGHT)) SpectatorFlyTo(s, (s->view + 1) % scene->viewpointCount);
-    if (IsKeyPressed(KEY_LEFT))  SpectatorFlyTo(s, (s->view <= 0 ? scene->viewpointCount : s->view) - 1);
+    if (arrows && IsKeyPressed(KEY_RIGHT)) SpectatorFlyTo(s, (s->view + 1) % scene->viewpointCount);
+    if (arrows && IsKeyPressed(KEY_LEFT))  SpectatorFlyTo(s, (s->view <= 0 ? scene->viewpointCount : s->view) - 1);
 
     // Speed: mouse wheel, exponential so it is equally quick at 2 m/s and 200 m/s
     float wheel = GetMouseWheelMove();

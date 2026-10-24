@@ -27,7 +27,7 @@
 //   F9             export the open map as a self-contained folder (package, scene runtime,
 //                  R3D, build.sh, README) into export/<map>-<YYYY-MM-DD_HHMMSS>/ next to
 //                  requests/ (export.c, like --export)
-//   ESC            closes the prompt box / leaves snip mode / closes the panel (no quit: close the window)
+//   ESC            closes the prompt box / leaves snip or volume mode / closes the panel (no quit: close the window)
 //   The HUD's bottom line shows "map reloaded (N boxes)" after an edit to any file of the
 //   map package (map, shaders, textures), or the error (file:line: message) in red while
 //   the package is broken (the old map stays loaded).
@@ -57,6 +57,19 @@
 //                  attached, RMB / ESC / C = leave snip mode and drop the regions. ESC in the
 //                  prompt box returns to snip mode with the regions; a successful submit
 //                  ends it. The bundle lists what each region shows (designer.c)
+//   V              volume mode: world-space boxes (the camera keeps flying). LMB on a
+//                  surface = first corner, LMB = opposite footprint corner, then mouse up /
+//                  down or the wheel sets the height (camera frozen; SHIFT x4) and LMB / ENTER
+//                  adds it. Points snap to N's step (0.1 / 0.25 / 0.5 / 1 / 2 m, default
+//                  0.5) on the axes along the clicked face; CTRL = no snap. RMB / ESC cancel
+//                  the volume being made, else leave volume mode (as V does). In the mode:
+//                  [ ] = active volume, arrows / PGUP / PGDN move it one step (arrows along
+//                  the world axes nearest to the view; they don't fly to viewpoints then),
+//                  ALT + them grows that side, ALT+SHIFT shrinks it, DELETE removes it,
+//                  SHIFT+DELETE clears all, ENTER = prompt box. Volumes stay (map reloads and
+//                  submits too) until removed; they are never written to the map. The bundle
+//                  lists what each volume holds (designer.c, volumes[])
+//   SHIFT+V        a volume from the selection's bounds (or the crosshair object's)
 //   R              fly back to the camera of the last finished request
 //   The HUD lists the coordinator ("running", "starting", "not running") and the open
 //   requests ("queued", "running", "[?]" = a question waits in the coordinator terminal)
@@ -227,16 +240,19 @@
 //   --region x y w h   attach a screen region (pixels of the shot, top-left origin), as if
 //                  dragged out in snip mode (repeatable); with --shot-hud the shot
 //                  shows the snip-mode drawing, with --submit the bundle gets the regions
+//   --volume x0 y0 z0 x1 y1 z1   attach a volume: an axis-aligned box between two opposite
+//                  corners in map coordinates, as if made in volume mode (repeatable);
+//                  --shot-hud draws it, --submit puts it into the bundle (volumes[])
 //   --submit "text"  with --shot: after saving the shot, run the real submit path (render
 //                  view + view-marked offscreen, LauncherSubmit with the centre pick, the
-//                  --select objects and the --region regions) and print the launcher's
+//                  --select objects, the --region regions and the --volume volumes) and print the launcher's
 //                  message. This writes a real bundle into requests/ and queues it (and may
 //                  start a real coordinator: terminal + Claude Code): for tests, set
 //                  MONOLITH_REQUESTS_DIR to a scratch folder and MONOLITH_TERMINAL to a stub
 //                  script that only logs its arguments (tools/stub-terminal.sh;
 //                  tools/test-coordinator.sh runs the queue end to end with a stub coordinator)
 //   --type "text"  open the prompt box with this text (cursor at the end)
-//   --shot-hud     with --shot: draw the HUD, crosshair, selection overlay, regions and prompt box
+//   --shot-hud     with --shot: draw the HUD, crosshair, selection overlay, regions, volumes and prompt box
 //                  into the shot (to look at the UI; plain shots never contain it)
 //   --submit-wait <s>   with --submit: keep polling the request (state, result.md, terminal
 //                  process) for <s> seconds before exiting; state changes are logged
@@ -247,7 +263,7 @@
 //   --classify "text"   print the model the launcher would choose for this prompt (tier,
 //                  model, reason; launcher.c "Model choice") and exit without opening a
 //                  window. Context: the loaded map (empty? MAP.md?), the --select lines, the
-//                  --region count and a crosshair hit. --classify-kind edit|import|new-map
+//                  --region and --volume counts and a crosshair hit. --classify-kind edit|import|new-map
 //                  sets the request kind (default edit)
 //   In --submit, --type and --classify text, a literal \n becomes a new line.
 //
@@ -581,6 +597,7 @@ static bool Submit(Designer *d, Camera3D cam, float yaw, float pitch, RenderText
         DesignerDrawOverlay(d, cam, false);
         DesignerDrawCrosshair(rt.texture.width, rt.texture.height);
         DesignerDrawRegions(d, rt.texture.width, rt.texture.height, true);
+        DesignerDrawVolumes(d, cam, rt.texture.width, rt.texture.height, true);
     EndTextureMode();
     Image marked = ReadTarget(rt);
 
@@ -617,6 +634,7 @@ static struct {
     const char **settingsChange;    // --settings-change key=value
     int *selectLines;           // --select <line>
     Rectangle *regions;         // --region x y w h
+    BoundingBox *volumes;       // --volume x0 y0 z0 x1 y1 z1
     Vector2 *pickAt;            // --pick-at x y
     double *benchTimes;         // [view * benchFrames + frame]
     int *benchShadowUpdates;    // per view
@@ -629,6 +647,7 @@ static void FreeMainHeap(void)
     free(mainHeap.settingsChange);
     free(mainHeap.selectLines);
     free(mainHeap.regions);
+    free(mainHeap.volumes);
     free(mainHeap.pickAt);
     free(mainHeap.benchTimes);
     free(mainHeap.benchShadowUpdates);
@@ -775,10 +794,11 @@ static int Run(int argc, char **argv)
     mainHeap.fx = malloc(sizeof(const char *) * argc);
     mainHeap.selectLines = malloc(sizeof(int) * argc);
     mainHeap.regions = malloc(sizeof(Rectangle) * argc);
+    mainHeap.volumes = malloc(sizeof(BoundingBox) * argc);
     mainHeap.pickAt = malloc(sizeof(Vector2) * argc);
     mainHeap.settingsSet = malloc(sizeof(const char *) * argc);
     mainHeap.settingsChange = malloc(sizeof(const char *) * argc);
-    if (!mainHeap.fx || !mainHeap.selectLines || !mainHeap.regions || !mainHeap.pickAt || !mainHeap.settingsSet ||
+    if (!mainHeap.fx || !mainHeap.selectLines || !mainHeap.regions || !mainHeap.volumes || !mainHeap.pickAt || !mainHeap.settingsSet ||
         !mainHeap.settingsChange) {
         fprintf(stderr, "monolith: out of memory\n");
         return 1;
@@ -787,9 +807,10 @@ static int Run(int argc, char **argv)
     int fxCount = 0;
     int *selectLines = mainHeap.selectLines, selectLineCount = 0;
     Rectangle *regionArgs = mainHeap.regions;
+    BoundingBox *volumeArgs = mainHeap.volumes;
     Vector2 *pickAtArgs = mainHeap.pickAt;
     int pickAtCount = 0;
-    int regionArgCount = 0;
+    int regionArgCount = 0, volumeArgCount = 0;
     const char **settingsSets = mainHeap.settingsSet, **settingsChanges = mainHeap.settingsChange;
     int settingsSetCount = 0, settingsChangeCount = 0;
     // Every flag is checked here, before anything else happens: an unknown flag, a missing
@@ -916,6 +937,19 @@ static int Run(int argc, char **argv)
             NUM(4, -ARG_COORD_LIMIT, ARG_COORD_LIMIT, r.height);
             regionArgs[regionArgCount++] = r;
             i += 4;
+        }
+        else if (strcmp(a, "--volume") == 0) {
+            // Two opposite corners in map coordinates (any order)
+            NEED(6);
+            BoundingBox v;
+            NUM(1, -ARG_COORD_LIMIT, ARG_COORD_LIMIT, v.min.x);
+            NUM(2, -ARG_COORD_LIMIT, ARG_COORD_LIMIT, v.min.y);
+            NUM(3, -ARG_COORD_LIMIT, ARG_COORD_LIMIT, v.min.z);
+            NUM(4, -ARG_COORD_LIMIT, ARG_COORD_LIMIT, v.max.x);
+            NUM(5, -ARG_COORD_LIMIT, ARG_COORD_LIMIT, v.max.y);
+            NUM(6, -ARG_COORD_LIMIT, ARG_COORD_LIMIT, v.max.z);
+            volumeArgs[volumeArgCount++] = v;
+            i += 6;
         }
         else if (strcmp(a, "--shadow") == 0) {
             // Clamped: a zero range or size would divide by zero in the shadow tile layout
@@ -1088,7 +1122,7 @@ static int Run(int argc, char **argv)
                 for (int k = 0; k < selectLineCount; k++) if (peek->models[m].ref.line == selectLines[k]) { selected++; break; }
             char *text = Unescape(classifyText);
             if (!text) { MS_Unload(peek); return 1; }
-            ModelQuery q = { .prompt = text, .kind = classifyKind, .selected = selected, .regions = regionArgCount,
+            ModelQuery q = { .prompt = text, .kind = classifyKind, .selected = selected, .regions = regionArgCount, .volumes = volumeArgCount,
                              .hit = true, .emptyMap = peek->boxCount + peek->modelCount <= 2, .noBrief = !peek->brief[0] };
             ModelChoice c;
             LauncherChooseModel(&q, &c);
@@ -1227,6 +1261,8 @@ static int Run(int argc, char **argv)
         if (!DesignerAddRegion(&designer, regionArgs[i], GetScreenWidth(), GetScreenHeight()))
             TraceLog(LOG_WARNING, "monolith: --region %.0f %.0f %.0f %.0f is empty after clamping to %dx%d; ignored",
                      regionArgs[i].x, regionArgs[i].y, regionArgs[i].width, regionArgs[i].height, GetScreenWidth(), GetScreenHeight());
+    // --volume: as if made in volume mode (world space)
+    for (int i = 0; i < volumeArgCount; i++) DesignerAddVolume(&designer, volumeArgs[i]);
 
     if (!hidden) DisableCursor();
     if (typeText) {
@@ -1512,7 +1548,7 @@ static int Run(int argc, char **argv)
                     SpectatorMessage(&spec, "back to the last finished request");
                 } else SpectatorMessage(&spec, "no finished request yet");
             }
-            if (spec.active) { if (!typing) UpdateSpectator(&spec, &player, dt); }
+            if (spec.active) { if (!typing) UpdateSpectator(&spec, &player, dt, !DesignerTakesArrows(&designer)); }
             else if (!typing) UpdatePlayer(&player, dt);
 
             if (action == DESIGNER_SUBMIT) {
@@ -1573,6 +1609,7 @@ static int Run(int argc, char **argv)
             bool designerUi = (spec.active || shotPath) && (!bench || emulateWindow);
             if (drawUi && hud && designerUi) {
                 DesignerDrawOverlay(&designer, camera, true);
+                DesignerDrawVolumes(&designer, camera, GetScreenWidth(), GetScreenHeight(), false);
                 DesignerDrawCrosshair(GetScreenWidth(), GetScreenHeight());
             }
             // Snip mode (screen regions) shows even with the HUD off, like the prompt box
@@ -1589,7 +1626,7 @@ static int Run(int argc, char **argv)
                 if (spec.active) {
                     DrawText(TextFormat("speed %.1f m/s (wheel)  |  <- -> viewpoints  |  P copy view  |  G drop player  |  TAB exit  |  K / SHIFT+K / CTRL+K n close terminals",
                              spec.speed), 12, 32, 16, (Color){ 230, 230, 230, 120 });
-                    DrawText("LMB select  |  SHIFT+LMB add/remove  |  CTRL+LMB group  |  RMB clear  |  C snip regions  |  ENTER request  |  R fly to last result",
+                    DrawText("LMB select  |  SHIFT+LMB add/remove  |  CTRL+LMB group  |  RMB clear  |  C snip regions  |  V volumes (SHIFT+V from selection)  |  ENTER request  |  R fly to last result",
                              12, 52, 16, (Color){ 230, 230, 230, 120 });
                     int y = 80;
                     y += DesignerDrawHud(&designer, 12, y);
