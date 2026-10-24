@@ -8,7 +8,7 @@
 // to the package folder), writes an import bundle requests/<stamp>_import-<name>/
 // (request.md with an "Import" section, request.json with "kind": "import") and opens a
 // Claude Code import session on it through the launcher. The session follows
-// AI-MAP-TOOL.md "Import requests". Prints what it did; false on error.
+// the import-request skill (.claude/skills/import-request/SKILL.md). Prints what it did; false on error.
 bool ImportProject(const char *mapsDir, const char *projectDir, const char *mapTarget);
 
 #endif

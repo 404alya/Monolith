@@ -3,7 +3,7 @@
 # The game starts it in place of claude (MONOLITH_CLAUDE=tools/stub-coordinator.sh, with
 # MONOLITH_TERMINAL=tools/stub-terminal.sh and MONOLITH_STUB_RUN=<log>, see
 # tools/test-coordinator.sh). It ignores its arguments and applies the scheduling rules of
-# AI-COORDINATOR.md through tools/request-queue.sh, so the tests exercise the real queue:
+# the coordinator skill (.claude/skills/coordinator/SKILL.md) through tools/request-queue.sh, so the tests exercise the real queue:
 #   - a queued request starts only if no claimed request uses the same map package, and an
 #     older queued one on that package goes first;
 #   - a code request runs alone: it starts only when nothing else runs, and while it waits

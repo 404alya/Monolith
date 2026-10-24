@@ -14,7 +14,7 @@
 //     coordinator" runs a small /bin/sh wrapper that holds the lock (flock) around `claude
 //     <permission flags> --model $MONOLITH_COORDINATOR_MODEL (default sonnet)
 //     [MONOLITH_CLAUDE_ARGS] "You are the monolith request coordinator. Read
-//     AI-COORDINATOR.md ... Requests folder: <path>"`. Later requests only go into the queue;
+//     .claude/skills/coordinator/SKILL.md ... Requests folder: <path>"`. Later requests only go into the queue;
 //     they never open a window. The coordinator (tools/request-queue.sh) claims bundles,
 //     hands each to a subagent on the request's model and writes every later state (claimed,
 //     question, done, failed, cancelled). The HUD follows state + result.md. Without flock
@@ -39,8 +39,8 @@
 //     --single-instance) still finds it.
 //   - permissions: every session starts with --allow-dangerously-skip-permissions
 //     --dangerously-skip-permissions, so the developer isn't asked to approve each
-//     command; the guard rails live in CLAUDE.md / AI-COORDINATOR.md / AI-MAP-TOOL.md
-//     instead. MONOLITH_CLAUDE_SAFE=1 (any value but empty or "0") drops the two flags.
+//     command; the guard rails live in CLAUDE.md and the coordinator / map-request
+//     skills (.claude/skills/) instead. MONOLITH_CLAUDE_SAFE=1 (any value but empty or "0") drops the two flags.
 //   - model: per request MONOLITH_MODEL, MONOLITH_MODEL_FAST / _DEFAULT / _HEAVY and an @tier
 //     prompt prefix steer it (region "Model choice"); the coordinator passes it to the
 //     request's subagent. The coordinator's own model: MONOLITH_COORDINATOR_MODEL.
@@ -1044,14 +1044,14 @@ static bool WriteRequestMd(const char *path, const Bundle *B)
     fprintf(f, "Model: %s (%s tier: %s)\n\n", B->model.name, ModelTierName(B->model.tier), B->model.reason);
     fprintf(f, "Request `%s`, submitted %s from the monolith map designer. Bundle format 2: besides the "
                "crosshair hit and the selected objects it may contain **screen regions** the developer "
-               "dragged over the frame (see *Screen regions* below and `AI-MAP-TOOL.md`).\n\n", B->id, B->created);
-    fprintf(f, "**First** read `CLAUDE.md` and `AI-MAP-TOOL.md` in the repository root (if they are not "
-               "loaded already); they explain the map format, the conventions and how to verify an edit. "
+               "dragged over the frame (see *Screen regions* below and `docs/knowledge/request-bundle.md`).\n\n", B->id, B->created);
+    fprintf(f, "**First** read `CLAUDE.md` and the map-request skill `.claude/skills/map-request/SKILL.md` in the repository root (if they "
+               "are not loaded already); they explain the workflow, the map format and how to verify an edit. "
                "Then carry out the request below.\n\n"
                "**When you are done**, write `requests/%s/result.md`. Its **first line is a one-line "
                "summary** (the game shows it in its HUD), followed by what changed (map lines before -> "
                "after), the paths of your after-image(s), and anything left open. If the request is "
-               "genuinely ambiguous, ask the developer instead of guessing (`AI-MAP-TOOL.md` section 3 says how).\n\n", B->id);
+               "genuinely ambiguous, ask the developer instead of guessing (the map-request skill, section 3, says how).\n\n", B->id);
     if (B->stale)
         fprintf(f, "**Warning:** the map was reloaded between the selection and the submit; box indices "
                    "below may not match what the user saw.\n\n");
@@ -1274,7 +1274,7 @@ static bool WriteRequestJson(const char *path, const Bundle *B)
     fprintf(f, ",\n  \"slug\": "); JsonStr(f, B->slug);
     fprintf(f, ",\n  \"created\": "); JsonStr(f, B->created);
     fprintf(f, ",\n  \"instructions\": ");
-    JsonStr(f, TextFormat("Read CLAUDE.md and AI-MAP-TOOL.md in the repository root first, then carry out the "
+    JsonStr(f, TextFormat("Read CLAUDE.md and .claude/skills/map-request/SKILL.md in the repository root first, then carry out the "
                           "prompt. When done, write requests/%s/result.md; its first line is a one-line summary.", B->id));
     fprintf(f, ",\n  \"resultFile\": "); JsonStr(f, TextFormat("requests/%s/result.md", B->id));
     fprintf(f, ",\n  \"mapReloadedSinceSnapshot\": %s", B->stale ? "true" : "false");
@@ -2429,7 +2429,7 @@ void LauncherCloseOnExit(void)
 // as its last file; then, unless requests/.coordinator/lock is held, one terminal titled
 // "monolith-claude: coordinator" runs COORDINATOR_WRAPPER + claude [permission flags]
 // --model $MONOLITH_COORDINATOR_MODEL (default sonnet) [MONOLITH_CLAUDE_ARGS] "<fixed
-// prompt naming AI-COORDINATOR.md>". The coordinator (tools/request-queue.sh) claims bundles
+// prompt naming .claude/skills/coordinator/SKILL.md>". The coordinator (tools/request-queue.sh) claims bundles
 // and hands each to a subagent; after "queued" only it writes state (claimed, question,
 // done, failed, cancelled). The game asks for a cancel with requests/<id>/cancel, and turns
 // a queued bundle into "cancelled" itself only while no coordinator holds the lock.
@@ -2619,7 +2619,7 @@ static bool StartCoordinator(char *note, int noteSize)
 
     char title[200], prompt[1600], err[512] = "";
     CoordinatorTitle(title, sizeof(title));
-    snprintf(prompt, sizeof(prompt), "You are the monolith request coordinator. Read AI-COORDINATOR.md in the repository root "
+    snprintf(prompt, sizeof(prompt), "You are the monolith request coordinator. Read .claude/skills/coordinator/SKILL.md in the repository root "
                                      "and follow it exactly. Requests folder: %s", requestsDir);
     TermWindow t = { 0 };
     char mark[160] = "";

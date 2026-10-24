@@ -74,7 +74,7 @@ a little lonely, safe near the fire.
 - **Models are the default for organic things** (trees, rocks, props, logs). Reuse the models
   in `models/` first (7 Kenney pines, 2 rocks, a stump, a log, the Poly Pizza campfire, tent
   and lantern, the Poly Haven rock face). New ones: low-poly CC0 / CC-BY from the sources in
-  `AI-MAP-TOOL.md` ("Models and textures"); Kenney and Poly Pizza low-poly fit best.
+  the `assets-and-licences` skill; Kenney and Poly Pizza low-poly fit best.
 - **Boxes** for terrain shaping (terraces, ledges, steps, platforms), posts and anything
   architectural, with flat palette materials.
 - **Restyle every model** with material overrides in the map file (`material` /

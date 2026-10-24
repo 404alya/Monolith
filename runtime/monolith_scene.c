@@ -750,7 +750,7 @@ static void BuiltinEnvironment(EnvDef *e)
     env->volumetricFog.enabled = true;
     // Keep the density low: R3D's volumetric fog is lit only by lights, not by the sky, so
     // dense fog in shadow turns into a black curtain that hides everything behind it
-    // (PROMPT-INSTRUCTIONS.md 7.1). The emission stands in for the missing sky light.
+    // (docs/knowledge/r3d-pitfalls.md 1). The emission stands in for the missing sky light.
     env->volumetricFog.scatteringDensity = 0.012f;
     env->volumetricFog.absortionDensity = 0.001f;
     env->volumetricFog.scatteringColor = (Color){ 255, 244, 228, 255 };
@@ -788,7 +788,7 @@ static void BuiltinEnvironment(EnvDef *e)
 
     // The ambient map comes from an ambient-only copy of the sky whose lower hemisphere
     // stands in for light bounced off the ground; with the visible sky's dark ground,
-    // downward-facing surfaces got almost no ambient (PROMPT-INSTRUCTIONS.md 7.5).
+    // downward-facing surfaces got almost no ambient (docs/knowledge/r3d-pitfalls.md 5).
     e->ambientMode = AMB_PROCEDURAL;
     e->ambientSize = 256;
     e->ambient.groundBottomColor = (Color){ 120, 116, 108, 255 };
@@ -4353,8 +4353,8 @@ void MS_ApplyRenderResolution(const MS_Scene *s, int outW, int outH)
 }
 
 // --- Graphics quality (MS_Quality, monolith_scene.h)
-// Presets from the measured trade-off knobs (PROMPT-INSTRUCTIONS.md 7.3 "Trade-off knobs" and
-// "Graphics settings"): ultra is the map exactly; high trades SSAO + SSIL for the baked
+// Presets from the measured trade-off knobs (docs/performance.md "Trade-off knobs" and
+// docs/knowledge/cli.md "Graphics settings"): ultra is the map exactly; high trades SSAO + SSIL for the baked
 // occlusion volume and bakes the fog's sun visibility; medium also renders at 75% with half
 // the fog march steps and a 4096 shadow map; low renders at 50% without AO and bloom.
 

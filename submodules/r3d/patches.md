@@ -1026,7 +1026,7 @@ two `GL_TIMESTAMP` queries at the start and end of `R3D_End()` for the whole spa
 - Sanity: sum of passes + untimed rest = GPU total; GPU total + CPU time ≈ headless frame
   time (headless runs `glFinish` every frame, so CPU and GPU don't overlap). The shadow-map
   row divided by the re-render fraction gives ~1.2 ms per re-render, matching the earlier
-  A/B estimate in `PROMPT-INSTRUCTIONS.md` §7.3; min/max reduction ~0.37 ms per re-render
+  A/B estimate in `docs/knowledge/r3d-pitfalls.md` §3; min/max reduction ~0.37 ms per re-render
   (§7.3 said ~0.35).
 - Builds without warnings with `-Werror` (R3D's own flags) on Linux (unoptimised and
   Release builds) and MinGW; runs under wine too.
@@ -3546,7 +3546,7 @@ index beb67f7..7e2266b 100644
 ## Patch 11: baked world-space occlusion for the ambient light (2026-10-11)
 
 **Symptom.** SSAO + SSIL cost ~0.75 ms per frame (plus normal/radiance downsamples) for a
-small effect in this scene (PROMPT-INSTRUCTIONS §7.5), and being screen-space they change when
+small effect in this scene (docs/knowledge/r3d-pitfalls.md §5), and being screen-space they change when
 the camera only turns and miss off-screen occluders. The scene is static, so its occlusion is a
 function of the world position.
 
@@ -3855,7 +3855,7 @@ march).
 
 **Change.** Two new `R3D_VolumetricFog` fields, `fadeStart` and `fadeEnd` (default 0 = off).
 With `fadeEnd > 0` the fog density is multiplied by `1 - smoothstep(fadeStart, fadeEnd, t)`,
-t = distance from the eye along the view ray (never view depth, PROMPT-INSTRUCTIONS 7.6):
+t = distance from the eye along the view ray (never view depth, docs/knowledge/r3d-pitfalls.md 6):
 - `vfog_radiance.frag`: per step the in-scatter and the step's extinction are scaled by the
   fade; the march stops at `fadeEnd` (the density is 0 beyond it). The directional light's
   closed form for unshadowed rays (patch 9) is skipped when fading (the per-step factors vary).

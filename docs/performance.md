@@ -1,6 +1,6 @@
 # monolith: performance notes and measurements
 
-Measurement history and the reasoning behind the engine's caches and trade-off knobs. The rules that follow from it are in `PROMPT-INSTRUCTIONS.md` (§7); this file holds the numbers, how they were measured and the ideas not taken. Numbers are from the dev machine (RTX 4050 Laptop, driver 615.71), default map, unless noted. GPU clock states swing results by ~10%: compare rows of one session only.
+Measurement history and the reasoning behind the engine's caches and trade-off knobs. The rules that follow from it are in `docs/knowledge/r3d-pitfalls.md` and the `benchmarking` skill; this file holds the numbers, how they were measured and the ideas not taken. Numbers are from the dev machine (RTX 4050 Laptop, driver 615.71), default map, unless noted. GPU clock states swing results by ~10%: compare rows of one session only.
 
 ## R3D build type
 
@@ -105,7 +105,7 @@ Headless `--bench`, 1920×1006, spinning, 3 interleaved rounds: ultra 3.17 ms, h
 
 Single-knob costs behind the settings panel (default 3.59 ms in that session): render scale 0.75 −39% / 0.5 −55%; shadow map 8192 = 3.7 cm texels, 256 MB VRAM, 4096 = 7.4 cm, 64 MB; AO baked −27%, off ~−0.9 ms; fog cache 0.5 m + step ×2 −16%; bloom off −6%; window MSAA ~0.1 ms.
 
-## Shadowed undersides (§7.5 of PROMPT-INSTRUCTIONS)
+## Shadowed undersides (`docs/knowledge/r3d-pitfalls.md` §5)
 
 Measured with `--off` on the default map (2026-10-10). Before the ambient-only sky, with the sun off (`--off 6`) soffits and the hall ceiling were exactly (0,0,0), and warm volumetric in-scatter on them came out maroon, e.g. (19,0,0), after AgX, contrast and 0.8 saturation. SSAO and SSIL each changed whole-frame mean brightness by < 0.5/255 in every test view. SSIL ≈ 0.5 ms and SSAO ≈ 0.2 ms GPU; net, SSIL darkens (its own 5 m AO term outweighs its bounce). With both off the largest change in the 26 verification shots is the darkening band along wall feet in close shaded views (view 1: up to +37/255 in that band, +1.35/255 mean); views 2/3/5 and the steep view < 0.5/255 mean.
 
@@ -130,3 +130,7 @@ Session-to-session swings were large (the clusters-alone low run measured 3.44 i
 Profiled with `perf record --call-graph lbr` (LBR stacks unwind through the NVIDIA driver, which has no CFI) and `__GL_YIELD=USLEEP` (so `glFinish`'s spin-wait in headless benches doesn't pose as work). On the default map the crosshair pick (`DesignerPickCamera` → linear `PickBoxes` over 46,322 boxes) was ~21% of the CPU samples, ~0.57 ms per frame in spectator mode; walking (`player.c` `Overlap`, 3–5 linear scans per frame) and `MS_Raycast` / `MS_Collides` had the same shape.
 
 A BVH over the published colliders (built at load, leaves of ≤ 4, also for noGpu loads) now serves `MS_Raycast`, `MS_Collides` and the new `MS_FirstCollision`; the designer's pick and the player go through them. Results are bit-identical to the linear scans (in-process self-test, 700k random/axis-aligned/corner rays and touching/apart boxes over the three test maps: 0 mismatches). A ray: 383 → 2.3 µs. Headless bench, 3 interleaved pairs: low 2.71 → 2.20 ms (CPU until finish 1.07 → 0.57 ms), ultra 8.52 → 7.87 ms. After it, `R3D_End` (draw submission, ~0.34 ms of it the geometry pass) is the largest CPU item.
+
+## Run-to-run noise: GPU clock states (2026-10)
+
+Headless `--bench` runs on the RTX 4050 laptop flip between two speed levels about 10% apart (e.g. Canyon 4.8 vs. 5.4 ms) depending on the GPU's clock state, far more than the 1-2% noise measured earlier between runs in one state. In 2026-10 one 3x full A/B made Canyon look 8% slower; 6 tightly interleaved short pairs showed it wasn't. Hence the rule in the `benchmarking` skill: compare paired differences of interleaved A/B runs, never single runs.

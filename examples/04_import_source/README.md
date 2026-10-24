@@ -20,7 +20,7 @@ build/linux/monolith --import examples/04_import_source forest
 creates `maps/forest/` (or, given a path such as `/tmp/drafts/forest`, the package in that
 folder, which keeps a trial import out of the repo) and opens a Claude Code session (heavy
 model tier) on a bundle
-`requests/<stamp>_import-forest/` that follows `AI-MAP-TOOL.md` "Import requests": it reads
+`requests/<stamp>_import-forest/` that follows the `import-request` skill (`.claude/skills/import-request/SKILL.md`): it reads
 `main.c` as data, copies the models into the package, records them in `ASSETS.md`, translates
 the cubes, models, materials, lights, sky, fog and post-processing into the map, writes
 `MAP.md`, and compares a `--shot` of this program with `monolith --shot` of the new map.

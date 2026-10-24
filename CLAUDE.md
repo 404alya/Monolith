@@ -9,32 +9,37 @@ monolith is an **AI-assisted map designer** for 3D levels of any style, written 
 - Never run code from downloads or imported projects, except to build an imported project in a scratch copy.
 - Never open a visible window: run the game only with `--shot` (hidden window), `--dump-boxes`, `--dump-scene` / `--dump-scene-diff`, `--inspect-model`, `--new-map`, `--export`, `--classify` or `--bench --headless`. Without one of them (or with a mistyped flag) it opens a visible window.
 
-## What to read
+## Skills: load the one for your task first
 
-Nothing below is loaded automatically: read what your task needs before you start (index: `docs/knowledge/README.md`).
+The workflows are project skills in `.claude/skills/<name>/SKILL.md`. They load when the task matches; if one doesn't, load it with the Skill tool or Read its file. Reference material they share is in `docs/knowledge/` (index: its `README.md`).
 
-| Task | Read |
+| Skill | Use it for |
 |---|---|
-| **You are the request coordinator** (your start prompt says so) | `AI-COORDINATOR.md` only |
-| **A map request** (`requests/<id>/request.md`) | `AI-MAP-TOOL.md` (the workflow), the map's `MAP.md`, `docs/knowledge/map-format.md`; for models or textures `docs/knowledge/models-and-textures.md` |
-| **An import request** (`kind: "import"`) | `AI-MAP-TOOL.md`, `docs/knowledge/import-export.md`, `docs/knowledge/map-format.md`, `docs/knowledge/models-and-textures.md` |
-| **Editing a map by hand** | the map's `MAP.md`, `docs/knowledge/map-format.md`, `AI-MAP-TOOL.md` §5–6 (editing rules, verification) |
-| **Code: C, runtime, R3D, shaders, build** | `PROMPT-INSTRUCTIONS.md` (all of §7 before touching lighting, fog or shadows); `submodules/r3d/patches.md` before changing R3D |
-| **Larger engine or feature work, several agents, a task prompt** | `docs/knowledge/working-method.md`, then the above |
-| **Why something is the way it is** | `docs/knowledge/history.md`, `docs/design-v2.md`, `docs/performance.md` |
+| `map-request` | a request bundle `requests/<id>/request.md` (also: an old bundle that says to read `AI-MAP-TOOL.md`) |
+| `import-request` | a bundle with `kind: "import"` (with `map-request`) |
+| `map-editing` | any change to a map package, by hand or for a request: rules and verification |
+| `assets-and-licences` | a model or texture: sources, licences, download, Blender, `ASSETS.md`, restyling |
+| `engine-code` | code: C, the runtime, R3D, shaders outside a package, build, tools |
+| `lighting-fog-shadows` | lighting, shadows, fog, ambient, exposure, black surfaces (with `docs/knowledge/r3d-pitfalls.md`) |
+| `benchmarking` | any `--bench` run or performance claim |
+| `leak-check` | `tools/leakcheck.sh`, after every code change |
+| `large-engine-work` | engine work across modules or with several agents; `/task-prompt` drafts a task prompt |
+| `coordinator` | only if your start prompt says you are the request coordinator |
+
+Why things are the way they are: `docs/knowledge/history.md`, `docs/design-v2.md`, `docs/design-coordinator.md`, `docs/performance.md`.
 
 ## Hard rules
 
-- **Never take over the developer's screen.** Run the game and the examples only as the guard rail above says (examples: only with `--shot`). Never switch i3 workspaces.
-- **Benchmarks are noisy** (~10% swings between GPU clock states). Screen with `--bench-frames 150`, and report numbers only from full runs. Verify every claimed gain or regression with **interleaved A/B pairs** (A, B, A, B, … ≥ 3 pairs, two binaries side by side, same flags), with `__GL_SYNC_TO_VBLANK=0` and `--note "what changed"` on every run. Only one benchmark may run at a time. Map edits never need a benchmark.
-- **The Bash tool runs zsh:** an unquoted `$VAR` does not word-split. Use arrays or inline env assignments (`__GL_SYNC_TO_VBLANK=0 ./build/linux/monolith …`).
+- **Never take over the developer's screen.** Run the game and the examples only as the guard rail above says (examples: only with `--shot`). Never switch the developer's workspace, desktop or window focus.
+- **Benchmarks are noisy** (~10% swings between GPU clock states): only `--bench --headless`, one benchmark at a time, interleaved A/B pairs for every claimed gain or regression. Map edits never need a benchmark. Details: the `benchmarking` skill.
+- **The Bash tool's shell may be zsh** (it is on the developer's machine): never rely on an unquoted `$VAR` word-splitting. Use arrays or inline env assignments (`__GL_SYNC_TO_VBLANK=0 ./build/linux/monolith …`).
 - **Both targets build with zero warnings:** `./build.sh` and `./build.sh --win` (and `examples/build.sh` when the runtime or an example changed), after any code change. Shaders pass `glslangValidator`.
 - **Zero memory leaks:** after any change to code (C, shaders, build), `tools/leakcheck.sh` must end with `leakcheck: OK: zero leaks of ours` before the change counts as done (map-only edits don't need it).
 - **No fixed-size content buffers:** anything sized by the map, the selection, the regions or the input is a heap array (`MS_RESERVE` / `MS_PUSH`) or a heap string. Fixed arrays only for stack scratch that formats one path or message.
 - **Don't change how a scene looks without the developer's approval.** The exception is when the look is what the request asks for. Engine changes keep every map in `maps/` pixel-identical (prove it with `--shot` comparisons) and its box list identical (`--dump-boxes`), or are presented as a trade-off with before/after images.
-- **Assets need a recorded licence:** CC0 / public domain, or CC-BY with the attribution recorded; every external file gets an `ASSETS.md` row and a sidecar (`docs/knowledge/models-and-textures.md`).
-- **Record every change under `submodules/r3d`** in `submodules/r3d/patches.md` (symptom, cause, files, diff, verification). Don't touch `~/Projects/r3d` or other projects.
+- **Assets need a recorded licence:** CC0 / public domain, or CC-BY with the attribution recorded; every external file gets an `ASSETS.md` row and a sidecar (the `assets-and-licences` skill).
+- **Record every change under `submodules/r3d`** in `submodules/r3d/patches.md` (symptom, cause, files, diff, verification). Don't touch other checkouts of R3D or other projects outside this repo.
 - **Never delete with `rm`** (or `rmdir`, `find -delete`, `unlink`): every `rm` needs the developer's approval. Move files to the trash instead with `gio trash <path>…` (works for folders too; the developer can restore them). This includes test bundles in `requests/`, scratch shots and temporary files in the repo.
 - **Don't commit unless asked.** Never commit `build/`, screenshots, `benchmark/`, `requests/` or `export/`.
 
-**Keep this file short:** it is loaded into every session. Rules go here only if every session needs them; reference material goes into `docs/knowledge/` (or `PROMPT-INSTRUCTIONS.md` for the engine), measurement history into `docs/performance.md`.
+**Keep this file short and map-agnostic:** it is loaded into every session. Rules go here only if every session needs them. Workflows go into a skill, reference material into `docs/knowledge/`, measurement history into `docs/performance.md`. Never name a map here or in a skill: say "every map in `maps/`"; anything about one map goes into that map's `MAP.md`. Project knowledge goes into the repo, not into a personal memory: teammates don't have yours. Machine-specific settings (tool paths such as `BLENDER`) go into your own gitignored `.claude/settings.local.json` (`"env": {…}`).

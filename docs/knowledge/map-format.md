@@ -1,6 +1,6 @@
 # Map packages and the map format
 
-Reference for everything inside a map package: the package layout, the design brief (`MAP.md`) and the `.map` file format. Read it before editing a map. The request workflow is in `AI-MAP-TOOL.md`; models and textures in `models-and-textures.md`; import and export in `import-export.md` (all of `docs/knowledge/` is listed in `docs/knowledge/README.md`). The parser's header comment in `runtime/monolith_scene.c` is authoritative where this file and the code differ.
+Reference for everything inside a map package: the package layout, the design brief (`MAP.md`) and the `.map` file format. Read it before editing a map. The request workflow is the `map-request` skill and the editing rules the `map-editing` skill; models and textures the `assets-and-licences` skill; import the `import-request` skill, export `export.md` (all of `docs/knowledge/` and the skills are listed in `docs/knowledge/README.md`). The parser's header comment in `runtime/monolith_scene.c` is authoritative where this file and the code differ.
 
 ## 1. Map packages and the design brief
 
@@ -16,7 +16,7 @@ maps/<name>/
 └── ASSETS.md      every external file: source URL, author, licence (+ URL), date, sha256, changes
 ```
 
-- Every path in a map file is **relative to the package root** (the folder of the map file). Absolute paths and `..` are rejected, so a package can be copied anywhere (and exported, `import-export.md` §2).
+- Every path in a map file is **relative to the package root** (the folder of the map file). Absolute paths and `..` are rejected, so a package can be copied anywhere (and exported, `export.md`).
 - `--map <path>` takes a package folder (it loads `<folder>/<folder name>.map`, else its only `.map`) or a `.map` file. A single `.map` file outside a package (format 1 or 2) loads too; its folder is its root.
 - Hot reload watches every file the package uses: the map, shaders, textures, panoramas, model files and the files a model file names.
 
@@ -91,7 +91,7 @@ use "name"                                    following boxes (and models, as an
 ```
 
 - `"default"` always exists (plain PBR: albedo 180 180 180, roughness 0.9, metalness 0) and may be redefined. A material must be defined before a `use` names it; `use "default"` goes back.
-- Keys: `shader "shaders/x.glsl"` (an R3D surface shader), `uniform <name> f [f f f]`, `sampler <name> "textures/x.png"`, `albedo R G B [A]` (0–255 sRGB), `albedo_map`, `normal_map`, `normal_scale`, `orm_map`, `occlusion`, `roughness`, `metalness`, `specular`, `emission R G B`, `emission_energy`, `emission_map`, `uv_scale u v`, `uv_offset u v`, `wrap repeat|clamp|mirror` (default repeat), `alpha_cutoff` (0 = never discards, allows the depth pre-pass), `cull back|front|none`, `transparency off|prepass|alpha`, `blend …`, `unlit on|off`, `instanced on|off` (default off: keep this material's boxes as instanced unit cubes, needed by shaders that read `INSTANCE_*` or the model-space `POSITION` in `vertex()`; the loader warns and does it anyway when it finds those in the shader source), `priority n`, and `inherit albedo|normal|orm|emission|all` (model overrides only: keep that map of the model's own material, `models-and-textures.md` step 8). Unset keys keep R3D's defaults.
+- Keys: `shader "shaders/x.glsl"` (an R3D surface shader), `uniform <name> f [f f f]`, `sampler <name> "textures/x.png"`, `albedo R G B [A]` (0–255 sRGB), `albedo_map`, `normal_map`, `normal_scale`, `orm_map`, `occlusion`, `roughness`, `metalness`, `specular`, `emission R G B`, `emission_energy`, `emission_map`, `uv_scale u v`, `uv_offset u v`, `wrap repeat|clamp|mirror` (default repeat), `alpha_cutoff` (0 = never discards, allows the depth pre-pass), `cull back|front|none`, `transparency off|prepass|alpha`, `blend …`, `unlit on|off`, `instanced on|off` (default off: keep this material's boxes as instanced unit cubes, needed by shaders that read `INSTANCE_*` or the model-space `POSITION` in `vertex()`; the loader warns and does it anyway when it finds those in the shader source), `priority n`, and `inherit albedo|normal|orm|emission|all` (model overrides only: keep that map of the model's own material, the `assets-and-licences` skill, step 8). Unset keys keep R3D's defaults.
 - Boxes are drawn per material and 32 m cell: as one mesh of the faces no other box hides (a face is dropped only when opaque boxes cover all of it, so what you see and the shadows don't change), or, with `instanced on` / a shader that needs the cube, as instanced unit cubes. A handful of materials costs nothing; dozens are fine.
 - **Box UVs are per face (0–1)**: a texture stretches with the box. A textured material only looks right on boxes of one size, or with a `uv_scale` matched to that size (`maps/pine_forest`: `uv_scale 286 286` tiles a 2.1 m texture over the 600 m ground). For many box sizes, prefer flat colours or a world-position shader like the default map's `concrete.glsl`.
 
@@ -108,13 +108,13 @@ material "wet asphalt" albedo 28 28 32 roughness 0.15 metalness 0               
 
 - **R3D environment:** every `R3D_Environment` field by its C name: `background.*`, `ambient.*`, `ssao.*`, `ssil.*`, `ssgi.*`, `ssr.*`, `fog.*` (`fog.mode disabled|linear|exp2|exp`, `fog.color`, `fog.density`, …), `volumetricFog.*`, `dof.*`, `bloom.*`, `autoExposure.*`, `tonemap.*` (`tonemap.mode linear|reinhard|filmic|aces|agx`, `tonemap.exposure`), `color.*`. Booleans `on`/`off`, colours `R G B [A]`.
 - **Sky:** `sky.mode procedural|color|panorama`, `sky.size`, `sky.panorama "textures/x.hdr"`, and the procedural sky's colours, curves and sun disc (`sky.skyTopColor`, `sky.skyHorizonColor`, `sky.groundBottomColor`, `sky.sunSizeDeg`, …; `sky.sunDirection` follows `sun.direction` unless set).
-- **Ambient light (IBL):** `ambientSky.mode procedural|same|off`, `ambientSky.size`, and `ambientSky.<sky key>`: the ambient map comes from a copy of the visible sky with these keys changed. A brighter `ambientSky.groundBottomColor` is the fill light for undersides (`PROMPT-INSTRUCTIONS.md` 7.5).
+- **Ambient light (IBL):** `ambientSky.mode procedural|same|off`, `ambientSky.size`, and `ambientSky.<sky key>`: the ambient map comes from a copy of the visible sky with these keys changed. A brighter `ambientSky.groundBottomColor` is the fill light for undersides (`r3d-pitfalls.md` §5).
 - **Sun** (the one shadowed directional light, with static shadow tiles): `sun.enabled`, `sun.direction x y z` (the direction the light travels), `sun.color`, `sun.energy`, `sun.specular`, `sun.fogEnergy`, `sun.range` (shadow distance), `sun.shadow`, `sun.softness`, `sun.depthBias`, `sun.slopeBias` (tuned for `shadow.size`; a quality preset or `--shadow` with a smaller map scales both up by the texel ratio, so they need no retuning per preset); `shadow.size` (px, read at start-up only).
 - **Volumetric fog fade:** `volumetricFog.fadeStart`, `volumetricFog.fadeEnd` (m from the eye; default 0 0 = off, `fadeEnd` > `fadeStart`): the fog's density is full up to `fadeStart` and fades out smoothly by `fadeEnd`. Keeps close light shafts while buildings further away stay clear, and gives the fog a soft end instead of the hard stop at `volumetricFog.length` (`maps/monolith`: 10 50). R3D patch 13; ignored with upstream R3D. With a fade the fog's sun shadow also fades by each step's own distance from the eye (patch 14), so the haze has no hard line where the ground crosses 75% of `sun.range` (without a fade, fog in front of anything past that distance is unshadowed). `volumetricFog.fadeNear` (m, default 0 = off, ≤ `fadeStart`): the density also fades *in*, from 0 at the eye to full at that distance (patch 15). Without it the fog around a sunlit eye veils the whole view, so the scene looks brighter when the player stands in sun than in shade (`maps/monolith`: 15 15 50).
 - **Quality presets:** `bloom.offExposure` (default 1.19): the exposure factor that replaces bloom when the low preset (or `--bloom off`) turns it off. A map whose bloom is stronger than the default map's (intensity 0.04) sets its own value, measured so the mean brightness of its viewpoints stays the same (`maps/pine_forest`: bloom 0.06, `bloom.offExposure 1.3`).
 - **Cache hints** (optional): `shadow.home x y z`, `fogCache.region x0 y0 z0 x1 y1 z1`. Without them both follow the map's bounds; don't add them to new maps.
 - Out-of-range values (e.g. `volumetricFog.stepSize` < 0.05) and zero directions are rejected with `file:line: message`.
-- **Engine pitfalls to respect** (`PROMPT-INSTRUCTIONS.md` §7): dense volumetric fog turns shadowed areas into a black curtain (keep `scatteringDensity` low, add a little `emissionEnergy`, raise shafts with `sun.fogEnergy`); keep `sun.range` ≥ `volumetricFog.length`; washed-out images want less `sun.energy` or `tonemap.exposure`, not brighter fog.
+- **Engine pitfalls to respect** (`r3d-pitfalls.md`): dense volumetric fog turns shadowed areas into a black curtain (keep `scatteringDensity` low, add a little `emissionEnergy`, raise shafts with `sun.fogEnergy`); keep `sun.range` ≥ `volumetricFog.length`; washed-out images want less `sun.energy` or `tonemap.exposure`, not brighter fog.
 
 - **Dark maps** (dusk, night): keep `color.contrast` at **1**. R3D applies contrast in linear space after the tonemap, so any value > 1 clips the darkest tones to pure black (`maps/pine_forest` lost 25% of its path view to black at 1.08). Darken the mood with `tonemap.exposure` and `ambient.energy` instead, and keep the ambient sky (`ambientSky.*`) brighter and bluer than the visible sky, or shadows go black. Count pure-black pixels of a few shots: outside genuinely black objects there should be none.
 - **Bloom and the low preset:** if a map's bloom is stronger than the default map's (`bloom.intensity` 0.04, threshold 0), set `bloom.offExposure` so `--bloom off` keeps the mean brightness of its viewpoints (Sun / quality keys above).
@@ -153,7 +153,7 @@ env bloom.intensity 0.08
 env tonemap.exposure 1.6
 env color.contrast 1
 ```
-The light then comes from the map's lights: emissive sign materials with a weak point light in front of each (`energy 2 range 8`), lamps, windows (§2.6, `models-and-textures.md` step 8 "Neon / night").
+The light then comes from the map's lights: emissive sign materials with a weak point light in front of each (`energy 2 range 8`), lamps, windows (§2.6, the `assets-and-licences` skill, step 8 "Neon / night").
 
 ### 2.6 Lights, spawn, viewpoints
 
@@ -185,7 +185,7 @@ model "models/x.glb" x y z [rot yawDeg pitchDeg rollDeg] [scale s | scale sx sy 
 - `origin bottom` stands the model on y by its lowest vertex after scale and rotation, centred over x z by its file bounds: the safe way to stand a model on a surface. `center`: the same x z and the middle between its lowest and highest vertex; `model` (default): the file's own origin. World bounds, `collide aabb` and picking use the rotated vertices, not the rotated file box.
 - Materials: `material "name"` overrides every slot, `material.N "name"` slot N (`--inspect-model` lists the slots). Precedence: `material.N`, then `material`, then the active `use` (when it is not `"default"`), else the file's own materials.
 - `collide`: `aabb` (default: the world bounds block the player), `none`, or `box …` boxes in model space (before scale and rotation), each turned into a world AABB (a tree's trunk only). `shadow off` stops it casting the sun shadow (it still receives shadows).
-- Finding, licensing, normalising, recording and restyling models: `models-and-textures.md`.
+- Finding, licensing, normalising, recording and restyling models: the `assets-and-licences` skill.
 
 ```
 model "models/tree_pineTallC.glb" -30.07 0 15.26 rot 35 0 0 scale 12.84 origin bottom material.0 "needles" material.1 "bark" collide box -0.025 -0.05 -0.025 0.025 0.4 0.025   # pine_forest

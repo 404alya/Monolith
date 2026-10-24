@@ -1,5 +1,5 @@
 // Export: one map as a self-contained folder that builds and runs on its own (docs/knowledge/
-// import-export.md section 2, PROMPT-INSTRUCTIONS.md "Export, import, examples")
+// export.md, docs/knowledge/engine.md "Export, import, examples")
 //
 // --export <dir> [--map <path>] (no window) and the in-game key F9 (the open map, into
 // export/<map>-<stamp>/) write:

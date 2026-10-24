@@ -1,6 +1,6 @@
 # Design note: one coordinator session for all requests
 
-Status: implemented (2026-10-24). Before this, every request opened its own terminal with its own `claude` process (`src/launcher.c`, region "Launching"). Several sessions could edit the same map at once; the only protection was the map hash check in `AI-MAP-TOOL.md` §6 step 1. Now one long-lived **coordinator** session takes requests from a queue on disk and hands each one to a **subagent**. The old mode stays behind `MONOLITH_LAUNCH=per-request`.
+Status: implemented (2026-10-24). Before this, every request opened its own terminal with its own `claude` process (`src/launcher.c`, region "Launching"). Several sessions could edit the same map at once; the only protection was the map hash check (now the `map-editing` skill, verification step 1). Now one long-lived **coordinator** session takes requests from a queue on disk and hands each one to a **subagent**. The old mode stays behind `MONOLITH_LAUNCH=per-request`.
 
 ## 1. Parts
 
@@ -9,8 +9,8 @@ Status: implemented (2026-10-24). Before this, every request opened its own term
 | Game (submit, `--import`) | `src/launcher.c` | writes the bundle, then `state` = `queued` as its last file; starts the coordinator terminal if none holds the lock; shows the queue in the HUD |
 | Coordinator lock wrapper | `src/launcher.c` (an `/bin/sh -c` script; Windows: a `9>` redirection) | holds `requests/.coordinator/lock` while the coordinator's `claude` runs |
 | Queue tool | `tools/request-queue.sh` | every state change the coordinator makes (claim, finish, requeue, recover), the watcher (`wait`), the queue listing (`list`) |
-| Coordinator | `claude` started by the game with `AI-COORDINATOR.md` | schedules, starts subagents, relays questions, finishes bundles. Reads only `request.json` metadata and the queue listing; never the images, never edits maps |
-| Subagent | Agent tool inside the coordinator | does one request under `AI-MAP-TOOL.md`, returns a one-line status |
+| Coordinator | `claude` started by the game with the `coordinator` skill (`.claude/skills/coordinator/SKILL.md`) | schedules, starts subagents, relays questions, finishes bundles. Reads only `request.json` metadata and the queue listing; never the images, never edits maps |
+| Subagent | Agent tool inside the coordinator | does one request under the `map-request` skill, returns a one-line status |
 | Test doubles | `tools/stub-terminal.sh` (`MONOLITH_STUB_RUN`), `tools/stub-coordinator.sh`, `tools/test-coordinator.sh` | the same scheduling rules in shell, no Claude session |
 
 ## 2. Files on disk
@@ -37,7 +37,7 @@ Transitions: `queued → claimed → (question ↔ claimed) → done | failed | 
 
 The game can't type into a running session, so the handoff is the file system:
 1. The game writes the bundle, then `state` (`queued`).
-2. If the lock is free (and no coordinator was started by this game in the last 20 s), it opens **one** terminal titled `monolith-claude: coordinator` running `claude [permission flags] --model <coordinator model> [MONOLITH_CLAUDE_ARGS] "<fixed prompt>"`, wrapped so the wrapper holds the lock; a second wrapper that finds the lock taken (two quick submits) waits 2 s for it, says so and exits. The fixed prompt names `AI-COORDINATOR.md` and the requests folder, never user text.
+2. If the lock is free (and no coordinator was started by this game in the last 20 s), it opens **one** terminal titled `monolith-claude: coordinator` running `claude [permission flags] --model <coordinator model> [MONOLITH_CLAUDE_ARGS] "<fixed prompt>"`, wrapped so the wrapper holds the lock; a second wrapper that finds the lock taken (two quick submits) waits 2 s for it, says so and exits. The fixed prompt names `.claude/skills/coordinator/SKILL.md` and the requests folder, never user text.
 3. The coordinator keeps **`tools/request-queue.sh wait`** running in the background (Bash `run_in_background`). It polls the folder once a second in shell (no tokens) and **exits** when a `queued` bundle or a `cancel` file appears that it has not reported yet; it prints the events and the queue listing. The exit wakes the coordinator through the harness. Subagent completions wake it the same way. An idle queue costs nothing.
 4. On every wake the coordinator first re-arms the watcher, then acts. Because `seen` records what was reported, a bundle queued between the watcher's exit and its restart still fires the new watcher.
 
@@ -73,7 +73,7 @@ Rejected alternative: `result.md` with `Not done: ambiguous` and a resubmit; the
 
 ## 8. Isolation (design point 6)
 
-Chosen: **no worktrees.** Map subagents edit the real repo in place, because hot reload reads the real package and the developer watches the change appear. Code subagents also work in place: they run alone (§5), the developer's `build/linux/monolith` is the binary to rebuild anyway, and a worktree costs an assimp rebuild of minutes (`working-method.md` §3).
+Chosen: **no worktrees.** Map subagents edit the real repo in place, because hot reload reads the real package and the developer watches the change appear. Code subagents also work in place: they run alone (§5), the developer's `build/linux/monolith` is the binary to rebuild anyway, and a worktree costs an assimp rebuild of minutes (the `large-engine-work` skill, §3).
 
 ## 9. HUD and keys (design point 7)
 

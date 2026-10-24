@@ -3,7 +3,7 @@
 # Run headless and locked down (never open a downloaded .blend; this script only imports
 # glTF / GLB / OBJ / FBX through Blender's own importers):
 #
-#   BLENDER=${BLENDER:-~/.local/share/Steam/steamapps/common/Blender/blender}
+#   BLENDER=${BLENDER:-blender}   # set BLENDER when Blender is not in PATH (e.g. a Steam install)
 #   "$BLENDER" -b --factory-startup --disable-autoexec --python-exit-code 1 \
 #       --python tools/normalize_model.py -- <in.glb|.gltf|.obj|.fbx> <out.glb> [options]
 #

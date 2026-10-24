@@ -7,8 +7,8 @@
 // default map is maps/monolith/. In spectator mode you point at things, select boxes and
 // models or drag out screen regions, and type a request; the game writes requests/<id>/ and
 // queues it for the request coordinator, one Claude Code session in its own terminal that the
-// game starts when none runs (AI-COORDINATOR.md) and that hands each request to a subagent
-// (AI-MAP-TOOL.md). Engine reference: PROMPT-INSTRUCTIONS.md.
+// game starts when none runs (.claude/skills/coordinator) and that hands each request to a subagent
+// (.claude/skills/map-request). Engine reference: docs/knowledge/engine.md.
 //
 // Controls:
 //   WASD / mouse   walk & look          SHIFT  walk faster
@@ -211,8 +211,8 @@
 //   --import <project dir> <name|path>   create maps/<name>/ or the package folder a path
 //                  names (as --new-map) and queue a Claude Code import request (a bundle
 //                  requests/<stamp>_import-<name>/, like a submit) that translates
-//                  the raylib + R3D project's scene into it (import.c, AI-MAP-TOOL.md "Import
-//                  requests"); no window. Same queue / coordinator as edit requests
+//                  the raylib + R3D project's scene into it (import.c, the import-request
+//                  skill); no window. Same queue / coordinator as edit requests
 //
 // Designer debug flags (for testing without a visible window):
 //   --pick         with --shot: print what the crosshair (screen centre) hits on the shot

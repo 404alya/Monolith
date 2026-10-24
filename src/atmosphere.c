@@ -6,7 +6,7 @@
 // SSAO and SSIL run every frame at half resolution (~0.2 + ~0.5 ms GPU at 1920x1006, plus
 // the normal / radiance downsamples they need), yet in this scene they change the image
 // very little: the ambient they modulate is small next to the sun, the volumetric fog and
-// the IBL ground fill (PROMPT-INSTRUCTIONS.md 7.5). --ao picks one of the runtime's AO modes
+// the IBL ground fill (docs/knowledge/r3d-pitfalls.md 5). --ao picks one of the runtime's AO modes
 // (MS_Quality.ao, applied by MS_ApplyQuality) so the developer can trade them away and judge
 // the look live. The default ("full") is the map's setup, unchanged. --bloom off is
 // MS_Quality.bloom = false (bloom here is mostly a uniform ~20% lift: threshold 0, MIX 0.04;

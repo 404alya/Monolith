@@ -23,3 +23,7 @@ export/
 # Maps are local, except the pine_forest package
 maps/*
 !maps/pine_forest/
+
+# Claude Code: per-developer settings and agent worktrees
+.claude/settings.local.json
+.claude/worktrees/

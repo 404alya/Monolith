@@ -1,5 +1,5 @@
 // monolith_capture.h -- record what an R3D program draws in one frame and write it as a
-// monolith map package (the "capture shim" import route; AI-MAP-TOOL.md "Import requests").
+// monolith map package (the "capture shim" import route; the import-request skill).
 //
 // For scenes that are hard to read from source (built in loops, from data files, procedurally):
 // compile this header into the program, run it once with MONOLITH_CAPTURE set, and it writes a

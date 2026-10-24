@@ -2,15 +2,15 @@
 
 > **Design record.** This note was written before the v2 work fanned out
 > (the round-2 task prompt, now retired: its reasons are in `docs/knowledge/history.md`, its
-> working method in `docs/knowledge/working-method.md`) and fixed the shared interfaces; the streams appended
+> working method in the `large-engine-work` skill) and fixed the shared interfaces; the streams appended
 > implementation notes (§8–§10) as they merged. It is kept as the record of *why* things are
 > the way they are. It is not the reference: where it and the code differ, the code wins, and
 > the current, authoritative descriptions are
 > - the map format: the header comment of `runtime/monolith_scene.c` and `docs/knowledge/map-format.md`;
-> - the runtime API: `runtime/monolith_scene.h` and `PROMPT-INSTRUCTIONS.md` §6.1;
-> - request bundles: `AI-MAP-TOOL.md` §2 (and `src/launcher.c`);
+> - the runtime API: `runtime/monolith_scene.h` and `docs/knowledge/engine.md` §4.1;
+> - request bundles: `docs/knowledge/request-bundle.md` (and `src/launcher.c`);
 > - flags, keys and environment variables: the header comment of `src/main.c` and
->   `PROMPT-INSTRUCTIONS.md` §5;
+>   `docs/knowledge/cli.md`;
 > - a map's look and rules: its `MAP.md` (the default map: `maps/monolith/MAP.md`).
 >
 > Later additions are summarised in §11.
@@ -134,7 +134,7 @@ Keys are dotted paths. Every key has a built-in default equal to today's hard-co
   `sky.groundBottomColor`, `sky.groundHorizonColor`, `sky.groundHorizonCurve`,
   `sky.groundEnergy`, `sky.sunDirection`, `sky.sunColor`, `sky.sunSizeDeg`, `sky.sunCurve`,
   `sky.sunEnergy`). `sky.sunDirection` defaults to `sun.direction`.
-- **Ambient-only sky** (`ambientSky.*`, §7.5 of PROMPT-INSTRUCTIONS): the same keys as
+- **Ambient-only sky** (`ambientSky.*`, `docs/knowledge/r3d-pitfalls.md` §5): the same keys as
   `sky.*`, applied to a copy of the visible sky that only feeds `R3D_GenAmbientMap`;
   `ambientSky.size 256`; `ambientSky.mode same|procedural|off` (`same` = use the visible sky).
 - **Sun** (`sun.*`, the one shadowed directional light with the static shadow tiles):
@@ -281,7 +281,7 @@ typedef struct { Rectangle rect; } DesignRegion;               // pixels of view
 // DesignRequest gains: MS_ObjRef *selected; DesignRegionInfo *regions; int regionCount;  (heap, stream M)
 ```
 
-`request.json`, `"format": 2` (format 1 bundles stay readable; `AI-MAP-TOOL.md` describes both):
+`request.json`, `"format": 2` (format 1 bundles stay readable; `docs/knowledge/request-bundle.md` describes both):
 
 ```jsonc
 {
@@ -502,19 +502,19 @@ default map's box dump and the verification shots are unchanged.
 
 - **Memory rules and leak check** (stream M): no content limits, heap arrays via `MS_RESERVE` /
   `MS_PUSH`, sanity caps (§2.7); `tools/leakcheck.sh` with `tools/lsan.supp` /
-  `tools/lsan_report.py` (`PROMPT-INSTRUCTIONS.md` §4).
+  `tools/lsan_report.py` (the `leak-check` skill).
 - **Pass trimming** (stream P): R3D patch 10, single-sampled window by default (`--window-msaa`),
   `--bench-window`; trade-off knobs `--render-scale` / `--upscale` and the baked occlusion volume
-  `--ao-volume` / `--ao baked` (R3D patch 11) (`PROMPT-INSTRUCTIONS.md` §7.3).
+  `--ao-volume` / `--ao baked` (R3D patch 11) (`docs/knowledge/r3d-pitfalls.md` §3).
 - **Graphics settings**: `MS_Quality`, `MS_QualityPreset`, `MS_ApplyQuality`,
   `MS_ApplyRenderResolution` in the runtime; the F2 panel and the settings file in the game
-  (`settings.c`, `settingspanel.c`; `PROMPT-INSTRUCTIONS.md` §5 "Graphics settings").
+  (`settings.c`, `settingspanel.c`; `docs/knowledge/cli.md` "Graphics settings").
 - **Model tiers**: every request gets a fast / default / heavy model (`request.md` `Model:` line,
   `request.json` `model`; `launcher.c` "Model choice"; `MONOLITH_MODEL*`).
 - **Closing request terminals**: K, Shift+K, Ctrl+K n; i3 / sway marks `_monolith_<id>`
   (`launcher.c` "Closing request windows").
 - **Request coordinator** (2026-10-24): one coordinator session takes every request from a queue
-  and hands it to a subagent (`docs/design-coordinator.md`, `AI-COORDINATOR.md`). The bundle
+  and hands it to a subagent (`docs/design-coordinator.md`, the `coordinator` skill). The bundle
   format is unchanged (`request.json` stays format 2); new files next to it: `state` (queued,
   claimed, question, done, failed, cancelled), `claim.txt` (fingerprint at the claim), `cancel`
   (from the game), `question.md` (from the subagent). The K keys take finished requests off the

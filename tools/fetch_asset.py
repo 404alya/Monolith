@@ -2,8 +2,7 @@
 # fetch_asset.py -- licence-safe downloads of models and textures for monolith map packages
 #
 # Run with `python3 -I tools/fetch_asset.py <source> <command> ...` (stdlib only; -I keeps the
-# current directory and user site-packages off sys.path). See AI-MAP-TOOL.md, "Models and
-# textures".
+# current directory and user site-packages off sys.path). See .claude/skills/assets-and-licences/SKILL.md.
 #
 #   polyhaven search [text] [--category c] [--max-tris n] [--limit n]   CC0 models (API)
 #   polyhaven get <slug> [--res 1k|2k|4k] [--out DIR]   glTF + .bin + textures, md5-verified
