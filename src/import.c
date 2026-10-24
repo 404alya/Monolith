@@ -7,8 +7,9 @@
 //    the project folder, the package, an inventory of the project's source and asset files,
 //    the commands to verify with) and request.json ("format": 2, "kind": "import" and an
 //    "import" object). No images: there is no view yet.
-// 3. Opens Claude Code on it through the launcher (same terminal, permission flags and
-//    workspace handling as an edit request). The session reads the project's source as data,
+// 3. Hands it to the launcher like an edit request (LauncherStartBundle: queued for the
+//    coordinator, which starts if none runs; per-request mode: its own terminal with the same
+//    permission flags and workspace handling). The session reads the project's source as data,
 //    copies its assets into the package, translates the scene into format 2, fills MAP.md
 //    and lists what it couldn't translate in result.md.
 // Runs without a window. The project folder is only read (listed), never executed here.

@@ -1,6 +1,6 @@
 # monolith: AI-assisted map designer
 
-Instructions for a Claude Code session that the game started for a request (`requests/<id>/request.md`): how the request reaches you, how to find what the developer means, the editing rules, how to verify, and what to report. This file is the entry point; the reference material is in `docs/knowledge/`:
+Instructions for the session that carries out one request (`requests/<id>/request.md`): normally a **subagent of the request coordinator** (`AI-COORDINATOR.md`), or, in per-request mode, a Claude Code session in its own terminal. How the request reaches you, how to find what the developer means, the editing rules, how to verify, and what to report. This file is the entry point; the reference material is in `docs/knowledge/`:
 
 | Read | When |
 |---|---|
@@ -23,23 +23,31 @@ monolith is an **AI-assisted map designer** for 3D levels of any style, built on
 
 - **The game** (`build/linux/monolith`) is the editor and viewer. The developer flies through the level in spectator mode, points the crosshair at a spot, optionally selects objects or drags out screen regions, types a request ("make this wall twice as tall", "plant three more pines along the path", "hang a neon sign over each of these stalls") and submits it.
 - **The level** is a **map package** `maps/<name>/` (`docs/knowledge/map-format.md` §1): a plain-text map file `<name>.map` (axis-aligned boxes, placed models, materials, lights, environment, spawn, viewpoints), the design brief `MAP.md`, and the package's shaders, models, textures and `ASSETS.md`. `--map <package or .map file>` picks the map; the default is `maps/monolith/`.
-- **Claude Code** gets each request in a new terminal window, started by the game in the repo root. It edits the package (usually only the map file). The running game hot-reloads the package, so the change shows up in place without a restart.
+- **Claude Code** carries the requests out. The game queues each request; one long-lived **coordinator** session (started by the game in its own terminal, `AI-COORDINATOR.md`) decides what runs when and hands each request to a **subagent**. The subagent edits the package (usually only the map file) in the real repo. The running game hot-reloads the package, so the change shows up in place without a restart. (`MONOLITH_LAUNCH=per-request` instead opens one terminal with its own session per request, the behaviour before 2026-10-24.)
 
-You are that Claude Code session. Your job is to change the map (rarely the engine) so it does what the user asked and fits the map's brief, check the result visually, and report back.
+You are the session doing one request. Your job is to change the map (rarely the engine) so it does what the user asked and fits the map's brief, check the result visually, and report back.
 
 ## 2. Request workflow
 
 1. In spectator mode the developer aims, selects, optionally drags out screen regions (snip mode, **C**) and presses **Enter**, types the request and presses **Enter** again.
 2. The game writes a bundle folder, **`requests/<YYYY-MM-DD_HHMMSS>_<slug>/`**, in the repo root (`requests/` is gitignored). The slug is made from the prompt's first words.
-3. The game opens a terminal running `claude "Map edit request: read requests/<id>/request.md and carry it out."` in the repo root. The user's text is never put on a command line. It is only in the bundle. The session runs **without approval prompts** (`--allow-dangerously-skip-permissions --dangerously-skip-permissions`, unless `MONOLITH_CLAUDE_SAFE=1`), so the guard rails at the top of this file apply, and its terminal is moved to i3/sway workspace 10 (`MONOLITH_WORKSPACE`). The game also chose **your model** for this request (fast / default / heavy tier, from the prompt and its context; the `Model:` line near the top of `request.md` says which and why). If the task turns out much bigger than your tier suggests, still do it carefully and completely (you can't switch models), and say so in `result.md`.
+3. The game writes `state` (`queued`) as the bundle's last file and, if no coordinator is running, opens one terminal for it (moved to i3/sway workspace 10, `MONOLITH_WORKSPACE`). The coordinator claims the request when its rules allow (requests on the same map package never run at the same time; code requests run alone) and starts you as its subagent. The user's text is never put on a command line. It is only in the bundle. Everything runs **without approval prompts** (`--allow-dangerously-skip-permissions --dangerously-skip-permissions`, unless `MONOLITH_CLAUDE_SAFE=1`), so the guard rails at the top of this file apply. The game also chose **your model** for this request (fast / default / heavy tier, from the prompt and its context; the `Model:` line near the top of `request.md` says which and why). If the task turns out much bigger than your tier suggests, still do it carefully and completely (you can't switch models), and say so in `result.md`. *Per-request mode:* the game opens a terminal running `claude "Map edit request: read requests/<id>/request.md and carry it out."` in the repo root instead.
 4. You:
    1. read `request.md`;
    2. **read the map's `MAP.md`** (the *Design brief* section of `request.md` names it; format-1 bundles don't: then it is `MAP.md` next to the map file). It decides what new content looks like and how it is built. If it is missing, empty or still the unfilled `--new-map` template (placeholders in parentheses), **write it first** (`docs/knowledge/map-format.md` §1.2), then build;
    3. **read `docs/knowledge/map-format.md`** (the map format: you need it for every edit; skip it only if you already read it in this session), and `docs/knowledge/models-and-textures.md` too if the request needs a model or a texture;
    4. look at the images, locate the target (§3), edit the map (§5), verify the edit (§6), and write **`requests/<id>/result.md`** (§7).
-5. The game polls the bundle twice a second. When `result.md` appears, the HUD shows `[done] <slug>: <first line of result.md>`. The map change is already visible through hot reload. **R** flies the developer's camera back to where the request was made.
+5. The game polls the bundle twice a second. Its HUD shows the request as `queued`, `running`, `[?]` (a question waits for the developer) and, when `result.md` appears, `[done] <slug>: <first line of result.md>` (or `[failed]` / `[cancelled]`). The map change is already visible through hot reload. **R** flies the developer's camera back to where the request was made.
 
-Several requests can run at the same time, and two of them may edit the same map. That is why you check the map hash first (§6, step 1).
+Under the coordinator no other request edits your map package while you work, and code requests run alone. Still check the map hash first (§6, step 1): the developer may have edited the map by hand, an earlier request may have changed it since the submit, and in per-request mode several sessions can edit the same map at once.
+
+### 2a. Working under the coordinator
+
+- **You have no terminal**, and the developer doesn't see your messages; the coordinator relays. Your **final reply is one line**: `DONE: <line 1 of result.md>`, `FAILED: <line 1 of result.md>`, `QUESTION`, or `NEEDS-CODE: <why>`. Everything else goes into `result.md`.
+- **Questions** (§3, step 6): write the question to `requests/<id>/question.md` (line 1: the question, under 150 characters, plain ASCII; details below it) and reply `QUESTION`. Change nothing before you ask if you can help it. You are resumed with the developer's answer; then carry on.
+- **Code**: unless your prompt says you run alone, don't change code (C, the runtime, R3D, shaders outside the map package, build files, tools). If the request needs it, stop **before** changing any code and reply `NEEDS-CODE: <one line why>`. The coordinator resumes you once no other request runs; then code changes are allowed (`PROMPT-INSTRUCTIONS.md`, §6 step 7).
+- **Don't touch the queue**: never write `state`, `claim.txt` or `cancel`, never run `tools/request-queue.sh`, and never touch other bundles. Write only into your own bundle (`result.md`, `question.md`, images, dumps).
+- A cancel from the developer stops you mid-work; the coordinator then lists in `result.md` which files had changed. That is one more reason to write each map edit in one go (§6 step 3).
 
 **Bundle files**
 
@@ -51,6 +59,10 @@ Several requests can run at the same time, and two of them may edit the same map
 | `view-marked.png` | The same frame with the **selected objects** tinted and outlined in orange (models: their rotated bounds), the **crosshair hit** shown as a small cyan square with a normal tick, the crosshair drawn at the centre, and each **screen region** outlined in magenta with its number. |
 | `region-<n>.png` | One per screen region: the crop of `view.png` inside region *n*. |
 | `result.md` | **Written by you**, last. See §7. |
+| `state` | The queue state, one line `<state> <time> <writer>`: `queued` (written by the game), `claimed`, `question`, `done`, `failed`, `cancelled` (written by the coordinator through `tools/request-queue.sh`). Not in per-request mode. Never write it yourself. |
+| `claim.txt` | The coordinator's fingerprint of the map package and the code at the claim (for recovery after a crash). |
+| `cancel` | Written by the game when the developer cancels the request. |
+| `question.md` | Your question for the developer, if you have one (§2a). |
 
 **Format-1 bundles** (written by game builds before map packages) have no `Model:` line, no design brief, no regions and no models; `request.json` has `"format": 1` and no `kind`, the selection lists `boxes` instead of `objects` and `hit` has `box` but no `kind`. They name the map as `…/maps/monolith.map` (also in the reproduction command), which is now the package `maps/monolith/` (map file `maps/monolith/monolith.map`): use the package path in every command, and read `maps/monolith/MAP.md` anyway. The new file has a header block, so **line numbers and box indices from a format-1 bundle are stale**: locate the target by its coordinates and the quoted line text (as with a hash mismatch, §6 step 1).
 
@@ -75,7 +87,7 @@ Work through these sources in this order:
 3. **Group names, landmarks and nearby context.** "The hall roof", "the canyon walls", "the camp" or "the ridge" refer to groups (`docs/knowledge/map-format.md` §2.3); the map's `MAP.md` lists its groups and landmarks. The Nearby table tells you what surrounds the spot.
 4. **Screen regions** (format-2 bundles; older bundles have none). The developer dragged a rectangle over the frame, usually to point at an *area* rather than one object: "this area", "everything here", "fill this gap", "make this part darker". Read the region's crop (`region-<n>.png`) and its numbered outline in `view-marked.png`. "Everything here" means the region's object list (read the *by map line* table first; ignore tiny shares, a few percent or less, unless they are what the request is about). "Fill this gap" / "put something here" is about the empty part: the sky share and the depth range tell you whether there is open space or distant geometry behind it. **A gap is bounded by the geometry at the region's edges, not by what is seen through it**: when the region looks through an opening (a canyon mouth, a doorway, the space between two buildings), its centre point and objects lie behind the opening, often far away; the **edge objects** (nearest first, with their sides) are the walls, floor and lintel that frame it, and the place to build is between them, at their distance. When the region shows a surface instead (a wall to "make darker", ground to "plant here"), the centre point + normal is the anchor. To probe more points of the frame, `--pick-at x y` (with the bundle's reproduction command) prints what the ray through any pixel of `view.png` hits. Combine with the selection and the crosshair hit when they are given too; when several regions are numbered in the prompt ("1", "2"), match them to the outlines.
 5. **The images.** Look at `view-marked.png` (Read it as an image) to see what the user saw and what was marked. `view.png` shows the same frame without the marks.
-6. **If it is still ambiguous**, for example "this" when there is no hit and no selection, or two plausible targets, **ask in the terminal**. Don't guess. The developer is watching that terminal.
+6. **If it is still ambiguous**, for example "this" when there is no hit and no selection, or two plausible targets, **ask the developer**. Don't guess. Under the coordinator: `question.md` + reply `QUESTION` (§2a); the coordinator asks in its terminal, which the developer watches, and resumes you with the answer. In per-request mode: ask in your terminal.
 
 ## 4. Coordinates and scale
 
@@ -134,7 +146,7 @@ Run every command from the repo root. The binary is `./build/linux/monolith`, an
    - no unrelated objects moved (the dump diff), and nothing multiplied out of scale (the loader's sanity cap is 1 000 000 objects);
    - for models: scale next to the player, support, collision, shadows and lit materials, licence recorded, budgets (`docs/knowledge/models-and-textures.md`, "Verification additions for models");
    - `MAP.md` updated if you added a landmark, group or material.
-7. **Code changes only (C, shaders, build): leak check.** Run `tools/leakcheck.sh` (it builds the LeakSanitizer binaries and runs the main code paths in hidden windows, about 1.5 minutes). It must end with `leakcheck: OK: zero leaks of ours`; otherwise fix the leak it prints before writing `result.md`. Map-only edits (including the package's own shaders) skip this step; check a changed shader with `glslangValidator` instead (`PROMPT-INSTRUCTIONS.md` 7.4).
+7. **Code changes only (C, shaders, build): leak check.** Run `tools/leakcheck.sh` (it builds the LeakSanitizer binaries and runs the main code paths in hidden windows, about 1.5 minutes; its test bundles go to its own requests folder, so it doesn't touch the queue). It must end with `leakcheck: OK: zero leaks of ours`; otherwise fix the leak it prints before writing `result.md`. Map-only edits (including the package's own shaders) skip this step; check a changed shader with `glslangValidator` instead (`PROMPT-INSTRUCTIONS.md` 7.4).
 8. **Write `requests/<id>/result.md`** (§7).
 
 **Hot reload vs. rebuild.** The game polls the map package (map file, shaders, textures, models) about twice a second and reloads it when a file's content changes. The HUD then shows `map reloaded (N boxes)`. **A package-only edit (map, `MAP.md`, the package's shaders, models, textures) needs no rebuild and no restart.** A **code edit** (C or R3D) needs `./build.sh` (and `./build.sh --win` for the warning check), and **the developer restarts the game**. Say so in `result.md`. A changed `shadow.size` also needs a restart (or the F2 panel's shadow map size).
@@ -150,7 +162,7 @@ Write it **last**, in one go. The game picks it up as soon as it has a complete 
   - **assets**: every downloaded file with its source and licence (or why none was acceptable);
   - **anything left open**: assumptions, departures from the brief, things you couldn't do, side effects;
   - **"restart needed"** if you changed code.
-- If you couldn't do the request, still write `result.md`, with a summary line that says so (e.g. `Not done: ambiguous target, see terminal`). Otherwise the HUD shows the request as running forever.
+- If you couldn't do the request, still write `result.md`, with a summary line that says so (e.g. `Not done: the developer chose to skip it` or `Not done: no model with an acceptable licence`). Otherwise the HUD shows the request as running until the coordinator gives up on it.
 
 ## 8. Import requests
 

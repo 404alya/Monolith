@@ -6,8 +6,9 @@
 // hot-reloaded by the scene runtime (runtime/monolith_scene.h) while the game runs. The
 // default map is maps/monolith/. In spectator mode you point at things, select boxes and
 // models or drag out screen regions, and type a request; the game writes requests/<id>/ and
-// opens Claude Code in a new terminal to edit the map (AI-MAP-TOOL.md). Engine reference:
-// PROMPT-INSTRUCTIONS.md.
+// queues it for the request coordinator, one Claude Code session in its own terminal that the
+// game starts when none runs (AI-COORDINATOR.md) and that hands each request to a subagent
+// (AI-MAP-TOOL.md). Engine reference: PROMPT-INSTRUCTIONS.md.
 //
 // Controls:
 //   WASD / mouse   walk & look          SHIFT  walk faster
@@ -57,15 +58,22 @@
 //                  prompt box returns to snip mode with the regions; a successful submit
 //                  ends it. The bundle lists what each region shows (designer.c)
 //   R              fly back to the camera of the last finished request
-//   The HUD lists open requests ("running", "waiting for result.md") and, for 20 s,
-//   finished ones with the first line of their result.md (after that a dim line while
-//   their terminal is still open). Each has a number [n], kept while it is listed.
-//   K              close the terminal window of the last finished request
-//   SHIFT+K        close the terminals of all finished requests
-//   CTRL+K, n      close request [n] (1-9, 0 = 10), also a running one: then press n again
-//                  within 3 s. ESC cancels; the digits don't toggle effects meanwhile.
-//                  Closed requests leave the list, their bundles stay (launcher.c, region
-//                  "Closing request windows": i3/sway mark + kill, else SIGTERM/SIGKILL)
+//   The HUD lists the coordinator ("running", "starting", "not running") and the open
+//   requests ("queued", "running", "[?]" = a question waits in the coordinator terminal)
+//   and, for 20 s, finished ones ([done] / [failed] / [cancelled]) with the first line of
+//   their result.md. Each has a number [n], kept while it is listed.
+//   K              take the last finished request off the list
+//   SHIFT+K        take all finished requests off the list
+//   CTRL+K, n      request [n] (1-9, 0 = 10): finished = off the list; queued = cancel it;
+//                  running = press n again within 3 s to cancel it (the coordinator stops
+//                  its subagent and lists what had changed). ESC cancels the pick; the
+//                  digits don't toggle effects meanwhile. Bundles always stay
+//   CTRL+SHIFT+K   close the coordinator's terminal (press again within 3 s while requests
+//                  are open; the next submit starts a new coordinator, which takes them up)
+//   MONOLITH_LAUNCH=per-request (one terminal per request): K / SHIFT+K close the terminals
+//                  of the last / all finished requests, CTRL+K n closes request [n]'s
+//                  (running: press n twice); launcher.c, region "Closing request windows":
+//                  i3/sway mark + kill, else SIGTERM/SIGKILL
 //   The selection survives map hot reloads: objects are matched by identical geometry (models:
 //   world bounds), else by the same map line + index within it + group; the HUD says if any
 //   got lost.
@@ -201,10 +209,10 @@
 //                  README.md (export.c). Refuses a non-empty <dir>; writes nothing when a
 //                  referenced file is missing. Needs the repo (not a copied build folder)
 //   --import <project dir> <name|path>   create maps/<name>/ or the package folder a path
-//                  names (as --new-map) and open a Claude Code
-//                  import session on a bundle requests/<stamp>_import-<name>/ that translates
+//                  names (as --new-map) and queue a Claude Code import request (a bundle
+//                  requests/<stamp>_import-<name>/, like a submit) that translates
 //                  the raylib + R3D project's scene into it (import.c, AI-MAP-TOOL.md "Import
-//                  requests"); no window. Same terminal / flags / workspace as edit requests
+//                  requests"); no window. Same queue / coordinator as edit requests
 //
 // Designer debug flags (for testing without a visible window):
 //   --pick         with --shot: print what the crosshair (screen centre) hits on the shot
@@ -220,17 +228,20 @@
 //   --submit "text"  with --shot: after saving the shot, run the real submit path (render
 //                  view + view-marked offscreen, LauncherSubmit with the centre pick, the
 //                  --select objects and the --region regions) and print the launcher's
-//                  message. This writes a real bundle into requests/ and launches a real
-//                  terminal + Claude Code: for tests, set MONOLITH_TERMINAL to a stub script
-//                  that only logs its arguments (tools/stub-terminal.sh)
+//                  message. This writes a real bundle into requests/ and queues it (and may
+//                  start a real coordinator: terminal + Claude Code): for tests, set
+//                  MONOLITH_REQUESTS_DIR to a scratch folder and MONOLITH_TERMINAL to a stub
+//                  script that only logs its arguments (tools/stub-terminal.sh;
+//                  tools/test-coordinator.sh runs the queue end to end with a stub coordinator)
 //   --type "text"  open the prompt box with this text (cursor at the end)
 //   --shot-hud     with --shot: draw the HUD, crosshair, selection overlay, regions and prompt box
 //                  into the shot (to look at the UI; plain shots never contain it)
-//   --submit-wait <s>   with --submit: keep polling the request (result.md, terminal process)
-//                  for <s> seconds before exiting
+//   --submit-wait <s>   with --submit: keep polling the request (state, result.md, terminal
+//                  process) for <s> seconds before exiting; state changes are logged
 //   --close-submitted   with --submit: then close the submitted request like CTRL+K n (twice
-//                  if it is still running) and wait up to 10 s for its terminal process to go;
-//                  prints "close [n]: ..." and "close: terminal process gone after X s"
+//                  if it is still running; coordinator mode: cancels it) and wait up to 10 s
+//                  for its terminal process to go; prints "close [n]: ..." and "close:
+//                  terminal process gone after X s"
 //   --classify "text"   print the model the launcher would choose for this prompt (tier,
 //                  model, reason; launcher.c "Model choice") and exit without opening a
 //                  window. Context: the loaded map (empty? MAP.md?), the --select lines, the
@@ -239,13 +250,19 @@
 //   In --submit, --type and --classify text, a literal \n becomes a new line.
 //
 // Environment (launcher.c):
+//   MONOLITH_LAUNCH     coordinator (default: one coordinator session takes every request
+//                       from a queue, docs/design-coordinator.md) or per-request (a new
+//                       terminal with its own Claude Code session per request, as before)
+//   MONOLITH_COORDINATOR_MODEL   the coordinator's model (default sonnet)
 //   MONOLITH_TERMINAL   terminal to open for Claude Code: program name or path + optional
 //                       args, e.g. "kitty --single-instance"
 //   TERMINAL            used if MONOLITH_TERMINAL is unset; else the first of alacritty,
 //                       kitty, foot, wezterm, xterm in PATH
 //   MONOLITH_CLAUDE_ARGS   extra Claude Code flags, split on whitespace (default none), after
 //                       --allow-dangerously-skip-permissions --dangerously-skip-permissions
-//                       --model <name>; a --model in them replaces the chosen model
+//                       --model <name>, on the coordinator's (per-request: the request's)
+//                       command line; a --model in them replaces the chosen model (both the
+//                       coordinator's and the one recorded for each request)
 //   MONOLITH_MODEL      one model for every request (turns the per-request choice off)
 //   MONOLITH_MODEL_FAST / _DEFAULT / _HEAVY   model of each tier (default haiku / sonnet /
 //                       opus). The tier is chosen per request from the prompt and its
@@ -254,6 +271,11 @@
 //   MONOLITH_CLAUDE_SAFE=1   drop those two permission flags
 //   MONOLITH_WORKSPACE  i3/sway workspace for the terminal (default 10, empty = don't move)
 //   MONOLITH_CLOSE_ON_EXIT=1   close the terminals of finished requests when the game quits
+//                       (coordinator mode: the coordinator, if none of this run's requests
+//                       is still queued or running)
+//   MONOLITH_CLAUDE     the claude program to run (tests: tools/stub-coordinator.sh)
+//   MONOLITH_REQUESTS_DIR   requests folder instead of <repo>/requests (tests only: bundles,
+//                       queue and coordinator lock in a scratch folder)
 //   MONOLITH_CLOSE_METHOD   wm / signal: close terminals only through i3/sway or only by
 //                       signals (tests; default both, WM first)
 //   __GL_SYNC_TO_VBLANK=0 (NVIDIA) / vblank_mode=0 (Mesa)   driver vsync off, for --bench
@@ -1327,10 +1349,11 @@ static int Run(int argc, char **argv)
         }
         typing = typing || PanelCapturesInput(&panel);
 
-        // Closing request terminals (launcher.c): K = the last finished request, SHIFT+K =
-        // all finished ones, CTRL+K then 1-9 / 0 (= 10) = request [n] of the HUD list, also
-        // a running one (then its number twice). While CTRL+K waits for the number, the
-        // digits don't toggle effects and ESC cancels instead of quitting.
+        // Closing requests (launcher.c): K = the last finished request, SHIFT+K = all finished
+        // ones, CTRL+K then 1-9 / 0 (= 10) = request [n] of the HUD list, also a running one
+        // (then its number twice; coordinator mode: cancels it), CTRL+SHIFT+K = close the
+        // coordinator. While CTRL+K waits for the number, the digits don't toggle effects and
+        // ESC cancels instead of quitting.
         bool closeKeys = spec.active && !typing && !shotPath && !bench;
         bool picking = closeKeys && closePickTime > 0.0f;   // digits belong to the close
         closePickTime = picking ? closePickTime - GetFrameTime() : 0.0f;
@@ -1343,7 +1366,8 @@ static int Run(int argc, char **argv)
                 if (IsKeyPressed(KEY_ZERO + k) || IsKeyPressed(KEY_KP_0 + k)) number = k ? k : 10;
             if (IsKeyPressed(KEY_K)) {
                 closePickTime = 0.0f;
-                if (ctrl) {
+                if (ctrl && shift) LauncherCloseCoordinator(msg, sizeof(msg));
+                else if (ctrl) {
                     closePickTime = 3.0f;
                     snprintf(msg, sizeof(msg), "close which request? press its number (ESC cancels)");
                 } else if (shift) LauncherCloseAllDone(msg, sizeof(msg));

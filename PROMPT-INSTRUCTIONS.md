@@ -46,7 +46,8 @@ monolith/
 ├── runtime/                     # scene runtime (§6.1): monolith_scene.h/.c, monolith_capture.h (§6.3),
 │                                #   export/ (viewer.c + build.sh templates for --export)
 ├── tools/                       # fetch_asset.py, normalize_model.py, record_asset.py (docs/knowledge/models-and-textures.md);
-│                                #   leakcheck.sh + lsan.supp + lsan_report.py (§4); stub-terminal.sh
+│                                #   leakcheck.sh + lsan.supp + lsan_report.py (§4); request-queue.sh (the coordinator's queue);
+│                                #   stub-terminal.sh, stub-coordinator.sh, test-coordinator.sh (launcher tests)
 ├── examples/                    # 01_minimal (+ scene/), 02_existing_project, 03_live_editing, 04_import_source,
 │                                #   common/shot.h, build.sh (§6.3)
 ├── tests/models/                # small CC0 test package: every statement kind once
@@ -55,7 +56,7 @@ monolith/
 │   ├── main.c                   # header comment (controls + flags), args, data paths, init, main loop, Submit
 │   ├── common.h                 # shared includes, the global `MS_Scene *scene`, benchmarkDir
 │   ├── player.c, spectator.c    # walking player + collision; spectator camera, LookDir/LookAngles
-│   ├── designer.c, launcher.c   # picking, selection, overlay, HUD, prompt box; bundles, terminal launch, polling
+│   ├── designer.c, launcher.c   # picking, selection, overlay, HUD, prompt box; bundles, queue + coordinator launch, polling
 │   ├── atmosphere.c             # --ao / --bloom / --fx overrides on top of the map's environment
 │   ├── newmap.c, export.c, import.c, dirscan.c   # --new-map, --export / F9, --import, safe folder walk
 │   ├── inspect.c, dumpscene.c   # --inspect-model, --dump-scene
@@ -123,10 +124,11 @@ The header comment at the top of `src/main.c` is the source of truth; keep it up
 | Enter | Prompt box |
 | C | Snip mode: camera frozen, cursor free; drag = a region (replaces), Shift+drag = add, Enter = prompt box with regions + selection, RMB / Esc / C = leave. Esc in that prompt box returns to snip mode; a successful submit ends it. |
 | R | Fly back to the camera of the most recently finished request |
-| K / Shift+K | Close the terminal of the latest / all finished requests |
-| Ctrl+K, then n | Close request [n] of the HUD list (1–9, 0 = 10); a running one needs n again within 3 s; Esc cancels |
+| K / Shift+K | Take the latest / all finished requests off the list (per-request mode: close their terminals) |
+| Ctrl+K, then n | Request [n] of the HUD list (1–9, 0 = 10): finished = off the list, queued = cancel, running = n again within 3 s to cancel (per-request mode: close its terminal); Esc cancels |
+| Ctrl+Shift+K | Close the coordinator's terminal (again within 3 s while requests are open) |
 
-- **Request list and closing.** Requests are numbered `[n]`; finished ones show 20 s, then a dim line while their terminal is open. On i3 / sway the workspace helper marks each terminal `_monolith_<id>`; a close runs `i3-msg '[con_mark="^_monolith_<id>$"] mark --add …, kill'` (that window only, no focus change). If the process is alive 3 s later or there is no mark: SIGTERM to its process group (started with `setsid`), SIGKILL after 3 s, only while it is the game's unreaped child. kitty `--single-instance` / wezterm mux exit at once, so only the i3 route reaches them. Windows: the entry only leaves the list.
+- **Request list and closing.** A coordinator line (running / starting / not running / not started: error), then the requests, numbered `[n]`: queued, running, `[?]` (a question waits in the coordinator terminal), and for 20 s `[done]` / `[failed]` / `[cancelled]` with `result.md` line 1. A cancel writes `requests/<id>/cancel` (the coordinator stops the subagent); with no coordinator the game cancels a queued request itself. On i3 / sway the workspace helper marks the coordinator's terminal `_monolith_coordinator` (per-request mode: each terminal `_monolith_<id>`, which stays 20 s plus a dim line while open); a close runs `i3-msg '[con_mark="^_monolith_<id>$"] mark --add …, kill'` (that window only, no focus change). If the process is alive 3 s later or there is no mark: SIGTERM to its process group (started with `setsid`), SIGKILL after 3 s, only while it is the game's unreaped child. kitty `--single-instance` / wezterm mux exit at once, so only the i3 route reaches them. Windows: the entry only leaves the list.
 - **Selection** gets an orange tint and outline plus a faint always-on-top outline. It survives reloads: matched by identical geometry (models: world bounds), then by map line + index within the line + group; lost ones are reported.
 - **Prompt box:** UTF-8 editing, Ctrl+Backspace word, arrows, Home / End (Ctrl: whole text), Ctrl+V, Shift+Enter newline, **Enter sends**, **Esc cancels**. 1 MB cap, byte counter. Game keys and camera stay frozen while open (+2 frames). Empty prompts can't be sent; on failure the box keeps the text and the HUD shows the error and bundle path.
 
@@ -180,8 +182,8 @@ The header comment at the top of `src/main.c` is the source of truth; keep it up
 | `--pick-at x y` | With `--shot`: the same for pixel (x, y), top-left origin (repeatable) |
 | `--select <line>` | Select every object of this map line (repeatable) |
 | `--region x y w h` | Attach a screen region (repeatable) |
-| `--submit "text"` | With `--shot`: run the real submit path (bundle + **real terminal**): always with `MONOLITH_TERMINAL=tools/stub-terminal.sh`, and `gio trash` the bundle afterwards |
-| `--submit-wait <s>` / `--close-submitted` | Keep polling the request / then close it like Ctrl+K n and report when the terminal process is gone |
+| `--submit "text"` | With `--shot`: run the real submit path (bundle + queue + **real coordinator terminal** if none runs): always with `MONOLITH_REQUESTS_DIR=<scratch>` and `MONOLITH_TERMINAL=tools/stub-terminal.sh`, and `gio trash` the folder afterwards |
+| `--submit-wait <s>` / `--close-submitted` | Keep polling the request (state changes are logged) / then close it like Ctrl+K n (coordinator mode: cancel) and report when the terminal process is gone |
 | `--type "text"` | Open the prompt box with this text |
 | `--classify "text"` | No window: print the model tier the launcher would pick (context: map, `--select`, `--region`, hit; `--classify-kind edit\|import\|new-map`) |
 | `--shot-hud` | Draw HUD, crosshair, overlay, regions, prompt box into the shot |
@@ -194,17 +196,21 @@ In `--submit`, `--type` and `--classify` text a literal `\n` becomes a new line.
 
 | Variable | Meaning |
 |---|---|
+| `MONOLITH_LAUNCH` | `coordinator` (default: one coordinator session takes the requests from a queue, `docs/design-coordinator.md`, `AI-COORDINATOR.md`) or `per-request` (a terminal + session per request, as before 2026-10-24). Without `flock` (util-linux): per-request |
+| `MONOLITH_COORDINATOR_MODEL` | The coordinator's model (default `sonnet`); each request's subagent runs on the request's tier model |
 | `MONOLITH_TERMINAL` | Terminal program + optional args (`"kitty --single-instance"`); over `TERMINAL`; else the first of `alacritty`, `kitty`, `foot`, `wezterm`, `xterm` in `PATH` |
-| `MONOLITH_CLAUDE_ARGS` | Extra Claude Code flags (whitespace-split), after the two permission flags and `--model <name>`; a `--model` here replaces the chosen one |
+| `MONOLITH_CLAUDE_ARGS` | Extra Claude Code flags (whitespace-split), after the two permission flags and `--model <name>`, on the coordinator's (per-request: each request's) command line; a `--model` here replaces the chosen one (the coordinator's and every request's) |
 | `MONOLITH_CLAUDE_SAFE` | Non-empty and not `0`: drop the permission flags |
 | `MONOLITH_MODEL` | One model for every request (turns the tier choice off) |
 | `MONOLITH_MODEL_FAST` / `_DEFAULT` / `_HEAVY` | Model per tier (`haiku`, `sonnet`, `opus`). `ClassifyRequest` ("Model choice" in `launcher.c`): **heavy** for imports / new maps, an empty map or no `MAP.md`, asset, look/engine or large design words, > 280 bytes, 3+ sentences or > 2 regions; **fast** for one short sentence (≤ 120 bytes) with a local edit word, no creation word and a target; **default** otherwise. Written to `request.md` / `request.json`. |
 | `@fast` / `@default` / `@heavy` (also `@haiku` / `@sonnet` / `@opus`) | Prompt prefix picking the tier, stripped from the bundle (`model.override: true`); `MONOLITH_MODEL` and a `--model` in the args still win |
-| `MONOLITH_WORKSPACE` | i3 / sway workspace for the terminal (default `10`, empty = stay). `i3-msg` / `swaymsg` on `[title="^monolith-claude: <slug> <HHMMSS>$"]`, retried by a detached helper every 0.1 s for 10 s; also sets the `_monolith_<id>` mark. An i3 `for_window [title="^monolith-claude: "] …` rule avoids the brief flash. |
-| `MONOLITH_CLOSE_ON_EXIT` | `1`: close finished requests' terminals when the game quits |
+| `MONOLITH_WORKSPACE` | i3 / sway workspace for the terminal (default `10`, empty = stay). `i3-msg` / `swaymsg` on `[title="^monolith-claude: coordinator$"]` (per-request: `^monolith-claude: <slug> <HHMMSS>$`), retried by a detached helper every 0.1 s for 10 s; also sets the `_monolith_coordinator` (`_monolith_<id>`) mark. An i3 `for_window [title="^monolith-claude: "] …` rule avoids the brief flash. |
+| `MONOLITH_CLOSE_ON_EXIT` | `1`: when the game quits, close the coordinator if none of this run's requests is open (per-request: finished requests' terminals) |
+| `MONOLITH_CLAUDE` | The claude program (tests: `tools/stub-coordinator.sh`) |
+| `MONOLITH_REQUESTS_DIR` | Requests folder instead of `<repo>/requests` (tests only: bundles, queue and lock in a scratch folder, away from a real coordinator) |
 | `MONOLITH_CLOSE_METHOD` | `wm` or `signal` only (tests; default both, WM first) |
 
-**Other variables:** `MONOLITH_CAPTURE` / `MONOLITH_CAPTURE_FRAME` (capture shim output folder / frame, default 3), `MONOLITH_DOWNLOADS` (`fetch_asset.py`, default `~/.cache/monolith/downloads`), `POLY_PIZZA_API_KEY` (or `~/.config/monolith/poly-pizza.key`; never printed), `MONOLITH_STUB_LOG` (stub terminal's argv log), `__GL_SYNC_TO_VBLANK=0` / `vblank_mode=0` (driver vsync off for benches).
+**Other variables:** `MONOLITH_CAPTURE` / `MONOLITH_CAPTURE_FRAME` (capture shim output folder / frame, default 3), `MONOLITH_DOWNLOADS` (`fetch_asset.py`, default `~/.cache/monolith/downloads`), `POLY_PIZZA_API_KEY` (or `~/.config/monolith/poly-pizza.key`; never printed), `MONOLITH_STUB_LOG` / `MONOLITH_STUB_OPENED` / `MONOLITH_STUB_RUN` (stub terminal: argv log, one line per "window", run the command; `tools/stub-terminal.sh`), `MONOLITH_STUB_WORK` (stub coordinator's seconds per request), `__GL_SYNC_TO_VBLANK=0` / `vblank_mode=0` (driver vsync off for benches).
 
 ### Graphics settings (F2, `settings.c`, `settingspanel.c`, runtime `MS_Quality`)
 
@@ -237,10 +243,11 @@ The scene (loading, drawing, collision, picking, hot reload) is the **scene runt
    - **Prompt box**: UTF-8, word wrap, scrolling, heap text; `DesignerCapturesInput()` freezes game keys and camera.
    - `DesignerBuildRequest()` snapshots prompt, eye, angles, fovy, size, hit, selection, regions, map version into a `DesignRequest`.
 5. **Launcher** (`launcher.c`, see its header comment):
-   - `LauncherSubmit()` writes `requests/<YYYY-MM-DD_HHMMSS>_<slug>/` (`view.png`, `view-marked.png`, `region-<n>.png`, `request.md`, `request.json`, format 2: `AI-MAP-TOOL.md` §2), then starts the terminal with `fork` + `execve` from an argv array, no shell: the user's text never reaches a command line. The child `setsid`s, `chdir`s to the repo root, stdin `/dev/null`; exec failures return through a close-on-exec pipe; children are reaped with `waitpid(WNOHANG)`.
+   - `LauncherSubmit()` writes `requests/<YYYY-MM-DD_HHMMSS>_<slug>/` (`view.png`, `view-marked.png`, `region-<n>.png`, `request.md`, `request.json`, format 2: `AI-MAP-TOOL.md` §2), then (coordinator mode) `state` = `queued` and, unless `requests/.coordinator/lock` is held (`flock`), starts the coordinator's terminal (a `/bin/sh` wrapper holds the lock around `claude`; region "Coordinator and queue", `docs/design-coordinator.md`), or (per-request mode) the request's own terminal. Terminals start with `fork` + `execve` from an argv array, no shell: the user's text never reaches a command line. The child `setsid`s, `chdir`s to the repo root, stdin `/dev/null`; exec failures return through a close-on-exec pipe; children are reaped with `waitpid(WNOHANG)`.
    - Terminal syntax (title, working dir, exec flag) from `TERMINALS[]`; unknown terminals get `-e`. Title `monolith-claude: <slug> <HHMMSS>[-n]`, unique per request. `claude` is looked up in `PATH`, then `~/.local/bin`, passed absolute, with the permission flags (unless `MONOLITH_CLAUDE_SAFE`), `--model <tier's model>` and `MONOLITH_CLAUDE_ARGS` (a bare `--model` there is dropped with a warning). A detached helper moves and marks the window. On launch failure the bundle stays, the HUD names it and the log prints the command.
-   - `LauncherUpdate()` polls open requests for `result.md` (HUD 20 s); `LauncherLastDone()` gives the camera for **R**.
-   - **Windows**: `cmd /c start "<title>" /D <exe dir> cmd /k "<claude>" … "<prompt>"` via `_spawnvp`; compile-tested only.
+   - `LauncherUpdate()` polls open requests for `state` and `result.md` (HUD 20 s) and tests the coordinator's lock every 2 s; `LauncherLastDone()` gives the camera for **R**.
+   - **Queue**: after `queued` only the coordinator writes `state`, through `tools/request-queue.sh` (claim with a fingerprint in `claim.txt`, question, finish, requeue, recovery after a crash, the background watcher `wait`); the game asks for a cancel with a `cancel` file. Test: `tools/test-coordinator.sh` (stub terminal + `tools/stub-coordinator.sh`, which applies the same scheduling rules).
+   - **Windows**: `cmd /c start "<title>" /D <exe dir> cmd /k "<claude>" … "<prompt>"` via `_spawnvp` (the coordinator's with ` 9>"<lock>"`, tested with an exclusive `_sopen_s`); compile-tested only.
 6. **Atmosphere** (`atmosphere.c`): the environment is map data (`env` lines; defaults in `BuiltinEnvironment()`, applied by `MS_ApplyEnvironment`). Graphics settings (`MS_ApplyQuality`, incl. `--ao` / `--bloom`) go on top, then `--fx`; `main.c`'s `ApplyEnvironment()` re-applies environment → quality → `--fx` → toggle flips → `MS_ApplyRenderResolution` after every reload.
 7. **Graphics settings** (`settings.c`, `settingspanel.c`): `GfxSettings` = `MS_Quality` + window options (MSAA, vsync, fps cap, frame reuse).
 8. **New map, export, import, inspection, dumps** (`newmap.c`, `export.c`, `import.c`, `inspect.c`, `dumpscene.c`): §6.3, §5.
@@ -388,7 +395,7 @@ No test suite; verification is **visual and numeric**:
 10. **Designer and launcher without a window:**
     - `--shot x.png --view 2 --pick` on the default map must hit box 46, `hypostyle hall: pillars`, map line 193, material `concrete`, distance ≈ 42.07 m.
     - `--shot-hud` with `--select` / `--region` / `--type` / `--settings-panel` puts the overlay into the shot.
-    - `--submit` **always** with `MONOLITH_TERMINAL=tools/stub-terminal.sh` (logs to `$MONOLITH_STUB_LOG`) and `MONOLITH_WORKSPACE=`; `gio trash requests/<id>` afterwards. `--classify` checks the model choice without a bundle.
+    - `--submit` **always** with `MONOLITH_REQUESTS_DIR=<scratch folder>`, `MONOLITH_TERMINAL=tools/stub-terminal.sh` (logs to `$MONOLITH_STUB_LOG`) and `MONOLITH_WORKSPACE=`; `gio trash` the folder afterwards. `tools/test-coordinator.sh` tests the queue end to end (one terminal for many submits, scheduling, cancel, recovery after killing the coordinator, per-request mode). `--classify` checks the model choice without a bundle.
     - Mouse and keyboard input can only be tested by hand.
 11. **Export and examples:** export into a scratch folder, build its `viewer.c` outside the repo (the README's compiler line), compare its `--shot` with `monolith --shot` (pixel-identical for the shipped packages).
 
@@ -400,7 +407,7 @@ No test suite; verification is **visual and numeric**:
 
 **Add an environment key.** Key tables in `monolith_scene.c` (region "Key tables": `ENV_KEYS` for `R3D_Environment` fields, sky / sun tables otherwise, a range in `ENV_RANGES`), its built-in default in `BuiltinEnvironment()` equal to today's value, written by `MS_WriteEnvironment`. Image changes without a reload must reach `FrameKey`.
 
-**Change a request bundle.** `launcher.c` (`BuildBundle`, `WriteRequestMd`, `WriteRequestJson`; bump `"format"` when keys change) and `AI-MAP-TOOL.md` §2 (keep older formats described). New terminal: `TERMINALS[]`.
+**Change a request bundle.** `launcher.c` (`BuildBundle`, `WriteRequestMd`, `WriteRequestJson`; bump `"format"` when keys change) and `AI-MAP-TOOL.md` §2 (keep older formats described); `tools/request-queue.sh` reads `kind`, `prompt`, `model` and `map.package` from `request.json` line by line. New terminal: `TERMINALS[]`.
 
 **Add a viewpoint.** Spectator mode, **P** (prints *feet*), then `viewpoint "Name" ex ey ez tx ty tz` with the *eye*. `--bench` covers it automatically.
 
@@ -430,7 +437,7 @@ No test suite; verification is **visual and numeric**:
 - **Models:** picking hits triangles, collision uses AABBs; `noGpu` loads don't read model files (bounds and `origin` shifts final only in GPU loads); FBX / DAE references aren't followed for hot reload or export; the AO volume ignores models.
 - **Interactive input** (clicks, drags, typing, paste, Esc, the panel, camera freezing) is tested only by hand.
 - **Windows launcher** is compile-tested only; `start` failures go undetected; workspace moves and closing are i3 / sway only. On Windows and in copied build folders, `requests/` and Claude Code's working directory are the executable's folder (no sources, no `CLAUDE.md`).
-- **Request flow:** a failed launch keeps the bundle and the text; Enter again writes a second bundle (trash the stale one). A terminal process exiting early (kitty `--single-instance`, wezterm mux) is reported, not a failure; closing then needs the i3 / sway mark.
+- **Request flow:** coordinator mode: a bundle stays queued when the coordinator can't start (the HUD says why; the next submit tries again), and the prompt box closes. Per-request mode: a failed launch keeps the bundle and the text; Enter again writes a second bundle (trash the stale one). The coordinator itself (AI-COORDINATOR.md) has only been tested through the stub; its HUD can't show other game runs' requests. A terminal process exiting early (kitty `--single-instance`, wezterm mux) is reported, not a failure; closing then needs the i3 / sway mark.
 - **Upstream R3D** builds are compile-checked only.
 - **Ideas:** decals (`r3d_decal.h`); height-dependent fog for hazy outdoor views; shadow cascades and cheaper fog lookups (`docs/performance.md`).
 - **Platform:** Linux + Windows cross-build (tested under wine). The strict-GLSL fixes (§7.4) are verified with `glslangValidator` but not yet on the AMD PC. No native Windows build script, no macOS, no Windows sanitizers.

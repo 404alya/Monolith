@@ -18,10 +18,13 @@
 # shader materials, shadowed lights), of examples/01_minimal/scene and maps/pine_forest
 # (textured ground, many restyled models), --reload-test both ways
 # and into a broken map, a broken map on the command line, --shot-hud with --select / --region,
-# --submit (tools/stub-terminal.sh instead of a terminal, MONOLITH_WORKSPACE=) on both maps,
+# --submit (tools/stub-terminal.sh instead of a terminal, MONOLITH_WORKSPACE=) on both maps, in
+# coordinator mode (queue + coordinator start, a cancel with no coordinator) and per-request mode,
 # --export, --inspect-model, --new-map, --import (stub terminal), --classify, and every
-# example's --shot (plus the capture shim). Files it creates (bundles in requests/, the export,
-# the new map packages) go to the trash afterwards (gio trash), never rm.
+# example's --shot (plus the capture shim). Bundles go to its own requests folder
+# (MONOLITH_REQUESTS_DIR=<tmp>/requests), never to requests/: a coordinator running meanwhile
+# never sees them, and bundles queued meanwhile are left alone. Files it creates (that folder,
+# the export, the new map packages) go to the trash afterwards (gio trash), never rm.
 #
 # Leaks are classified by tools/lsan_report.py with tools/lsan.supp: only memory allocated by
 # GPU driver / system library code is ignored (see the comment at the top of lsan.supp); every
@@ -110,9 +113,8 @@ Run() {
 }
 
 STUB="$ROOT/tools/stub-terminal.sh"
-REQ="$ROOT/requests"
+REQ="$TMP/requests"         # (inside TMP: trashed with it)
 mkdir -p "$REQ"
-BEFORE="$(ls "$REQ")"
 
 echo "leakcheck: running monolith ($MODE build) ..."
 Run dump-boxes 0        "$M" --dump-boxes "$TMP/boxes.txt"
@@ -155,12 +157,14 @@ Run broken-map 1        "$M" --dump-boxes "$TMP/broken.txt" --map "$TMP/broken.m
 Run shot-hud 0          "$M" --shot "$TMP/hud.png" --view 2 --shot-hud --select 192 --select 198 \
                             --region 100 100 300 200 --region 800 300 200 200 --type 'make it\ntaller' --pick \
                             --pick-at 10 10 --pick-at 1590 890
-Run submit-default 0    env MONOLITH_TERMINAL="$STUB" MONOLITH_STUB_LOG="$TMP/stub1.txt" MONOLITH_WORKSPACE= \
+Run submit-default 0    env MONOLITH_REQUESTS_DIR="$REQ" MONOLITH_TERMINAL="$STUB" MONOLITH_STUB_LOG="$TMP/stub1.txt" MONOLITH_WORKSPACE= \
                             "$M" --shot "$TMP/s1.png" --view 2 --select 192 --select 193 --region 100 100 300 200 \
                             --region 800 300 200 200 --submit 'leakcheck: make these taller'
-Run submit-models 0     env MONOLITH_TERMINAL="$STUB" MONOLITH_STUB_LOG="$TMP/stub2.txt" MONOLITH_WORKSPACE= \
-                            "$M" --shot "$TMP/s2.png" --view 1 --map tests/models --select 36 --region 0 0 1600 900 \
-                            --submit '@heavy leakcheck: restyle the trees'
+Run submit-models 0     env MONOLITH_REQUESTS_DIR="$REQ" MONOLITH_TERMINAL="$STUB" MONOLITH_STUB_LOG="$TMP/stub2.txt" MONOLITH_WORKSPACE= \
+                            MONOLITH_LAUNCH=per-request "$M" --shot "$TMP/s2.png" --view 1 --map tests/models --select 36 \
+                            --region 0 0 1600 900 --submit '@heavy leakcheck: restyle the trees' --submit-wait 1 --close-submitted
+Run submit-cancel 0     env MONOLITH_REQUESTS_DIR="$REQ" MONOLITH_TERMINAL="$STUB" MONOLITH_CLAUDE=/nonexistent/claude MONOLITH_WORKSPACE= \
+                            "$M" --shot "$TMP/s3.png" --view 2 --submit 'leakcheck: cancel me' --submit-wait 1 --close-submitted
 Run export-default 0    "$M" --export "$TMP/export-default"
 Run export-models 0     "$M" --export "$TMP/export-models" --map tests/models
 Run inspect-model 0     "$M" --inspect-model tests/models/models/tree_oak.glb
@@ -170,7 +174,7 @@ Run new-map 0           "$M" --new-map "$NEWMAP"
 Run new-map-path 0      "$M" --new-map "$TMP/newmap_path"
 Run classify 0          "$M" --classify 'make the pillar taller' --select 192
 IMPORTMAP="_leakcheck_import_$STAMP"
-Run import 0            env MONOLITH_TERMINAL="$STUB" MONOLITH_STUB_LOG="$TMP/stub3.txt" MONOLITH_WORKSPACE= \
+Run import 0            env MONOLITH_REQUESTS_DIR="$REQ" MONOLITH_TERMINAL="$STUB" MONOLITH_STUB_LOG="$TMP/stub3.txt" MONOLITH_WORKSPACE= \
                             "$M" --import examples/04_import_source "$IMPORTMAP"
 
 if [[ $MODE == lsan ]]; then
@@ -186,7 +190,6 @@ if [[ $MODE == lsan ]]; then
 fi
 
 # --- Clean up what the runs created (to the trash)
-for d in $(ls "$REQ"); do grep -qxF "$d" <<<"$BEFORE" || Trash "$REQ/$d"; done
 Trash "$ROOT/maps/$NEWMAP" "$ROOT/maps/$IMPORTMAP" "$TMP"
 
 # --- Report

@@ -1,38 +1,55 @@
-// Launcher: request bundles, Claude Code in a new terminal, polling for result.md
+// Launcher: request bundles, the request queue + coordinator session, polling for result.md
 //
 // A submitted request becomes a self-contained folder requests/<YYYY-MM-DD_HHMMSS>_<slug>/
 // (view.png, view-marked.png, region-<n>.png per screen region, request.md, request.json;
-// bundle format 2, docs/design-v2.md section 5). Then a new terminal window runs
-// `claude --allow-dangerously-skip-permissions --dangerously-skip-permissions --model <name>
-// [MONOLITH_CLAUDE_ARGS] "Map edit request: read requests/<id>/request.md and carry it
-// out."` in the repo root. The model is chosen per request (fast / default / heavy tier,
-// see "Model choice" below) and recorded in request.md / request.json. The user's prompt never goes on a command line: it
-// only lives in the bundle, and the process is started from an argv array (no shell).
-// The game then polls the bundle for result.md and shows its first line in the HUD.
+// bundle format 2, docs/design-v2.md section 5). The model is chosen per request (fast /
+// default / heavy tier, see "Model choice" below) and recorded in request.md / request.json.
+// The user's prompt never goes on a command line: it only lives in the bundle, and every
+// process is started from an argv array (no shell).
+//
+// Two ways to hand the bundle to Claude Code (MONOLITH_LAUNCH):
+//   - coordinator (default; region "Coordinator and queue", docs/design-coordinator.md): the
+//     game writes requests/<id>/state = "queued" as the bundle's last file. Unless a
+//     coordinator holds requests/.coordinator/lock, one terminal titled "monolith-claude:
+//     coordinator" runs a small /bin/sh wrapper that holds the lock (flock) around `claude
+//     <permission flags> --model $MONOLITH_COORDINATOR_MODEL (default sonnet)
+//     [MONOLITH_CLAUDE_ARGS] "You are the monolith request coordinator. Read
+//     AI-COORDINATOR.md ... Requests folder: <path>"`. Later requests only go into the queue;
+//     they never open a window. The coordinator (tools/request-queue.sh) claims bundles,
+//     hands each to a subagent on the request's model and writes every later state (claimed,
+//     question, done, failed, cancelled). The HUD follows state + result.md. Without flock
+//     (util-linux) the game falls back to per-request mode.
+//   - per-request: a new terminal per request runs `claude <permission flags> --model <name>
+//     [MONOLITH_CLAUDE_ARGS] "Map edit request: read requests/<id>/request.md and carry it
+//     out."` in the repo root (no state file); the behaviour before 2026-10-24.
 //
 // Where things go:
 //   - requests/ and the working directory of Claude Code: the repo root baked in by
 //     build.sh (PROJECT_PATH) while it exists, i.e. on the dev machine; otherwise the
 //     directory of the executable (a copied build/linux or build/win folder).
+//     MONOLITH_REQUESTS_DIR (tests only) moves requests/ (bundles, queue, lock) elsewhere.
 //   - terminal: $MONOLITH_TERMINAL, else $TERMINAL, else the first of alacritty, kitty,
 //     foot, wezterm, xterm found in PATH. The variables may hold a program name or path
 //     plus extra arguments ("kitty --single-instance"); the program's basename picks
 //     the syntax from TERMINALS below, unknown terminals get `-e <command>`.
-//   - claude: searched in PATH, then ~/.local/bin/claude (where the native installer puts
-//     it, which a game started from a desktop launcher may not have in PATH). It is
-//     passed to the terminal as an absolute path, so a terminal daemon with another
-//     environment (kitty --single-instance) still finds it.
+//   - claude: $MONOLITH_CLAUDE (tests: tools/stub-coordinator.sh), else searched in PATH,
+//     then ~/.local/bin/claude (where the native installer puts it, which a game started
+//     from a desktop launcher may not have in PATH). It is passed to the terminal as an
+//     absolute path, so a terminal daemon with another environment (kitty
+//     --single-instance) still finds it.
 //   - permissions: every session starts with --allow-dangerously-skip-permissions
 //     --dangerously-skip-permissions, so the developer isn't asked to approve each
-//     command; the guard rails live in CLAUDE.md / AI-MAP-TOOL.md instead.
-//     MONOLITH_CLAUDE_SAFE=1 (any value but empty or "0") drops the two flags.
-//   - model: --model <name> after the permission flags; MONOLITH_MODEL, MONOLITH_MODEL_FAST /
-//     _DEFAULT / _HEAVY and an @tier prompt prefix steer it (region "Model choice").
+//     command; the guard rails live in CLAUDE.md / AI-COORDINATOR.md / AI-MAP-TOOL.md
+//     instead. MONOLITH_CLAUDE_SAFE=1 (any value but empty or "0") drops the two flags.
+//   - model: per request MONOLITH_MODEL, MONOLITH_MODEL_FAST / _DEFAULT / _HEAVY and an @tier
+//     prompt prefix steer it (region "Model choice"); the coordinator passes it to the
+//     request's subagent. The coordinator's own model: MONOLITH_COORDINATOR_MODEL.
 //   - extra Claude Code flags: $MONOLITH_CLAUDE_ARGS, split on whitespace (no quoting),
-//     after --model. Default none. A --model in them replaces the chosen one.
+//     after --model, on the coordinator's (or the request's) command line. Default none.
+//     A --model in them replaces the chosen one (and the coordinator's).
 //   - workspace (i3 / sway): the new terminal is moved to workspace $MONOLITH_WORKSPACE
 //     (default 10; empty = leave it where it opens) with `i3-msg` (`swaymsg` when
-//     $SWAYSOCK is set) and the criteria [title="^monolith-claude: <slug> <HHMMSS>$"]. A detached
+//     $SWAYSOCK is set) and the criteria [title="^<its title>$"]. A detached
 //     /bin/sh helper retries every 0.1 s for up to 10 s until the window exists, so the
 //     game never waits. A criteria `move container to workspace` doesn't switch the
 //     visible workspace; focus returns to the previously focused window. The window may
@@ -40,19 +57,26 @@
 //     (terminals set it before the window is mapped) avoids that, and the IPC move then
 //     finds it already there. Other window managers: i3-msg finds no i3 (exit 1) and the
 //     helper stops at once. The same command also gives the window an i3 mark,
-//     _monolith_<id> (also with MONOLITH_WORKSPACE empty), for closing it later.
-//   - closing (region "Closing request windows"): the HUD list numbers the requests;
-//     K / SHIFT+K / CTRL+K n in the game close a request's terminal through the mark
-//     (`i3-msg [con_mark=...] kill`), else by SIGTERM / SIGKILL to the terminal's process
-//     group, and take it off the list (the bundle stays). MONOLITH_CLOSE_ON_EXIT=1 closes
-//     the finished ones when the game quits.
+//     _monolith_coordinator or _monolith_<id> (also with MONOLITH_WORKSPACE empty), for
+//     closing it later.
+//   - closing (region "Closing request windows"): the HUD list numbers the requests.
+//     Coordinator mode: K / SHIFT+K take finished requests off the list, CTRL+K n cancels
+//     request n (a running one on a second press: the coordinator stops its subagent),
+//     CTRL+SHIFT+K closes the coordinator's terminal. Per-request mode: K / SHIFT+K / CTRL+K
+//     n close a request's terminal. Closing goes through the mark (`i3-msg [con_mark=...]
+//     kill`), else SIGTERM / SIGKILL to the terminal's process group. MONOLITH_CLOSE_ON_EXIT=1
+//     closes the finished requests' terminals (coordinator mode: the coordinator, if none of
+//     this run's requests is still open) when the game quits.
 //
-// Windows: the same bundle, then `cmd /c start "monolith-claude: <slug> <HHMMSS>" /D <root> cmd /k
-// "<claude>" <permission flags> --model <name> ...` via _spawnvp (no workspace move) (<process.h>, so no <windows.h> clash with raylib). Only
+// Windows: the same bundle and queue, then `cmd /c start "<title>" /D <root> cmd /k
+// "<claude>" <permission flags> --model <name> ...` via _spawnvp (no workspace move)
+// (<process.h>, so no <windows.h> clash with raylib); the coordinator's command ends in
+// ` 9>"<requests>\.coordinator\lock"`, which cmd holds open while claude runs. Only
 // compile-tested; failures of `start` itself can't be seen from here.
 
 #ifndef _WIN32
 #   define _XOPEN_SOURCE 700           // POSIX 2008 + XSI: fork, setsid, readlink, realpath
+#   define _DEFAULT_SOURCE             // flock (the coordinator's lock)
 #endif
 
 #include "launcher.h"
@@ -66,6 +90,9 @@
 #   include <direct.h>     // _mkdir
 #   include <io.h>         // _access
 #   include <process.h>    // _spawnvp
+#   include <share.h>      // _SH_DENYRW (the coordinator's lock)
+#   include <fcntl.h>
+#   include <sys/stat.h>
 #   include <stdint.h>
 // Declared by hand like the GL functions in main.c (<windows.h> clashes with raylib).
 // x64 has one calling convention, so this matches kernel32.dll.
@@ -73,6 +100,7 @@ extern int CloseHandle(void *handle);
 #else
 #   include <fcntl.h>
 #   include <signal.h>
+#   include <sys/file.h>   // flock
 #   include <sys/stat.h>
 #   include <sys/types.h>
 #   include <sys/wait.h>
@@ -98,7 +126,12 @@ extern char **environ;
 // ======================================================================================
 
 static char rootDir[1024];          // repo root (or exe dir), trailing slash
-static char requestsDir[1100];      // rootDir + "requests/"
+static char requestsDir[1100];      // rootDir + "requests/" (or $MONOLITH_REQUESTS_DIR), trailing slash
+static char coordDir[1200];         // requestsDir + ".coordinator/": the coordinator's lock, seen, log
+static unsigned requestsHash;       // 0, or with MONOLITH_REQUESTS_DIR a hash of it (window title / mark)
+
+static void InitCoordinatorMark(void);
+static void AbsPath(const char *in, char *out, int outSize);
 
 static void InitPaths(void)
 {
@@ -112,7 +145,21 @@ static void InitPaths(void)
     size_t n = strlen(rootDir);
     if (n == 0) snprintf(rootDir, sizeof(rootDir), "./");
     else if (rootDir[n - 1] != '/' && rootDir[n - 1] != '\\' && n + 1 < sizeof(rootDir)) strcat(rootDir, "/");
-    snprintf(requestsDir, sizeof(requestsDir), "%srequests/", rootDir);
+    // MONOLITH_REQUESTS_DIR (tests only): bundles, queue and coordinator lock elsewhere, so a
+    // test never meets the developer's coordinator. Bundles still name requests/<id>/ in
+    // their commands.
+    const char *over = getenv("MONOLITH_REQUESTS_DIR");
+    if (over && *over) {
+        MakeDirectory(over);
+        AbsPath(over, requestsDir, sizeof(requestsDir));
+        n = strlen(requestsDir);
+        if (n && requestsDir[n - 1] != '/' && requestsDir[n - 1] != '\\' && n + 1 < sizeof(requestsDir)) strcat(requestsDir, "/");
+        requestsHash = 2166136261u;
+        for (const char *c = requestsDir; *c; c++) requestsHash = (requestsHash ^ (unsigned char)*c) * 16777619u;
+        if (!requestsHash) requestsHash = 1;
+    } else snprintf(requestsDir, sizeof(requestsDir), "%srequests/", rootDir);
+    snprintf(coordDir, sizeof(coordDir), "%s.coordinator/", requestsDir);
+    InitCoordinatorMark();
 }
 
 // Absolute path of a file (falls back to the input if it can't be resolved)
@@ -1004,7 +1051,7 @@ static bool WriteRequestMd(const char *path, const Bundle *B)
                "**When you are done**, write `requests/%s/result.md`. Its **first line is a one-line "
                "summary** (the game shows it in its HUD), followed by what changed (map lines before -> "
                "after), the paths of your after-image(s), and anything left open. If the request is "
-               "genuinely ambiguous, ask in the terminal instead of guessing.\n\n", B->id);
+               "genuinely ambiguous, ask the developer instead of guessing (`AI-MAP-TOOL.md` section 3 says how).\n\n", B->id);
     if (B->stale)
         fprintf(f, "**Warning:** the map was reloaded between the selection and the submit; box indices "
                    "below may not match what the user saw.\n\n");
@@ -1409,27 +1456,36 @@ static bool WriteRequestJson(const char *path, const Bundle *B)
 // #region Open requests (HUD list + result.md polling)
 // ======================================================================================
 
+// A terminal window we started: a request's (per-request mode) or the coordinator's
 typedef struct {
-    bool used;
-    long seq;                   // submit order, for "most recent first"
-    char id[128], slug[SLUG_MAX + 1];
-    char dir[1300];             // bundle folder, trailing slash
-    double submitTime, doneTime;
-    bool launched;              // false: launching failed, the developer runs it by hand
+    bool launched;              // false: launching failed (or never tried)
     bool exited;                // the terminal process is gone (result may still come)
-    bool done;
-    bool closed;                // closed from the game: off the list, the bundle stays
-    int number;                 // [n] in the HUD list, stable while listed (the lowest free number)
-    long resultSize;            // size of result.md at the last poll (wait until it settles)
-    char summary[160];          // first line of result.md
-    Vector3 eye;
-    float yaw, pitch;
 #ifndef _WIN32
     pid_t pid;                  // the terminal (session + process group leader, setsid)
     char mark[160];             // i3/sway mark set on its window by the workspace helper
     int killStage;              // after a close: 1 = WM closed it, wait; 2 = SIGTERM sent, wait
     double killTime;            // clockTime of the next escalation step
 #endif
+} TermWindow;
+
+typedef struct {
+    bool used;
+    long seq;                   // submit order, for "most recent first"
+    char id[128], slug[SLUG_MAX + 1];
+    char dir[1300];             // bundle folder, trailing slash
+    double submitTime, doneTime;
+    bool queue;                 // coordinator mode: tracked through requests/<id>/state
+    char state[16];             // queue: first word of the state file ("" = not read yet)
+    bool cancelAsked;           // queue: the developer asked to cancel it (cancel file written)
+    bool done;
+    bool closed;                // closed from the game: off the list, the bundle stays
+    int number;                 // [n] in the HUD list, stable while listed (the lowest free number)
+    long resultSize;            // size of result.md at the last poll (wait until it settles)
+    char summary[160];          // first line of result.md (queue: of question.md while asking)
+    Vector3 eye;
+    float yaw, pitch;
+    bool hasCamera;             // eye / yaw / pitch are set (not for imports)
+    TermWindow term;            // per-request mode: its terminal
 } OpenRequest;
 
 static OpenRequest *reqs;       // heap; a retired entry (Retired) is reused by the next request
@@ -1443,6 +1499,26 @@ static Vector3 lastDoneEye;
 static float lastDoneYaw, lastDonePitch;
 static long confirmSeq;         // running request whose close waits for a second key press
 static double confirmUntil;     // ... until this clockTime
+
+// The coordinator (coordinator mode, region "Coordinator and queue")
+static struct {
+    TermWindow term;            // its terminal, if this game run started it
+    bool tried;                 // this game run tried to start one
+    double startTime;           // clockTime of that attempt
+    char error[256];            // why the last attempt failed ("" = it didn't)
+    int alive;                  // last lock test: 1 = running, 0 = not, -1 = not tested yet
+    float checkTimer;
+    double confirmUntil;        // CTRL+SHIFT+K with requests open: second press until then
+} coord = { .alive = -1 };
+
+// Its window's i3 / sway mark: fixed, so a restarted game can still close it through the WM
+static void InitCoordinatorMark(void)
+{
+#ifndef _WIN32
+    if (requestsHash) snprintf(coord.term.mark, sizeof(coord.term.mark), "_monolith_coordinator_%08x", requestsHash);
+    else snprintf(coord.term.mark, sizeof(coord.term.mark), "_monolith_coordinator");
+#endif
+}
 
 #ifndef _WIN32
 // Every child is reaped with waitpid(pid, WNOHANG) from LauncherUpdate. Not waitpid(-1):
@@ -1467,7 +1543,7 @@ static bool Listed(const OpenRequest *q) { return q->used && !q->closed; }
 // for terminals that hand the window to a daemon and exit (kitty --single-instance, wezterm)
 static bool WindowMaybeOpen(const OpenRequest *q)
 {
-    return q->launched && !q->exited;
+    return q->term.launched && !q->term.exited;
 }
 
 // An entry nobody needs any more: closed and its terminal shut down, or finished, off the
@@ -1477,7 +1553,7 @@ static bool Retired(const OpenRequest *q)
 {
     if (!q->used) return true;
 #ifndef _WIN32
-    if (q->closed) return q->killStage == 0;
+    if (q->closed) return q->term.killStage == 0;
 #else
     if (q->closed) return true;
 #endif
@@ -1526,16 +1602,17 @@ static bool ChildAlive(pid_t pid)
     if (slot < 0) return false;             // reaped already (or never tracked)
     if (waitpid(pid, NULL, WNOHANG) == 0) return true;
     // Reaped: from now on the kernel may hand this pid to any new process, including a
-    // later terminal of ours. Forget it in every request that holds it (and cancel a
+    // later terminal of ours. Forget it in every window that holds it (and cancel a
     // pending WM close -> SIGTERM -> SIGKILL escalation), so a close of the old request
     // can never signal the new process.
-    for (int k = 0; k < reqCount; k++)
-        if (reqs[k].used && reqs[k].pid == pid) {
-            reqs[k].exited = true;
-            reqs[k].pid = 0;
-            reqs[k].killStage = 0;
-            TraceLog(LOG_INFO, "monolith: terminal of %s exited (pid %d reaped)", reqs[k].id, (int)pid);
-        }
+    for (int k = 0; k <= reqCount; k++) {
+        TermWindow *t = k < reqCount ? (reqs[k].used ? &reqs[k].term : NULL) : &coord.term;
+        if (!t || t->pid != pid) continue;
+        t->exited = true;
+        t->pid = 0;
+        t->killStage = 0;
+        TraceLog(LOG_INFO, "monolith: terminal of %s exited (pid %d reaped)", k < reqCount ? reqs[k].id : "the coordinator", (int)pid);
+    }
     children[slot] = children[--childCount];    // reaped (or not ours any more: ECHILD)
     return false;
 }
@@ -1543,11 +1620,13 @@ static bool ChildAlive(pid_t pid)
 static void CloseEscalate(void);
 #endif
 
-// Reads the first non-empty line of result.md, without leading '#'s and blanks
-static bool ReadResult(OpenRequest *q)
+// Reads the first non-empty line of a bundle file (result.md, question.md) into out, without
+// leading '#'s and blanks. *lastSize: the file's size at the previous call (NULL: accept only
+// a complete line)
+static bool ReadFirstLine(const OpenRequest *q, const char *name, long *lastSize, char *out, int outSize)
 {
     char path[1400];
-    snprintf(path, sizeof(path), "%sresult.md", q->dir);
+    snprintf(path, sizeof(path), "%s%s", q->dir, name);
     FILE *f = fopen(path, "rb");
     if (!f) return false;
     char buf[4096];
@@ -1558,8 +1637,8 @@ static bool ReadResult(OpenRequest *q)
     buf[n] = 0;
     // Still being written? Accept once it has a complete line or its size held still
     // for one poll interval.
-    bool settled = size == q->resultSize;
-    q->resultSize = size;
+    bool settled = lastSize && size == *lastSize;
+    if (lastSize) *lastSize = size;
     if (size <= 0) return false;
     char *p = buf;
     for (;;) {
@@ -1574,17 +1653,30 @@ static bool ReadResult(OpenRequest *q)
         while (end > s && (end[-1] == '\r' || end[-1] == ' ' || end[-1] == '\t')) end--;
         if (end > s) {
             int len = (int)(end - s);
-            if (len > (int)sizeof(q->summary) - 1) len = (int)sizeof(q->summary) - 1;
-            memcpy(q->summary, s, len);
-            q->summary[len] = 0;
+            if (len > outSize - 1) len = outSize - 1;
+            memcpy(out, s, len);
+            out[len] = 0;
             // No control characters in the HUD line (non-ASCII shows as '?' in raylib's font)
-            for (char *c = q->summary; *c; c++) if ((unsigned char)*c < 0x20) *c = ' ';
+            for (char *c = out; *c; c++) if ((unsigned char)*c < 0x20) *c = ' ';
             return true;
         }
         if (!*e) return false;
         p = e;      // a line of only '#'s: try the next one
     }
 }
+
+static bool ReadResult(OpenRequest *q)
+{
+    return ReadFirstLine(q, "result.md", &q->resultSize, q->summary, (int)sizeof(q->summary));
+}
+
+static bool StateFinal(const char *s)
+{
+    return strcmp(s, "done") == 0 || strcmp(s, "failed") == 0 || strcmp(s, "cancelled") == 0;
+}
+
+static void CoordinatorCheck(void);
+static void ReadState(OpenRequest *q);
 
 void LauncherUpdate(float dt)
 {
@@ -1599,25 +1691,47 @@ void LauncherUpdate(float dt)
     CloseEscalate();
 #endif
 
+    CoordinatorCheck();
+
     for (int i = 0; i < reqCount; i++) {
         OpenRequest *q = &reqs[i];
         if (!q->used || q->done) continue;
-        if (ReadResult(q)) {
-            q->done = true;
-            q->doneTime = clockTime;
+        bool final = false;
+        if (q->queue) {
+            ReadState(q);
+            final = StateFinal(q->state);
+            if (strcmp(q->state, "question") == 0 && !ReadFirstLine(q, "question.md", NULL, q->summary, (int)sizeof(q->summary)))
+                snprintf(q->summary, sizeof(q->summary), "see the coordinator terminal");
+        }
+        bool result = ReadResult(q);
+        if (!result && !final) continue;
+        if (!result) snprintf(q->summary, sizeof(q->summary), "%s (no result.md)", q->state);
+        q->done = true;
+        q->doneTime = clockTime;
+        // R flies back to requests that ended with a result (not to cancelled ones)
+        if (q->hasCamera && result && strcmp(q->state, "cancelled") != 0) {
             lastDoneSeq = ++doneCounter;
             lastDoneEye = q->eye;
             lastDoneYaw = q->yaw;
             lastDonePitch = q->pitch;
-            TraceLog(LOG_INFO, "monolith: request %s done: %s", q->id, q->summary);
         }
+        TraceLog(LOG_INFO, "monolith: request %s %s: %s", q->id, final ? q->state : "done", q->summary);
     }
 }
+
+// HUD line of the coordinator; NULL when there is nothing to say
+static const char *CoordinatorLine(Color *c);
 
 int LauncherDrawHud(int x, int y)
 {
     const int size = 18, step = 22, maxRows = 6;
     int rows = 0;
+    Color cc;
+    const char *coordText = CoordinatorLine(&cc);
+    if (coordText) {
+        DrawText(coordText, x, y, size, cc);
+        rows++;
+    }
     long below = 1L << 30;      // walk the list from the newest request down
     while (rows < maxRows) {
         OpenRequest *q = NULL;
@@ -1628,7 +1742,26 @@ int LauncherDrawHud(int x, int y)
 
         const char *text;
         Color c = { 235, 232, 225, 220 };
-        if (q->done) {
+        int t = (int)(clockTime - q->submitTime);
+        if (q->queue && q->done) {
+            float age = (float)(clockTime - q->doneTime);
+            if (age > DONE_SHOW_TIME) continue;
+            bool ok = strcmp(q->state, "failed") != 0 && strcmp(q->state, "cancelled") != 0;
+            Color base = ok ? (Color){ 150, 230, 150, 255 } : strcmp(q->state, "failed") == 0 ? (Color){ 255, 170, 110, 255 } : (Color){ 190, 190, 190, 255 };
+            c = Fade(base, fminf((DONE_SHOW_TIME - age) / DONE_FADE_TIME, 1.0f));
+            text = TextFormat("[%d] [%s] %s: %s", q->number, ok ? "done" : q->state, q->slug, q->summary);
+        } else if (q->queue) {
+            const char *cancel = q->cancelAsked ? ", cancelling" : "";
+            if (strcmp(q->state, "question") == 0) {
+                c = (Color){ 255, 225, 120, 240 };
+                text = TextFormat("[%d] [?] %s: %s (answer in the coordinator terminal)", q->number, q->slug, q->summary);
+            } else if (strcmp(q->state, "claimed") == 0)
+                text = TextFormat("[%d] ... %s running (%02d:%02d%s)", q->number, q->slug, t / 60, t % 60, cancel);
+            else {
+                c = (Color){ 200, 205, 215, 200 };
+                text = TextFormat("[%d] queued %s (%02d:%02d%s)", q->number, q->slug, t / 60, t % 60, cancel);
+            }
+        } else if (q->done) {
             float age = (float)(clockTime - q->doneTime);
             if (age > DONE_SHOW_TIME) {
                 // After its 20 s a finished request stays as a dim line while its terminal
@@ -1642,11 +1775,10 @@ int LauncherDrawHud(int x, int y)
                 text = TextFormat("[%d] [done] %s: %s", q->number, q->slug, q->summary);
             }
         } else {
-            int t = (int)(clockTime - q->submitTime);
-            if (!q->launched) {
+            if (!q->term.launched) {
                 c = (Color){ 255, 170, 110, 230 };
                 text = TextFormat("[%d] [!] %s not launched, run it by hand (see log), waiting (%02d:%02d)", q->number, q->slug, t / 60, t % 60);
-            } else if (q->exited)
+            } else if (q->term.exited)
                 // Not necessarily a failure: some terminals hand the window to a daemon
                 // and exit right away (kitty --single-instance, wezterm with a mux)
                 text = TextFormat("[%d] ... %s waiting for result.md, terminal process gone (%02d:%02d)", q->number, q->slug, t / 60, t % 60);
@@ -1700,11 +1832,35 @@ static bool ClaudeSafe(void)
     return s && *s && strcmp(s, "0") != 0;
 }
 
+static bool FindProgram(const char *name, char *out, int outSize);
+
+// The claude program: $MONOLITH_CLAUDE (tests: tools/stub-coordinator.sh), else claude in PATH,
+// else ~/.local/bin/claude (where the native installer puts it, which a game started from a
+// desktop launcher may not have in PATH)
+static bool FindClaude(char *out, int outSize)
+{
+    const char *env = getenv("MONOLITH_CLAUDE");
+    if (env && *env) return FindProgram(env, out, outSize);
+    if (FindProgram("claude", out, outSize)) return true;
+#ifdef _WIN32
+    return false;
+#else
+    if (!getenv("HOME")) return false;
+    char cand[2048];
+    snprintf(cand, sizeof(cand), "%s/.local/bin/claude", getenv("HOME"));
+    return FindProgram(cand, out, outSize);
+#endif
+}
+
 #ifdef _WIN32
 
 static bool FindProgram(const char *name, char *out, int outSize)
 {
     static const char *exts[] = { ".exe", ".cmd", ".bat", "" };
+    if (strpbrk(name, "/\\")) {         // a path (MONOLITH_CLAUDE)
+        snprintf(out, outSize, "%s", name);
+        return _access(out, 0) == 0;
+    }
     const char *path = getenv("PATH");
     char dirs[8192];
     snprintf(dirs, sizeof(dirs), "%s", path ? path : "");
@@ -1725,12 +1881,14 @@ static bool FindProgram(const char *name, char *out, int outSize)
     return false;
 }
 
-static bool Launch(const char *id, const char *slug, const char *prompt, const char *model, OpenRequest *q, char *err, int errSize)
+static bool Launch(const char *title, const char *mark, const char *prompt, const char *model, const char *lock,
+                   TermWindow *t, char *err, int errSize)
 {
-    (void)q;
+    (void)t;
+    (void)mark;
     char claude[1024];
-    if (!FindProgram("claude", claude, sizeof(claude))) {
-        snprintf(err, errSize, "claude not found in PATH");
+    if (!FindClaude(claude, sizeof(claude))) {
+        snprintf(err, errSize, "claude not found in PATH (or MONOLITH_CLAUDE)");
         return false;
     }
     char dir[1024];
@@ -1749,20 +1907,31 @@ static bool Launch(const char *id, const char *slug, const char *prompt, const c
     if (!cmd) { snprintf(err, errSize, "out of memory"); return false; }
     if (skipped) TraceLog(LOG_WARNING, "monolith: %d word%s with a double quote left out of the claude command line (cmd can't pass them)",
                           skipped, skipped == 1 ? "" : "s");
-    char title[300], dirArg[1100];
-    title[0] = '"';
-    RequestTitle(id, slug, title + 1, (int)sizeof(title) - 2);
-    strcat(title, "\"");
+    // The coordinator: ` 9>"<lock>"` inside the outer quotes, so cmd keeps the lock file
+    // open (without delete / write sharing) while claude runs (CoordinatorAlive)
+    if (lock) {
+        if (strchr(lock, '"')) { free(cmd); snprintf(err, errSize, "the requests folder has a double quote in its path"); return false; }
+        size_t cl = strlen(cmd);
+        char *with = malloc(cl + strlen(lock) + 8);
+        if (!with) { free(cmd); snprintf(err, errSize, "out of memory"); return false; }
+        memcpy(with, cmd, cl - 1);                              // without the closing outer quote
+        sprintf(with + cl - 1, " 9>\"%s\"\"", lock);
+        free(cmd);
+        cmd = with;
+        for (char *c = cmd + cl; *c; c++) if (*c == '/') *c = '\\';
+    }
+    char titleArg[300], dirArg[1100];
+    snprintf(titleArg, sizeof(titleArg), "\"%s\"", title);
     snprintf(dirArg, sizeof(dirArg), "\"%s\"", dir);
     // cmd.exe takes command lines of at most 8191 characters: say so instead of a bare
     // "cannot start" (or a window that drops the end)
-    size_t total = strlen(cmd) + strlen(title) + strlen(dirArg) + 40;
+    size_t total = strlen(cmd) + strlen(titleArg) + strlen(dirArg) + 40;
     if (total > 8191) {
         snprintf(err, errSize, "the claude command line is %zu characters, cmd.exe takes at most 8191 (shorten MONOLITH_CLAUDE_ARGS)", total);
         free(cmd);
         return false;
     }
-    const char *argv[] = { "cmd.exe", "/c", "start", title, "/D", dirArg, "cmd.exe", "/k", cmd, NULL };
+    const char *argv[] = { "cmd.exe", "/c", "start", titleArg, "/D", dirArg, "cmd.exe", "/k", cmd, NULL };
     intptr_t h = _spawnvp(_P_NOWAIT, "cmd.exe", argv);
     free(cmd);
     if (h == -1) {
@@ -1770,7 +1939,7 @@ static bool Launch(const char *id, const char *slug, const char *prompt, const c
         return false;
     }
     CloseHandle((void *)h);     // cmd /c start exits right away; nothing to wait for
-    TraceLog(LOG_INFO, "monolith: launched request %s via cmd start", id);
+    TraceLog(LOG_INFO, "monolith: launched '%s' via cmd start", title);
     return true;
 }
 
@@ -1875,7 +2044,24 @@ static void MarkAndMove(const char *title, const char *mark)
     else TraceLog(LOG_INFO, "monolith: marking '%s' via %s (pid %d)", title, tool, (int)pid);
 }
 
-static bool Launch(const char *id, const char *slug, const char *prompt, const char *model, OpenRequest *q, char *err, int errSize)
+// /bin/sh script around the coordinator's claude ($0 = the lock file, "$@" = claude and its
+// arguments): holds an flock on the lock for as long as claude runs (CoordinatorAlive tests
+// it), without passing the descriptor on, so a background process claude leaves behind can't
+// keep the lock alive. A second coordinator started within moments (two quick submits) finds
+// the lock taken after 2 s, says so and exits.
+static const char COORDINATOR_WRAPPER[] =
+    "exec 9>>\"$0\" || exit 1\n"
+    "if ! flock -w 2 9; then echo 'monolith: a request coordinator is already running; this window closes in 5 s'; sleep 5; exit 0; fi\n"
+    "\"$@\" 9>&-\n"
+    "st=$?\n"
+    "if [ $st -ne 0 ]; then echo \"monolith: the coordinator exited with status $st; this window closes in 30 s\"; sleep 30; fi\n"
+    "exit $st\n";
+
+// Opens a terminal titled `title` running claude [flags] [--model model] [extra] prompt in the
+// repo root; lock != NULL: the coordinator, wrapped in COORDINATOR_WRAPPER with that lock file.
+// mark: the i3 / sway mark for its window (MarkAndMove). Fills t (pid, mark).
+static bool Launch(const char *title, const char *mark, const char *prompt, const char *model, const char *lock,
+                   TermWindow *t, char *err, int errSize)
 {
     // Terminal: env override (program + extra args) or the first known one in PATH
     ArgList term = { 0 }, args = { 0 };
@@ -1913,20 +2099,14 @@ static bool Launch(const char *id, const char *slug, const char *prompt, const c
     char **argv = NULL;
     bool ok = false;
     char claude[4096];
-    bool found = FindProgram("claude", claude, sizeof(claude));
-    if (!found && getenv("HOME")) {
-        char cand[2048];
-        snprintf(cand, sizeof(cand), "%s/.local/bin/claude", getenv("HOME"));
-        found = FindProgram(cand, claude, sizeof(claude));
-    }
-    if (!found) {
-        snprintf(err, errSize, "claude not found in PATH or ~/.local/bin");
+    if (!FindClaude(claude, sizeof(claude))) {
+        snprintf(err, errSize, "claude not found in PATH or ~/.local/bin (or MONOLITH_CLAUDE)");
         goto fail;
     }
 
-    // argv: terminal [its extra args] [pre] [title] [dir] [exec] claude [claude args] prompt
-    char title[300], dir[1024];
-    RequestTitle(id, slug, title, sizeof(title));
+    // argv: terminal [its extra args] [pre] [title] [dir] [exec] [wrapper] claude [claude args] prompt
+    char titleBuf[300], dir[1024];
+    snprintf(titleBuf, sizeof(titleBuf), "%s", title);
     snprintf(dir, sizeof(dir), "%s", rootDir);
     size_t dl = strlen(dir);
     if (dl > 1 && dir[dl - 1] == '/') dir[dl - 1] = 0;
@@ -1934,14 +2114,15 @@ static bool Launch(const char *id, const char *slug, const char *prompt, const c
     char **extra = args.tok;
     int extraCount = args.count;
     // (allocated before the fork: the child may only call async-signal-safe functions)
-    argv = malloc(sizeof(char *) * (termCount + 8 + SKIP_PERMISSION_COUNT + 2 + extraCount + 4));
+    argv = malloc(sizeof(char *) * (termCount + 8 + 4 + SKIP_PERMISSION_COUNT + 2 + extraCount + 4));
     if (!argv) { snprintf(err, errSize, "out of memory"); goto fail; }
     int n = 0;
     for (int i = 0; i < termCount; i++) argv[n++] = termTok[i];
     if (ts->pre) argv[n++] = (char *)ts->pre;
-    if (ts->titleFlag) { argv[n++] = (char *)ts->titleFlag; argv[n++] = title; }
+    if (ts->titleFlag) { argv[n++] = (char *)ts->titleFlag; argv[n++] = titleBuf; }
     if (ts->dirFlag) { argv[n++] = (char *)ts->dirFlag; argv[n++] = dir; }
     if (ts->exec) argv[n++] = (char *)ts->exec;
+    if (lock) { argv[n++] = "/bin/sh"; argv[n++] = "-c"; argv[n++] = (char *)COORDINATOR_WRAPPER; argv[n++] = (char *)lock; }
     argv[n++] = claude;
     for (int i = 0; i < SKIP_PERMISSION_COUNT && !ClaudeSafe(); i++) argv[n++] = (char *)SKIP_PERMISSION_FLAGS[i];
     if (model) { argv[n++] = "--model"; argv[n++] = (char *)model; }
@@ -1990,13 +2171,15 @@ static bool Launch(const char *id, const char *slug, const char *prompt, const c
         goto fail;
     }
 
-    q->pid = pid;
+    t->pid = pid;
+    t->exited = false;
+    t->killStage = 0;
     TrackChild(pid);
-    TraceLog(LOG_INFO, "monolith: launched %s (pid %d) for request %s", termPath, (int)pid, id);
-    // (an id is [0-9_a-z-] for edit requests; keep the mark free of quotes in any case)
-    snprintf(q->mark, sizeof(q->mark), "_monolith_%s", id);
-    for (char *c = q->mark; *c; c++) if (!isalnum((unsigned char)*c) && *c != '-' && *c != '_') *c = '_';
-    MarkAndMove(title, q->mark);
+    TraceLog(LOG_INFO, "monolith: launched %s (pid %d) for '%s'", termPath, (int)pid, title);
+    // (keep the mark free of quotes in any case)
+    snprintf(t->mark, sizeof(t->mark), "%s", mark);
+    for (char *c = t->mark; *c; c++) if (!isalnum((unsigned char)*c) && *c != '-' && *c != '_') *c = '_';
+    MarkAndMove(title, t->mark);
     ok = true;
 fail:
     free(argv);
@@ -2012,6 +2195,9 @@ fail:
 // ======================================================================================
 // #region Closing request windows (K / SHIFT+K / CTRL+K n, MONOLITH_CLOSE_ON_EXIT)
 // ======================================================================================
+// Coordinator mode has no request windows: K / SHIFT+K only take finished requests off the
+// list and CTRL+K n cancels (CancelRequest); the coordinator's own window (CTRL+SHIFT+K,
+// LauncherCloseCoordinator) closes the way a request window does in per-request mode.
 // Linux, in this order:
 //   1. i3 / sway: `i3-msg [con_mark="^_monolith_<id>$"] kill` (swaymsg on sway). The mark
 //      was set by MarkAndMove when the window appeared, so it still matches after Claude
@@ -2036,17 +2222,17 @@ fail:
 typedef enum { CLOSED_WINDOW, CLOSED_GONE, CLOSED_LISTED } CloseOutcome;
 
 #ifndef _WIN32
-// 1: the WM closed a window with the request's mark, 0: no such window, -1: no i3 / sway
-static int WmCloseMarked(const OpenRequest *q)
+// 1: the WM closed a window with the mark, 0: no such window, -1: no i3 / sway
+static int WmCloseMarked(const TermWindow *t)
 {
-    if (!q->mark[0]) return 0;
+    if (!t->mark[0]) return 0;
     const char *tool;
     char toolPath[4096];
     if (!WmTool(toolPath, sizeof(toolPath), &tool)) return -1;
     // `kill` alone reports success even when nothing matches; re-adding the mark first
     // fails (exit 2) when no window has it, so the exit status says whether one was closed
     char cmd[400];
-    snprintf(cmd, sizeof(cmd), "[con_mark=\"^%s$\"] mark --add \"%s\", kill", q->mark, q->mark);
+    snprintf(cmd, sizeof(cmd), "[con_mark=\"^%s$\"] mark --add \"%s\", kill", t->mark, t->mark);
     char *argv[] = { toolPath, cmd, NULL };
     pid_t pid = fork();
     if (pid < 0) return -1;
@@ -2064,78 +2250,93 @@ static int WmCloseMarked(const OpenRequest *q)
     return WEXITSTATUS(st) == 0 ? 1 : WEXITSTATUS(st) == 2 ? 0 : -1;
 }
 
-static void SignalGroup(const OpenRequest *q, int sig)
+static void SignalGroup(const TermWindow *t, const char *what, int sig)
 {
-    if (q->pid > 0 && ChildAlive(q->pid) && kill(-q->pid, sig) == 0)
+    if (t->pid > 0 && ChildAlive(t->pid) && kill(-t->pid, sig) == 0)
         TraceLog(LOG_INFO, "monolith: %s sent to the terminal of %s (process group %d)",
-                 sig == SIGKILL ? "SIGKILL" : "SIGTERM", q->id, (int)q->pid);
+                 sig == SIGKILL ? "SIGKILL" : "SIGTERM", what, (int)t->pid);
+}
+
+static void EscalateTerm(TermWindow *t, const char *what)
+{
+    if (!t->killStage || clockTime < t->killTime) return;
+    // (ChildAlive: only a pid that is still our unreaped child; reaping clears t->pid)
+    if (t->pid <= 0 || !ChildAlive(t->pid)) { t->killStage = 0; return; }
+    if (t->killStage == 1) { SignalGroup(t, what, SIGTERM); t->killStage = 2; t->killTime = clockTime + CLOSE_GRACE; }
+    else { SignalGroup(t, what, SIGKILL); t->killStage = 0; }
 }
 
 // From LauncherUpdate: WM close -> SIGTERM -> SIGKILL for terminals that linger
 static void CloseEscalate(void)
 {
-    for (int i = 0; i < reqCount; i++) {
-        OpenRequest *q = &reqs[i];
-        if (!q->used || !q->killStage || clockTime < q->killTime) continue;
-        // (ChildAlive: only a pid that is still our unreaped child; reaping clears q->pid)
-        if (q->pid <= 0 || !ChildAlive(q->pid)) { q->killStage = 0; continue; }
-        if (q->killStage == 1) { SignalGroup(q, SIGTERM); q->killStage = 2; q->killTime = clockTime + CLOSE_GRACE; }
-        else { SignalGroup(q, SIGKILL); q->killStage = 0; }
-    }
+    for (int i = 0; i < reqCount; i++) if (reqs[i].used) EscalateTerm(&reqs[i].term, reqs[i].id);
+    EscalateTerm(&coord.term, "the coordinator");
 }
 #endif
 
-static CloseOutcome CloseRequest(OpenRequest *q)
+// Closes a terminal window: through the WM, then by signals (above). what: for the log
+static CloseOutcome CloseTerm(TermWindow *t, const char *what)
 {
-    q->closed = true;
-    if (confirmSeq == q->seq) confirmSeq = 0;
-    if (!q->launched) return CLOSED_LISTED;
 #ifdef _WIN32
+    (void)t;
+    (void)what;
     return CLOSED_LISTED;
 #else
     const char *method = getenv("MONOLITH_CLOSE_METHOD");
     bool useWm = !method || strcmp(method, "signal") != 0;
     bool useSignal = !method || strcmp(method, "wm") != 0;
-    int wm = useWm ? WmCloseMarked(q) : -1;
-    bool alive = ChildAlive(q->pid);
-    TraceLog(LOG_INFO, "monolith: closing %s: window manager %s, terminal process %s", q->id,
+    int wm = useWm ? WmCloseMarked(t) : -1;
+    bool alive = ChildAlive(t->pid);
+    TraceLog(LOG_INFO, "monolith: closing %s: window manager %s, terminal process %s", what,
              wm == 1 ? "closed its window" : wm == 0 ? "found no window" : "not used", alive ? "running" : "gone");
     if (wm == 1) {
-        if (alive && useSignal) { q->killStage = 1; q->killTime = clockTime + CLOSE_GRACE; }
+        if (alive && useSignal) { t->killStage = 1; t->killTime = clockTime + CLOSE_GRACE; }
         return CLOSED_WINDOW;
     }
     if (alive && useSignal) {
-        SignalGroup(q, SIGTERM);
-        q->killStage = 2;
-        q->killTime = clockTime + CLOSE_GRACE;
+        SignalGroup(t, what, SIGTERM);
+        t->killStage = 2;
+        t->killTime = clockTime + CLOSE_GRACE;
         return CLOSED_WINDOW;
     }
     return CLOSED_GONE;
 #endif
 }
 
+static CloseOutcome CloseRequest(OpenRequest *q)
+{
+    q->closed = true;
+    if (confirmSeq == q->seq) confirmSeq = 0;
+    if (!q->term.launched) return CLOSED_LISTED;
+    return CloseTerm(&q->term, q->id);
+}
+
 static void CloseMessage(const OpenRequest *q, CloseOutcome o, char *msg, int msgSize)
 {
-    if (o == CLOSED_WINDOW) snprintf(msg, msgSize, "closed %s", q->slug);
+    if (q->queue) snprintf(msg, msgSize, "%s off the list", q->slug);
+    else if (o == CLOSED_WINDOW) snprintf(msg, msgSize, "closed %s", q->slug);
 #ifdef _WIN32
-    else if (q->launched) snprintf(msg, msgSize, "%s off the list; close its window by hand (not supported on Windows)", q->slug);
+    else if (q->term.launched) snprintf(msg, msgSize, "%s off the list; close its window by hand (not supported on Windows)", q->slug);
 #endif
     else if (o == CLOSED_LISTED) snprintf(msg, msgSize, "%s off the list (it was never launched)", q->slug);
     else snprintf(msg, msgSize, "%s: window already gone", q->slug);
     TraceLog(LOG_INFO, "monolith: %s", msg);
 }
 
+static int CancelRequest(OpenRequest *q, char *msg, int msgSize);
+
 bool LauncherCloseLatestDone(char *msg, int msgSize)
 {
     OpenRequest *q = NULL;
-    bool running = false;
+    bool running = false, queue = false;
     for (int i = 0; i < reqCount; i++) {
         if (!Listed(&reqs[i])) continue;
-        if (!reqs[i].done) running = true;
+        if (!reqs[i].done) { running = true; queue |= reqs[i].queue; }
         else if (!q || reqs[i].doneTime > q->doneTime) q = &reqs[i];
     }
     if (!q) {
-        snprintf(msg, msgSize, "no finished request to close%s", running ? " (CTRL+K, then its number, stops a running one)" : "");
+        snprintf(msg, msgSize, "no finished request to close%s", !running ? "" : queue ? " (CTRL+K, then its number, cancels a queued or running one)"
+                                                                               : " (CTRL+K, then its number, stops a running one)");
         return false;
     }
     CloseMessage(q, CloseRequest(q), msg, msgSize);
@@ -2153,12 +2354,12 @@ int LauncherCloseAllDone(char *msg, int msgSize)
         lastOutcome = CloseRequest(q);
         last = q;
         count++;
-        if (lastOutcome == CLOSED_GONE) gone++;
+        if (lastOutcome == CLOSED_GONE && !q->queue) gone++;
     }
     if (!last) snprintf(msg, msgSize, "no finished request to close");
     else if (count == 1) CloseMessage(last, lastOutcome, msg, msgSize);
     else {
-        snprintf(msg, msgSize, "closed %d finished requests", count);
+        snprintf(msg, msgSize, "%s %d finished requests", last->queue ? "took off the list" : "closed", count);
         if (gone) snprintf(msg + strlen(msg), msgSize - strlen(msg), " (%d window%s already gone)", gone, gone == 1 ? "" : "s");
         TraceLog(LOG_INFO, "monolith: %s", msg);
     }
@@ -2170,6 +2371,7 @@ int LauncherCloseNumber(int number, char *msg, int msgSize)
     OpenRequest *q = NULL;
     for (int i = 0; i < reqCount; i++) if (Listed(&reqs[i]) && reqs[i].number == number) q = &reqs[i];
     if (!q) { snprintf(msg, msgSize, "no request [%d] in the list", number); return -1; }
+    if (q->queue && !q->done) return CancelRequest(q, msg, msgSize);
     // A request without result.md may still be working: ask for a second press first
     if (!q->done && !(confirmSeq == q->seq && clockTime <= confirmUntil)) {
         confirmSeq = q->seq;
@@ -2192,10 +2394,15 @@ bool LauncherClosing(void)
 {
 #ifndef _WIN32
     for (int i = 0; i < reqCount; i++)
-        if (reqs[i].used && reqs[i].closed && reqs[i].launched && ChildAlive(reqs[i].pid)) return true;
+        if (reqs[i].used && reqs[i].closed && reqs[i].term.launched && ChildAlive(reqs[i].term.pid)) return true;
+    if (coord.term.killStage && ChildAlive(coord.term.pid)) return true;
 #endif
     return false;
 }
+
+static bool QueueMode(void);
+static bool CoordinatorAlive(void);
+static int OpenQueueRequests(void);
 
 void LauncherCloseOnExit(void)
 {
@@ -2203,8 +2410,317 @@ void LauncherCloseOnExit(void)
     if (!e || !*e || strcmp(e, "0") == 0) return;
     // No escalation after this (the game is gone): the WM close, or SIGTERM where the WM
     // route isn't available, is all there is
+    if (QueueMode()) {
+        int open = OpenQueueRequests();
+        if (open) TraceLog(LOG_INFO, "monolith: on exit: %d request%s still queued or running, the coordinator stays open", open, open == 1 ? "" : "s");
+        else if (CoordinatorAlive()) CloseTerm(&coord.term, "the coordinator");
+        return;
+    }
     char msg[256];
     if (LauncherCloseAllDone(msg, sizeof(msg)) > 0) TraceLog(LOG_INFO, "monolith: on exit: %s", msg);
+}
+
+// #endregion
+
+// ======================================================================================
+// #region Coordinator and queue (MONOLITH_LAUNCH=coordinator, the default)
+// ======================================================================================
+// docs/design-coordinator.md. A submitted bundle gets requests/<id>/state = "queued <time>"
+// as its last file; then, unless requests/.coordinator/lock is held, one terminal titled
+// "monolith-claude: coordinator" runs COORDINATOR_WRAPPER + claude [permission flags]
+// --model $MONOLITH_COORDINATOR_MODEL (default sonnet) [MONOLITH_CLAUDE_ARGS] "<fixed
+// prompt naming AI-COORDINATOR.md>". The coordinator (tools/request-queue.sh) claims bundles
+// and hands each to a subagent; after "queued" only it writes state (claimed, question,
+// done, failed, cancelled). The game asks for a cancel with requests/<id>/cancel, and turns
+// a queued bundle into "cancelled" itself only while no coordinator holds the lock.
+// Windows: the lock is the coordinator's `9>` redirection held open by cmd; the game tests
+// it with an exclusive open (_SH_DENYRW).
+
+#define COORD_CHECK_INTERVAL 2.0f   // seconds between lock tests (only while relevant)
+#define COORD_START_TIME     20.0   // after a start, "starting" this long before "not running"
+
+static int queueMode = -1;
+
+static bool QueueMode(void)
+{
+    if (queueMode >= 0) return queueMode;
+    queueMode = 1;
+    const char *m = getenv("MONOLITH_LAUNCH");
+    if (m && *m) {
+        if (strcmp(m, "per-request") == 0) queueMode = 0;
+        else if (strcmp(m, "coordinator") != 0)
+            TraceLog(LOG_WARNING, "monolith: MONOLITH_LAUNCH=%s unknown (coordinator or per-request); using coordinator", m);
+    }
+#ifndef _WIN32
+    char path[4096];
+    if (queueMode && !FindProgram("flock", path, sizeof(path))) {
+        TraceLog(LOG_WARNING, "monolith: flock (util-linux) not found: one terminal per request instead of the coordinator");
+        queueMode = 0;
+    }
+#endif
+    return queueMode;
+}
+
+static void Stamp(char *out, int outSize)
+{
+    time_t now = time(NULL);
+    struct tm *tm = localtime(&now);
+    if (!tm || !strftime(out, outSize, "%Y-%m-%dT%H:%M:%S", tm)) snprintf(out, outSize, "0000-00-00T00:00:00");
+}
+
+static bool WriteText(const char *path, const char *text)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f) return false;
+    bool ok = fputs(text, f) >= 0;
+    return fclose(f) == 0 && ok;
+}
+
+// requests/<id>/state = "<state> <time> game" (Linux: temp file + rename, so a reader never
+// sees half a line; Windows' rename doesn't replace a file, and the line is one write anyway)
+static bool WriteState(const char *dir, const char *state)
+{
+    char path[1400], line[96], stamp[32];
+    Stamp(stamp, sizeof(stamp));
+    snprintf(line, sizeof(line), "%s %s game\n", state, stamp);
+    snprintf(path, sizeof(path), "%sstate", dir);
+#ifdef _WIN32
+    return WriteText(path, line);
+#else
+    char tmp[1400];
+    snprintf(tmp, sizeof(tmp), "%sstate.tmp", dir);
+    return WriteText(tmp, line) && rename(tmp, path) == 0;
+#endif
+}
+
+static void ReadState(OpenRequest *q)
+{
+    char path[1400], buf[64] = "";
+    snprintf(path, sizeof(path), "%sstate", q->dir);
+    FILE *f = fopen(path, "rb");
+    if (!f) return;
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[n] = 0;
+    char word[16];
+    int len = 0;
+    while (len < (int)sizeof(word) - 1 && isalpha((unsigned char)buf[len])) { word[len] = buf[len]; len++; }
+    word[len] = 0;
+    if (!len || strcmp(word, q->state) == 0) return;     // half written (or unchanged)
+    TraceLog(LOG_INFO, "monolith: request %s: %s -> %s", q->id, q->state[0] ? q->state : "(new)", word);
+    snprintf(q->state, sizeof(q->state), "%s", word);
+}
+
+// Is a coordinator running (does anyone hold its lock)?
+static bool CoordinatorAlive(void)
+{
+    char path[1300];
+    snprintf(path, sizeof(path), "%slock", coordDir);
+#ifdef _WIN32
+    int fd = -1;
+    int e = _sopen_s(&fd, path, _O_RDWR | _O_CREAT, _SH_DENYRW, _S_IREAD | _S_IWRITE);
+    if (e == 0) { _close(fd); return false; }
+    return e == EACCES;
+#else
+    int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+    if (fd < 0) return false;                   // no requests folder: nobody runs
+    bool held = flock(fd, LOCK_EX | LOCK_NB) != 0 && errno == EWOULDBLOCK;
+    close(fd);                                  // (drops the lock if we just took it)
+    return held;
+#endif
+}
+
+static bool CoordinatorStarting(void)
+{
+    return coord.tried && !coord.error[0] && clockTime - coord.startTime < COORD_START_TIME && !coord.term.exited;
+}
+
+// Listed coordinator-mode requests that aren't finished yet
+static int OpenQueueRequests(void)
+{
+    int n = 0;
+    for (int i = 0; i < reqCount; i++) n += Listed(&reqs[i]) && reqs[i].queue && !reqs[i].done;
+    return n;
+}
+
+static void CoordinatorCheck(void)
+{
+    if (!QueueMode()) return;
+    bool relevant = coord.tried || coord.alive == 1;
+    for (int i = 0; i < reqCount && !relevant; i++) relevant = Listed(&reqs[i]) && reqs[i].queue;
+    if (!relevant) return;
+    coord.checkTimer -= POLL_INTERVAL;
+    if (coord.checkTimer > 0.0f && coord.alive >= 0) return;
+    coord.checkTimer = COORD_CHECK_INTERVAL;
+    int alive = CoordinatorAlive();
+    if (alive != coord.alive) TraceLog(LOG_INFO, "monolith: coordinator %s", alive ? "running" : "not running");
+    coord.alive = alive;
+}
+
+static const char *CoordinatorLine(Color *c)
+{
+    if (!QueueMode()) return NULL;
+    int listed = 0, queued = 0, running = 0;
+    for (int i = 0; i < reqCount; i++) {
+        const OpenRequest *q = &reqs[i];
+        if (!Listed(q) || !q->queue) continue;
+        listed++;
+        if (q->done) continue;
+        if (strcmp(q->state, "queued") == 0) queued++;
+        else running++;
+    }
+    if (!listed) return NULL;
+    *c = (Color){ 200, 205, 215, 200 };
+    if (coord.alive == 1) {
+        if (!queued && !running) return "coordinator: running, idle";
+        return TextFormat("coordinator: running, %d queued, %d running", queued, running);
+    }
+    if (CoordinatorStarting()) return "coordinator: starting ...";
+    *c = (Color){ 255, 170, 110, 230 };
+    if (coord.error[0]) return TextFormat("coordinator: not started: %s (the requests stay queued)", coord.error);
+    if (!queued && !running) { *c = (Color){ 200, 205, 215, 160 }; return "coordinator: not running"; }
+    return "coordinator: not running (the next request starts one; queued requests wait for it)";
+}
+
+static void CoordinatorTitle(char *out, int outSize)
+{
+    if (requestsHash) snprintf(out, outSize, "monolith-claude: coordinator %08x", requestsHash);
+    else snprintf(out, outSize, "monolith-claude: coordinator");
+}
+
+// Value of --model for the coordinator; NULL when MONOLITH_CLAUDE_ARGS has its own --model
+static const char *CoordinatorModel(void)
+{
+    ArgList a;
+    if (!ClaudeArgs(&a, NULL, false)) return NULL;
+    bool own = false;
+    for (int i = 0; i < a.count; i++) own |= strcmp(a.tok[i], "--model") == 0 || strncmp(a.tok[i], "--model=", 8) == 0;
+    FreeArgs(&a);
+    return own ? NULL : EnvOr("MONOLITH_COORDINATOR_MODEL", "sonnet");
+}
+
+// Makes sure a coordinator runs or is starting; note: a few words for the HUD message
+static bool StartCoordinator(char *note, int noteSize)
+{
+    char lock[1300];
+    MakeDirectory(coordDir);        // raylib: recursive, fine if it exists
+    snprintf(lock, sizeof(lock), "%slock", coordDir);
+    if (CoordinatorAlive()) {
+        coord.alive = 1;
+        snprintf(note, noteSize, "the coordinator takes it");
+        return true;
+    }
+    if (CoordinatorStarting()) { snprintf(note, noteSize, "the coordinator is starting"); return true; }
+    coord.tried = true;
+    coord.startTime = clockTime;
+    coord.error[0] = 0;
+    coord.alive = 0;
+    coord.checkTimer = 0.0f;
+
+    char title[200], prompt[1600], err[512] = "";
+    CoordinatorTitle(title, sizeof(title));
+    snprintf(prompt, sizeof(prompt), "You are the monolith request coordinator. Read AI-COORDINATOR.md in the repository root "
+                                     "and follow it exactly. Requests folder: %s", requestsDir);
+    TermWindow t = { 0 };
+    char mark[160] = "";
+#ifndef _WIN32
+    snprintf(mark, sizeof(mark), "%s", coord.term.mark);
+#endif
+    if (!Launch(title, mark, prompt, CoordinatorModel(), lock, &t, err, sizeof(err))) {
+        snprintf(coord.error, sizeof(coord.error), "%s", err);
+        snprintf(note, noteSize, "the coordinator could not start: %s; the request stays queued", err);
+        TraceLog(LOG_WARNING, "monolith: coordinator not started: %s", err);
+        return false;
+    }
+    t.launched = true;
+    coord.term = t;
+    snprintf(note, noteSize, "starting the request coordinator in a new terminal");
+    return true;
+}
+
+// The bundle in q->dir is complete: queue it and make sure a coordinator runs
+static bool QueueBundle(OpenRequest *q, const char *what, const char *model, char *msg, int msgSize)
+{
+    q->queue = true;
+    if (!WriteState(q->dir, "queued")) {
+        snprintf(msg, msgSize, "cannot write %sstate (disk full?)", q->dir);
+        TraceLog(LOG_WARNING, "monolith: %s", msg);
+        return false;
+    }
+    snprintf(q->state, sizeof(q->state), "queued");
+    TraceLog(LOG_INFO, "monolith: request %s queued", q->id);
+    char note[700];
+    StartCoordinator(note, sizeof(note));
+    if (model) snprintf(msg, msgSize, "%s queued [%d] (%s): %s (%s)", what, q->number, model, q->id, note);
+    else snprintf(msg, msgSize, "%s queued [%d]: %s (%s)", what, q->number, q->id, note);
+    return true;
+}
+
+// CTRL+K n on a queued / running request (LauncherCloseNumber)
+static int CancelRequest(OpenRequest *q, char *msg, int msgSize)
+{
+    if (q->cancelAsked) {
+        snprintf(msg, msgSize, "%s: cancel already asked, waiting for the coordinator", q->slug);
+        return 1;
+    }
+    ReadState(q);
+    bool queued = strcmp(q->state, "queued") == 0;
+    if (!queued && !(confirmSeq == q->seq && clockTime <= confirmUntil)) {
+        confirmSeq = q->seq;
+        confirmUntil = clockTime + CONFIRM_TIME;
+        snprintf(msg, msgSize, "press %d again to cancel running request %s", q->number % 10, q->slug);
+        return 0;
+    }
+    if (confirmSeq == q->seq) confirmSeq = 0;
+    char path[1400], stamp[32], line[64];
+    Stamp(stamp, sizeof(stamp));
+    snprintf(line, sizeof(line), "%s\n", stamp);
+    snprintf(path, sizeof(path), "%scancel", q->dir);
+    if (!WriteText(path, line)) {
+        snprintf(msg, msgSize, "cannot write %s", path);
+        return -1;
+    }
+    q->cancelAsked = true;
+    if (queued && !CoordinatorAlive() && !CoordinatorStarting()) {
+        // Nobody else can: finish it here (result.md first, the HUD reads it on "cancelled")
+        snprintf(path, sizeof(path), "%sresult.md", q->dir);
+        WriteText(path, "Cancelled by the developer before it started\n\nNothing was changed.\n");
+        WriteState(q->dir, "cancelled");
+        snprintf(msg, msgSize, "cancelled %s", q->slug);
+    } else snprintf(msg, msgSize, "cancelling %s (the coordinator %s)", q->slug, queued ? "skips it" : "stops its subagent and reports what changed");
+    TraceLog(LOG_INFO, "monolith: %s", msg);
+    return 1;
+}
+
+int LauncherCloseCoordinator(char *msg, int msgSize)
+{
+    InitPaths();
+    if (!QueueMode()) { snprintf(msg, msgSize, "no coordinator (one terminal per request: MONOLITH_LAUNCH=per-request)"); return -1; }
+    bool alive = CoordinatorAlive();
+    if (!alive && !(coord.term.launched && !coord.term.exited)) {
+        snprintf(msg, msgSize, "no coordinator running");
+        return -1;
+    }
+    int open = OpenQueueRequests();
+    bool confirmed = coord.confirmUntil > 0.0 && clockTime <= coord.confirmUntil;
+    if (open && !confirmed) {
+        coord.confirmUntil = clockTime + CONFIRM_TIME;
+        snprintf(msg, msgSize, "%d request%s queued or running: CTRL+SHIFT+K again closes the coordinator anyway (the next one takes them up)",
+                 open, open == 1 ? "" : "s");
+        return 0;
+    }
+    coord.confirmUntil = 0.0;
+    CloseOutcome o = CloseTerm(&coord.term, "the coordinator");
+    if (o == CLOSED_WINDOW) snprintf(msg, msgSize, "closed the coordinator");
+#ifdef _WIN32
+    else snprintf(msg, msgSize, "close the coordinator window by hand (not supported on Windows)");
+#else
+    else if (alive) snprintf(msg, msgSize, "the coordinator runs, but its window can't be closed from here (not started by this game run, or no i3 / sway): close it by hand");
+    else snprintf(msg, msgSize, "the coordinator's window is already gone");
+#endif
+    coord.alive = -1;               // test the lock again at the next poll
+    TraceLog(LOG_INFO, "monolith: %s", msg);
+    return 1;
 }
 
 // #endregion
@@ -2296,10 +2812,22 @@ bool LauncherSubmit(const DesignRequest *req, Image view, Image marked, char *ms
     q->eye = req->eye;
     q->yaw = req->yaw;
     q->pitch = req->pitch;
+    q->hasCamera = true;
 
-    char err[512] = "";
-    q->launched = Launch(B.id, B.slug, B.prompt, B.model.addFlag ? B.model.name : NULL, q, err, sizeof(err));
-    if (!q->launched) {
+    // Coordinator mode: queued even when the coordinator can't start (the next one takes
+    // it), so the prompt box closes; a second Enter would only queue it twice
+    if (QueueMode()) {
+        result = QueueBundle(q, "request", B.model.name, msg, msgSize);
+        if (result && B.model.droppedModelArg)
+            snprintf(msg + strlen(msg), msgSize - strlen(msg), "; a --model without a name in MONOLITH_CLAUDE_ARGS was ignored");
+        goto done;
+    }
+
+    char err[512] = "", title[300], mark[160];
+    RequestTitle(B.id, B.slug, title, sizeof(title));
+    snprintf(mark, sizeof(mark), "_monolith_%s", B.id);
+    q->term.launched = Launch(title, mark, B.prompt, B.model.addFlag ? B.model.name : NULL, NULL, &q->term, err, sizeof(err));
+    if (!q->term.launched) {
         snprintf(msg, msgSize, "launch failed: %s. Bundle kept: %s", err, dir);
         TraceLog(LOG_WARNING, "monolith: %s", msg);
         TraceLog(LOG_WARNING, "monolith: run it by hand: cd '%s' && claude --model %s \"%s\"", rootDir, B.model.name, B.prompt);
@@ -2323,9 +2851,12 @@ bool LauncherStartBundle(const char *id, const char *slug, const char *claudePro
     snprintf(q->slug, sizeof(q->slug), "%s", slug);
     snprintf(q->dir, sizeof(q->dir), "%s%s/", requestsDir, id);
     q->submitTime = clockTime;
-    char err[512] = "";
-    q->launched = Launch(id, slug, claudePrompt, model, q, err, sizeof(err));
-    if (!q->launched) {
+    if (QueueMode()) return QueueBundle(q, "request", model, msg, msgSize);
+    char err[512] = "", title[300], mark[160];
+    RequestTitle(id, slug, title, sizeof(title));
+    snprintf(mark, sizeof(mark), "_monolith_%s", id);
+    q->term.launched = Launch(title, mark, claudePrompt, model, NULL, &q->term, err, sizeof(err));
+    if (!q->term.launched) {
         snprintf(msg, msgSize, "launch failed: %s. Bundle kept: %s", err, q->dir);
         TraceLog(LOG_WARNING, "monolith: run it by hand: cd '%s' && claude \"%s\"", rootDir, claudePrompt);
         return false;

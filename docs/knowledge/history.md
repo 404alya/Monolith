@@ -36,6 +36,17 @@ Round 1 assumed one kind of level (brutalist concrete, boxes only, one shader) a
 
 Memory rules and the leak check, pass trimming, graphics settings and presets, model tiers per request, closing request terminals, the QA pass (`docs/QA-REPORT.md`): summarised in `docs/design-v2.md` §11.
 
+## One coordinator for all requests (2026-10-24)
+
+Until then every request opened its own terminal with its own `claude` process. With several requests in flight, two sessions could edit the same map at once (the only protection was the map hash check), and code requests could run next to each other while sharing `build/`, the leak check and the GPU; the leak check's cleanup even trashed bundles that were queued during its run. Every request also cost a new window on workspace 10. Now one long-lived **coordinator** session (`AI-COORDINATOR.md`) takes the requests from a queue on disk and hands each to a subagent, under rules that prevent the overlaps: one request per map package at a time, code requests alone, at most three at once (`docs/design-coordinator.md`). Choices behind it:
+- **The file system is the handoff** (`requests/<id>/state`, written whole): the game can't type into a running session. The coordinator sleeps on a shell watcher (`tools/request-queue.sh wait`) whose exit wakes it, so an idle queue costs no tokens. After `queued` only the coordinator writes `state`; the game asks for a cancel with a separate file, so the two never race.
+- **A kernel lock says whether a coordinator runs** (`flock` held by a wrapper around `claude`): it survives game restarts and is dropped however the coordinator dies, so the next submit can start a new one safely.
+- **Recovery by fingerprint**: a request a dead coordinator had claimed runs again only if nothing in its package or the code changed; otherwise it is reported, because re-running a half-applied edit would apply it twice.
+- **Questions go through the coordinator** (`question.md`, then `SendMessage` with the answer) instead of a `Not done` result: the developer keeps the request's context and doesn't have to aim again.
+- **No worktrees**: map edits must land in the real package for hot reload, and code requests already run alone.
+- **The coordinator stays small**: it reads only the queue listing and one-line replies, never images or maps, so a session can last all day.
+- The old mode stays behind `MONOLITH_LAUNCH=per-request`; tests use `MONOLITH_REQUESTS_DIR` and a stub coordinator, never a real session.
+
 ## The instruction files
 
 Until 2026-10-14 `CLAUDE.md` imported `AI-MAP-TOOL.md` and `PROMPT-INSTRUCTIONS.md` into every session (~125k characters, close to Claude Code's 150k cap), and the two task prompts (`AI-MAP-DESIGNER-PROMPT.md`, `AI-MAP-DESIGNER-V2-PROMPT.md`) stayed in the repo root as instruction files. They were separated by purpose: `CLAUDE.md` holds only the always-needed rules and a routing table; `AI-MAP-TOOL.md` is the request session's entry point; the reference material is in `docs/knowledge/`, read when the task needs it; the task prompts' lasting content became `working-method.md` and this file.

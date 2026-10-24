@@ -513,5 +513,12 @@ default map's box dump and the verification shots are unchanged.
   `request.json` `model`; `launcher.c` "Model choice"; `MONOLITH_MODEL*`).
 - **Closing request terminals**: K, Shift+K, Ctrl+K n; i3 / sway marks `_monolith_<id>`
   (`launcher.c` "Closing request windows").
+- **Request coordinator** (2026-10-24): one coordinator session takes every request from a queue
+  and hands it to a subagent (`docs/design-coordinator.md`, `AI-COORDINATOR.md`). The bundle
+  format is unchanged (`request.json` stays format 2); new files next to it: `state` (queued,
+  claimed, question, done, failed, cancelled), `claim.txt` (fingerprint at the claim), `cancel`
+  (from the game), `question.md` (from the subagent). The K keys take finished requests off the
+  list and cancel; Ctrl+Shift+K closes the coordinator. `MONOLITH_LAUNCH=per-request` keeps the
+  old terminal per request.
 - **Style-neutral docs** (stream G): the default map's brief, look and reasons moved from the
   project docs into `maps/monolith/MAP.md`.
