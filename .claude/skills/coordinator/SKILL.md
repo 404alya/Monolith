@@ -19,7 +19,7 @@ You are the **request coordinator**: one long-lived Claude Code session that the
 
 Your session may last all day, so keep its context small:
 - Read only the queue listing (`tools/request-queue.sh`), the first line of a `question.md`, and the subagents' one-line replies. **Never** read `request.md`, the images, map files or `MAP.md`, and never edit a map, a bundle or code yourself.
-- Change bundle state only through `tools/request-queue.sh`. Pass it only bundle ids and the fixed summaries quoted in this file, never text taken from a prompt, a question or a subagent reply (that would put untrusted text on a shell command line).
+- Change bundle state only through `tools/request-queue.sh`. Pass it only bundle ids and the fixed command words of §2 (`claim`, `set … question`, `finish … done`, …), never text taken from a prompt, a question or a subagent reply (that would put untrusted text on a shell command line).
 - Keep your own messages to a line or two: what started, what finished, what you need from the developer.
 
 ## 2. The queue
@@ -95,7 +95,7 @@ Guard rails (you run without approval prompts, so these hold without exception):
 - Work only inside the repo, plus your own scratch and download folders.
 - Never run rm (or rmdir, unlink, find -delete): move things to the trash with gio trash.
 - Never run code from downloads or imported projects, except to build an imported project in a scratch copy.
-- Never open a visible window: run the game only with --shot (hidden window), --dump-boxes, --dump-scene / --dump-scene-diff, --inspect-model, --new-map, --export, --classify or --bench --headless.
+- Never open a visible window: run the game only with --shot (hidden window), --dump-boxes, --dump-scene / --dump-scene-diff, --inspect-model, --new-map, --export, --classify or --bench --headless. Without one of them (or with a mistyped flag) it opens a visible window.
 
 Read CLAUDE.md and the map-request skill (.claude/skills/map-request/SKILL.md; its section 2a is about working under the coordinator), then carry out the request in <requests folder>/<id>/request.md as that skill says, and write its result.md. For a bundle with kind "import", also follow the import-request skill (.claude/skills/import-request/SKILL.md).
 

@@ -1,10 +1,10 @@
 # Architecture
 
-How monolith is built, for anyone reading or changing the code: the technology, the folder layout, the modules, the scene runtime, the request queue, and the known limitations. Keys and flags: [user-guide.md](user-guide.md), [command-line.md](command-line.md); the map format: [map-format.md](map-format.md). "R3D pitfall N" refers to the engine lessons in `.claude/skills/lighting-fog-shadows/r3d-pitfalls.md`; measurements are in `.claude/skills/benchmarking/measurements.md`.
+How monolith is built, for anyone reading or changing the code: the technology, the folder layout, the modules, the scene runtime, the request queue, and the known limitations. Keys and flags: [user-guide.md](user-guide.md), [command-line.md](command-line.md); the map format: [map-format.md](map-format.md). "R3D pitfall N" refers to section N of `.claude/skills/lighting-fog-shadows/r3d-pitfalls.md`, a list of R3D behaviours found by debugging (fog, shadows, caches, ambient light). It is kept with the Claude Code skills but is plain reading. The frame-time measurements behind the caches and presets are in `.claude/skills/benchmarking/measurements.md`, each labelled with the machine it was measured on.
 
 ## 1. What this is
 
-**monolith** is an AI-assisted map designer: a first-person 3D viewer and editor in plain C on raylib + R3D. The developer walks or flies through a level; in spectator mode they point, select objects or screen regions and submit a request, which the game writes as a bundle and hands to Claude Code in a new terminal. The game hot-reloads the edited map package ([user-guide.md](user-guide.md)).
+**monolith** is an AI-assisted map designer: a first-person 3D viewer and editor in plain C on raylib + R3D. The developer walks or flies through a level; in spectator mode they point, select objects or screen regions and submit a request, which the game writes as a bundle and queues for Claude Code (§5). The game hot-reloads the edited map package ([user-guide.md](user-guide.md)).
 
 Design principles:
 - **The level is data.** A map package (`maps/<name>/`): the map file, its shaders, models, textures and a design brief (`MAP.md`). Nothing in the engine assumes a style.
@@ -24,11 +24,11 @@ Reference maps: `maps/monolith/` (the default: brutalist concrete, boxes only, o
 | Assimp | R3D's model importer (glTF/GLB, OBJ, FBX, DAE); `--inspect-model` calls it directly |
 | OpenGL | 3.3 core. `libGL` / `opengl32` linked only for `glEnable` (`MS_InitRenderer`, R3D pitfall 2), `glFinish` (`--headless`) and `glGetString` (`bench.c`), declared by hand |
 | Platform | Linux (X11/GLFW); Windows x86_64 cross-compiled with MinGW-w64, tested under wine |
-| Tested on | Linux (CachyOS) with an NVIDIA RTX 4050 Laptop GPU (driver 615.71) and a GTX 1660 Ti desktop; shaders also checked on an AMD RX 9060 XT. Any OpenGL 3.3 GPU should work; performance numbers in this repo always name their machine |
+| Tested on | Linux (CachyOS) with an NVIDIA RTX 4050 Laptop GPU (driver 615.71) and a GTX 1660 Ti desktop; strict-GLSL problems were found on an AMD RX 9060 XT (§6). Any OpenGL 3.3 GPU should work; performance numbers in this repo always name their machine |
 
-**R3D** is vendored as a plain copy in **`submodules/r3d`** (with raylib and assimp). Headers `include/r3d/`, shader docs `docs/shaders/*.md`, examples `examples/`. Check its source rather than guessing. Paths like `shaders/deferred/…` or `src/modules/…` in this file are relative to `submodules/r3d`.
+**R3D** is vendored as a plain copy in **`submodules/r3d`** (with raylib and assimp). Headers `include/r3d/`, shader docs `docs/shaders/*.md`, examples `examples/`. When in doubt, its source is the reference. Paths like `shaders/deferred/…` or `src/modules/…` in this file are relative to `submodules/r3d`.
 
-> **R3D changes are patches.** Work around R3D from the app side where reasonable. When R3D itself must change, change it minimally and **record every change in `submodules/r3d/patches.md`** (symptom, cause, files, diff). Don't modify `~/Projects/r3d` or other projects in `~/Projects`.
+> **R3D changes are patches.** Work around R3D from the app side where reasonable. When R3D itself must change, change it minimally and **record every change in `submodules/r3d/patches.md`** (symptom, cause, files, diff). Other R3D checkouts and other projects are never modified from here.
 
 ## 3. Layout
 
@@ -83,7 +83,7 @@ The scene (loading, drawing, collision, picking, hot reload) is the **scene runt
    - **Prompt box**: UTF-8, word wrap, scrolling, heap text; `DesignerCapturesInput()` freezes game keys and camera.
    - `DesignerBuildRequest()` snapshots prompt, eye, angles, fovy, size, hit, selection, regions, map version into a `DesignRequest`.
 5. **Launcher** (`launcher.c`, see its header comment):
-   - `LauncherSubmit()` writes `requests/<YYYY-MM-DD_HHMMSS>_<slug>/` (`view.png`, `view-marked.png`, `region-<n>.png`, `request.md`, `request.json`, format 2), then (coordinator mode) `state` = `queued` and, unless `requests/.coordinator/lock` is held (`flock`), starts the coordinator's terminal (a `/bin/sh` wrapper holds the lock around `claude`; region "Coordinator and queue", `docs/architecture.md` §5), or (per-request mode) the request's own terminal. Terminals start with `fork` + `execve` from an argv array, no shell: the user's text never reaches a command line. The child `setsid`s, `chdir`s to the repo root, stdin `/dev/null`; exec failures return through a close-on-exec pipe; children are reaped with `waitpid(WNOHANG)`.
+   - `LauncherSubmit()` writes `requests/<YYYY-MM-DD_HHMMSS>_<slug>/` (`view.png`, `view-marked.png`, `region-<n>.png`, `request.md`, `request.json`, format 2), then (coordinator mode) `state` = `queued` and, unless `requests/.coordinator/lock` is held (`flock`), starts the coordinator's terminal (a `/bin/sh` wrapper holds the lock around `claude`; region "Coordinator and queue", §5), or (per-request mode) the request's own terminal. Terminals start with `fork` + `execve` from an argv array, no shell: the user's text never reaches a command line. The child `setsid`s, `chdir`s to the repo root, stdin `/dev/null`; exec failures return through a close-on-exec pipe; children are reaped with `waitpid(WNOHANG)`.
    - Terminal syntax (title, working dir, exec flag) from `TERMINALS[]`; unknown terminals get `-e`. Title `monolith-claude: <slug> <HHMMSS>[-n]`, unique per request. `claude` is looked up in `PATH`, then `~/.local/bin`, passed absolute, with the permission flags (unless `MONOLITH_CLAUDE_SAFE`), `--model <tier's model>` and `MONOLITH_CLAUDE_ARGS` (a bare `--model` there is dropped with a warning). A detached helper moves and marks the window. On launch failure the bundle stays, the HUD names it and the log prints the command.
    - `LauncherUpdate()` polls open requests for `state` and `result.md` (HUD 20 s) and tests the coordinator's lock every 2 s; `LauncherLastDone()` gives the camera for **R**.
    - **Queue**: after `queued` only the coordinator writes `state`, through `tools/request-queue.sh` (claim with a fingerprint in `claim.txt`, question, finish, requeue, recovery after a crash, the background watcher `wait`); the game asks for a cancel with a `cancel` file. Test: `tools/test-coordinator.sh` (stub terminal + `tools/stub-coordinator.sh`, which applies the same scheduling rules).
@@ -175,13 +175,13 @@ Since 2026-10-24 every request goes through a queue on disk, worked through by o
 | Game (submit, `--import`) | `src/launcher.c` | writes the bundle, then `state` = `queued` as its last file; starts the coordinator terminal if none holds the lock; shows the queue in the HUD |
 | Coordinator lock wrapper | `src/launcher.c` (an `/bin/sh -c` script; Windows: a `9>` redirection) | holds `requests/.coordinator/lock` while the coordinator's `claude` runs |
 | Queue tool | `tools/request-queue.sh` | every state change the coordinator makes (claim, finish, requeue, recover), the watcher (`wait`), the queue listing (`list`) |
-| Coordinator | `claude` started by the game with `.claude/skills/coordinator/SKILL.md` | schedules, starts subagents, relays questions, finishes bundles. Reads only `request.json` metadata and the queue listing; never the images, never edits maps |
+| Coordinator | `claude` started by the game with `.claude/skills/coordinator/SKILL.md` | schedules, starts subagents, relays questions, finishes bundles. Reads only the queue listing (built from `request.json` metadata), line 1 of a `question.md` and the subagents' one-line replies; never `request.md`, the images or the maps, never edits anything |
 | Subagent | Agent tool inside the coordinator | does one request under `.claude/skills/map-request/SKILL.md`, returns a one-line status |
 | Test doubles | `tools/stub-terminal.sh` (`MONOLITH_STUB_RUN`), `tools/stub-coordinator.sh`, `tools/test-coordinator.sh` | the same scheduling rules in shell, no Claude session |
 
 ### 5.2 Files on disk
 
-**`requests/<id>/state`**: one line, `<state> <YYYY-MM-DDTHH:MM:SS> [detail]`. Readers use the first word. Written whole (temp file + rename where possible).
+**`requests/<id>/state`**: one line, `<state> <YYYY-MM-DDTHH:MM:SS> <writer>` (`game` or `coordinator`). Readers use the first word. Written whole (temp file + rename where possible).
 
 | State | Written by | Meaning |
 |---|---|---|
@@ -249,7 +249,7 @@ A cancel writes `requests/<id>/cancel`; the coordinator stops the subagent and t
 - **Request flow:** coordinator mode: a bundle stays queued when the coordinator can't start (the HUD says why; the next submit tries again), and the prompt box closes. Per-request mode: a failed launch keeps the bundle and the text; Enter again writes a second bundle (trash the stale one). The coordinator itself has only been tested through the stub; its HUD can't show other game runs' requests. A terminal process exiting early (kitty `--single-instance`, wezterm mux) is reported, not a failure; closing then needs the i3 / sway mark.
 - **Upstream R3D** builds are compile-checked only.
 - **Ideas:** decals (`r3d_decal.h`); height-dependent fog for hazy outdoor views; shadow cascades and cheaper fog lookups (`.claude/skills/benchmarking/measurements.md`).
-- **Platform:** Linux + Windows cross-build (tested under wine). The strict-GLSL fixes (R3D pitfall 4) are verified with `glslangValidator` but not yet on the AMD PC. No native Windows build script, no macOS, no Windows sanitizers.
+- **Platform:** Linux + Windows cross-build (tested under wine). The strict-GLSL problems (R3D pitfall 4) were found on an AMD RX 9060 XT; the fixes are verified with `glslangValidator` but not yet re-tested on that card. No native Windows build script, no macOS, no Windows sanitizers.
 
 **Open decisions** (from the QA pass of 2026-10-11, still open):
 1. **R3D's contrast step clips dark values to black.** `color.contrast` is applied in linear space after tonemapping (`submodules/r3d/shaders/post/output.frag`, `Adjustments()`): everything below 0.5·(1−1/c) becomes pure black. Fixing it in R3D (contrast around mid-grey in a perceptual space) would change the default map's look, so maps keep contrast 1 where it matters instead.

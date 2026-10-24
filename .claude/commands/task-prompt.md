@@ -16,4 +16,4 @@ A task prompt for a new round only needs what is new; the `large-engine-work` sk
 5. **Done**: the deliverables and the evidence that proves each (shots, dumps, benches, leak check).
 6. **The developer's calls**: which choices to make with a default and report, and which to ask about.
 
-When a round is finished, move what it taught into the matching skill or `docs/knowledge/` file and its reasons into the `project-history` skill; don't keep the task prompt as an instruction file.
+When a round is finished, move what it taught into the matching skill (and `docs/` where people need it) and its reasons into the `project-history` skill; don't keep the task prompt as an instruction file.

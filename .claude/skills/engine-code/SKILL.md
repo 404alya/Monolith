@@ -7,7 +7,7 @@ description: Change monolith's code — C in src/, the scene runtime (runtime/mo
 
 How to change code. Reference: `docs/architecture.md` (technology, layout, architecture, runtime API), `docs/command-line.md` (controls, flags, environment variables), `.claude/skills/lighting-fog-shadows/r3d-pitfalls.md` (read all of it, with the **`lighting-fog-shadows`** skill, before touching lighting, fog or shadows), `submodules/r3d/patches.md` (before changing R3D), `.claude/skills/benchmarking/measurements.md` (measurements). Larger or multi-agent work: the **`large-engine-work`** skill. After every code change: the **`leak-check`** skill; performance claims: the **`benchmarking`** skill. Before you finish, ask the developer to restart the game: code changes don't hot-reload.
 
-> **R3D changes are patches.** Work around R3D from the app side where reasonable. When R3D itself must change, change it minimally and **record every change in `submodules/r3d/patches.md`** (symptom, cause, files, diff). Don't modify `~/Projects/r3d` or other projects in `~/Projects`.
+> **R3D changes are patches.** Work around R3D from the app side where reasonable. When R3D itself must change, change it minimally and **record every change in `submodules/r3d/patches.md`** (symptom, cause, files, diff). Never modify other R3D checkouts or projects outside this repo.
 
 ## 1. Build and run
 
@@ -29,7 +29,7 @@ Both output folders are **self-contained** (copy or zip as-is).
 - R3D config: static, vendored raylib + assimp + zlib (`ASSIMP_BUILD_ZLIB`), bundled minizip (`ASSIMP_BUILD_MINIZIP`; a system minizip breaks the build), no examples, GPU profiler compiled in (`R3D_GPU_PROFILER`, on only under `--bench`; patch 5), `CMAKE_BUILD_TYPE=Release`. Options are remembered in `build-linux/monolith-configure.args`; a change re-configures (full R3D rebuild). `R3D_BUILD_TYPE=None` gives the old unoptimised build; any other value is passed as `CMAKE_BUILD_TYPE`. Bench reports state the R3D build type (no measurable difference: `.claude/skills/benchmarking/measurements.md`).
 - Links R3D, raylib, assimp, zlib and **libstdc++ statically** (`-l:libstdc++.a`). Runtime deps only `libc`, `libm`, `libgcc_s.so.1`, `libGL.so.1` (check: `readelf -d build/linux/monolith | grep NEEDED`).
 - **glibc ≥ 2.34.** `build.sh` passes `-Wl,--wrap=` for newer symbols and `src/glibc_compat.c` routes them to old versions (libm to `@GLIBC_2.2.5`, `arc4random` → `getrandom`, `__isoc23_strtoul` → `strtoul`). After changing compiler, glibc or dependencies, `objdump -T build/linux/monolith | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1` must still print `GLIBC_2.34`; add any newer symbol to `GLIBC_WRAP` in `build.sh` and to `glibc_compat.c`.
-- A portability test on this machine still uses the repo paths unless they're hidden: `unshare -rm sh -c 'mount -t tmpfs none ~/Projects/monolith && /path/to/copy/monolith --shot /tmp/x.png --view 2'`. x86-64 only.
+- A portability test on this machine still uses the repo paths unless they're hidden: `unshare -rm sh -c 'mount -t tmpfs none <repo path> && /path/to/copy/monolith --shot /tmp/x.png --view 2'`. x86-64 only.
 
 **Windows (`--win`)**, `x86_64-w64-mingw32-gcc`:
 - R3D in `$R3D_DIR/build-mingw` with `cmake/mingw-w64-x86_64.cmake` (Release, static). The exe is **fully static** (`-static`): `build/win/` is `monolith.exe` + `maps/`, no DLLs. Imports only system DLLs (`opengl32`, `gdi32`, `user32`, `kernel32`, `shell32`, `winmm`, UCRT `api-ms-win-crt-*`); check with `x86_64-w64-mingw32-objdump -p build/win/monolith.exe | grep "DLL Name"`.
@@ -53,7 +53,7 @@ A change is done only when it **builds with no warnings** on both targets, **`to
 
 **Add an environment key.** Key tables in `monolith_scene.c` (region "Key tables": `ENV_KEYS` for `R3D_Environment` fields, sky / sun tables otherwise, a range in `ENV_RANGES`), its built-in default in `BuiltinEnvironment()` equal to today's value, written by `MS_WriteEnvironment`. Image changes without a reload must reach `FrameKey`.
 
-**Change a request bundle.** `launcher.c` (`BuildBundle`, `WriteRequestMd`, `WriteRequestJson`; bump `"format"` when keys change) and `.claude/skills/map-request/bundle-reference.md` (keep older formats described; the `map-request` skill if the workflow changes); `tools/request-queue.sh` reads `kind`, `prompt`, `model` and `map.package` from `request.json` line by line. New terminal: `TERMINALS[]`.
+**Change a request bundle.** The C strings in `src/launcher.c` (`request.md`, `request.json` `instructions`, the coordinator's start prompt) and `src/import.c` name `CLAUDE.md`, `.claude/skills/map-request/SKILL.md` (and its section 3), `.claude/skills/import-request/SKILL.md` and `.claude/skills/coordinator/SKILL.md`: don't rename, move or renumber those without changing the strings in the same change. `launcher.c` (`BuildBundle`, `WriteRequestMd`, `WriteRequestJson`; bump `"format"` when keys change) and `.claude/skills/map-request/bundle-reference.md` (keep older formats described; the `map-request` skill if the workflow changes); `tools/request-queue.sh` reads `kind`, `prompt`, `model` and `map.package` from `request.json` line by line. New terminal: `TERMINALS[]`.
 
 **Add a viewpoint.** Spectator mode, **P** (prints *feet*), then `viewpoint "Name" ex ey ez tx ty tz` with the *eye*. `--bench` covers it automatically.
 
@@ -71,7 +71,7 @@ No test suite; verification is **visual and numeric**:
 
 1. **Build cleanly:** `./build.sh` and `./build.sh --win`, no warnings; `examples/build.sh` (and `--win`) when the runtime or an example changed. Shaders pass `glslangValidator`.
 2. **No leaks:** `tools/leakcheck.sh` ends with `leakcheck: OK: zero leaks of ours` (the `leak-check` skill). After larger changes also `--asan`.
-3. **Every map is unchanged** by engine work: for each map in `maps/` (always the default map; the others and `tests/models` at least when models, materials, lights or environment code changed), identical `--dump-boxes` and pixel-identical `--shot`s against a build from before the change: every viewpoint, yaw sweeps 0/60/…/300 from one position at a few eye heights, a `--reload-test`, plus the extra views the map's `MAP.md` lists under *Engine verification* (if it has that section).
+3. **Every map is unchanged** by engine work: for each map in `maps/` (and `tests/models` when models, materials, lights or environment code changed), identical `--dump-boxes` and pixel-identical `--shot`s against a build from before the change: every viewpoint, yaw sweeps 0/60/…/300 from one position at a few eye heights, a `--reload-test`, plus the extra views the map's `MAP.md` lists under *Engine verification* (if it has that section).
 4. **Fixed views:**
    ```bash
    ./build/linux/monolith --shot a.png --view 2                          # viewpoint 2
@@ -82,7 +82,7 @@ No test suite; verification is **visual and numeric**:
    For lighting or shadows, take a **yaw sweep from one position**: the black-curtain and shadow-popping bugs only showed when rotating.
 5. **Isolate effects** with `--off` (1 volumetric fog, 2 fog, 3 SSAO, 4 SSIL, 5 bloom, 6 sun).
 6. **Performance:** the `benchmarking` skill.
-7. **Window titles:** automated runs are titled `monolith-bench` / `monolith-shot` (also the examples), normal play `monolith`; the developer's i3 config moves the first two to workspace 10 (`for_window [title="^monolith-(bench|shot)$"] …`). Keep these titles. Request terminals: `monolith-claude: <slug> <HHMMSS>`.
+7. **Window titles:** automated runs are titled `monolith-bench` / `monolith-shot` (also the examples), normal play `monolith`; a window-manager rule can move the first two out of the way (i3: `for_window [title="^monolith-(bench|shot)$"] …`). Keep these titles. Request terminals: `monolith-claude: coordinator`, per-request mode `monolith-claude: <slug> <HHMMSS>`.
 8. **Movement** (collision, controls) can only be tested by playing.
 9. **Map loader and edits:** diff `--dump-boxes` / `--dump-scene` / `--dump-scene-diff` before and after (identical for every map after a loader change). A broken map prints `file:line: message` and exits 1 before any window; the running game keeps the old map. Hot reload runs only interactively; `--reload-test` exercises it in a shot.
 10. **Designer and launcher without a window:**
@@ -94,14 +94,14 @@ No test suite; verification is **visual and numeric**:
 
 ## 3a. Export changes
 
-After changing the export, the runtime's editor blocks, `runtime/export/*` or what R3D's build reads: export `maps/monolith` and `maps/pine_forest` into a scratch folder, copy each into a fresh folder and run its `./build.sh` (and `--win`), then render every viewpoint with a scratch harness linked against that package's runtime and bundled R3D (hidden window, 1600 × 900, FXAA, `MS_InitRenderer`, 30 frames into a `RenderTexture`) and compare with `monolith --map … --shot … --view n`: they must match. Grep the package for tool leftovers (`--shot`, `bench`, `hidden`, `MS_Poll`, `reload`, `editor`, `request`, `Claude`): only the map's own files (its comments, `MAP.md`, `ASSETS.md`) and R3D's own sources may hit.
+After changing the export, the runtime's editor blocks, `runtime/export/*` or what R3D's build reads: export every map in `maps/` (and `tests/models`) into a scratch folder, copy each into a fresh folder and run its `./build.sh` (and `--win`), then render every viewpoint with a scratch harness linked against that package's runtime and bundled R3D (hidden window, 1600 × 900, FXAA, `MS_InitRenderer`, 30 frames into a `RenderTexture`) and compare with `monolith --map … --shot … --view n`: they must match. Grep the package for tool leftovers (`--shot`, `bench`, `hidden`, `MS_Poll`, `reload`, `editor`, `request`, `Claude`): only the map's own files (its comments, `MAP.md`, `ASSETS.md`) and R3D's own sources may hit.
 
 ## 4. Conventions
 
 - **English** for code, identifiers, comments and names.
 - **Match the style:** 4-space indent, `static` functions, PascalCase functions, `UPPER_CASE` macros, `// #region` sections, short comments explaining *why*.
 - **One module per concern:** each `src/<module>.c` has a `.h` interface and a header comment; file-local functions `static`; minimal shared state (`scene`, data paths).
-- **The runtime stays portable:** `runtime/` depends only on raylib and R3D, compiles without `MS_PATCHED_R3D`, knows nothing about the editor. Editor-only code stays in `src/`.
+- **The runtime stays portable:** `runtime/` depends only on raylib and R3D, compiles without `MS_PATCHED_R3D`, knows nothing about the editor. Editor-only code stays in `src/`; tool-only code inside `runtime/` goes into `#ifdef MONOLITH_EDITOR` blocks (never nested; `#ifndef MONOLITH_EDITOR … #endif` for game-only code, `#else` allowed). Comments outside those blocks ship with `--export`, so they must not mention the editor, requests, Claude Code, hot reload or monolith's command-line flags. The runtime builds with zero warnings with and without `MONOLITH_EDITOR` (and without `MS_PATCHED_R3D`): check all three after a runtime change.
 - **The level is data:** geometry, materials, lights, environment live in `maps/<name>/`; C describes primitives and statements, not buildings or a look. Nothing outside a package assumes a style.
 - **Assets are recorded** (`ASSETS.md` row + sidecar; CC0 / PD / CC-BY with attribution).
 - **Memory:** heap arrays for content, no per-frame allocation, everything freed (§1, memory rules).
