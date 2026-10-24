@@ -24,7 +24,7 @@ Reference maps: `maps/monolith/` (the default: brutalist concrete, boxes only, o
 | Assimp | R3D's model importer (glTF/GLB, OBJ, FBX, DAE); `--inspect-model` calls it directly |
 | OpenGL | 3.3 core. `libGL` / `opengl32` linked only for `glEnable` (`MS_InitRenderer`, R3D pitfall 2), `glFinish` (`--headless`) and `glGetString` (`bench.c`), declared by hand |
 | Platform | Linux (X11/GLFW); Windows x86_64 cross-compiled with MinGW-w64, tested under wine |
-| Dev machine | CachyOS, NVIDIA RTX 4050 Laptop GPU, driver 615.71 |
+| Tested on | Linux (CachyOS) with an NVIDIA RTX 4050 Laptop GPU (driver 615.71) and a GTX 1660 Ti desktop; shaders also checked on an AMD RX 9060 XT. Any OpenGL 3.3 GPU should work; performance numbers in this repo always name their machine |
 
 **R3D** is vendored as a plain copy in **`submodules/r3d`** (with raylib and assimp). Headers `include/r3d/`, shader docs `docs/shaders/*.md`, examples `examples/`. Check its source rather than guessing. Paths like `shaders/deferred/…` or `src/modules/…` in this file are relative to `submodules/r3d`.
 
@@ -66,7 +66,7 @@ monolith/
 └── submodules/r3d/              # vendored R3D; local fixes in patches.md
 ```
 
-**Data paths.** `InitDataPaths()` (`main.c`) sets `benchmarkDir` and the maps directory. On Linux the repo directories baked in (`-DBENCHMARK_PATH`, `-DMAPS_PATH`) win while they exist, so on the dev machine the game loads and hot-reloads the **repo's** `maps/`, not the copy in `build/`. Otherwise (and on Windows) the folders next to the executable are used. `build.sh` copies `maps/` and `runtime/` (+ `viewer.c`, for `--export`) into both output folders. `launcher.c` puts `requests/` and starts Claude Code in the repo root (`-DPROJECT_PATH`) while it exists, else (always on Windows) in the executable's directory.
+**Data paths.** `InitDataPaths()` (`main.c`) sets `benchmarkDir` and the maps directory. On Linux the repo directories baked in (`-DBENCHMARK_PATH`, `-DMAPS_PATH`) win while they exist, so in a repo checkout the game loads and hot-reloads the **repo's** `maps/`, not the copy in `build/`. Otherwise (and on Windows) the folders next to the executable are used. `build.sh` copies `maps/` and `runtime/` (+ `viewer.c`, for `--export`) into both output folders. `launcher.c` puts `requests/` and starts Claude Code in the repo root (`-DPROJECT_PATH`) while it exists, else (always on Windows) in the executable's directory.
 
 ## 4. Code architecture (`runtime/`, `src/*.c`)
 

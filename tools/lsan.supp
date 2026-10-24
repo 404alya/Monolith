@@ -4,7 +4,7 @@
 # (NVIDIA libnvidia-* / libGLX_nvidia, Mesa), the GL / GLX / EGL dispatch libraries, X11 / xcb
 # and D-Bus. They keep per-process state (context tables, shader caches, connection buffers)
 # that they never free, even after the context, display or connection is closed; there is
-# nothing an application can call to release it, and every GL program on this machine shows
+# nothing an application can call to release it, and every GL program on such a machine shows
 # them. Never add our code, raylib, GLFW, R3D or assimp here: those are linked statically
 # into the monolith binary, so a pattern for them would have to name that binary and would
 # hide real leaks.
@@ -34,7 +34,7 @@ leak:libnvidia-eglcore.so
 leak:libGLX_nvidia.so
 leak:libEGL_nvidia.so
 
-# Not observed on the dev machine (NVIDIA); listed so that the check gives the same answer on
+# Not observed on the NVIDIA machine this was written on; listed so that the check gives the same answer on
 # AMD / Intel machines and in VMs, where these libraries play the part of the ones above.
 # Mesa drivers (other GPUs): the same kind of per-process driver state
 leak:libgallium

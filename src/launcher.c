@@ -25,7 +25,7 @@
 //
 // Where things go:
 //   - requests/ and the working directory of Claude Code: the repo root baked in by
-//     build.sh (PROJECT_PATH) while it exists, i.e. on the dev machine; otherwise the
+//     build.sh (PROJECT_PATH) while it exists, i.e. in a repo checkout; otherwise the
 //     directory of the executable (a copied build/linux or build/win folder).
 //     MONOLITH_REQUESTS_DIR (tests only) moves requests/ (bundles, queue, lock) elsewhere.
 //   - terminal: $MONOLITH_TERMINAL, else $TERMINAL, else the first of alacritty, kitty,

@@ -1,12 +1,23 @@
 # Measurements and performance history
 
-Measurement history and the reasoning behind the engine's caches and trade-off knobs. The rules that follow from it are in `.claude/skills/lighting-fog-shadows/r3d-pitfalls.md` and the `benchmarking` skill; this file holds the numbers, how they were measured and the ideas not taken. Numbers are from the dev machine (RTX 4050 Laptop, driver 615.71), default map, unless noted. GPU clock states swing results by ~10%: compare rows of one session only.
+Measurement history and the reasoning behind the engine's caches and trade-off knobs. The rules that follow from it are in `.claude/skills/lighting-fog-shadows/r3d-pitfalls.md` and the `benchmarking` skill; this file holds the numbers, how they were measured and the ideas not taken. Numbers are for the default map unless noted, on the machine each section names (below). Run-to-run noise differs per machine (machine A swings ~10% between GPU clock states): compare rows of one session only.
 
-## R3D build type
+## Machines
+
+**Every number below belongs to the machine it was measured on.** Absolute frame times don't carry over to another GPU, CPU, driver, power mode or desktop: use them only to know what was tried and how large an effect was *relative to its own baseline*. Before comparing anything with these numbers, measure your own baseline on your machine. Each section names its machine (bench reports from 2026-10-08 to 2026-10-13 in `benchmark/` confirm machine A).
+
+| Machine | Hardware | Sections |
+|---|---|---|
+| **A** | Laptop: NVIDIA GeForce RTX 4050 Laptop GPU, driver 615.71, AMD Ryzen 7 7435HS (CPU recorded 2026-10-24, same GPU and driver), CachyOS (Linux), picom compositor | everything up to 2026-10-13 |
+| **B** | NVIDIA GeForce GTX 1660 Ti, Intel i5-10400F (desktop) | box culling, collider BVH (2026-10-20) |
+
+When you add a section, start it with the machine: the bench report's *Setup* table (GPU, driver, CPU, system, resolution), or a new row in this table.
+
+## R3D build type (machine A)
 
 Before 2026-10-10 R3D/raylib/assimp were built without a build type (no optimisation), like the original `~/Projects/r3d/build`. Measured with interleaved headless pairs (4 pairs, 2026-10-10), Release vs. unoptimised made **no measurable difference**: 4.952 vs. 4.969 ms average, CPU time per frame 0.500 vs. 0.517 ms, time inside `R3D_End()` 0.358 vs. 0.371 ms. The CPU side is dominated by GL driver calls, not R3D's own code, and the frame is GPU-bound (~4.4 of ~5.0 ms). Older reports (without an `R3D build` row) stay roughly comparable.
 
-## Sun shadow
+## Sun shadow (machine A)
 
 **Where the shadow time goes** (8192/100, `--bench` averages of 3 runs, measured 2026-10-08 with temporary switches; reports in `benchmark/2026-10-08_1157*`–`1206*`; predates patches 2–4, 7–9):
 
@@ -48,7 +59,7 @@ The fog is the big one: `vfog_radiance.frag` runs at half resolution, up to `len
 2. *Cascaded shadow maps* for directional lights (`light_dir_view_proj` / `light_dir_push` in `src/modules/r3d_light.c`, `L_SampleShadowDir` in `shaders/include/wrap/light.glsl`): 2–3 × 2048–4096 cascades give finer texels near the camera at a fraction of the fill and cache cost.
 3. *Rotation-stable fit:* centre the fit on the camera position so turning on the spot never invalidates a cached map.
 
-## Caching results (2026-10-10)
+## Caching results (2026-10-10, machine A)
 
 Default map, headless `--bench`, 1920×1006, interleaved, 3 runs per row unless noted (reports `benchmark/2026-10-10_1742*`–`1748*`). "Original" = before the map designer work (patches 1–3); "p3base" = Release R3D + profiler + patch 4, before caching.
 
@@ -65,7 +76,7 @@ Default map, headless `--bench`, 1920×1006, interleaved, 3 runs per row unless 
 
 Where the gain comes from: depth pre-pass + streak-fbm skip (geometry pass 0.98 → 0.55 ms spinning, 1.30 → 0.66 ms still), patch 9 (fog march 0.77 → 0.42 ms spinning), static shadow tiles (CPU 0.77 → 0.36 ms).
 
-## Pass trimming and the window (2026-10-11)
+## Pass trimming and the window (2026-10-11, machine A)
 
 Headless `--bench`, 4 interleaved full pairs per row (notes "P final A/B (round 2)"); per-pass GPU ms averaged over all views.
 
@@ -82,7 +93,7 @@ All of it is R3D patch 10 (pyramid only as deep as something reads it, bloom com
 
 *The visible window* (`--bench-window`, 3 interleaved triples): plain headless 3.50 ms, single-sampled window 3.78, 4× MSAA window 3.94. The window's own cost is ~0.45 ms in serial terms: 4× MSAA ~0.15 ms GPU (now off by default, `--window-msaa`), HUD text + overlay + pick ~0.15 ms CPU (~1500 glyph quads), and the resolve. ~200 fps visible vs. ~300 headless is explained outside the game: the desktop runs **picom** (glx backend, `vsync = true`, `use-damage = false`, dual-kawase blur), so every frame is also composited on the same GPU. A fullscreen window is unredirected (no compositor cost, but then the driver's vsync caps at 144 Hz unless `__GL_SYNC_TO_VBLANK=0`). Not measured with visible windows.
 
-## Trade-off knobs
+## Trade-off knobs (machine A)
 
 Headless frame ms vs. the default (3 interleaved full runs each, default 3.59 ms); images: before/after sheets of views 1/2/3/5 + steep.
 
@@ -99,23 +110,23 @@ Headless frame ms vs. the default (3 interleaved full runs each, default 3.59 ms
 
 Ideas not done: the concrete shader costs ~0.3 ms of the 0.58 ms geometry pass (a distance LOD for its grain would change the image); SSIL's three half-res denoise passes and SSAO's one compute the same geometric weights (fusable, ~0.05 ms); a quarter-resolution fog march (R3D change) would save ~0.3 ms on top of the fog cache.
 
-## Quality presets (2026-10-11)
+## Quality presets (2026-10-11, machine A)
 
 Headless `--bench`, 1920×1006, spinning, 3 interleaved rounds: ultra 3.17 ms, high 2.07, medium 1.32, low 0.77.
 
 Single-knob costs behind the settings panel (default 3.59 ms in that session): render scale 0.75 −39% / 0.5 −55%; shadow map 8192 = 3.7 cm texels, 256 MB VRAM, 4096 = 7.4 cm, 64 MB; AO baked −27%, off ~−0.9 ms; fog cache 0.5 m + step ×2 −16%; bloom off −6%; window MSAA ~0.1 ms.
 
-## Shadowed undersides (`.claude/skills/lighting-fog-shadows/r3d-pitfalls.md` §5)
+## Shadowed undersides (machine A; `r3d-pitfalls.md` §5)
 
 Measured with `--off` on the default map (2026-10-10). Before the ambient-only sky, with the sun off (`--off 6`) soffits and the hall ceiling were exactly (0,0,0), and warm volumetric in-scatter on them came out maroon, e.g. (19,0,0), after AgX, contrast and 0.8 saturation. SSAO and SSIL each changed whole-frame mean brightness by < 0.5/255 in every test view. SSIL ≈ 0.5 ms and SSAO ≈ 0.2 ms GPU; net, SSIL darkens (its own 5 m AO term outweighs its bounce). With both off the largest change in the 26 verification shots is the darkening band along wall feet in close shaded views (view 1: up to +37/255 in that band, +1.35/255 mean); views 2/3/5 and the steep view < 0.5/255 mean.
 
 After the fix: fully sunlit 0.25-albedo ground would be ~0.12 linear (albedo · sun 2.0 · cos 39° / π); 0.19 was picked by eye. Shadowed undersides at ~10–25% of sunlit faces in linear terms (hall ceiling (0,0,0) → (47,43,37), facade soffit (38,26,6) → (64,56,45), sunlit pillar unchanged at (149,141,130)).
 
-## Camera turning (R3D patch 4)
+## Camera turning (R3D patch 4, machine A)
 
 View depth is distance · cos of the angle off-axis, only 0.57 · distance at a 16:9 corner, so terms keyed on it changed when the camera only turned: the hall's far opening glowed in the screen centre and dimmed at the edge, distance fog thinned toward the edges. Measurements in `submodules/r3d/patches.md`.
 
-## Box culling and hidden faces (2026-10-20, GTX 1660 Ti)
+## Box culling and hidden faces (2026-10-20, machine B)
 
 The default map had grown to 46,322 boxes (555,864 triangles, 85 materials). R3D never culls an instanced draw outside a cluster, so all of it was vertex-processed every frame, twice with the depth pre-pass. Headless `--bench`, 1920×1006, spinning, 600 frames, the map snapshot of that day: the geometry pass was 70% of GPU time at `low` (1.66 of 2.38 ms), and `--off 12345` on top of `low` gained nothing.
 
@@ -125,12 +136,12 @@ The default map had grown to 46,322 boxes (555,864 triangles, 85 materials). R3D
 
 Session-to-session swings were large (the clusters-alone low run measured 3.44 in one session and 2.73 in the next): compare only rows of one session. Not done: merging coplanar faces into larger quads (UV and T-junction risk), a larger near plane.
 
-## CPU: collider BVH (2026-10-20, i5-10400F + GTX 1660 Ti)
+## CPU: collider BVH (2026-10-20, machine B)
 
 Profiled with `perf record --call-graph lbr` (LBR stacks unwind through the NVIDIA driver, which has no CFI) and `__GL_YIELD=USLEEP` (so `glFinish`'s spin-wait in headless benches doesn't pose as work). On the default map the crosshair pick (`DesignerPickCamera` → linear `PickBoxes` over 46,322 boxes) was ~21% of the CPU samples, ~0.57 ms per frame in spectator mode; walking (`player.c` `Overlap`, 3–5 linear scans per frame) and `MS_Raycast` / `MS_Collides` had the same shape.
 
 A BVH over the published colliders (built at load, leaves of ≤ 4, also for noGpu loads) now serves `MS_Raycast`, `MS_Collides` and the new `MS_FirstCollision`; the designer's pick and the player go through them. Results are bit-identical to the linear scans (in-process self-test, 700k random/axis-aligned/corner rays and touching/apart boxes over the three test maps: 0 mismatches). A ray: 383 → 2.3 µs. Headless bench, 3 interleaved pairs: low 2.71 → 2.20 ms (CPU until finish 1.07 → 0.57 ms), ultra 8.52 → 7.87 ms. After it, `R3D_End` (draw submission, ~0.34 ms of it the geometry pass) is the largest CPU item.
 
-## Run-to-run noise: GPU clock states (2026-10)
+## Run-to-run noise: GPU clock states (2026-10, machine A)
 
-Headless `--bench` runs on the RTX 4050 laptop flip between two speed levels about 10% apart (e.g. Canyon 4.8 vs. 5.4 ms) depending on the GPU's clock state, far more than the 1-2% noise measured earlier between runs in one state. In 2026-10 one 3x full A/B made Canyon look 8% slower; 6 tightly interleaved short pairs showed it wasn't. Hence the rule in the `benchmarking` skill: compare paired differences of interleaved A/B runs, never single runs.
+Headless `--bench` runs on machine A (a laptop GPU) flip between two speed levels about 10% apart (e.g. Canyon 4.8 vs. 5.4 ms) depending on the GPU's clock state, far more than the 1-2% noise measured earlier between runs in one state. In 2026-10 one 3x full A/B made Canyon look 8% slower; 6 tightly interleaved short pairs showed it wasn't. Hence the rule in the `benchmarking` skill: compare paired differences of interleaved A/B runs, never single runs.

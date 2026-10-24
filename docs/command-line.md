@@ -1,6 +1,6 @@
 # Command line
 
-Every flag and environment variable of `monolith` (Linux: `./build/linux/monolith`, Windows: `build\win\monolith.exe`). The header comment of `src/main.c` is the source of truth. Keys and mouse: [user-guide.md](user-guide.md).
+Every flag and environment variable of `monolith` (Linux: `./build/linux/monolith`, Windows: `build\win\monolith.exe`). The header comment of `src/main.c` is the source of truth. Timings quoted below were measured on an RTX 4050 Laptop GPU: a rough guide only, your machine's will differ. Keys and mouse: [user-guide.md](user-guide.md).
 
 Flags that never open a visible window, safe for scripts: `--shot` (renders in a hidden window), `--dump-boxes`, `--dump-scene`, `--dump-scene-diff`, `--inspect-model`, `--new-map`, `--export`, `--import`, `--classify`, and `--bench` together with `--headless`. Anything else opens the game window.
 
@@ -39,7 +39,7 @@ An unknown flag, a missing or unparsable value, a value that is itself a `--flag
 | `--shadow-camera` / `--shadow-always` | Sun shadow from R3D's camera-fitted map re-rendered when needed / every frame, instead of the static tiles (see *Sun shadow* in [architecture.md](architecture.md)). A/B and debugging. |
 | `--fog-cache <voxel> <sub>` | **Trade-off, off.** Bake the fog's sun visibility into an 8-bit 3D texture per load (voxel 0.25–8 m, sub³ samples, sub 1–4; patch 8); region from `env fogCache.region` or the content bounds (see *Sun shadow* in [architecture.md](architecture.md)); outside it the march uses the shadow map |
 | `--no-prepass` | No depth pre-pass (patch 6); same image, slower. A/B tests. |
-| `--bench` | Per viewpoint: 60 warmup + 600 measured frames spinning 360°; table + Markdown report in `benchmark/<stamp>_shadow-<size>-<range>.md` (completed runs only) |
+| `--bench` | Per viewpoint: 60 warmup + 600 measured frames spinning 360°; table + Markdown report in `benchmark/<stamp>_shadow-<size>-<range>.md` (completed runs only). The report's Setup table names the machine (GPU, driver, CPU, system, resolution): frame times are only comparable between runs on the same machine |
 | `--headless` | With `--bench`: hidden window, offscreen 1920×1006, `glFinish` per frame. **Required for automated runs.** ~10% slower than visible; compare headless only with headless. |
 | `--bench-frames <n>` | Frames per viewpoint (≥ 10, default 600). ~150 for screening; 600 for reported numbers. |
 | `--bench-still` | Camera doesn't spin (suffix `_still`) |

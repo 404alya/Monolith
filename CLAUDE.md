@@ -30,8 +30,8 @@ The workflows are project skills in `.claude/skills/<name>/SKILL.md`. They load 
 ## Hard rules
 
 - **Never take over the developer's screen.** Run the game and the examples only as the guard rail above says (examples: only with `--shot`). Never switch the developer's workspace, desktop or window focus.
-- **Benchmarks are noisy** (~10% swings between GPU clock states): only `--bench --headless`, one benchmark at a time, interleaved A/B pairs for every claimed gain or regression. Map edits never need a benchmark. Details: the `benchmarking` skill.
-- **The Bash tool's shell may be zsh** (it is on the developer's machine): never rely on an unquoted `$VAR` word-splitting. Use arrays or inline env assignments (`__GL_SYNC_TO_VBLANK=0 ./build/linux/monolith …`).
+- **Benchmark results belong to one machine and are noisy** (laptop GPUs swing ~10% between clock states): only `--bench --headless`, one benchmark at a time, base and change measured on the same machine in interleaved A/B pairs, results reported as relative changes with the machine (GPU, driver, CPU). Never compare with numbers from another machine or the docs. Map edits never need a benchmark. Details: the `benchmarking` skill.
+- **The Bash tool's shell may be zsh** (it is on some developers' machines): never rely on an unquoted `$VAR` word-splitting. Use arrays or inline env assignments (`__GL_SYNC_TO_VBLANK=0 ./build/linux/monolith …`).
 - **Both targets build with zero warnings:** `./build.sh` and `./build.sh --win` (and `examples/build.sh` when the runtime or an example changed), after any code change. Shaders pass `glslangValidator`.
 - **Zero memory leaks:** after any change to code (C, shaders, build), `tools/leakcheck.sh` must end with `leakcheck: OK: zero leaks of ours` before the change counts as done (map-only edits don't need it).
 - **No fixed-size content buffers:** anything sized by the map, the selection, the regions or the input is a heap array (`MS_RESERVE` / `MS_PUSH`) or a heap string. Fixed arrays only for stack scratch that formats one path or message.

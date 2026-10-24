@@ -1,6 +1,6 @@
 // glibc_compat.c -- lets the Linux build run on older distros (glibc >= 2.34).
 //
-// Linking against the dev machine's glibc (2.44) makes the executable require the
+// Linking against a current distribution's glibc (2.44 when this was written) makes the executable require the
 // newest version of every symbol it uses, e.g. acosf@GLIBC_2.43, which fails to load
 // on Ubuntu 22.04/24.04, Debian 12 etc. build.sh links with -Wl,--wrap=<symbol> for
 // each one below, so all references (also those inside the static R3D, raylib, assimp

@@ -9,7 +9,7 @@ The reasons behind the project's shape, from the task prompts of the development
 
 ## Starting point
 
-One hand-built brutalist concrete level in a single `main.c` (~1100 lines, `BuildWorld()`), walkable or seen from a spectator camera, ~5.9 ms per frame (~170 FPS) headless on the dev machine, with 3 local R3D patches.
+One hand-built brutalist concrete level in a single `main.c` (~1100 lines, `BuildWorld()`), walkable or seen from a spectator camera, ~5.9 ms per frame (~170 FPS) headless on the RTX 4050 Laptop it was developed on, with 3 local R3D patches.
 
 ## Round 1: the map designer and the caches (commit `b70d5a2`)
 

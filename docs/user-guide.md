@@ -71,7 +71,7 @@ The panel has a preset selector, rows for display, shadows, ambient occlusion, f
 | medium | high + 75% render scale, half the fog steps, 4096 shadow map |
 | low | 50% render scale, no AO, no bloom, baked fog with half the steps, 4096 shadow map |
 
-On the default map the presets run at roughly 3.2 / 2.1 / 1.3 / 0.8 ms per frame on a laptop RTX 4050. The settings are saved in `~/.config/monolith/settings.ini` (`%APPDATA%\monolith\` on Windows) as `key = value` lines; `--settings`, `--no-settings` and `--quality` change that for one run. Vsync is off and frames are uncapped by default; the panel's performance rows change that.
+Roughly, high takes two thirds of ultra's frame time, medium 40% and low a quarter (measured on the default map with an RTX 4050 Laptop GPU; your machine's numbers will differ, the F2 panel shows them live). The settings are saved in `~/.config/monolith/settings.ini` (`%APPDATA%\monolith\` on Windows) as `key = value` lines; `--settings`, `--no-settings` and `--quality` change that for one run. Vsync is off and frames are uncapped by default; the panel's performance rows change that.
 
 ## Making maps
 

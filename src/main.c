@@ -313,8 +313,8 @@ extern void glFinish(void);
 
 // Data directories, with a trailing slash. Both builds are meant to be copied to other
 // computers as a folder (build/linux/, build/win/), so they look next to the executable.
-// On Linux, the repo directories baked in by build.sh win while they exist (i.e. on the
-// dev machine), so bench reports land in the repo's benchmark/, and the map package that
+// On Linux, the repo directories baked in by build.sh win while they exist (i.e. in a
+// repo checkout), so bench reports land in the repo's benchmark/, and the map package that
 // gets hot-reloaded (with its shaders) is the repo's maps/ one.
 // Windows paths aren't baked in (wine would see Z:\...).
 char benchmarkDir[1024];

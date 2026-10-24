@@ -150,6 +150,36 @@ static void WriteProfileTable(FILE *f, bool md, const double *frameMs, double al
 #define GL_VERSION  0x1F02
 extern const unsigned char *glGetString(unsigned int name);
 
+// The CPU's model name for the report's Setup table, so every result names the machine it
+// was measured on (frame times are only comparable on one machine). Linux: the first
+// "model name" of /proc/cpuinfo; Windows: PROCESSOR_IDENTIFIER. False when unknown.
+static bool CpuName(char *out, size_t size)
+{
+#ifdef _WIN32
+    const char *id = getenv("PROCESSOR_IDENTIFIER");
+    if (!id || !id[0]) return false;
+    snprintf(out, size, "%s", id);
+    return true;
+#else
+    FILE *f = fopen("/proc/cpuinfo", "r");
+    if (!f) return false;
+    char line[512];
+    bool found = false;
+    while (!found && fgets(line, sizeof(line), f)) {
+        if (strncmp(line, "model name", 10) != 0) continue;
+        const char *v = strchr(line, ':');
+        if (!v) continue;
+        v++;
+        while (*v == ' ' || *v == '\t') v++;
+        snprintf(out, size, "%s", v);
+        out[strcspn(out, "\r\n")] = 0;
+        found = out[0] != 0;
+    }
+    fclose(f);
+    return found;
+#endif
+}
+
 typedef struct {
     double avgMs, avgFps, lowFps, worstMs;
 } BenchStats;
@@ -246,6 +276,8 @@ void WriteBenchReport(const double *times, const int *shadowUpdates, int shadowS
     fprintf(f, "| | |\n|---|---|\n");
     fprintf(f, "| GPU | %s |\n", (const char *)glGetString(GL_RENDERER));
     fprintf(f, "| Driver | %s / %s |\n", (const char *)glGetString(GL_VENDOR), (const char *)glGetString(GL_VERSION));
+    char cpu[256];
+    if (CpuName(cpu, sizeof(cpu))) fprintf(f, "| CPU | %s |\n", cpu);
 #ifdef _WIN32
     fprintf(f, "| System | Windows (x86_64, MinGW-w64 build) |\n");
 #else
