@@ -1,4 +1,4 @@
-// --new-map: creates a new, empty map package (docs/design-v2.md section 1)
+// --new-map: creates a new, empty map package (docs/map-format.md section 1)
 #ifndef MONOLITH_NEWMAP_H
 #define MONOLITH_NEWMAP_H
 

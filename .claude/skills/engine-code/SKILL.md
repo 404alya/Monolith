@@ -5,7 +5,7 @@ description: Change monolith's code — C in src/, the scene runtime (runtime/mo
 
 # Engine code
 
-How to change code. Reference: `docs/knowledge/engine.md` (technology, layout, architecture, runtime API), `docs/knowledge/cli.md` (controls, flags, environment variables), `docs/knowledge/r3d-pitfalls.md` (read all of it, with the **`lighting-fog-shadows`** skill, before touching lighting, fog or shadows), `submodules/r3d/patches.md` (before changing R3D), `docs/performance.md` (measurements). Larger or multi-agent work: the **`large-engine-work`** skill. After every code change: the **`leak-check`** skill; performance claims: the **`benchmarking`** skill. Before you finish, ask the developer to restart the game: code changes don't hot-reload.
+How to change code. Reference: `docs/architecture.md` (technology, layout, architecture, runtime API), `docs/command-line.md` (controls, flags, environment variables), `.claude/skills/lighting-fog-shadows/r3d-pitfalls.md` (read all of it, with the **`lighting-fog-shadows`** skill, before touching lighting, fog or shadows), `submodules/r3d/patches.md` (before changing R3D), `.claude/skills/benchmarking/measurements.md` (measurements). Larger or multi-agent work: the **`large-engine-work`** skill. After every code change: the **`leak-check`** skill; performance claims: the **`benchmarking`** skill. Before you finish, ask the developer to restart the game: code changes don't hot-reload.
 
 > **R3D changes are patches.** Work around R3D from the app side where reasonable. When R3D itself must change, change it minimally and **record every change in `submodules/r3d/patches.md`** (symptom, cause, files, diff). Don't modify `~/Projects/r3d` or other projects in `~/Projects`.
 
@@ -26,7 +26,7 @@ Both output folders are **self-contained** (copy or zip as-is).
 **R3D** is built by `build.sh`: configured on first use in `$R3D_DIR/build-linux` / `build-mingw` (a few minutes, assimp), then an incremental `cmake --build` each time (~1 s no-op; log in `<build dir>/monolith-build.log`). Delete the build dir to force a fresh configure.
 
 **Linux:**
-- R3D config: static, vendored raylib + assimp + zlib (`ASSIMP_BUILD_ZLIB`), bundled minizip (`ASSIMP_BUILD_MINIZIP`; a system minizip breaks the build), no examples, GPU profiler compiled in (`R3D_GPU_PROFILER`, on only under `--bench`; patch 5), `CMAKE_BUILD_TYPE=Release`. Options are remembered in `build-linux/monolith-configure.args`; a change re-configures (full R3D rebuild). `R3D_BUILD_TYPE=None` gives the old unoptimised build; any other value is passed as `CMAKE_BUILD_TYPE`. Bench reports state the R3D build type (no measurable difference: `docs/performance.md`).
+- R3D config: static, vendored raylib + assimp + zlib (`ASSIMP_BUILD_ZLIB`), bundled minizip (`ASSIMP_BUILD_MINIZIP`; a system minizip breaks the build), no examples, GPU profiler compiled in (`R3D_GPU_PROFILER`, on only under `--bench`; patch 5), `CMAKE_BUILD_TYPE=Release`. Options are remembered in `build-linux/monolith-configure.args`; a change re-configures (full R3D rebuild). `R3D_BUILD_TYPE=None` gives the old unoptimised build; any other value is passed as `CMAKE_BUILD_TYPE`. Bench reports state the R3D build type (no measurable difference: `.claude/skills/benchmarking/measurements.md`).
 - Links R3D, raylib, assimp, zlib and **libstdc++ statically** (`-l:libstdc++.a`). Runtime deps only `libc`, `libm`, `libgcc_s.so.1`, `libGL.so.1` (check: `readelf -d build/linux/monolith | grep NEEDED`).
 - **glibc ≥ 2.34.** `build.sh` passes `-Wl,--wrap=` for newer symbols and `src/glibc_compat.c` routes them to old versions (libm to `@GLIBC_2.2.5`, `arc4random` → `getrandom`, `__isoc23_strtoul` → `strtoul`). After changing compiler, glibc or dependencies, `objdump -T build/linux/monolith | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1` must still print `GLIBC_2.34`; add any newer symbol to `GLIBC_WRAP` in `build.sh` and to `glibc_compat.c`.
 - A portability test on this machine still uses the repo paths unless they're hidden: `unshare -rm sh -c 'mount -t tmpfs none ~/Projects/monolith && /path/to/copy/monolith --shot /tmp/x.png --view 2'`. x86-64 only.
@@ -39,7 +39,7 @@ Both output folders are **self-contained** (copy or zip as-is).
 A change is done only when it **builds with no warnings** on both targets, **`tools/leakcheck.sh` reports zero leaks**, and it has been **checked visually** (§3).
 
 
-**Memory rules** (details in `docs/design-v2.md` §2.7):
+**Memory rules:**
 - **No fixed-size content buffers.** Anything sized by content (map objects, lines, selection, regions, prompt, open requests, child processes, bench frames, export file lists) is a heap array (`MS_RESERVE` / `MS_PUSH`, `runtime/monolith_scene.h`, used by `src/` too) or a heap string (`MS_StrDup`). Fixed `char` arrays only for stack scratch formatting one path or message, and single values the loader bounds.
 - **Sanity caps instead of limits**, each with a clear message: `MS_MAX_OBJECTS` (1 000 000 boxes + model instances + lights), `MS_MAX_FILE_BYTES` (4 MB map), `MS_PATH_MAX` (1024), 3 `repeat`s per line, a 1 MB prompt, `BENCH_FRAMES_LIMIT`.
 - **The per-frame path never allocates** (drawing, picking, HUD, collision): scratch arrays grow to the largest size seen. Allocation happens on (re)load, input events, submit / export / report.
@@ -47,23 +47,23 @@ A change is done only when it **builds with no warnings** on both targets, **`to
 
 ## 2. Common modifications
 
-**Edit or start a level.** Edit the package following its `MAP.md` (format: `docs/knowledge/map-format.md`; rules: the `map-editing` skill); it hot-reloads, no rebuild. New level: `--new-map <name>`, fill in `MAP.md`, build (or submit a first request: the session writes the brief first), or `--import` a raylib + R3D project. Models: the `assets-and-licences` skill.
+**Edit or start a level.** Edit the package following its `MAP.md` (format: `docs/map-format.md`; rules: the `map-editing` skill); it hot-reloads, no rebuild. New level: `--new-map <name>`, fill in `MAP.md`, build (or submit a first request: the session writes the brief first), or `--import` a raylib + R3D project. Models: the `assets-and-licences` skill.
 
-**Add a map primitive or statement.** A builder next to `Box`/`Block`/`Stairs`/`WaffleFacade` in `runtime/monolith_scene.c` plus a `PRIMS[]` entry (name, argument count, per argument its shift axis `AX_X/Y/Z`, `AX_NONE` for sizes, `AX_INT` for counts), and its call where `ParseStatement()` dispatches. That code switches on the argument count (box and block, both 6, differ by `PRIMS[]` entry), so a new 6–8-argument primitive means switching on the entry. Builders return false when the map is full (`MS_MAX_OBJECTS`) or out of memory, and loops add a box per iteration so the cap bounds them. New statements need `monolith 2` (bump `MS_FORMAT_VERSION` only for changes older runtimes would misread). Document it in the `monolith_scene.c` header comment and `docs/knowledge/map-format.md` §2.
+**Add a map primitive or statement.** A builder next to `Box`/`Block`/`Stairs`/`WaffleFacade` in `runtime/monolith_scene.c` plus a `PRIMS[]` entry (name, argument count, per argument its shift axis `AX_X/Y/Z`, `AX_NONE` for sizes, `AX_INT` for counts), and its call where `ParseStatement()` dispatches. That code switches on the argument count (box and block, both 6, differ by `PRIMS[]` entry), so a new 6–8-argument primitive means switching on the entry. Builders return false when the map is full (`MS_MAX_OBJECTS`) or out of memory, and loops add a box per iteration so the cap bounds them. New statements need `monolith 2` (bump `MS_FORMAT_VERSION` only for changes older runtimes would misread). Document it in the `monolith_scene.c` header comment and `docs/map-format.md` §2.
 
 **Add an environment key.** Key tables in `monolith_scene.c` (region "Key tables": `ENV_KEYS` for `R3D_Environment` fields, sky / sun tables otherwise, a range in `ENV_RANGES`), its built-in default in `BuiltinEnvironment()` equal to today's value, written by `MS_WriteEnvironment`. Image changes without a reload must reach `FrameKey`.
 
-**Change a request bundle.** `launcher.c` (`BuildBundle`, `WriteRequestMd`, `WriteRequestJson`; bump `"format"` when keys change) and `docs/knowledge/request-bundle.md` (keep older formats described; the `map-request` skill if the workflow changes); `tools/request-queue.sh` reads `kind`, `prompt`, `model` and `map.package` from `request.json` line by line. New terminal: `TERMINALS[]`.
+**Change a request bundle.** `launcher.c` (`BuildBundle`, `WriteRequestMd`, `WriteRequestJson`; bump `"format"` when keys change) and `.claude/skills/map-request/bundle-reference.md` (keep older formats described; the `map-request` skill if the workflow changes); `tools/request-queue.sh` reads `kind`, `prompt`, `model` and `map.package` from `request.json` line by line. New terminal: `TERMINALS[]`.
 
 **Add a viewpoint.** Spectator mode, **P** (prints *feet*), then `viewpoint "Name" ex ey ez tx ty tz` with the *eye*. `--bench` covers it automatically.
 
-**Tune a map's look / shader.** Its `env` lines, materials and `shaders/` (hot-reloaded); respect `docs/knowledge/r3d-pitfalls.md` §1–5 (the `lighting-fog-shadows` skill) and the map's `MAP.md`; check shaders with `glslangValidator`. Changing a map's look needs the developer's approval.
+**Tune a map's look / shader.** Its `env` lines, materials and `shaders/` (hot-reloaded); respect `.claude/skills/lighting-fog-shadows/r3d-pitfalls.md` §1–5 (the `lighting-fog-shadows` skill) and the map's `MAP.md`; check shaders with `glslangValidator`. Changing a map's look needs the developer's approval.
 
 **Add a graphics setting.** A field in `MS_Quality` (preset values, `MS_QualityEqual`, `MS_ApplyQuality`), the file key and panel row in `settings.c` / `settingspanel.c`; ultra stays the map exactly.
 
 **Add an effect toggle.** The `TOGGLE(KEY_x, 'x')` block in the main loop, the HUD string, the header comment.
 
-**Add a CLI flag.** Parse it at the top of `main()`; document it in the header comment and `docs/knowledge/cli.md`.
+**Add a CLI flag.** Parse it at the top of `main()`; document it in the header comment and `docs/command-line.md`.
 
 ## 3. How to verify changes
 
@@ -92,6 +92,10 @@ No test suite; verification is **visual and numeric**:
     - Mouse and keyboard input can only be tested by hand.
 11. **Export and examples:** export into a scratch folder, build its `viewer.c` outside the repo (the README's compiler line), compare its `--shot` with `monolith --shot` (pixel-identical for the shipped packages).
 
+## 3a. Export changes
+
+After changing the export, the runtime's editor blocks, `runtime/export/*` or what R3D's build reads: export `maps/monolith` and `maps/pine_forest` into a scratch folder, copy each into a fresh folder and run its `./build.sh` (and `--win`), then render every viewpoint with a scratch harness linked against that package's runtime and bundled R3D (hidden window, 1600 × 900, FXAA, `MS_InitRenderer`, 30 frames into a `RenderTexture`) and compare with `monolith --map … --shot … --view n`: they must match. Grep the package for tool leftovers (`--shot`, `bench`, `hidden`, `MS_Poll`, `reload`, `editor`, `request`, `Claude`): only the map's own files (its comments, `MAP.md`, `ASSETS.md`) and R3D's own sources may hit.
+
 ## 4. Conventions
 
 - **English** for code, identifiers, comments and names.
@@ -101,6 +105,6 @@ No test suite; verification is **visual and numeric**:
 - **The level is data:** geometry, materials, lights, environment live in `maps/<name>/`; C describes primitives and statements, not buildings or a look. Nothing outside a package assumes a style.
 - **Assets are recorded** (`ASSETS.md` row + sidecar; CC0 / PD / CC-BY with attribution).
 - **Memory:** heap arrays for content, no per-frame allocation, everything freed (§1, memory rules).
-- **Comment non-obvious engine workarounds** with their reason (as for `r3d-pitfalls.md` §1, §2), so nobody "cleans them up".
+- **Comment non-obvious engine workarounds** with their reason (as for R3D pitfalls §1, §2), so nobody "cleans them up".
 - **Don't commit `build/`, screenshots, `benchmark/`, `requests/` or `export/`.**
-- **Keep the docs current** in the same change: `src/main.c`'s header comment (controls, flags), `docs/knowledge/engine.md` (layout, architecture), `cli.md` (flags), `r3d-pitfalls.md` (pitfalls, with "if R3D changes X, update Y" warnings), `map-format.md`, the skills when a workflow changes, `patches.md`, measurements in `docs/performance.md`.
+- **Keep the docs current** in the same change: `src/main.c`'s header comment (controls, flags), `docs/architecture.md` (layout, architecture), `docs/command-line.md` (flags), `docs/user-guide.md` (keys, settings), `.claude/skills/lighting-fog-shadows/r3d-pitfalls.md` (pitfalls, with "if R3D changes X, update Y" warnings), `map-format.md`, the skills when a workflow changes, `patches.md`, measurements in `.claude/skills/benchmarking/measurements.md`.

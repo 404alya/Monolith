@@ -5,14 +5,14 @@ description: Work on monolith's lighting, sun shadows, volumetric and distance f
 
 # Lighting, fog and shadows
 
-**Read `docs/knowledge/r3d-pitfalls.md` in full first.** It holds the engine facts found by debugging (black-curtain fog, camera-fitted shadows and pancaking, shadow resolution and caches, other gotchas, shadowed undersides, view-independent effects). The rules below follow from it. Code changes also follow the `engine-code` skill; map `env` / shader edits the `map-editing` skill and the map's `MAP.md` (its *Lighting and atmosphere* section).
+**Read `.claude/skills/lighting-fog-shadows/r3d-pitfalls.md` in full first.** It holds the engine facts found by debugging (black-curtain fog, camera-fitted shadows and pancaking, shadow resolution and caches, other gotchas, shadowed undersides, view-independent effects). The rules below follow from it. Code changes also follow the `engine-code` skill; map `env` / shader edits the `map-editing` skill and the map's `MAP.md` (its *Lighting and atmosphere* section).
 
 ## Rules
 
 - **The look is the developer's.** Change a map's look only when the request asks for it or the developer approves. Engine changes keep every map in `maps/` pixel-identical, or are offered as a trade-off behind a switch with before/after images.
 - **Fix causes, not symptoms.** Don't disable shadow casting to hide a shadow bug, don't brighten the fog colour or the albedo to hide a dark map, don't add a shadowless fill light for dark undersides (it lights the volumetric fog too): see the pitfalls' §1, §2, §4, §5.
 - **Any fade, fog or cache term is a function of world position (and the view ray), never of view depth** (pitfalls §6). Fix view dependence before a cache bakes it in.
-- **Anything new that changes the image** (a uniform, a light, a setting) goes into `FrameKey` (`docs/knowledge/engine.md` §4, "Frame reuse"), or a still camera keeps showing the old image.
+- **Anything new that changes the image** (a uniform, a light, a setting) goes into `FrameKey` (`docs/architecture.md` §4, "Frame reuse"), or a still camera keeps showing the old image.
 - **R3D changes are patches:** work around R3D from the app side where reasonable; otherwise change it minimally and record it in `submodules/r3d/patches.md` (symptom, cause, files, diff, verification). If R3D's shadow fit, fades or zExtension change, update the matching constants in `runtime/monolith_scene.c` (pitfalls §3).
 - **Shaders:** check every changed shader with `glslangValidator`; avoid GLSL built-in names (`noise1`–`noise4`, `length`, `distance`, …): NVIDIA accepts what AMD / Intel reject (pitfalls §4).
 

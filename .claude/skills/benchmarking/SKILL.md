@@ -20,16 +20,16 @@ __GL_SYNC_TO_VBLANK=0 ./build/linux/monolith --bench --headless --bench-frames 1
 __GL_SYNC_TO_VBLANK=0 ./build/linux/monolith --bench --headless --note "what changed"                            # full run
 ```
 
-Reports go to `benchmark/<stamp>_shadow-<size>-<range>.md` (gitignored; completed runs only). Other flags (`--bench-still`, `--bench-window`, `--no-profile`, `--shadow`, `--map`): `docs/knowledge/cli.md`. Window titles of automated runs are `monolith-bench` / `monolith-shot`; keep them.
+Reports go to `benchmark/<stamp>_shadow-<size>-<range>.md` (gitignored; completed runs only). Other flags (`--bench-still`, `--bench-window`, `--no-profile`, `--shadow`, `--map`): `docs/command-line.md`. Window titles of automated runs are `monolith-bench` / `monolith-shot`; keep them.
 
 ## 2. Performance method
 
 - **Measure first.** `--bench --headless` has a per-pass GPU table (R3D patch 5); put the breakdown in front of any optimisation. The frame is fill-bound; vertex work is tiny.
 - **One step at a time,** each measured on its own with interleaved A/B pairs (§1), kept only if it helps. Order the candidates by expected gain ÷ risk.
 - **Static work is done once per map load.** Every cache is keyed on `scene->version` (and the settings it depends on) and rebuilt on hot reload; prove it with `--reload-test`. Keep the rebuild short (< 1–2 s on the default map; log it) and track VRAM (the 8192² shadow array is ~256 MB).
-- **No view-dependent terms in anything cached** (`docs/knowledge/r3d-pitfalls.md` §6): fix view dependence before a cache bakes it in.
+- **No view-dependent terms in anything cached** (`.claude/skills/lighting-fog-shadows/r3d-pitfalls.md` §6): fix view dependence before a cache bakes it in.
 - **A still camera** reuses the last frame (`FrameKey`); `--bench` spins the camera so it measures real rendering. Anything new that changes the image goes into `FrameKey`.
-- Ideas tried, rejected or not yet done, with numbers: `docs/performance.md`. Record new measurements there, not in a skill.
+- Ideas tried, rejected or not yet done, with numbers: `.claude/skills/benchmarking/measurements.md`. Record new measurements there, not in a skill.
 
 ## 3. Reporting
 

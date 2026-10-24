@@ -202,7 +202,7 @@
 // #region Types
 // ======================================================================================
 
-// Memory rule (docs/design-v2.md 2.7): everything sized by the map is a heap array grown with
+// Memory rule (.claude/skills/engine-code, "Memory rules"): everything sized by the map is a heap array grown with
 // MS_RESERVE / MS_PUSH and every name or path stored per element is a heap string; all of it
 // belongs to the SceneData of one load and is freed with it (FreeData). Fixed char arrays are
 // left only for one-off values bounded by the loader (EnvDef.skyPanorama: a package path,
@@ -732,7 +732,7 @@ static int TypeSize(int type)
     }
 }
 
-// The built-in environment (docs/design-v2.md 2.6): the look the default map was built
+// The built-in environment (docs/map-format.md 2.5): the look the default map was built
 // with, which used to be hard-coded in SetupEnvironment() and main(). A map overrides
 // any key with `env`; a v1 map gets exactly these.
 static void BuiltinEnvironment(EnvDef *e)
@@ -750,7 +750,7 @@ static void BuiltinEnvironment(EnvDef *e)
     env->volumetricFog.enabled = true;
     // Keep the density low: R3D's volumetric fog is lit only by lights, not by the sky, so
     // dense fog in shadow turns into a black curtain that hides everything behind it
-    // (docs/knowledge/r3d-pitfalls.md 1). The emission stands in for the missing sky light.
+    // (.claude/skills/lighting-fog-shadows/r3d-pitfalls.md 1). The emission stands in for the missing sky light.
     env->volumetricFog.scatteringDensity = 0.012f;
     env->volumetricFog.absortionDensity = 0.001f;
     env->volumetricFog.scatteringColor = (Color){ 255, 244, 228, 255 };
@@ -788,7 +788,7 @@ static void BuiltinEnvironment(EnvDef *e)
 
     // The ambient map comes from an ambient-only copy of the sky whose lower hemisphere
     // stands in for light bounced off the ground; with the visible sky's dark ground,
-    // downward-facing surfaces got almost no ambient (docs/knowledge/r3d-pitfalls.md 5).
+    // downward-facing surfaces got almost no ambient (.claude/skills/lighting-fog-shadows/r3d-pitfalls.md 5).
     e->ambientMode = AMB_PROCEDURAL;
     e->ambientSize = 256;
     e->ambient.groundBottomColor = (Color){ 120, 116, 108, 255 };
@@ -1463,7 +1463,7 @@ static int AddMaterial(SceneData *d, const char *name)
     return mi;
 }
 
-// The built-in "default" material (docs/design-v2.md 2.2)
+// The built-in "default" material (docs/map-format.md 2.4)
 static bool DefaultMaterial(SceneData *d)
 {
     if (AddMaterial(d, "default") != 0) return false;
@@ -1711,7 +1711,7 @@ static bool ParseEnv(Parser *P, Token *tok, int n)
     return Fail(P, "unknown env key '%s' (see the header comment of monolith_scene.c)", key);
 }
 
-// --- Models (docs/design-v2.md 2.5)
+// --- Models (docs/map-format.md 2.7)
 
 // A model file's references (glTF uris, OBJ mtllib, MTL texture maps) must stay inside the
 // package. The checks read the files the way assimp / R3D's importer do (QA2 F1/F2): JSON
@@ -2328,7 +2328,7 @@ static bool ParseText(Parser *P, const char *text, int size)
 // #endregion
 
 // ======================================================================================
-// #region Caches follow the map (docs/design-v2.md 4)
+// #region Caches follow the map (.claude/skills/lighting-fog-shadows/r3d-pitfalls.md 3)
 // ======================================================================================
 #ifdef MS_PATCHED_R3D   // only the static tiles and the fog bake use these
 // "Ground-like" boxes (a slab much wider than it is tall, >= 100 m across) are left out of
@@ -4353,8 +4353,8 @@ void MS_ApplyRenderResolution(const MS_Scene *s, int outW, int outH)
 }
 
 // --- Graphics quality (MS_Quality, monolith_scene.h)
-// Presets from the measured trade-off knobs (docs/performance.md "Trade-off knobs" and
-// docs/knowledge/cli.md "Graphics settings"): ultra is the map exactly; high trades SSAO + SSIL for the baked
+// Presets from the measured trade-off knobs (.claude/skills/benchmarking/measurements.md "Trade-off knobs" and
+// docs/user-guide.md "Graphics settings"): ultra is the map exactly; high trades SSAO + SSIL for the baked
 // occlusion volume and bakes the fog's sun visibility; medium also renders at 75% with half
 // the fog march steps and a 4096 shadow map; low renders at 50% without AO and bloom.
 

@@ -423,7 +423,7 @@ BoundingBox MS_ObjectBounds(const MS_Scene *scene, MS_ObjRef obj);    // world A
 
 // Writes the scene's environment as format-2 `env` lines: every R3D_Environment field,
 // sky.*, the ambientSky.* keys that are set, sun.*, shadow.size and the cache hints that are
-// set. scene NULL = the built-in defaults (docs/design-v2.md section 2.6). For --new-map
+// set. scene NULL = the built-in defaults (BuiltinEnvironment(), docs/map-format.md 2.5). For --new-map
 // and export. Values are written so that they read back as the same floats.
 bool MS_WriteEnvironment(const MS_Scene *scene, FILE *f);
 

@@ -48,7 +48,7 @@ The runtime carries the editor's quality presets (`MS_Quality`, `runtime/monolit
 R3D init hint: pass it as `MS_LoadOptions.shadowSizeOverride` to the peek load before
 `R3D_Init` and to the real load. Ultra is the map exactly; lower presets trade SSAO/SSIL for the
 baked occlusion volume, bake the fog's sun visibility, render at 75% / 50% and so on
-(docs/knowledge/cli.md "Graphics settings"). `01_minimal --quality medium` shows it:
+(docs/user-guide.md "Graphics settings"). `01_minimal --quality medium` shows it:
 
 ```sh
 examples/build/linux/01_minimal/minimal --shot /tmp/01-medium.png --view 2 --quality medium

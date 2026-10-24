@@ -1,35 +1,12 @@
-# Controls, command line, environment variables, graphics settings
+# Command line
 
-The game's controls, every command-line flag and environment variable, and the graphics settings. Architecture: `engine.md`; how to verify a change: the `engine-code` skill.
+Every flag and environment variable of `monolith` (Linux: `./build/linux/monolith`, Windows: `build\win\monolith.exe`). The header comment of `src/main.c` is the source of truth. Keys and mouse: [user-guide.md](user-guide.md).
 
-## Controls
+Flags that never open a visible window, safe for scripts: `--shot` (renders in a hidden window), `--dump-boxes`, `--dump-scene`, `--dump-scene-diff`, `--inspect-model`, `--new-map`, `--export`, `--import`, `--classify`, and `--bench` together with `--headless`. Anything else opens the game window.
 
-The header comment at the top of `src/main.c` is the source of truth; keep it updated when adding controls or flags.
+## Flags
 
-**Walk mode (default):** WASD + mouse walk/look, Shift faster, Space jump, F fly (noclip), **1–6** toggle volumetric fog / distance fog / SSAO / SSIL / bloom / sun relative to the map's setting (survive reloads), F1 HUD, F2 graphics settings panel, F12 `screenshot.png`, F9 export to `export/<map>-<stamp>/` (not while the package has a load error), TAB spectator mode, Esc closes the prompt box / leaves snip mode / closes the panel (Esc does not quit; close the window; `SetExitKey(KEY_NULL)` keeps raylib from quitting on it). The bottom-left HUD line shows `map reloaded (N boxes)` or the parse error in red until the file is valid again.
-
-**Spectator mode:** WASD + mouse, E / Q (or Space) up / down (Ctrl is the group-select modifier), wheel base speed 1–400 m/s, Shift ×4 / Alt ×0.25, ← / → fly to the previous / next viewpoint, **P** print and copy the view as `--pos … --look …` (**feet**), G move the player to the camera.
-
-**Map designer (spectator mode, `designer.c`, `launcher.c`):**
-
-| Input | Action |
-|---|---|
-| Crosshair | White outline + cyan hit marker on the object under it; HUD: group, material, map line + text, index, distance (models: file, transform) |
-| LMB / Shift+LMB | Select the object (replace) / add or remove it |
-| Ctrl+LMB / Ctrl+Shift+LMB | Select / add the object's whole group |
-| RMB | Clear the selection |
-| Enter | Prompt box |
-| C | Snip mode: camera frozen, cursor free; drag = a region (replaces), Shift+drag = add, Enter = prompt box with regions + selection, RMB / Esc / C = leave. Esc in that prompt box returns to snip mode; a successful submit ends it. |
-| R | Fly back to the camera of the most recently finished request |
-| K / Shift+K | Take the latest / all finished requests off the list (per-request mode: close their terminals) |
-| Ctrl+K, then n | Request [n] of the HUD list (1–9, 0 = 10): finished = off the list, queued = cancel, running = n again within 3 s to cancel (per-request mode: close its terminal); Esc cancels |
-| Ctrl+Shift+K | Close the coordinator's terminal (again within 3 s while requests are open) |
-
-- **Request list and closing.** A coordinator line (running / starting / not running / not started: error), then the requests, numbered `[n]`: queued, running, `[?]` (a question waits in the coordinator terminal), and for 20 s `[done]` / `[failed]` / `[cancelled]` with `result.md` line 1. A cancel writes `requests/<id>/cancel` (the coordinator stops the subagent); with no coordinator the game cancels a queued request itself. On i3 / sway the workspace helper marks the coordinator's terminal `_monolith_coordinator` (per-request mode: each terminal `_monolith_<id>`, which stays 20 s plus a dim line while open); a close runs `i3-msg '[con_mark="^_monolith_<id>$"] mark --add …, kill'` (that window only, no focus change). If the process is alive 3 s later or there is no mark: SIGTERM to its process group (started with `setsid`), SIGKILL after 3 s, only while it is the game's unreaped child. kitty `--single-instance` / wezterm mux exit at once, so only the i3 route reaches them. Windows: the entry only leaves the list.
-- **Selection** gets an orange tint and outline plus a faint always-on-top outline. It survives reloads: matched by identical geometry (models: world bounds), then by map line + index within the line + group; lost ones are reported.
-- **Prompt box:** UTF-8 editing, Ctrl+Backspace word, arrows, Home / End (Ctrl: whole text), Ctrl+V, Shift+Enter newline, **Enter sends**, **Esc cancels**. 1 MB cap, byte counter. Game keys and camera stay frozen while open (+2 frames). Empty prompts can't be sent; on failure the box keeps the text and the HUD shows the error and bundle path.
-
-**Command line.** An unknown flag, a missing or unparsable value, a value that is itself a `--flag`, or a non-finite / out-of-range number (positions, angles, regions: |v| ≤ 1e6) prints a message and exits 1 before any window opens.
+An unknown flag, a missing or unparsable value, a value that is itself a `--flag`, or a non-finite / out-of-range number (positions, angles, regions: |v| ≤ 1e6) prints a message and exits 1 before any window opens.
 
 | Flag | Meaning |
 |---|---|
@@ -51,16 +28,16 @@ The header comment at the top of `src/main.c` is the source of truth; keep it up
 | `--settings-panel` | With `--shot --shot-hud`: draw the open panel |
 | `--fx key=value` | One effect override, after `--ao`/`--bloom`: `ssao.samples\|radius\|intensity\|power`, `ssil.samples\|radius\|gi\|ao`, `bloom.levels\|intensity`, `exposure`, `vfog.step\|length`. Range-checked like the `env` key. |
 | `--new-map <name\|path>` | Create `maps/<name>/` (or the folder a path with `/` names; its parent must exist): map with ground slab, default material, built-in environment written out, spawn, two viewpoints; `MAP.md` template; empty `shaders/ models/ textures/`, `ASSETS.md`. Checks it loads, no window, refuses to overwrite. |
-| `--export <dir>` | No window: `<dir>/<name>/` (every referenced file + `MAP.md`, `ASSETS.md`, sidecars, files model files refer to), `monolith_scene.h/.c`, `viewer.c`, `README.md`. Refuses a non-empty dir; checks the copy loads (`engine.md` §4.3). |
-| `--import <project dir> <name\|path>` | Package as `--new-map` + an import bundle `requests/<stamp>_import-<name>/` (`kind: "import"`, heavy tier) and a Claude Code session; no window (the `import-request` skill) |
+| `--export <dir>` | No window: `<dir>/<name>/` (every referenced file + `MAP.md`, `ASSETS.md`, sidecars, files model files refer to), `monolith_scene.h/.c`, `viewer.c`, `README.md`. Refuses a non-empty dir; checks the copy loads ([export.md](export.md)). |
+| `--import <project dir> <name\|path>` | Package as `--new-map` + an import bundle `requests/<stamp>_import-<name>/` (`kind: "import"`, heavy tier) and a Claude Code session; no window (the import request) |
 | `--dump-boxes <file>` | No window: every box as hex floats (`%a`, `min max` per line). Exact-box-list check and full parse check (exit 1 + `file:line: message`); model files only checked for existence |
 | `--dump-scene <file>` | Also model files, instances (transform, world bounds), colliders, materials, lights (`src/dumpscene.c`); hidden window when the map has models |
 | `--dump-scene-diff <file>` | The same without object indices and map lines (names instead), so a diff shows only changed objects across inserted lines |
 | `--inspect-model <file>` | No window: bounds, origin, meshes/triangles, material slots, textures, up axis / unit hints, glTF extensions, warnings, a placement line. Refuses files whose references leave their folder. |
 | `--shot <file>` | Render 30 frames into a **hidden window** (never mapped), save, exit (1600×900 unless `--shot-size`). No hot reload or request polling. |
 | `--shadow <size> <range>` | Override `env shadow.size` / `sun.range` (default `8192 100`; clamped 256–16384 px, 10–2000 m) |
-| `--shadow-camera` / `--shadow-always` | Sun shadow from R3D's camera-fitted map re-rendered when needed / every frame, instead of the static tiles (`r3d-pitfalls.md` §3). A/B and debugging. |
-| `--fog-cache <voxel> <sub>` | **Trade-off, off.** Bake the fog's sun visibility into an 8-bit 3D texture per load (voxel 0.25–8 m, sub³ samples, sub 1–4; patch 8); region from `env fogCache.region` or the content bounds (`r3d-pitfalls.md` §3); outside it the march uses the shadow map |
+| `--shadow-camera` / `--shadow-always` | Sun shadow from R3D's camera-fitted map re-rendered when needed / every frame, instead of the static tiles (see *Sun shadow* in [architecture.md](architecture.md)). A/B and debugging. |
+| `--fog-cache <voxel> <sub>` | **Trade-off, off.** Bake the fog's sun visibility into an 8-bit 3D texture per load (voxel 0.25–8 m, sub³ samples, sub 1–4; patch 8); region from `env fogCache.region` or the content bounds (see *Sun shadow* in [architecture.md](architecture.md)); outside it the march uses the shadow map |
 | `--no-prepass` | No depth pre-pass (patch 6); same image, slower. A/B tests. |
 | `--bench` | Per viewpoint: 60 warmup + 600 measured frames spinning 360°; table + Markdown report in `benchmark/<stamp>_shadow-<size>-<range>.md` (completed runs only) |
 | `--headless` | With `--bench`: hidden window, offscreen 1920×1006, `glFinish` per frame. **Required for automated runs.** ~10% slower than visible; compare headless only with headless. |
@@ -69,9 +46,11 @@ The header comment at the top of `src/main.c` is the source of truth; keep it up
 | `--bench-window <samples>` | With `--bench --headless`: offscreen stand-in for the window (`windowemu.c`; 4 = `--window-msaa`, 0 = today's) with HUD and overlay, resolved like the swap |
 | `--no-profile` | No per-pass GPU table (the profiler is on only under `--bench`) |
 | `--note "text"` | Note at the top of the bench report |
-| `--no-frame-reuse` / `--frame-reuse` | Turn the interactive frame reuse off (`engine.md` §4, "Frame reuse") / on where it is off by default (`--shot`, to prove a reused frame equals a fresh one; `--bench-still`, suffix `_reuse`) |
+| `--no-frame-reuse` / `--frame-reuse` | Turn the interactive frame reuse off ([architecture.md](architecture.md), "Frame reuse") / on where it is off by default (`--shot`, to prove a reused frame equals a fresh one; `--bench-still`, suffix `_reuse`) |
 
-**Designer debug flags** (testing without a visible window):
+## Designer test flags
+
+For testing the designer without a visible window:
 
 | Flag | Meaning |
 |---|---|
@@ -89,11 +68,13 @@ The header comment at the top of `src/main.c` is the source of truth; keep it up
 
 In `--submit`, `--type` and `--classify` text a literal `\n` becomes a new line.
 
-**Environment variables (launcher)**
+## Environment variables
+
+How the game starts Claude Code:
 
 | Variable | Meaning |
 |---|---|
-| `MONOLITH_LAUNCH` | `coordinator` (default: one coordinator session takes the requests from a queue, `docs/design-coordinator.md`, the `coordinator` skill) or `per-request` (a terminal + session per request, as before 2026-10-24). Without `flock` (util-linux): per-request |
+| `MONOLITH_LAUNCH` | `coordinator` (default: one coordinator session takes the requests from a queue, [architecture.md](architecture.md), "Request queue") or `per-request` (a terminal + session per request, as before 2026-10-24). Without `flock` (util-linux): per-request |
 | `MONOLITH_COORDINATOR_MODEL` | The coordinator's model (default `sonnet`); each request's subagent runs on the request's tier model |
 | `MONOLITH_TERMINAL` | Terminal program + optional args (`"kitty --single-instance"`); over `TERMINAL`; else the first of `alacritty`, `kitty`, `foot`, `wezterm`, `xterm` in `PATH` |
 | `MONOLITH_CLAUDE_ARGS` | Extra Claude Code flags (whitespace-split), after the two permission flags and `--model <name>`, on the coordinator's (per-request: each request's) command line; a `--model` here replaces the chosen one (the coordinator's and every request's) |
@@ -107,20 +88,11 @@ In `--submit`, `--type` and `--classify` text a literal `\n` becomes a new line.
 | `MONOLITH_REQUESTS_DIR` | Requests folder instead of `<repo>/requests` (tests only: bundles, queue and lock in a scratch folder, away from a real coordinator) |
 | `MONOLITH_CLOSE_METHOD` | `wm` or `signal` only (tests; default both, WM first) |
 
-**Other variables:** `MONOLITH_CAPTURE` / `MONOLITH_CAPTURE_FRAME` (capture shim output folder / frame, default 3), `MONOLITH_DOWNLOADS` (`fetch_asset.py`, default `~/.cache/monolith/downloads`), `POLY_PIZZA_API_KEY` (or `~/.config/monolith/poly-pizza.key`; never printed), `MONOLITH_STUB_LOG` / `MONOLITH_STUB_OPENED` / `MONOLITH_STUB_RUN` (stub terminal: argv log, one line per "window", run the command; `tools/stub-terminal.sh`), `MONOLITH_STUB_WORK` (stub coordinator's seconds per request), `__GL_SYNC_TO_VBLANK=0` / `vblank_mode=0` (driver vsync off for benches).
+Other variables: `MONOLITH_CAPTURE` / `MONOLITH_CAPTURE_FRAME` (capture shim output folder / frame, default 3), `MONOLITH_DOWNLOADS` (`fetch_asset.py`, default `~/.cache/monolith/downloads`), `POLY_PIZZA_API_KEY` (or `~/.config/monolith/poly-pizza.key`; never printed), `MONOLITH_STUB_LOG` / `MONOLITH_STUB_OPENED` / `MONOLITH_STUB_RUN` (stub terminal: argv log, one line per "window", run the command; `tools/stub-terminal.sh`), `MONOLITH_STUB_WORK` (stub coordinator's seconds per request), `__GL_SYNC_TO_VBLANK=0` / `vblank_mode=0` (driver vsync off for benches).
 
-## Graphics settings (F2, `settings.c`, `settingspanel.c`, runtime `MS_Quality`)
 
-**F2** opens a panel: preset selector, Display / Shadows / Ambient occlusion / Fog / Post / Performance rows, a frame time readout (fps, CPU ms, GPU ms; the profiler runs while it is open), Reset to preset, Close. UP/DOWN/LEFT/RIGHT or the mouse; values that differ from the preset are blue. Heavy changes (shadow map size, AO mode, fog cache, shadow mode/range, preset) apply one frame later behind "applying …"; a new shadow map size re-initialises R3D and reloads the map (~1 s, selection kept); window MSAA at the next start. ESC / F2 close and save.
+## Settings file
 
-**The map stays the source of the look.** Every scene setting is relative to the map's environment: ultra renders exactly the map (pixel-identical, the default), an effect the map turns off stays off. Toggles 1–6 and `--fx` apply on top. Everything that changes the image is in `FrameKey` (the whole `GfxSettings` + R3D's AA mode).
-
-Settings (file keys): Display — `render_scale` 0.5–1, `upscale`, `anti_aliasing` none/fxaa/smaa, `window_msaa`, exposure / brightness / contrast / saturation trims. Shadows — `sun_shadow`, `shadow_size` (map's / 2048–16384), `shadow_range` (map's / 60–300 m), `shadow_softness`, `shadow_mode` tiles/camera/always. Below the map's `shadow.size`, the sun's depth and slope biases are scaled by the texel ratio (`SunShadowMap()`) so low suns get no acne. A range below the fog length fades the shafts early. AO — `ao` full/ssao/lite/baked/off, baked voxel/intensity, SSAO / SSIL parameters. Fog — volumetric fog, `fog_step` (× the map's step), length, fog cache voxel/samples, distance fog. Post — bloom, bloom intensity, SSR, SSGI (off / map's / on). Performance — frame reuse, fps cap (off/monitor/30–240), vsync, depth pre-pass. Costs: `docs/performance.md`.
-
-**Presets** (`MS_QualityPreset`): **ultra** = the map exactly; **high** = AO baked (0.5 m, 0.6) + fog cache 0.5 m; **medium** = high + render scale 0.75, fog step ×2, shadow map 4096; **low** = render scale 0.5, AO off, bloom off, fog cache 0.5 m + step ×2, shadow map 4096. (Default map, headless: 3.17 / 2.07 / 1.32 / 0.77 ms.)
+Settings (file keys): Display — `render_scale` 0.5–1, `upscale`, `anti_aliasing` none/fxaa/smaa, `window_msaa`, exposure / brightness / contrast / saturation trims. Shadows — `sun_shadow`, `shadow_size` (map's / 2048–16384), `shadow_range` (map's / 60–300 m), `shadow_softness`, `shadow_mode` tiles/camera/always. Below the map's `shadow.size`, the sun's depth and slope biases are scaled by the texel ratio (`SunShadowMap()`) so low suns get no acne. A range below the fog length fades the shafts early. AO — `ao` full/ssao/lite/baked/off, baked voxel/intensity, SSAO / SSIL parameters. Fog — volumetric fog, `fog_step` (× the map's step), length, fog cache voxel/samples, distance fog. Post — bloom, bloom intensity, SSR, SSGI (off / map's / on). Performance — frame reuse, fps cap (off/monitor/30–240), vsync, depth pre-pass. 
 
 **The settings file** is `key = value` (`preset = …` sets every scene setting, later keys override). Only the interactive game reads the default file; **`--shot`, `--bench`, `--dump-*`, `--export` and `--classify` never do** unless `--settings` names one, so verification stays deterministic. Command-line flags override for one run and are never saved (panel changes are written field by field). Unknown keys and bad values are logged and ignored.
-
-**In your own program:** `MS_QualityPreset(level)`, `MS_ApplyQuality(scene, &q)` after every `MS_ApplyEnvironment`, then `MS_ApplyRenderResolution`; `q.shadowSize` goes to `MS_LoadOptions.shadowSizeOverride`. `examples/01_minimal --quality medium` renders the same pixels as `monolith --quality medium`.
-
-Vsync is **off** by default and rendered frames uncapped (settings change that in the interactive game only); reused frames sleep to the monitor refresh rate.

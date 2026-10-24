@@ -2,13 +2,13 @@
 //
 // A submitted request becomes a self-contained folder requests/<YYYY-MM-DD_HHMMSS>_<slug>/
 // (view.png, view-marked.png, region-<n>.png per screen region, request.md, request.json;
-// bundle format 2, docs/design-v2.md section 5). The model is chosen per request (fast /
+// bundle format 2, .claude/skills/map-request/bundle-reference.md). The model is chosen per request (fast /
 // default / heavy tier, see "Model choice" below) and recorded in request.md / request.json.
 // The user's prompt never goes on a command line: it only lives in the bundle, and every
 // process is started from an argv array (no shell).
 //
 // Two ways to hand the bundle to Claude Code (MONOLITH_LAUNCH):
-//   - coordinator (default; region "Coordinator and queue", docs/design-coordinator.md): the
+//   - coordinator (default; region "Coordinator and queue", docs/architecture.md section 5): the
 //     game writes requests/<id>/state = "queued" as the bundle's last file. Unless a
 //     coordinator holds requests/.coordinator/lock, one terminal titled "monolith-claude:
 //     coordinator" runs a small /bin/sh wrapper that holds the lock (flock) around `claude
@@ -1044,7 +1044,7 @@ static bool WriteRequestMd(const char *path, const Bundle *B)
     fprintf(f, "Model: %s (%s tier: %s)\n\n", B->model.name, ModelTierName(B->model.tier), B->model.reason);
     fprintf(f, "Request `%s`, submitted %s from the monolith map designer. Bundle format 2: besides the "
                "crosshair hit and the selected objects it may contain **screen regions** the developer "
-               "dragged over the frame (see *Screen regions* below and `docs/knowledge/request-bundle.md`).\n\n", B->id, B->created);
+               "dragged over the frame (see *Screen regions* below and `.claude/skills/map-request/bundle-reference.md`).\n\n", B->id, B->created);
     fprintf(f, "**First** read `CLAUDE.md` and the map-request skill `.claude/skills/map-request/SKILL.md` in the repository root (if they "
                "are not loaded already); they explain the workflow, the map format and how to verify an edit. "
                "Then carry out the request below.\n\n"
@@ -1244,7 +1244,7 @@ static void JsonMaterial(FILE *f, MS_ObjRef o)
     else fputs("null", f);
 }
 
-// A model instance (docs/design-v2.md 5): file, transform as written, the resulting
+// A model instance (.claude/skills/map-request/bundle-reference.md): file, transform as written, the resulting
 // translation, origin, collision, shadow, material overrides
 static void JsonModel(FILE *f, int index)
 {
@@ -2425,7 +2425,7 @@ void LauncherCloseOnExit(void)
 // ======================================================================================
 // #region Coordinator and queue (MONOLITH_LAUNCH=coordinator, the default)
 // ======================================================================================
-// docs/design-coordinator.md. A submitted bundle gets requests/<id>/state = "queued <time>"
+// docs/architecture.md section 5. A submitted bundle gets requests/<id>/state = "queued <time>"
 // as its last file; then, unless requests/.coordinator/lock is held, one terminal titled
 // "monolith-claude: coordinator" runs COORDINATOR_WRAPPER + claude [permission flags]
 // --model $MONOLITH_COORDINATOR_MODEL (default sonnet) [MONOLITH_CLAUDE_ARGS] "<fixed

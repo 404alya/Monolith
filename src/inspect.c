@@ -14,7 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define TRI_BUDGET      50000   // project default per model (docs/design-v2.md 6)
+#define TRI_BUDGET      50000   // project default per model (.claude/skills/assets-and-licences)
 #define TEX_BUDGET      2048    // px
 
 // The post-processing R3D's importer always applies (submodules/r3d/src/r3d_importer.c), so

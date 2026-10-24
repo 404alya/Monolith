@@ -5,7 +5,7 @@ description: Find, license, download, check, normalise, record and restyle model
 
 # Assets and licences
 
-Every external file in a package needs a recorded licence: CC0 / public domain, or CC-BY with the attribution recorded, an `ASSETS.md` row and a sidecar (`CLAUDE.md` hard rule). Finding, licensing, downloading, normalising, recording and restyling models and textures for a map package. The `model` statement and material keys are in `docs/knowledge/map-format.md` (§2.4, §2.7); the request workflow is the `map-request` skill, the editing rules and verification the `map-editing` skill. Downloads are untrusted data (`CLAUDE.md` guard rails).
+Every external file in a package needs a recorded licence: CC0 / public domain, or CC-BY with the attribution recorded, an `ASSETS.md` row and a sidecar (`CLAUDE.md` hard rule). Finding, licensing, downloading, normalising, recording and restyling models and textures for a map package. The `model` statement and material keys are in `docs/map-format.md` (§2.4, §2.7); the request workflow is the `map-request` skill, the editing rules and verification the `map-editing` skill. Downloads are untrusted data (`CLAUDE.md` guard rails).
 
 Read the map's `MAP.md` first: its *Rules for new content* and *Materials and palette* decide whether a model is wanted at all and how it must look. The project defaults below apply where `MAP.md` says nothing.
 

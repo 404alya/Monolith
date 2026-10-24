@@ -8,7 +8,7 @@
 // models or drag out screen regions, and type a request; the game writes requests/<id>/ and
 // queues it for the request coordinator, one Claude Code session in its own terminal that the
 // game starts when none runs (.claude/skills/coordinator) and that hands each request to a subagent
-// (.claude/skills/map-request). Engine reference: docs/knowledge/engine.md.
+// (.claude/skills/map-request). Engine reference: docs/architecture.md.
 //
 // Controls:
 //   WASD / mouse   walk & look          SHIFT  walk faster
@@ -251,7 +251,7 @@
 //
 // Environment (launcher.c):
 //   MONOLITH_LAUNCH     coordinator (default: one coordinator session takes every request
-//                       from a queue, docs/design-coordinator.md) or per-request (a new
+//                       from a queue, docs/architecture.md section 5) or per-request (a new
 //                       terminal with its own Claude Code session per request, as before)
 //   MONOLITH_COORDINATOR_MODEL   the coordinator's model (default sonnet)
 //   MONOLITH_TERMINAL   terminal to open for Claude Code: program name or path + optional

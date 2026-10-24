@@ -1,4 +1,4 @@
-// --import <project dir> <map name>: an import request (docs/design-v2.md section 5,
+// --import <project dir> <map name>: an import request (.claude/skills/map-request/bundle-reference.md,
 // the import-request skill, .claude/skills/import-request/SKILL.md)
 //
 // 1. Creates the empty package maps/<map name>/ (or the folder a path names) through the

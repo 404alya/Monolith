@@ -10,7 +10,7 @@
 #define REGION_SAMPLES  4096    // rays per region at most (a regular grid, see DesignerAnalyzeRegion):
                                 // the analysis cost, not a storage limit
 
-// Objects are MS_ObjRef (runtime/monolith_scene.h, docs/design-v2.md section 5): a box
+// Objects are MS_ObjRef (runtime/monolith_scene.h, .claude/skills/map-request/bundle-reference.md): a box
 // (index into scene->boxes) or a model instance (index into scene->models).
 
 // What the crosshair points at. obj.kind MS_OBJ_NONE = nothing hit (sky).

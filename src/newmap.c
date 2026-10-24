@@ -152,7 +152,7 @@ bool NewMapIn(const char *dir, const char *name, const char *mapsDir)
     fprintf(f,
         "monolith 2\n"
         "# %s.map -- created by `monolith --new-map %s`. Edit while the game runs: it reloads on save.\n"
-        "# Format: the header comment of runtime/monolith_scene.c (and docs/knowledge/map-format.md). The\n"
+        "# Format: the header comment of runtime/monolith_scene.c (and docs/map-format.md). The\n"
         "# design brief is MAP.md next to this file: read it first, and write it before building.\n"
         "# Paths in this file are relative to this folder.\n"
         "\n"

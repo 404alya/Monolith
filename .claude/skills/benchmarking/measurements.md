@@ -1,6 +1,6 @@
-# monolith: performance notes and measurements
+# Measurements and performance history
 
-Measurement history and the reasoning behind the engine's caches and trade-off knobs. The rules that follow from it are in `docs/knowledge/r3d-pitfalls.md` and the `benchmarking` skill; this file holds the numbers, how they were measured and the ideas not taken. Numbers are from the dev machine (RTX 4050 Laptop, driver 615.71), default map, unless noted. GPU clock states swing results by ~10%: compare rows of one session only.
+Measurement history and the reasoning behind the engine's caches and trade-off knobs. The rules that follow from it are in `.claude/skills/lighting-fog-shadows/r3d-pitfalls.md` and the `benchmarking` skill; this file holds the numbers, how they were measured and the ideas not taken. Numbers are from the dev machine (RTX 4050 Laptop, driver 615.71), default map, unless noted. GPU clock states swing results by ~10%: compare rows of one session only.
 
 ## R3D build type
 
@@ -105,7 +105,7 @@ Headless `--bench`, 1920×1006, spinning, 3 interleaved rounds: ultra 3.17 ms, h
 
 Single-knob costs behind the settings panel (default 3.59 ms in that session): render scale 0.75 −39% / 0.5 −55%; shadow map 8192 = 3.7 cm texels, 256 MB VRAM, 4096 = 7.4 cm, 64 MB; AO baked −27%, off ~−0.9 ms; fog cache 0.5 m + step ×2 −16%; bloom off −6%; window MSAA ~0.1 ms.
 
-## Shadowed undersides (`docs/knowledge/r3d-pitfalls.md` §5)
+## Shadowed undersides (`.claude/skills/lighting-fog-shadows/r3d-pitfalls.md` §5)
 
 Measured with `--off` on the default map (2026-10-10). Before the ambient-only sky, with the sun off (`--off 6`) soffits and the hall ceiling were exactly (0,0,0), and warm volumetric in-scatter on them came out maroon, e.g. (19,0,0), after AgX, contrast and 0.8 saturation. SSAO and SSIL each changed whole-frame mean brightness by < 0.5/255 in every test view. SSIL ≈ 0.5 ms and SSAO ≈ 0.2 ms GPU; net, SSIL darkens (its own 5 m AO term outweighs its bounce). With both off the largest change in the 26 verification shots is the darkening band along wall feet in close shaded views (view 1: up to +37/255 in that band, +1.35/255 mean); views 2/3/5 and the steep view < 0.5/255 mean.
 

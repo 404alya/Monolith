@@ -11,7 +11,7 @@ monolith is an **AI-assisted map designer** for 3D levels of any style, written 
 
 ## Skills: load the one for your task first
 
-The workflows are project skills in `.claude/skills/<name>/SKILL.md`. They load when the task matches; if one doesn't, load it with the Skill tool or Read its file. Reference material they share is in `docs/knowledge/` (index: its `README.md`).
+The workflows are project skills in `.claude/skills/<name>/SKILL.md`. They load when the task matches; if one doesn't, load it with the Skill tool or Read its file. Larger reference files live next to the skill that owns them (e.g. `lighting-fog-shadows/r3d-pitfalls.md`); the human documentation is `README.md` and `docs/` (user guide, command line, map format, export, architecture), which the skills link to.
 
 | Skill | Use it for |
 |---|---|
@@ -20,13 +20,12 @@ The workflows are project skills in `.claude/skills/<name>/SKILL.md`. They load 
 | `map-editing` | any change to a map package, by hand or for a request: rules and verification |
 | `assets-and-licences` | a model or texture: sources, licences, download, Blender, `ASSETS.md`, restyling |
 | `engine-code` | code: C, the runtime, R3D, shaders outside a package, build, tools |
-| `lighting-fog-shadows` | lighting, shadows, fog, ambient, exposure, black surfaces (with `docs/knowledge/r3d-pitfalls.md`) |
+| `lighting-fog-shadows` | lighting, shadows, fog, ambient, exposure, black surfaces (with `.claude/skills/lighting-fog-shadows/r3d-pitfalls.md`) |
 | `benchmarking` | any `--bench` run or performance claim |
 | `leak-check` | `tools/leakcheck.sh`, after every code change |
 | `large-engine-work` | engine work across modules or with several agents; `/task-prompt` drafts a task prompt |
+| `project-history` | why something is built the way it is, before changing a rule or design; old bundles or notes naming files that no longer exist |
 | `coordinator` | only if your start prompt says you are the request coordinator |
-
-Why things are the way they are: `docs/knowledge/history.md`, `docs/design-v2.md`, `docs/design-coordinator.md`, `docs/performance.md`.
 
 ## Hard rules
 
@@ -42,4 +41,4 @@ Why things are the way they are: `docs/knowledge/history.md`, `docs/design-v2.md
 - **Never delete with `rm`** (or `rmdir`, `find -delete`, `unlink`): every `rm` needs the developer's approval. Move files to the trash instead with `gio trash <path>…` (works for folders too; the developer can restore them). This includes test bundles in `requests/`, scratch shots and temporary files in the repo.
 - **Don't commit unless asked.** Never commit `build/`, screenshots, `benchmark/`, `requests/` or `export/`.
 
-**Keep this file short and map-agnostic:** it is loaded into every session. Rules go here only if every session needs them. Workflows go into a skill, reference material into `docs/knowledge/`, measurement history into `docs/performance.md`. Never name a map here or in a skill: say "every map in `maps/`"; anything about one map goes into that map's `MAP.md`. Project knowledge goes into the repo, not into a personal memory: teammates don't have yours. Machine-specific settings (tool paths such as `BLENDER`) go into your own gitignored `.claude/settings.local.json` (`"env": {…}`).
+**Keep this file short and map-agnostic:** it is loaded into every session. Rules go here only if every session needs them. Workflows, lessons and AI-facing reference go into a skill (or a file in its folder); `docs/` and `README.md` are written for people: keep instructions to Claude out of them. Measurements go into `.claude/skills/benchmarking/measurements.md`. Never name a map here or in a skill: say "every map in `maps/`"; anything about one map goes into that map's `MAP.md`. Project knowledge goes into the repo, not into a personal memory: teammates don't have yours. Machine-specific settings (tool paths such as `BLENDER`) go into your own gitignored `.claude/settings.local.json` (`"env": {…}`).

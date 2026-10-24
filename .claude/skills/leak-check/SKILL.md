@@ -5,7 +5,7 @@ description: Run and read monolith's leak check (tools/leakcheck.sh, LeakSanitiz
 
 # Leak check
 
-**The rule** (`CLAUDE.md`): after any change to code (C, shaders, build), `tools/leakcheck.sh` must end with `leakcheck: OK: zero leaks of ours` before the change counts as done. Map-only edits (including a package's own shaders) skip it; check a changed shader with `glslangValidator` instead (`docs/knowledge/r3d-pitfalls.md` §4). After larger changes also run `tools/leakcheck.sh --asan`.
+**The rule** (`CLAUDE.md`): after any change to code (C, shaders, build), `tools/leakcheck.sh` must end with `leakcheck: OK: zero leaks of ours` before the change counts as done. Map-only edits (including a package's own shaders) skip it; check a changed shader with `glslangValidator` instead (`.claude/skills/lighting-fog-shadows/r3d-pitfalls.md` §4). After larger changes also run `tools/leakcheck.sh --asan`.
 
 ```bash
 ./build.sh lsan                 # -O1 -g + LeakSanitizer -> build/linux-lsan/; examples: examples/build.sh lsan
