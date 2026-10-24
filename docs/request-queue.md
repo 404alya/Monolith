@@ -31,7 +31,7 @@ Transitions: `queued → claimed → (question ↔ claimed) → done | failed | 
 **`requests/.coordinator/`** (dot folder: invisible to `ls`-based tools such as the leak check's cleanup):
 - `lock`: held (Linux: `flock(2)`) by the wrapper around the coordinator's `claude` for as long as it runs. "Is a coordinator running?" = "is the lock held?"; the kernel drops it when the process dies, however it dies.
 - `seen`: the events the watcher has reported in this coordinator's life (`queued <id>`, `cancel <id>`); `start` empties it.
-- `log`: append-only, one line per event: `<time with ms> <event> <id> [package]`. The tests read their timestamps from it; the developer can `tail -f` it.
+- `log`: append-only, one line per event: `<time with ms> <event> <id> [package]` (`start` lines carry the coordinator's pid instead of an id). The tests read their timestamps from it; the developer can `tail -f` it.
 
 ## 3. Handoff and waking
 

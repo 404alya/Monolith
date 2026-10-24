@@ -33,14 +33,6 @@ typedef struct {
     RenderTexture target;   // zero = the window
 } Shot;
 
-static inline Shot ShotParse(int argc, char **argv)
-{
-    Shot s = { 0 };
-    for (int i = 1; i + 1 < argc; i++)
-        if (strcmp(argv[i], "--shot") == 0) s.path = argv[i + 1];
-    return s;
-}
-
 // True in an AI agent's shell (Claude Code sets CLAUDECODE=1, other agents AI_AGENT), where an
 // example may only run with --shot: a visible window would land on the developer's screen.
 // MONOLITH_ALLOW_WINDOW=1 lets a person open it anyway.
@@ -51,13 +43,23 @@ static inline bool ShotAgentShell(void)
     return agent && !(allow && allow[0] && strcmp(allow, "0") != 0);
 }
 
-static inline void ShotInitWindow(const Shot *s, int width, int height, const char *title)
+// Parses --shot, and refuses (exit 1) an interactive run in an AI agent's shell. Call it
+// first, before anything is loaded.
+static inline Shot ShotParse(int argc, char **argv)
 {
-    if (!s->path && ShotAgentShell()) {
+    Shot s = { 0 };
+    for (int i = 1; i + 1 < argc; i++)
+        if (strcmp(argv[i], "--shot") == 0) s.path = argv[i + 1];
+    if (!s.path && ShotAgentShell()) {
         fprintf(stderr, "refusing to open a window from an AI agent's shell: use --shot <file> "
                         "(or set MONOLITH_ALLOW_WINDOW=1)\n");
         exit(1);
     }
+    return s;
+}
+
+static inline void ShotInitWindow(const Shot *s, int width, int height, const char *title)
+{
     SetConfigFlags(FLAG_MSAA_4X_HINT | (s->path ? FLAG_WINDOW_HIDDEN : FLAG_WINDOW_RESIZABLE));
     InitWindow(width, height, s->path ? "monolith-shot" : title);
     if (!s->path) SetTargetFPS(60);

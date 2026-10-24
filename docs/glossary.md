@@ -2,7 +2,7 @@
 
 Terms used across these pages, in alphabetical order.
 
-**AO volume, baked AO** (`--ao baked`): ambient occlusion computed once per map load into a 3D texture around the boxes, instead of per frame (SSAO / SSIL). Cheaper and stable when the camera turns; a quality trade-off in the high preset.
+**AO volume, baked AO** (`--ao baked`): ambient occlusion computed once per map load into a 3D texture around the boxes, instead of per frame (SSAO / SSIL). Cheaper and stable when the camera turns; a quality trade-off used by the high and medium presets.
 
 **Brief, design brief:** a map's `MAP.md`: its style, scale, materials, lighting, rules for new content and named groups. Every request on the map is carried out in its style ([map-format.md](map-format.md) §1.2).
 
@@ -30,7 +30,7 @@ Terms used across these pages, in alphabetical order.
 
 **Regions, snip mode:** rectangles dragged over the screen (key C in spectator mode) to point at an area rather than an object.
 
-**Shadow tiles:** the sun's shadow map rendered once per map load for fixed tiles of the world, chosen by the camera position, instead of every frame. Turning the camera never re-renders them (`--shadow-camera` switches back to R3D's per-view shadow map).
+**Shadow tiles:** the sun's shadow map rendered for fixed tiles of the world and then only sampled, instead of every frame. The two tiles around the map's play area are drawn once per load; moving far away draws a new one about every 90 m. Which tile is used depends only on the camera position, so turning never re-renders them (`--shadow-camera` switches back to R3D's per-view shadow map).
 
 **Skill:** a Claude Code instruction file in `.claude/skills/<name>/SKILL.md`. Claude loads the matching one for its task (map requests, engine code, benchmarking, …).
 

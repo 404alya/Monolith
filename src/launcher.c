@@ -2895,4 +2895,13 @@ const char *LauncherRootDir(void)
     return rootDir;
 }
 
+void LauncherScrubEnv(void)
+{
+#ifdef _WIN32
+    _putenv("MONOLITH_ALLOW_WINDOW=");
+#else
+    unsetenv("MONOLITH_ALLOW_WINDOW");
+#endif
+}
+
 // #endregion

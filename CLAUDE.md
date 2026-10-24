@@ -15,7 +15,7 @@ The workflows are project skills in `.claude/skills/<name>/SKILL.md`. They load 
 
 | Skill | Use it for |
 |---|---|
-| `map-request` | a request bundle `requests/<id>/request.md` (also: an old bundle that says to read `AI-MAP-TOOL.md`) |
+| `map-request` | a request bundle `requests/<id>/request.md` (also: an old bundle that says to read `AI-MAP-TOOL.md`); its first section lists the files to read before any edit |
 | `import-request` | a bundle with `kind: "import"` (with `map-request`) |
 | `map-editing` | any change to a map package, by hand or for a request: rules and verification |
 | `assets-and-licences` | a model or texture: sources, licences, download, Blender, `ASSETS.md`, restyling |

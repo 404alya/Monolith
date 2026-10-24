@@ -1011,6 +1011,7 @@ static int Run(int argc, char **argv)
                         "  --bench --headless; a person who wants the window from this shell sets MONOLITH_ALLOW_WINDOW=1.\n");
         return 1;
     }
+    LauncherScrubEnv();     // the sessions this game starts must not inherit the override
 
     // --- Graphics settings (settings.c). The interactive game reads the user's settings file
     // (and the panel saves it); automated runs (--shot, --bench, --dump-*, --export,

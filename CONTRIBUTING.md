@@ -4,7 +4,7 @@ The rules for changing monolith, whether you write the change yourself or with C
 
 ## A code change is done when
 
-1. **Both targets build with zero warnings:** `./build.sh` and `./build.sh --win`, plus `examples/build.sh` (and `--win`) when the runtime or an example changed. Changed shaders pass `glslangValidator`. A change to `runtime/` also builds without `MONOLITH_EDITOR` (an `--export` package builds it that way) and without `MS_PATCHED_R3D`.
+1. **Both targets build with zero warnings:** `./build.sh` and `./build.sh --win`, plus `examples/build.sh` (and `--win`) when the runtime or an example changed. Changed shaders pass `glslangValidator` (Arch: `glslang`; Debian / Ubuntu: `glslang-tools`). A change to `runtime/` also builds without `MONOLITH_EDITOR` (an `--export` package builds it that way) and without `MS_PATCHED_R3D`.
 2. **The leak check passes:** `tools/leakcheck.sh` ends with `leakcheck: OK: zero leaks of ours` (about 1.5 minutes, hidden windows only). After larger changes also `tools/leakcheck.sh --asan`.
 3. **Every map looks the same**, unless changing the look is the point of the change: identical box lists (`--dump-boxes`) and pixel-identical `--shot` images of each map's viewpoints, before vs. after. A change that alters the look is presented as a trade-off (behind a setting, with before / after images) and needs the maintainer's approval.
 4. **The tests that cover it pass:** `tools/test-coordinator.sh` for the launcher and request queue; the unit check in `tests/unit/wincmd_test.c` (its first line shows how to build it) for the Windows command line; `--reload-test`, `--shot` and the dump flags for the loader and renderer ([command-line.md](docs/command-line.md)).

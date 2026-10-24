@@ -57,6 +57,11 @@ bool LauncherStartBundle(const char *id, const char *slug, const char *claudePro
 const char *LauncherRequestsDir(void);
 const char *LauncherRootDir(void);
 
+// Removes MONOLITH_ALLOW_WINDOW from this process's environment, so the Claude Code sessions
+// the launcher starts (agents, whose shells set CLAUDECODE) never inherit the override of the
+// game's window guard. Call once, after main() has read it and before any launch.
+void LauncherScrubEnv(void);
+
 // Polls the open requests for result.md (cheap; call every frame, it rate-limits itself)
 void LauncherUpdate(float dt);
 

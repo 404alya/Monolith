@@ -4,7 +4,7 @@
 
 **The first `./build.sh` fails in R3D, raylib or assimp.** The full log is in `submodules/r3d/build-linux/monolith-build.log` (Windows: `build-mingw/`). Usually a missing package: see the install lines in the [README](../README.md). After installing it, run `./build.sh` again; to force a fresh configure, move `submodules/r3d/build-linux` out of the way.
 
-**The Linux binary doesn't start on another machine.** It needs glibc 2.34 or newer and `libGL.so.1`; everything else is linked in. Check with `readelf -d build/linux/monolith | grep NEEDED`.
+**The Linux binary doesn't start on another machine.** It needs glibc 2.34 or newer, `libGL.so.1`, `libgcc_s.so.1`, and the X11 client libraries (libX11, libXrandr, libXinerama, libXcursor, libXi), which GLFW loads at start-up; `readelf -d build/linux/monolith | grep NEEDED` lists only the first ones.
 
 ## Starting
 
@@ -24,7 +24,7 @@
 
 **No terminal opens.** The game uses `MONOLITH_TERMINAL`, else `TERMINAL`, else the first of alacritty, kitty, foot, wezterm, xterm. kitty with `--single-instance` and wezterm's mux exit at once, so the game can only close those windows on i3 / sway.
 
-**A request stays `queued`.** The coordinator runs requests on the same map one at a time and code requests alone, at most three at once; a request on a map whose earlier request is asking a question (`[?]` in the HUD) waits until you answer it in the coordinator terminal. If the coordinator's terminal was closed, the next submit starts a new one, which picks up the queue. `requests/.coordinator/log` shows every queue event.
+**A request stays `queued`.** The coordinator runs requests on the same map one at a time and code requests alone, at most three at once; a request on a map whose earlier request is asking a question (`[?]` in the HUD) waits until you answer it in the coordinator terminal. If the coordinator's terminal was closed, the next submit starts a new one, which picks up the queue. `requests/.coordinator/log` shows what the coordinator did (starts, claims, state changes, requeues); a request that never appears there was never claimed.
 
 **The coordinator asks for approval of every command.** The working folder has no `CLAUDE.md` (a copied build folder, Windows), or `MONOLITH_CLAUDE_SAFE` is set. Run the game from a repository checkout to work without prompts.
 
