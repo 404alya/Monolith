@@ -3356,7 +3356,7 @@ static bool BuildModelGroups(SceneData *d, char *err, int errSize)
     free(tmp);
 
     // Instances sorted by (group, cell): each group's buffer holds its cells one after the other
-    CellItem *items = malloc(sizeof(CellItem) * d->modelCount);
+    CellItem *items = malloc(sizeof(CellItem) * (d->modelCount > 0 ? d->modelCount : 1));
     if (!items) {
         free(groupOf);
         snprintf(err, errSize, "%s: out of memory", d->path);
