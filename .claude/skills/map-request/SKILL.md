@@ -7,6 +7,14 @@ description: Carry out one in-game map request from the monolith map designer �
 
 The workflow for the session that carries out one request (`requests/<id>/request.md`): normally a **subagent of the request coordinator** (the `coordinator` skill), or, in per-request mode, a Claude Code session in its own terminal. How the request reaches you, how to find what the developer means, and what to report. The guard rails in `CLAUDE.md` hold without exception: you run without approval prompts.
 
+**Read before you edit, from disk, every time** (a copy of `CLAUDE.md` or a skill already in your context may be from an older session; skipping these is how requests go wrong):
+1. `CLAUDE.md`;
+2. the bundle's `request.md`, and `view-marked.png` (as an image);
+3. `.claude/skills/map-request/bundle-reference.md` (what the fields mean);
+4. the map's `MAP.md`, **all of it** (style, scale, materials, rules, groups);
+5. `docs/map-format.md` (what each statement and number means: never infer the format from existing lines);
+6. the `map-editing` skill (`.claude/skills/map-editing/SKILL.md`), and `assets-and-licences` if a model or texture is involved.
+
 | Read | When |
 |---|---|
 | the map's `MAP.md` | every request: the map's own style, scale, materials, lighting, rules, groups |
@@ -35,7 +43,7 @@ You are the session doing one request. Your job is to change the map (rarely the
 4. You:
    1. read `request.md`, and `.claude/skills/map-request/bundle-reference.md` for what its sections and fields mean (object indices shift, the `Warning` line, copy indices, regions, format-1 bundles);
    2. **read the map's `MAP.md`** (the *Design brief* section of `request.md` names it; format-1 bundles don't: then it is `MAP.md` next to the map file). It decides what new content looks like and how it is built. If it is missing, empty or still the unfilled `--new-map` template (placeholders in parentheses), **write it first** (`docs/map-format.md` §1.2), then build;
-   3. **read `docs/map-format.md`** (the map format: you need it for every edit; skip it only if you already read it in this session), and load the **`map-editing`** skill (`.claude/skills/map-editing/SKILL.md`: coordinates and scale, editing rules, verification); load **`assets-and-licences`** (`.claude/skills/assets-and-licences/SKILL.md`) too if the request needs a model or a texture;
+   3. **read `docs/map-format.md`** (the map format: you need it for every edit; skip it only if you already read it from disk in this request), and load the **`map-editing`** skill (`.claude/skills/map-editing/SKILL.md`: coordinates and scale, editing rules, verification); load **`assets-and-licences`** (`.claude/skills/assets-and-licences/SKILL.md`) too if the request needs a model or a texture;
    4. look at the images, locate the target (§3), edit the map and verify the edit (`map-editing`), and write **`requests/<id>/result.md`** (§4).
 5. The game polls the bundle twice a second. Its HUD shows the request as `queued`, `running`, `[?]` (a question waits for the developer) and, when `result.md` appears, `[done] <slug>: <first line of result.md>` (or `[failed]` / `[cancelled]`). The map change is already visible through hot reload. **R** flies the developer's camera back to where the request was made.
 

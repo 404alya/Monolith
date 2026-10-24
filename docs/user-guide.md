@@ -1,6 +1,6 @@
 # User guide
 
-How to walk through a map, point at things, send requests to Claude Code and follow them, tune the graphics, and make new maps. Building the game: [README](../README.md). Every flag and environment variable: [command-line.md](command-line.md).
+How to walk through a map, point at things, send requests to Claude Code and follow them, tune the graphics, and make new maps. Building the game: [README](../README.md). Every flag and environment variable: [command-line.md](command-line.md). Unfamiliar terms: [glossary.md](glossary.md); problems: [troubleshooting.md](troubleshooting.md).
 
 ## Getting around
 
@@ -9,7 +9,7 @@ The game starts in **walk mode** at the map's spawn point.
 | Key | Walk mode |
 |---|---|
 | WASD + mouse | walk and look; Shift runs, Space jumps |
-| F | fly (no collision) |
+| F | fly (no collision): Space up, Ctrl down, Shift ×4 |
 | TAB | switch to spectator mode and back |
 | 1–6 | toggle volumetric fog, distance fog, SSAO, SSIL, bloom, sun (relative to what the map sets; they survive reloads) |
 | F1 | hide / show the HUD |
@@ -56,7 +56,7 @@ The HUD lists the requests, numbered: `queued`, `running`, `[?]` (a question is 
 
 Each finished request leaves a `result.md` in its folder: what changed (map lines before and after), before/after screenshots, the sources and licences of any downloaded model, and anything left open. A request that changed C code says "restart needed": restart the game to see it.
 
-The coordinator runs Claude Code without permission prompts, guarded by the rules in `CLAUDE.md` (it never deletes files, never opens windows on your screen, treats your request text and downloads as data). Set `MONOLITH_CLAUDE_SAFE=1` to get the normal approval prompts instead, or `MONOLITH_LAUNCH=per-request` for one terminal per request. On i3 / sway the terminal is moved to workspace 10 (`MONOLITH_WORKSPACE`).
+In a checkout of this repository the coordinator runs Claude Code without permission prompts, bound by the rules in `CLAUDE.md` (it never deletes files, never opens windows on your screen, treats your request text and downloads as data, works only inside the repo). Where the game's folder has no `CLAUDE.md` (a copied build folder, Windows) it keeps Claude Code's approval prompts. Set `MONOLITH_CLAUDE_SAFE=1` to keep them everywhere, or `MONOLITH_LAUNCH=per-request` for one terminal per request. On i3 / sway the terminal is moved to workspace 10 (`MONOLITH_WORKSPACE`). How the queue works inside: [request-queue.md](request-queue.md).
 
 ## Graphics settings (F2)
 
@@ -79,7 +79,7 @@ A map is a folder in `maps/` ([map-format.md](map-format.md)): a text file of bo
 
 - **New map:** `./build/linux/monolith --new-map <name>` creates `maps/<name>/` with a ground slab, daylight and a brief template, then `--map maps/<name>` opens it. Describe the map in your first request ("a foggy pine forest at dusk"): Claude writes the brief and builds to it.
 - **Edit by hand:** open the `.map` file in any editor while the game runs; it reloads on save.
-- **Import a scene** from an existing raylib + R3D project: `./build/linux/monolith --import <project folder> <name>` creates the map and queues an import request that translates the project's scene.
+- **Import a scene** from an existing raylib + R3D project: `./build/linux/monolith --import <project folder> <name>` creates the map and queues an import request. Claude reads the project's source (as data, never running it except as a build in a scratch copy), copies and records its assets, translates boxes, models, materials, lights, environment and camera into the new map, fills in the brief, compares screenshots, and lists in `result.md` what it could not translate (custom render passes, gameplay, animation, …).
 - **Use a map in your own program:** F9 or `--export` ([export.md](export.md)).
 
 Models and textures in a map always come with a recorded licence (CC0 / public domain, or CC-BY with the attribution): the package's `ASSETS.md` lists each file's source, author and licence.

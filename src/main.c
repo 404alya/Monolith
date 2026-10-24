@@ -116,7 +116,8 @@
 //                  images and numbers stay deterministic
 //   --no-settings  neither read nor save a settings file
 //   --settings-set key=value   change one setting as if in the panel (repeatable, after every
-//                  other flag): applies to this run and is saved to the settings file. Keys = the
+//                  other flag): applies to this run and is saved to the settings file (in
+//                  --shot / --dump-* / --bench runs only with --settings <file>). Keys = the
 //                  file's (settings.c), e.g. preset=medium, render_scale=0.75, ao=baked
 //   --settings-change key=value   with --shot: after 10 frames, apply this change through the
 //                  panel's live path (repeatable; shadow_size restarts the renderer). The shot
@@ -182,7 +183,8 @@
 //                  exit without opening a window (for checking that edits to the loader
 //                  or the map keep the exact box list). Any map that fails to parse (with
 //                  or without this flag) prints file:line: message and exits with status 1.
-//                  Model files are only checked for existence here (no window, no GPU)
+//                  Model files are imported on the CPU (a missing, truncated or unreadable
+//                  one fails), but nothing reaches the GPU (no window)
 //   --dump-scene <file>   like --dump-boxes, plus model files, model instances (transform and
 //                  world bounds as hex floats), model colliders, materials and lights
 //                  (format: src/dumpscene.c). Maps with models load them in a hidden window
@@ -251,7 +253,7 @@
 //
 // Environment (launcher.c):
 //   MONOLITH_LAUNCH     coordinator (default: one coordinator session takes every request
-//                       from a queue, docs/architecture.md section 5) or per-request (a new
+//                       from a queue, docs/request-queue.md) or per-request (a new
 //                       terminal with its own Claude Code session per request, as before)
 //   MONOLITH_COORDINATOR_MODEL   the coordinator's model (default sonnet)
 //   MONOLITH_TERMINAL   terminal to open for Claude Code: program name or path + optional
@@ -268,7 +270,10 @@
 //                       opus). The tier is chosen per request from the prompt and its
 //                       context; a leading @fast / @default / @heavy (or @haiku / @sonnet /
 //                       @opus) in the prompt picks it and is stripped from the bundle's prompt
-//   MONOLITH_CLAUDE_SAFE=1   drop those two permission flags
+//   MONOLITH_CLAUDE_SAFE=1   drop those two permission flags (also dropped when the working
+//                       folder has no CLAUDE.md)
+//   MONOLITH_ALLOW_WINDOW=1   open the game window even in an AI agent's shell (CLAUDECODE or
+//                       AI_AGENT set), where it otherwise refuses every mode that would show it
 //   MONOLITH_WORKSPACE  i3/sway workspace for the terminal (default 10, empty = don't move)
 //   MONOLITH_CLOSE_ON_EXIT=1   close the terminals of finished requests when the game quits
 //                       (coordinator mode: the coordinator, if none of this run's requests
@@ -632,6 +637,20 @@ static void FreeMainHeap(void)
 
 static int Run(int argc, char **argv);
 
+// True when this process runs in an AI agent's shell: Claude Code sets CLAUDECODE=1 in the
+// shells it starts, other agents AI_AGENT. Such runs must never open the game window on the
+// developer's screen (CLAUDE.md guard rail); MONOLITH_ALLOW_WINDOW lets a person override it.
+static bool EnvSet(const char *name)
+{
+    const char *v = getenv(name);
+    return v && v[0] && strcmp(v, "0") != 0;
+}
+
+static bool AgentShell(void)
+{
+    return (EnvSet("CLAUDECODE") || EnvSet("AI_AGENT")) && !EnvSet("MONOLITH_ALLOW_WINDOW");
+}
+
 // #region Command-line values
 // Checks for Run()'s flag loop. Each prints why it failed (stderr) and returns false.
 
@@ -982,6 +1001,16 @@ static int Run(int argc, char **argv)
 
     if (newMapName) return NewMap(mapsDir, newMapName) ? 0 : 1;
     if (importDir) return ImportProject(mapsDir, importDir, importName) ? 0 : 1;
+
+    // Every mode below that isn't one of these opens the visible game window. An agent's shell
+    // may not (a mistyped or forgotten flag would put the game on the developer's screen).
+    bool windowless = shotPath || (bench && headless) || dumpPath || dumpScenePath || exportDir || classifyText;
+    if (!windowless && AgentShell()) {
+        fprintf(stderr, "monolith: refusing to open the game window from an AI agent's shell (CLAUDECODE / AI_AGENT is set).\n"
+                        "  Use --shot, --dump-boxes, --dump-scene(-diff), --inspect-model, --new-map, --export, --classify or\n"
+                        "  --bench --headless; a person who wants the window from this shell sets MONOLITH_ALLOW_WINDOW=1.\n");
+        return 1;
+    }
 
     // --- Graphics settings (settings.c). The interactive game reads the user's settings file
     // (and the panel saves it); automated runs (--shot, --bench, --dump-*, --export,

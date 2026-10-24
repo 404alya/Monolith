@@ -85,6 +85,16 @@ int main(int argc, char **argv)
     MS_Scene *peek = MS_Load(package, &(MS_LoadOptions){ .noGpu = true, .shadowSizeOverride = quality.shadowSize }, err, sizeof(err));
     if (!peek) { fprintf(stderr, "%s\n", err); return 1; }
 
+    // In an AI agent's shell (Claude Code sets CLAUDECODE=1, others AI_AGENT) only --shot may
+    // run: a visible window would land on the developer's screen. MONOLITH_ALLOW_WINDOW=1 overrides.
+    const char *cc = getenv("CLAUDECODE"), *ai = getenv("AI_AGENT"), *allow = getenv("MONOLITH_ALLOW_WINDOW");
+    bool agent = (cc && cc[0] && strcmp(cc, "0") != 0) || (ai && ai[0] && strcmp(ai, "0") != 0);
+    if (!shotPath && agent && !(allow && allow[0] && strcmp(allow, "0") != 0)) {
+        fprintf(stderr, "refusing to open a window from an AI agent's shell: use --shot <file> (or MONOLITH_ALLOW_WINDOW=1)\n");
+        MS_Unload(peek);
+        return 1;
+    }
+
     // A shot opens a hidden window that is never mapped. The title "monolith-shot" lets a
     // window manager rule route it (i3: for_window [title="^monolith-(bench|shot)$"] ...).
     SetConfigFlags(FLAG_MSAA_4X_HINT | (shotPath ? FLAG_WINDOW_HIDDEN : FLAG_WINDOW_RESIZABLE));

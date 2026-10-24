@@ -25,7 +25,7 @@
 //                              monolith's build.sh made them from that tree (AddPrebuilt: only
 //                              current static Release builds; a target without them builds from source)
 //   <dir>/cmake/mingw-w64-x86_64.cmake   the toolchain file build.sh --win uses
-//   <dir>/LICENSES/            the licence texts of R3D, raylib, assimp and uthash
+//   <dir>/LICENSES/            the licence texts of monolith (MIT), R3D, raylib, assimp and uthash
 //
 // The runtime is copied without its editor parts: every `#ifdef MONOLITH_EDITOR` block is
 // dropped and every `#ifndef MONOLITH_EDITOR` block kept without its directives (StripEditor),
@@ -559,7 +559,7 @@ static char *MakeReadme(const MS_Scene *s, const char *name, const char *assetsP
         "| `prebuilt/` | R3D, raylib and assimp as static libraries, built by monolith from `r3d/` "
         "(`prebuilt/<linux|win>/lib/`; the targets are listed under \"Build and run\"). |\n"
         "| `cmake/` | The MinGW-w64 toolchain file for `./build.sh --win`. |\n"
-        "| `LICENSES/` | Licence texts of R3D, raylib, assimp and uthash. |\n\n",
+        "| `LICENSES/` | Licence texts of monolith, R3D, raylib, assimp and uthash. |\n\n",
         name, name);
 
     fprintf(f,
@@ -723,7 +723,7 @@ static char *MakeReadme(const MS_Scene *s, const char *name, const char *assetsP
         "(zlib, pugixml, rapidjson, ...) carry theirs under `r3d/external/assimp/contrib/`\n"
         "- uthash: BSD licence, `LICENSES/uthash.txt`; tinycthread (zlib licence) and the glad loader carry theirs in "
         "their sources under `r3d/external/`\n"
-        "- The scene runtime (`monolith_scene.h/.c`), `viewer.c` and `build.sh` are part of monolith.\n\n"
+        "- The scene runtime (`monolith_scene.h/.c`), `viewer.c` and `build.sh` are part of monolith: MIT licence, `LICENSES/monolith.txt`\n\n"
         "The map's own files, from `%s/ASSETS.md` (the package's record of every external file; keep it with the "
         "package and credit CC-BY assets as listed):\n\n", name);
     WriteAssets(f, assetsPath);
@@ -962,6 +962,7 @@ bool ExportScene(const MS_Scene *s, const char *outDirIn, char *msg, int msgSize
         { "external/assimp/LICENSE", "LICENSES/assimp.txt" }, { "external/uthash/LICENSE", "LICENSES/uthash.txt" },
     };
     for (int i = 0; i < 4; i++) AddCopy(&P, TextFormat("%s%s", r3d, LIC[i][0]), LIC[i][1], NULL);
+    AddCopy(&P, TextFormat("%sLICENSE", rt), "LICENSES/monolith.txt", NULL);   // the runtime, viewer.c, build.sh
     // Prebuilt R3D, raylib and assimp for each target monolith has built
     static const char *const TARGETS[][3] = { { "build-linux", "linux", "Linux" }, { "build-mingw", "win", "Windows" } };
     bool prebuilt[2];

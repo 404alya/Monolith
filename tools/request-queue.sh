@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # tools/request-queue.sh -- the request queue on disk, for the coordinator session
-# (.claude/skills/coordinator/SKILL.md; design: docs/architecture.md section 5). The game writes a bundle's
+# (.claude/skills/coordinator/SKILL.md; design: docs/request-queue.md). The game writes a bundle's
 # requests/<id>/state = "queued" (and requests/<id>/cancel when the developer cancels);
 # every later state change goes through this script, run by the coordinator only.
 #

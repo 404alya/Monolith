@@ -63,7 +63,7 @@ A change is done only when it **builds with no warnings** on both targets, **`to
 
 **Add an effect toggle.** The `TOGGLE(KEY_x, 'x')` block in the main loop, the HUD string, the header comment.
 
-**Add a CLI flag.** Parse it at the top of `main()`; document it in the header comment and `docs/command-line.md`.
+**Add a CLI flag.** Parse it at the top of `main()`; a new mode that opens no window or only a hidden one also goes into the `windowless` check after the flag loop (otherwise the game refuses it in an agent's shell); document it in the header comment and `docs/command-line.md`.
 
 ## 3. How to verify changes
 
@@ -107,4 +107,4 @@ After changing the export, the runtime's editor blocks, `runtime/export/*` or wh
 - **Memory:** heap arrays for content, no per-frame allocation, everything freed (§1, memory rules).
 - **Comment non-obvious engine workarounds** with their reason (as for R3D pitfalls §1, §2), so nobody "cleans them up".
 - **Don't commit `build/`, screenshots, `benchmark/`, `requests/` or `export/`.**
-- **Keep the docs current** in the same change: `src/main.c`'s header comment (controls, flags), `docs/architecture.md` (layout, architecture), `docs/command-line.md` (flags), `docs/user-guide.md` (keys, settings), `.claude/skills/lighting-fog-shadows/r3d-pitfalls.md` (pitfalls, with "if R3D changes X, update Y" warnings), `map-format.md`, the skills when a workflow changes, `patches.md`, measurements in `.claude/skills/benchmarking/measurements.md`.
+- **Keep the docs current** in the same change: `src/main.c`'s header comment (controls, flags), `docs/architecture.md` (layout, architecture), `docs/command-line.md` (flags), `docs/user-guide.md` (keys, settings), `docs/request-queue.md`, `docs/troubleshooting.md` and `docs/glossary.md` where they are affected, `CONTRIBUTING.md` (rules for people), `.claude/skills/lighting-fog-shadows/r3d-pitfalls.md` (pitfalls, with "if R3D changes X, update Y" warnings), `map-format.md`, the skills when a workflow changes, `patches.md`, measurements in `.claude/skills/benchmarking/measurements.md`.

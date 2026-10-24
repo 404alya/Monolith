@@ -14,6 +14,10 @@ Rules and verification for every change to a map package. Read the map's `MAP.md
 - **New maps.** The developer creates a package with `monolith --new-map <name>` (in `maps/`; `--new-map <path>`, any argument with a `/`, creates it in that folder instead, e.g. a scratch draft): a 200 × 200 m ground slab (group `ground`), the plain grey `"default"` material, the built-in environment written out as `env` lines (the default map's daylight look), a `spawn`, two viewpoints, empty `shaders/ models/ textures/`, an empty `ASSETS.md` and a `MAP.md` **template** whose sections only hold placeholders in parentheses. The first request on such a map ("a foggy pine forest at dusk", "a neon market street at night, wet asphalt, stalls on both sides") is a design request: **write `MAP.md` first** from the request (style and mood, scale and the player's routes, materials and palette, lighting and atmosphere, rules for new content, the groups you are going to build), then build to it: materials, the `env` lines (sky, sun, fog, effects, exposure: replace the built-in daylight values where the brief needs a different mood), lights, geometry, models, viewpoints that show the result. Also write the brief before building when an existing map has no `MAP.md` or only the template.
 - Add a `viewpoint` when you build a new area worth flying to.
 
+## 0a. The primitives at a glance
+
+From `docs/map-format.md` §2 (read it in full; this is only a reminder): `box x0 y0 z0 x1 y1 z1` (two opposite corners), `block cx y0 cz sx sy sz` (centred on cx cz, from y0 up, full sizes), `stairs cx baseY startZ width steps rise run` (climbs toward −Z), `waffle x0 x1 y0 y1 z depth bayW floorH` (facade facing +Z); prefixes `repeat n dx dy dz` (≤ 3 per line, first = outer loop) and `at x y z` (legacy, don't add); `use "material"` and `group "name"` apply to the lines after them.
+
 ## 1. Coordinates and scale
 
 - Units are **metres**. **+Y is up**. The world is right-handed. Boxes are axis-aligned; only models can be rotated.
@@ -45,7 +49,7 @@ Rules and verification for every change to a map package. Read the map's `MAP.md
 
 Run every command from the repo root. The binary is `./build/linux/monolith`, and the reproduction command in `request.md` uses its absolute path. **Never open a visible window on the developer's screen.** Use only `--shot` (it renders in a hidden window that is never mapped), `--dump-boxes` / `--inspect-model` (no window) and `--dump-scene` (a hidden window when the map has models). Below, `<map>` is the map file (or package) named in `request.md`, e.g. `maps/<name>/<name>.map`.
 
-1. **Check the map hash** before editing. Compare with the hash in `request.md` ("at submit: FNV-1a 64 hash …"), using the command printed there:
+1. **Check the map hash** before editing. Compare with the hash in `request.md` ("at submit: FNV-1a 64 hash …"), using the command printed there, on the **`.map` file** (not the package folder):
    ```sh
    python3 -c "import sys,functools as f;print('%016x'%f.reduce(lambda h,b:((h^b)*0x100000001b3)&(2**64-1),open(sys.argv[1],'rb').read(),0xcbf29ce484222325))" <map>
    ```
@@ -55,17 +59,17 @@ Run every command from the repo root. The binary is `./build/linux/monolith`, an
    ./build/linux/monolith --shot requests/<id>/before.png --shot-size W H --eye X Y Z --look YAW PITCH --map <map>
    ```
    (`--shot` with a relative path writes into the current directory, so always give the bundle path.) `--shot` renders 30 frames and exits; the bundle's command passes `--shot-size W H` with the size of `view.png`, so the image matches `view.png` (pixel-identical in tests; without `--shot-size` shots are 1600 × 900). Add `--pick` to print what the screen centre hits (box or model, group, material, map line, point, normal, distance).
-   Also save the scene list: `./build/linux/monolith --dump-boxes requests/<id>/boxes-before.txt --map <map>` (one box per line as hex floats), or `--dump-scene-diff requests/<id>/scene-before.txt` when the edit touches models, materials or lights (`--dump-scene` without `-diff` also writes object indices and map lines, so every row after an inserted line changes; `-diff` refers to groups, materials and model files by name, so its diff shows only the changed objects).
+   If the hash matched (step 1), the bundle's `view.png` already shows this state and may serve as the before image; otherwise render `before.png`. **Always** save the scene list before editing (without it you can't prove in step 6 that nothing else changed): `./build/linux/monolith --dump-scene-diff requests/<id>/scene-before.txt --map <map>` (always fine: it names groups, materials and model files instead of indices and line numbers, so after inserted lines its diff shows only the changed objects). `--dump-boxes` (boxes only, hex floats) is the exact check when you split a `repeat` line and must prove the other copies kept their coordinates.
 3. **Edit the map.** For multi-line edits, prefer one write: the game reloads on every save, so intermediate states flash on the developer's screen. A broken save keeps the old map loaded and shows a red `file:line: message` in the HUD.
 4. **Check that it parses.** A broken map never crashes the game, but it also doesn't load, so the developer keeps seeing the old one. To check the file, load it explicitly:
    ```sh
-   ./build/linux/monolith --dump-boxes requests/<id>/boxes-after.txt --map <map>   # no window
+   ./build/linux/monolith --dump-scene-diff requests/<id>/scene-after.txt --map <map>; echo "exit $?"
    ```
-   A parse error prints `file:line: message` and exits with status 1 (`--dump-boxes` opens no window but also imports every model file on the CPU, so a missing, truncated or unreadable model fails here too; `--export` fails the same way). `--map` is also how to try a draft copy before writing it over the real map. `diff` the two dumps (`--dump-boxes` or `--dump-scene-diff`, the same kind before and after) to confirm that only the intended objects changed (with inserted lines, the unchanged ones move as a block).
-5. **After image** from the same camera: `--shot requests/<id>/after.png` with the same `--eye`/`--look`. Then **look at both images** (Read them). Add extra views where the reproduction view can't show the change, e.g. from the other side, from above, or walking height `--eye x <ground + 1.62> z`. The map's viewpoints are `--view 1..n`. Use `--off <digits>` to isolate effects (1 volumetric fog, 2 distance fog, 3 SSAO, 4 SSIL, 5 bloom, 6 sun).
+   **Check the exit status:** 0 = it loads. A parse error prints `file:line: message` and exits with status 1 (both dump modes load every model file too, so a missing, truncated or unreadable model fails here; `--dump-scene-diff` uses a hidden window when the map has models, `--dump-boxes` none). `--map` is also how to try a draft copy before writing it over the real map. `diff` the two dumps (`--dump-boxes` or `--dump-scene-diff`, the same kind before and after) to confirm that only the intended objects changed (with inserted lines, the unchanged ones move as a block).
+5. **After image** from the same camera: `--shot requests/<id>/after.png` with the same `--eye`/`--look`. Then **look at both images** (Read them: the before image too, to be sure the reproduction view matches `view.png`). Add extra views where the reproduction view can't show the change, e.g. from the other side, from above, or walking height `--eye x <ground + 1.62> z`. The map's viewpoints are `--view 1..n`. Use `--off <digits>` to isolate effects (1 volumetric fog, 2 distance fog, 3 SSAO, 4 SSIL, 5 bloom, 6 sun).
 6. **Check:**
    - the request is visibly done, at the right spot, at a sensible scale, **in the style of `MAP.md`** (materials, palette, budgets);
-   - no **floating** objects: each new box or model rests on or is attached to something, unless intended. Compare y0 with the top of the support (`--pick` on it);
+   - no **floating** objects: each new box or model rests on or is attached to something, unless intended. Compare y0 with the top of the support: `--pick` (or `--pick-at x y`) on the support in a shot, or its bounds in the scene dump — do it, don't assume;
    - no **z-fighting** or flickering near-coplanar faces;
    - walkways not blocked: **headroom ≥ 2.2 m**, stairs **rise ≤ 0.45 m** per step, openings ≥ 0.6 m (better ≥ 1 m), and the routes `MAP.md` names still exist;
    - no unrelated objects moved (the dump diff), and nothing multiplied out of scale (the loader's sanity cap is 1 000 000 objects);

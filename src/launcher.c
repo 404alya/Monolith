@@ -8,7 +8,7 @@
 // process is started from an argv array (no shell).
 //
 // Two ways to hand the bundle to Claude Code (MONOLITH_LAUNCH):
-//   - coordinator (default; region "Coordinator and queue", docs/architecture.md section 5): the
+//   - coordinator (default; region "Coordinator and queue", docs/request-queue.md): the
 //     game writes requests/<id>/state = "queued" as the bundle's last file. Unless a
 //     coordinator holds requests/.coordinator/lock, one terminal titled "monolith-claude:
 //     coordinator" runs a small /bin/sh wrapper that holds the lock (flock) around `claude
@@ -41,6 +41,8 @@
 //     --dangerously-skip-permissions, so the developer isn't asked to approve each
 //     command; the guard rails live in CLAUDE.md and the coordinator / map-request
 //     skills (.claude/skills/) instead. MONOLITH_CLAUDE_SAFE=1 (any value but empty or "0") drops the two flags.
+//     So does a working directory without CLAUDE.md (Windows, a copied build folder): with no
+//     guard rails to read, the session keeps Claude Code's approval prompts.
 //   - model: per request MONOLITH_MODEL, MONOLITH_MODEL_FAST / _DEFAULT / _HEAVY and an @tier
 //     prompt prefix steer it (region "Model choice"); the coordinator passes it to the
 //     request's subagent. The coordinator's own model: MONOLITH_COORDINATOR_MODEL.
@@ -1819,7 +1821,7 @@ static void RequestTitle(const char *id, const char *slug, char *out, int outSiz
     else snprintf(out, outSize, "monolith-claude: %s %s", slug, id);
 }
 
-// Every Claude Code session starts with these, unless MONOLITH_CLAUDE_SAFE is set
+// Every Claude Code session starts with these (when its folder has CLAUDE.md), unless MONOLITH_CLAUDE_SAFE is set
 // (to anything but "" or "0")
 static const char *const SKIP_PERMISSION_FLAGS[] = {
     "--allow-dangerously-skip-permissions", "--dangerously-skip-permissions",
@@ -1830,6 +1832,21 @@ static bool ClaudeSafe(void)
 {
     const char *s = getenv("MONOLITH_CLAUDE_SAFE");
     return s && *s && strcmp(s, "0") != 0;
+}
+
+// The permission flags are passed only where the session can read its guard rails: the
+// working directory (rootDir) must hold CLAUDE.md. Without it (Windows, a copied build folder)
+// the session keeps Claude Code's approval prompts, and the log says why once.
+static bool SkipPermissions(void)
+{
+    if (ClaudeSafe()) return false;
+    if (FileExists(TextFormat("%sCLAUDE.md", rootDir))) return true;
+    static bool warned = false;
+    if (!warned) {
+        TraceLog(LOG_WARNING, "monolith: no CLAUDE.md in %s: Claude Code sessions keep their approval prompts", rootDir);
+        warned = true;
+    }
+    return false;
 }
 
 static bool FindProgram(const char *name, char *out, int outSize);
@@ -1901,7 +1918,7 @@ static bool Launch(const char *title, const char *mark, const char *prompt, cons
     ArgList args;
     if (!ClaudeArgs(&args, NULL, false)) { snprintf(err, errSize, "out of memory"); return false; }
     int skipped = 0;
-    char *cmd = WinClaudeCommand(claude, SKIP_PERMISSION_FLAGS, ClaudeSafe() ? 0 : SKIP_PERMISSION_COUNT, model,
+    char *cmd = WinClaudeCommand(claude, SKIP_PERMISSION_FLAGS, SkipPermissions() ? SKIP_PERMISSION_COUNT : 0, model,
                                  args.tok, args.count, prompt, &skipped);
     FreeArgs(&args);
     if (!cmd) { snprintf(err, errSize, "out of memory"); return false; }
@@ -2124,7 +2141,8 @@ static bool Launch(const char *title, const char *mark, const char *prompt, cons
     if (ts->exec) argv[n++] = (char *)ts->exec;
     if (lock) { argv[n++] = "/bin/sh"; argv[n++] = "-c"; argv[n++] = (char *)COORDINATOR_WRAPPER; argv[n++] = (char *)lock; }
     argv[n++] = claude;
-    for (int i = 0; i < SKIP_PERMISSION_COUNT && !ClaudeSafe(); i++) argv[n++] = (char *)SKIP_PERMISSION_FLAGS[i];
+    bool skip = SkipPermissions();
+    for (int i = 0; i < SKIP_PERMISSION_COUNT && skip; i++) argv[n++] = (char *)SKIP_PERMISSION_FLAGS[i];
     if (model) { argv[n++] = "--model"; argv[n++] = (char *)model; }
     for (int i = 0; i < extraCount; i++) argv[n++] = extra[i];
     argv[n++] = (char *)prompt;
@@ -2425,7 +2443,7 @@ void LauncherCloseOnExit(void)
 // ======================================================================================
 // #region Coordinator and queue (MONOLITH_LAUNCH=coordinator, the default)
 // ======================================================================================
-// docs/architecture.md section 5. A submitted bundle gets requests/<id>/state = "queued <time>"
+// docs/request-queue.md. A submitted bundle gets requests/<id>/state = "queued <time>"
 // as its last file; then, unless requests/.coordinator/lock is held, one terminal titled
 // "monolith-claude: coordinator" runs COORDINATOR_WRAPPER + claude [permission flags]
 // --model $MONOLITH_COORDINATOR_MODEL (default sonnet) [MONOLITH_CLAUDE_ARGS] "<fixed
