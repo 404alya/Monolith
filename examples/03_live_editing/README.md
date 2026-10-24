@@ -7,10 +7,10 @@ last good scene (`MS_RELOAD_FAILED`, the reason in `MS_Error(scene)` as `file:li
 
 ## Side by side with monolith
 
-1. Start monolith on a package, e.g. `build/linux/monolith --map maps/courtyard` (or the
-   default map).
+1. From the repo root, start monolith on a package, e.g.
+   `build/linux/monolith --map maps/pine_forest`.
 2. Start this example on the **same folder**:
-   `examples/build/linux/03_live_editing/live_editing ~/Projects/monolith/maps/courtyard`.
+   `examples/build/linux/03_live_editing/live_editing maps/pine_forest`.
 3. Edit: submit a request in monolith (spectator mode, Enter), or save the `.map` file in an
    editor. Both windows show the change within a second; this one prints
    `reloaded: N boxes ...` or the error.

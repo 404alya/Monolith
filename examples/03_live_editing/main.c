@@ -6,7 +6,7 @@
 //
 //   live_editing [package] [--shot <file>] [--reload <package>]
 //     package             the package to watch (default: scene/ next to the executable),
-//                         e.g. ~/Projects/monolith/maps/courtyard
+//                         e.g. maps/pine_forest (run from the repo root)
 //     --shot <file>       hidden-window screenshot after 30 frames (../common/shot.h)
 //     --reload <package>  test: after 10 frames reload from this package through the same
 //                         path as a file change (MS_Reload), then keep rendering
