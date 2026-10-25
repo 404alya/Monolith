@@ -1,5 +1,6 @@
 #include "designer.h"
 #include "mapedit.h"
+#include "ui.h"
 #include <math.h>
 #include <limits.h>
 
@@ -844,11 +845,10 @@ void DesignerSync(Designer *d)
 // ======================================================================================
 
 #define PROMPT_FONT     20
-#define PROMPT_SPACING  2.0f
 #define PROMPT_MARGIN   12      // box to screen edge
 #define PROMPT_PAD      10      // text to box edge
-#define PROMPT_LINE_H   24
-#define PROMPT_HEADER_H 24
+#define PROMPT_LINE_H   26
+#define PROMPT_HEADER_H 32     // title line + rule
 #define PROMPT_MIN_LINES 3
 #define PROMPT_MAX_LINES 10
 
@@ -874,14 +874,11 @@ static int NextBoundary(const char *s, int len, int pos)
     return pos;
 }
 
-// Width of one codepoint as DrawTextEx advances it (glyph + spacing)
+// Width of one codepoint as the prompt text advances it (the same metrics UiText draws with,
+// so wrapping and the cursor match the drawn text)
 static float GlyphAdvance(int cp)
 {
-    Font f = GetFontDefault();
-    float scale = (float)PROMPT_FONT / (float)f.baseSize;
-    int idx = GetGlyphIndex(f, cp);
-    float adv = f.glyphs[idx].advanceX ? (float)f.glyphs[idx].advanceX : f.recs[idx].width;
-    return adv * scale + PROMPT_SPACING;
+    return UiAdvance(cp, PROMPT_FONT);
 }
 
 // Width of s[from, to)
@@ -1783,18 +1780,26 @@ void DesignerDrawOverlay(const Designer *d, Camera3D cam, bool hover)
     EndOverlay3D();
 }
 
-// Volume label: a tab with the text, centred above screen point p (kept on screen)
+// Help bar of a mode at the bottom centre: the mode's pill, then its key hints (UiHints markup)
+static void DrawHelpBar(const char *mode, Color modeColor, const char *hints, int w, int h)
+{
+    int pw = UiPillWidth(mode), tw = pw + 10 + UiHintsWidth(hints, UI_S);
+    int x = (w - tw) / 2, y = h - 66;
+    UiPanel((Rectangle){ (float)(x - 10), (float)y, (float)(tw + 20), 30 }, UI_PANEL, UI_LINE);
+    UiPill(mode, x, y + 5, modeColor, (Color){ 16, 16, 18, 255 });
+    UiHints(hints, x + pw + 10, y + (30 - UiLineHeight(UI_S)) / 2, UI_S, UI_INK);
+}
+
+// Volume label: a pill with the text, centred above screen point p (kept on screen)
 static void DrawVolumeTab(Vector2 p, const char *text, int w, int h)
 {
-    int tw = MeasureText(text, 16) + 8, th = 20;
+    int tw = UiPillWidth(text), th = UI_PILL_H;
     int lx = (int)p.x - tw / 2, ly = (int)p.y - th - 4;
-    if (lx + tw > w) lx = w - tw;
-    if (lx < 0) lx = 0;
-    if (ly + th > h) ly = h - th;
-    if (ly < 0) ly = 0;
-    DrawRectangle(lx - 1, ly - 1, tw + 2, th + 2, (Color){ 0, 0, 0, 170 });
-    DrawRectangle(lx, ly, tw, th, VOLUME_COLOR);
-    DrawText(text, lx + 4, ly + 2, 16, (Color){ 10, 24, 18, 255 });
+    if (lx + tw > w - 1) lx = w - 1 - tw;
+    if (lx < 1) lx = 1;
+    if (ly + th > h - 1) ly = h - 1 - th;
+    if (ly < 1) ly = 1;
+    UiPill(text, lx, ly, VOLUME_COLOR, (Color){ 10, 24, 18, 255 });
 }
 
 // The tab of volume `v` at the middle of its top face, if that is in front of the camera
@@ -1860,16 +1865,14 @@ void DesignerDrawVolumes(const Designer *d, Camera3D cam, int w, int h, bool mar
     if (live && !d->promptOpen) {
         const char *help;
         if (d->volumeStep == VOLUME_STEP_SECOND)
-            help = "VOLUME   LMB: opposite footprint corner  |  CTRL: no snap  |  RMB / ESC: cancel";
+            help = "{LMB} opposite footprint corner|{CTRL} no snap|{RMB} / {ESC} cancel";
         else if (d->volumeStep == VOLUME_STEP_HEIGHT)
-            help = "VOLUME   mouse up / down or wheel: height (SHIFT x4)  |  CTRL: no snap  |  LMB / ENTER: done  |  RMB / ESC: cancel";
+            help = "mouse up / down or {wheel} height ({SHIFT} x4)|{CTRL} no snap|{LMB} / {ENTER} done|{RMB} / {ESC} cancel";
         else
-            help = TextFormat("VOLUME   LMB: first corner  |  [ ]: active  |  arrows, PGUP / PGDN: move (ALT grow, ALT+SHIFT shrink)  |  "
-                              "N: snap %g m  |  DEL / SHIFT+DEL: remove / clear  |  ENTER: request  |  V / ESC: leave   (%d volume%s)",
+            help = TextFormat("{LMB} first corner|{[} {]} active|arrows, {PGUP} / {PGDN} move ({ALT} grow, {ALT+SHIFT} shrink)|"
+                              "{N} snap %g m|{DEL} / {SHIFT+DEL} remove / clear|{ENTER} request|{V} / {ESC} leave   (%d volume%s)",
                               VolumeSnap(d), d->volumeCount, d->volumeCount == 1 ? "" : "s");
-        int tw = MeasureText(help, 16);
-        DrawRectangle((w - tw) / 2 - 10, h - 64, tw + 20, 26, (Color){ 16, 16, 18, 200 });
-        DrawText(help, (w - tw) / 2, h - 59, 16, (Color){ 240, 238, 232, 230 });
+        DrawHelpBar("VOLUME", VOLUME_COLOR, help, w, h);
     }
 }
 
@@ -1889,16 +1892,15 @@ void DesignerDrawCrosshair(int w, int h)
     DrawRectangle(cx - 1, cy - 1, 2, 2, ink);
 }
 
-// HUD text with a dark drop shadow: these lines are often over bright fog
+// HUD line on a dark backdrop: these lines are often over bright fog
 static void HudText(const char *text, int x, int y, Color c)
 {
-    DrawText(text, x + 1, y + 1, 16, (Color){ 0, 0, 0, (unsigned char)(c.a / 2) });
-    DrawText(text, x, y, 16, c);
+    UiHudText(text, x, y, UI_HUD_LINE, UI_S, c);
 }
 
 int DesignerDrawHud(const Designer *d, int x, int y)
 {
-    Color main = { 230, 230, 230, 170 }, dim = { 230, 230, 230, 115 };
+    Color main = UI_TEXT, dim = UI_DIM;
     int y0 = y;
 
     if (d->selectedCount == 0) {
@@ -2022,13 +2024,12 @@ static void DrawRegionFrame(Rectangle r, int number, bool size, int w)
     if (number > 0 && size) snprintf(text, sizeof(text), "%d   %.0f x %.0f", number, r.width, r.height);
     else if (number > 0) snprintf(text, sizeof(text), "%d", number);
     else snprintf(text, sizeof(text), "%.0f x %.0f", r.width, r.height);
-    int tw = MeasureText(text, 16) + 8, th = 20;
+    int tw = UiPillWidth(text), th = UI_PILL_H;
     // Above the top-left corner, or inside the rect at the top of the screen; kept on screen
-    int lx = (int)r.x, ly = r.y >= th ? (int)r.y - th : (int)r.y + 2;
-    if (lx + tw > w) lx = w - tw;
-    if (lx < 0) lx = 0;
-    DrawRectangle(lx, ly, tw, th, REGION_COLOR);
-    DrawText(text, lx + 4, ly + 2, 16, (Color){ 20, 10, 20, 255 });
+    int lx = (int)r.x, ly = r.y >= th + 4 ? (int)r.y - th - 4 : (int)r.y + 4;
+    if (lx + tw > w - 1) lx = w - 1 - tw;
+    if (lx < 1) lx = 1;
+    UiPill(text, lx, ly, REGION_COLOR, (Color){ 20, 10, 20, 255 });
 }
 
 void DesignerDrawRegions(const Designer *d, int w, int h, bool marked)
@@ -2057,11 +2058,9 @@ void DesignerDrawRegions(const Designer *d, int w, int h, bool marked)
     }
 
     if (!d->promptOpen) {
-        const char *help = TextFormat("SNIP   drag: new region  |  SHIFT+drag: add  |  ENTER: request  |  RMB / ESC / C: cancel"
+        const char *help = TextFormat("drag new region|{SHIFT}+drag add|{ENTER} request|{RMB} / {ESC} / {C} cancel"
                                       "   (%d region%s)", d->regionCount, d->regionCount == 1 ? "" : "s");
-        int tw = MeasureText(help, 18);
-        DrawRectangle((w - tw) / 2 - 10, h - 64, tw + 20, 28, (Color){ 16, 16, 18, 200 });
-        DrawText(help, (w - tw) / 2, h - 59, 18, (Color){ 240, 238, 232, 230 });
+        DrawHelpBar("SNIP", REGION_COLOR, help, w, h);
     }
 }
 
@@ -2079,29 +2078,31 @@ void DesignerDrawPrompt(Designer *d, int w, int h)
 
         int boxH = PROMPT_HEADER_H + visible * PROMPT_LINE_H + 2 * PROMPT_PAD;
         Rectangle box = { PROMPT_MARGIN, (float)(h - PROMPT_MARGIN - boxH), (float)(w - 2 * PROMPT_MARGIN), (float)boxH };
-        DrawRectangleRec(box, (Color){ 16, 16, 18, 225 });
-        DrawRectangleLinesEx(box, 1.0f, (Color){ 230, 230, 230, 90 });
+        UiPanel(box, UI_PANEL, UI_LINE);
 
         int tx = (int)box.x + PROMPT_PAD, ty = (int)box.y + PROMPT_PAD;
         char regions[64] = "";
         int rn = 0;
         if (d->regionCount > 0) rn = snprintf(regions, sizeof(regions), " + %d region%s", d->regionCount, d->regionCount == 1 ? "" : "s");
         if (d->volumeCount > 0) snprintf(regions + rn, sizeof(regions) - rn, " + %d volume%s", d->volumeCount, d->volumeCount == 1 ? "" : "s");
-        DrawText(TextFormat("Request for Claude   (%d selected%s%s)   Enter send  |  Shift+Enter new line  |  Ctrl+V paste  |  Esc %s",
-                 d->selectedCount, !ObjIsNone(d->hit.obj) ? " + crosshair point" : "", regions,
-                 d->snipping ? "back to snip" : "cancel"), tx, ty, 16, (Color){ 230, 230, 230, 140 });
+        int hy = ty + (PROMPT_HEADER_H - 8 - UiLineHeight(UI_S)) / 2;
+        UiTextBold("Request for Claude", tx, hy, UI_S, UI_INK);
+        UiHints(TextFormat("(%d selected%s%s)|{Enter} send|{Shift+Enter} new line|{Ctrl+V} paste|{Esc} %s",
+                           d->selectedCount, !ObjIsNone(d->hit.obj) ? " + crosshair point" : "", regions,
+                           d->snipping ? "back to snip" : "cancel"),
+                tx + UiMeasureBold("Request for Claude", UI_S) + 12, hy, UI_S, UI_DIM);
         const char *counter = TextFormat("%d bytes", d->promptLen);
-        Color counterColor = d->promptLen >= PROMPT_LIMIT - 1 ? (Color){ 255, 110, 90, 230 } : (Color){ 230, 230, 230, 140 };
-        DrawText(counter, (int)(box.x + box.width) - PROMPT_PAD - MeasureText(counter, 16), ty, 16, counterColor);
+        Color counterColor = d->promptLen >= PROMPT_LIMIT - 1 ? UI_ERROR : UI_DIM;
+        UiText(counter, (int)(box.x + box.width) - PROMPT_PAD - UiMeasure(counter, UI_S), hy, UI_S, counterColor);
+        DrawRectangle(tx, ty + PROMPT_HEADER_H - 5, (int)box.width - 2 * PROMPT_PAD, 1, UI_LINE);
         ty += PROMPT_HEADER_H;
 
-        Font font = GetFontDefault();
-        Color ink = { 240, 238, 232, 255 };
+        Color ink = UI_INK;
         if (d->promptLen == 0) {
-            DrawTextEx(font, d->regionCount > 0 || d->volumeCount > 0
-                       ? "Describe the change. The crosshair point, the selected boxes, the screen regions and the volumes are sent along."
-                       : "Describe the change. The crosshair point and the selected boxes are sent along.",
-                       (Vector2){ (float)tx, (float)ty }, PROMPT_FONT, PROMPT_SPACING, (Color){ 240, 238, 232, 90 });
+            UiText(d->regionCount > 0 || d->volumeCount > 0
+                   ? "Describe the change. The crosshair point, the selected boxes, the screen regions and the volumes are sent along."
+                   : "Describe the change. The crosshair point and the selected boxes are sent along.",
+                   tx, ty, PROMPT_FONT, UI_FAINT);
         }
         for (int i = d->scroll; i < lines && i < d->scroll + visible; i++) {
             PromptLine l = promptLines[i];
@@ -2111,23 +2112,20 @@ void DesignerDrawPrompt(Designer *d, int w, int h)
             if (n > 0) memcpy(buf, d->prompt + l.start, n);
             buf[n] = 0;
             int ly = ty + (i - d->scroll) * PROMPT_LINE_H;
-            DrawTextEx(font, buf, (Vector2){ (float)tx, (float)ly }, PROMPT_FONT, PROMPT_SPACING, ink);
+            UiText(buf, tx, ly, PROMPT_FONT, ink);
             if (i == cursorLine && fmod(GetTime(), 1.0) < 0.6) {
                 float cx = tx + TextSpanWidth(d->prompt, l.start, d->cursor);
-                DrawRectangle((int)cx, ly - 1, 2, PROMPT_FONT + 2, (Color){ 255, 200, 120, 255 });
+                DrawRectangle((int)cx, ly, 2, UiLineHeight(PROMPT_FONT), UI_CURSOR);
             }
         }
         // Scroll hints
-        if (d->scroll > 0) DrawText("^", (int)(box.x + box.width) - 18, ty, 16, ink);
-        if (d->scroll + visible < lines) DrawText("v", (int)(box.x + box.width) - 18, ty + (visible - 1) * PROMPT_LINE_H, 16, ink);
-        msgY = (int)box.y - 28;
+        if (d->scroll > 0) UiText("^", (int)(box.x + box.width) - 18, ty, UI_S, ink);
+        if (d->scroll + visible < lines) UiText("v", (int)(box.x + box.width) - 18, ty + (visible - 1) * PROMPT_LINE_H, UI_S, ink);
+        msgY = (int)box.y - 34;
     }
 
     if (d->messageTime > 0.0f) {
-        float a = fminf(d->messageTime, 1.0f);
-        Color c = d->messageError ? (Color){ 255, 110, 90, 255 } : (Color){ 235, 232, 225, 255 };
-        int mw = MeasureText(d->message, 20);
-        DrawText(d->message, (w - mw) / 2, msgY, 20, Fade(c, a));
+        UiToast(d->message, w / 2, msgY, UI_L, d->messageError ? UI_ERROR : UI_INK, fminf(d->messageTime, 1.0f));
     }
 }
 

@@ -83,6 +83,7 @@
 
 #include "launcher.h"
 #include "wincmd.h"
+#include "ui.h"
 #include <ctype.h>
 #include <errno.h>
 #include <math.h>
@@ -1963,12 +1964,12 @@ static const char *CoordinatorLine(Color *c);
 
 int LauncherDrawHud(int x, int y)
 {
-    const int size = 18, step = 22, maxRows = 6;
+    const int size = UI_M, step = 24, maxRows = 6;
     int rows = 0;
     Color cc;
     const char *coordText = CoordinatorLine(&cc);
     if (coordText) {
-        DrawText(coordText, x, y, size, cc);
+        UiHudText(coordText, x, y, step, size, cc);
         rows++;
     }
     long below = 1L << 30;      // walk the list from the newest request down
@@ -2024,7 +2025,7 @@ int LauncherDrawHud(int x, int y)
             else
                 text = TextFormat("[%d] ... %s running (%02d:%02d)", q->number, q->slug, t / 60, t % 60);
         }
-        DrawText(text, x, y + rows * step, size, c);
+        UiHudText(text, x, y + rows * step, step, size, c);
         rows++;
     }
     return rows * step;

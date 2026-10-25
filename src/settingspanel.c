@@ -4,6 +4,7 @@
 // arrows (or the left / right half of the value), wheel changes. While open the camera and the
 // game keys are frozen and the cursor is free (like the prompt box).
 #include "settingspanel.h"
+#include "ui.h"
 #include <r3d/r3d_profiler.h>
 
 #define ROW_H       24
@@ -12,14 +13,9 @@
 #define FOOTER_H    92
 #define PAD         20
 #define COL_GAP     36
-#define FONT        18
+#define FONT        UI_M
 #define VALUE_W     210     // value column incl. arrows
 #define ARROW_W     22
-
-static const Color INK = { 238, 236, 230, 255 };
-static const Color DIM = { 238, 236, 230, 140 };
-static const Color ACCENT = { 255, 196, 120, 255 };
-static const Color CHANGED = { 140, 205, 255, 255 };
 
 typedef struct {
     Rectangle panel;
@@ -166,10 +162,9 @@ int PanelUpdate(SettingsPanel *p, GfxSettings *s, float dt, int w, int h)
 
 static void Button(Rectangle r, const char *text, bool selected)
 {
-    DrawRectangleRec(r, selected ? (Color){ 70, 64, 56, 255 } : (Color){ 40, 40, 44, 255 });
-    DrawRectangleLinesEx(r, 1.0f, selected ? ACCENT : (Color){ 238, 236, 230, 90 });
-    int tw = MeasureText(text, FONT);
-    DrawText(text, (int)(r.x + (r.width - tw) / 2), (int)(r.y + (r.height - FONT) / 2), FONT, INK);
+    UiPanel(r, selected ? (Color){ 70, 64, 56, 255 } : UI_RAISED, selected ? UI_ACCENT : UI_LINE);
+    int tw = UiMeasure(text, FONT);
+    UiText(text, (int)(r.x + (r.width - tw) / 2), (int)(r.y + (r.height - UiLineHeight(FONT)) / 2), FONT, UI_INK);
 }
 
 void PanelDraw(const SettingsPanel *p, const GfxSettings *s, int w, int h, bool reused)
@@ -177,18 +172,16 @@ void PanelDraw(const SettingsPanel *p, const GfxSettings *s, int w, int h, bool 
     if (!p->open) return;
     Layout L = MakeLayout(w, h);
     DrawRectangle(0, 0, w, h, (Color){ 0, 0, 0, 90 });
-    DrawRectangleRec(L.panel, (Color){ 18, 18, 20, 236 });
-    DrawRectangleLinesEx(L.panel, 1.0f, (Color){ 238, 236, 230, 90 });
+    UiPanel(L.panel, (Color){ 18, 18, 20, 236 }, UI_LINE);
 
     // Title + frame time
     int tx = (int)L.panel.x + PAD, ty = (int)L.panel.y + 18;
-    DrawText("Graphics settings", tx, ty, 24, INK);
+    UiTextBold("Graphics settings", tx, ty, UI_XL, UI_INK);
     const char *gpu = p->gpuMs >= 0.0f ? TextFormat("GPU %.2f ms", p->gpuMs)
                     : R3D_IsProfilerAvailable() ? "GPU -" : "GPU: profiler not built in";
     const char *timing = TextFormat("%d fps   %.2f ms   %s%s", GetFPS(), p->msAvg, gpu, reused ? "   (cached frame)" : "");
-    DrawText(timing, (int)(L.panel.x + L.panel.width) - PAD - MeasureText(timing, FONT), ty + 4, FONT, DIM);
-    DrawLine((int)L.panel.x + PAD, (int)L.panel.y + TITLE_H - 10, (int)(L.panel.x + L.panel.width) - PAD,
-             (int)L.panel.y + TITLE_H - 10, (Color){ 238, 236, 230, 50 });
+    UiText(timing, (int)(L.panel.x + L.panel.width) - PAD - UiMeasure(timing, FONT), ty + 5, FONT, UI_DIM);
+    DrawRectangle((int)L.panel.x + PAD, (int)L.panel.y + TITLE_H - 10, (int)L.panel.width - 2 * PAD, 1, UI_LINE);
 
     // Values that differ from the preset the settings came from are drawn in blue
     GfxSettings ref = *s;
@@ -200,38 +193,40 @@ void PanelDraw(const SettingsPanel *p, const GfxSettings *s, int w, int h, bool 
     ref.frameReuse = defaults.frameReuse;
 
     for (int g = 0; g < GFX_GROUP_COUNT; g++)
-        if (L.header[g]) DrawText(GfxGroupName((GfxGroup)g), L.headerX[g], L.header[g], FONT, ACCENT);
+        if (L.header[g]) UiTextBold(GfxGroupName((GfxGroup)g), L.headerX[g], L.header[g], FONT, UI_ACCENT);
     for (int r = 0; r < GfxRowCount() && r < 64; r++) {
         Rectangle row = L.row[r];
         bool sel = p->sel == r;
-        if (sel) DrawRectangleRec((Rectangle){ row.x - 6, row.y, row.width + 12, row.height }, (Color){ 255, 255, 255, 22 });
-        int ty2 = (int)(row.y + (row.height - FONT) / 2);
-        DrawText(GfxRowLabel(r), (int)row.x + 10, ty2, FONT, sel ? INK : (Color){ 220, 218, 212, 220 });
-        if (GfxRowNeedsRestart(r)) DrawText("restart", (int)row.x + 10 + MeasureText(GfxRowLabel(r), FONT) + 10, ty2 + 3, 14, DIM);
+        if (sel) UiPanel((Rectangle){ row.x - 6, row.y, row.width + 12, row.height }, (Color){ 255, 255, 255, 22 }, BLANK);
+        int ty2 = (int)(row.y + (row.height - UiLineHeight(FONT)) / 2);
+        UiText(GfxRowLabel(r), (int)row.x + 10, ty2, FONT, sel ? UI_INK : (Color){ 220, 218, 212, 220 });
+        if (GfxRowNeedsRestart(r))
+            UiPill("restart", (int)row.x + 10 + UiMeasure(GfxRowLabel(r), FONT) + 10, (int)row.y + (ROW_H - UI_PILL_H) / 2,
+                   (Color){ 238, 236, 230, 40 }, UI_DIM);
         char v[64], rv[64];
         GfxRowFormat(s, r, v, sizeof(v));
         GfxRowFormat(&ref, r, rv, sizeof(rv));
         bool differs = GfxRowKindOf(r) == GFX_ROW_VALUE && strcmp(v, rv) != 0;
         Rectangle vr = ValueRect(row);
-        Color arrow = sel ? ACCENT : (Color){ 238, 236, 230, 70 };
-        DrawText("<", (int)vr.x + 4, ty2, FONT, arrow);
-        DrawText(">", (int)(vr.x + vr.width) - ARROW_W + 6, ty2, FONT, arrow);
-        int vw = MeasureText(v, FONT);
-        DrawText(v, (int)(vr.x + (vr.width - vw) / 2), ty2, FONT,
-                 GfxRowKindOf(r) == GFX_ROW_PRESET ? ACCENT : differs ? CHANGED : INK);
+        Color arrow = sel ? UI_ACCENT : (Color){ 238, 236, 230, 70 };
+        UiText("<", (int)vr.x + 4, ty2, FONT, arrow);
+        UiText(">", (int)(vr.x + vr.width) - ARROW_W + 6, ty2, FONT, arrow);
+        int vw = UiMeasure(v, FONT);
+        UiText(v, (int)(vr.x + (vr.width - vw) / 2), ty2, FONT,
+                 GfxRowKindOf(r) == GFX_ROW_PRESET ? UI_ACCENT : differs ? UI_CHANGED : UI_INK);
     }
 
     // Footer: the selected row's hint, status, buttons
     int fy = (int)(L.panel.y + L.panel.height) - FOOTER_H + 6;
-    DrawLine((int)L.panel.x + PAD, fy, (int)(L.panel.x + L.panel.width) - PAD, fy, (Color){ 238, 236, 230, 50 });
+    DrawRectangle((int)L.panel.x + PAD, fy, (int)L.panel.width - 2 * PAD, 1, UI_LINE);
     const char *hint = p->sel < GfxRowCount() ? GfxRowHint(p->sel)
                      : p->sel == ResetItem() ? TextFormat("every setting back to the %s preset", MS_QualityName(s->base))
                      : "close the panel (F2 / ESC)";
-    DrawText(hint, tx, fy + 10, 16, INK);
+    UiText(hint, tx, fy + 10, UI_S, UI_INK);
     if (p->statusTime > 0.0f && p->status[0])
-        DrawText(p->status, tx, fy + 34, 16, Fade(ACCENT, fminf(p->statusTime, 1.0f)));
-    DrawText("UP/DOWN select   LEFT/RIGHT change   mouse: arrows / wheel   blue = changed from the preset",
-             tx, (int)L.close.y + 8, 14, DIM);
+        UiText(p->status, tx, fy + 34, UI_S, Fade(UI_ACCENT, fminf(p->statusTime, 1.0f)));
+    UiHints("{UP}/{DOWN} select|{LEFT}/{RIGHT} change|mouse: arrows / wheel|blue = changed from the preset",
+            tx, (int)L.close.y + (28 - UiLineHeight(UI_XS)) / 2, UI_XS, UI_DIM);
     Button(L.reset, "Reset to preset", p->sel == ResetItem());
     Button(L.close, "Close", p->sel == CloseItem());
 }

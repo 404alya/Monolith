@@ -145,3 +145,13 @@ A BVH over the published colliders (built at load, leaves of ≤ 4, also for noG
 ## Run-to-run noise: GPU clock states (2026-10, machine A)
 
 Headless `--bench` runs on machine A (a laptop GPU) flip between two speed levels about 10% apart (e.g. Canyon 4.8 vs. 5.4 ms) depending on the GPU's clock state, far more than the 1-2% noise measured earlier between runs in one state. In 2026-10 one 3x full A/B made Canyon look 8% slower; 6 tightly interleaved short pairs showed it wasn't. Hence the rule in the `benchmarking` skill: compare paired differences of interleaved A/B runs, never single runs.
+
+## Editor UI font and overlay (2026-10-25, machine A)
+
+Outfit embedded font + restyled overlay (`src/ui.c`) against the build before it (HEAD `2cedea8`), default map, `--bench-window 4` (the bench draws the spectator HUD and overlay like the window). Driver 615.71.09.
+- **Whole frames are too noisy for this:** 11 interleaved full pairs of `--bench-still --frame-reuse --bench-window 4` swung 0.66–1.98 ms *within one binary* (clock states), paired differences −36% … +49%. Useless for a UI costing tens of microseconds.
+- **Timing the UI block itself** (an instrumented scratch build: `glFinish` + `GetTime` before the HUD/overlay block and after `EndTextureMode`, averaged over the bench frames; never committed) is stable to ~1%: base 0.213–0.230 ms per frame.
+  - First version, raylib's `DrawRectangleRounded` / `DrawRectangleRoundedLinesEx` for panels, pills and ~60 key caps: **0.36 ms (+0.14)**. Switches: plain rectangles 0.229, no text 0.25, no backdrops 0.338 → the rounded shapes were the cost (dozens of triangles each, draw-mode switches in the batch).
+  - Rounded shapes as nine-slices from atlas discs / rings: 0.266 ms (+0.05); without the key-cap boxes 0.207 → the caps (~15 quads each) were the rest.
+  - Key caps baked per line size into the atlas, drawn as 3-slices: **0.220 vs 0.216 ms reused (+0.004), 0.247 vs 0.235 ms spinning (+0.011)**, 4 interleaved pairs each; whole frames 0.611 → 0.613 ms and 5.31 → 5.33 ms (+0.3%).
+- Final full runs (600 frames, uninstrumented), interleaved: still + reuse 4 pairs −0.5 / +3.5 / +6.3 / +0.8% (median +2.2%), spinning 3 pairs −2.5 / +1.2 / +5.8% — within the clock-state noise.

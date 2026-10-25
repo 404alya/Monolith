@@ -11,7 +11,7 @@ The game starts in **walk mode** at the map's spawn point.
 | WASD + mouse | walk and look; Shift runs, Space jumps |
 | F | fly (no collision): Space up, Ctrl down, Shift ×4 |
 | TAB | switch to spectator mode and back |
-| 1–6 | toggle volumetric fog, distance fog, SSAO, SSIL, bloom, sun (relative to what the map sets; they survive reloads) |
+| 1–6 | toggle volumetric fog, distance fog, SSAO, SSIL, bloom, sun (relative to what the map sets; they survive reloads). The HUD's top line shows each one green when on and dimmed when off |
 | F1 | hide / show the HUD |
 | F2 | graphics settings panel |
 | F9 | export the open map to `export/<map>-<stamp>/` ([export.md](export.md)) |

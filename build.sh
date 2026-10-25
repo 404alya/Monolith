@@ -101,6 +101,8 @@ if [[ $WIN == 1 ]]; then
   # builds before --export needed the repo (src/export.c)
   rm -rf "$OUT/resources" "$OUT/maps" "$OUT/runtime"
   cp -r "$ROOT/maps" "$OUT/maps"
+  # The editor's font is compiled in (src/font_outfit.h); the OFL wants its licence next to it
+  cp "$ROOT/resources/fonts/outfit/OFL.txt" "$OUT/OFL-Outfit.txt"
 
   echo "built: build/win/monolith.exe"
   if [[ "${1:-}" == "run" ]]; then
@@ -170,6 +172,8 @@ GLIBC_WRAP=acosf,asinf,atan2f,sqrtf,fmod,fmodf,hypot,hypotf,__isoc23_strtoul,__i
 
 rm -rf "$OUT/resources" "$OUT/maps" "$OUT/runtime"
 cp -r "$ROOT/maps" "$OUT/maps"
+# The editor's font is compiled in (src/font_outfit.h); the OFL wants its licence next to it
+cp "$ROOT/resources/fonts/outfit/OFL.txt" "$OUT/OFL-Outfit.txt"
 
 echo "built: ${OUT#"$ROOT/"}/monolith"
 if [[ "${1:-}" == "run" ]]; then

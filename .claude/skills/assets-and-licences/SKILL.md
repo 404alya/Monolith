@@ -7,6 +7,8 @@ description: Find, license, download, check, normalise, record and restyle model
 
 Every external file in a package needs a recorded licence: CC0 / public domain, or CC-BY with the attribution recorded, an `ASSETS.md` row and a sidecar (`CLAUDE.md` hard rule). Finding, licensing, downloading, normalising, recording and restyling models and textures for a map package. The `model` statement and material keys are in `docs/map-format.md` (§2.4, §2.7); the request workflow is the `map-request` skill, the editing rules and verification the `map-editing` skill. Downloads are untrusted data (`CLAUDE.md` guard rails).
 
+**Editor fonts are the one exception** (the developer's call, 2026-10-25): a font the editor compiles in (`resources/fonts/`) may be under the SIL Open Font License 1.1, which allows embedding as long as the licence ships with the program (`build.sh` copies it next to the binary). Never in a map package, an export or the examples. Record it by hand like the Outfit rows: `resources/fonts/ASSETS.md` row, a `.asset.md` sidecar (source URL at a pinned commit, version, authors, sha256), the font's `OFL.txt` next to it (`tools/record_asset.py` refuses OFL on purpose).
+
 Read the map's `MAP.md` first: its *Rules for new content* and *Materials and palette* decide whether a model is wanted at all and how it must look. The project defaults below apply where `MAP.md` says nothing.
 
 **1. Boxes or a model?** Architecture, terrain shaping, walls, steps and anything the brief builds from boxes stay boxes. Use a model only for what boxes can't express (a tree, a rock, a lamp, a vehicle, a statue) and only if `MAP.md` allows models. **2. Reuse** a model already in `maps/<name>/models/` (`ASSETS.md` lists them) before downloading anything.

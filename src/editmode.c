@@ -27,6 +27,7 @@
 #include "editmode.h"
 #include "launcher.h"
 #include "dirscan.h"
+#include "ui.h"
 #include <ctype.h>
 #include <math.h>
 
@@ -360,19 +361,18 @@ EditModeResult EditModeUpdate(EditMode *m, Designer *d, float dt)
 
 static void HudText(const char *text, int x, int y, Color c)
 {
-    DrawText(text, x + 1, y + 1, 16, (Color){ 0, 0, 0, (unsigned char)(c.a / 2) });
-    DrawText(text, x, y, 16, c);
+    UiHudText(text, x, y, UI_HUD_LINE, UI_S, c);
 }
 
 int EditModeDrawHud(const EditMode *m, const Designer *d, int x, int y)
 {
     int y0 = y;
-    Color dim = { 230, 230, 230, 130 };
+    Color dim = UI_DIM;
     if (m->active) {
-        HudText(TextFormat("EDIT MODE (M)  |  snap %g m (N, CTRL: none)  |  arrows / PGUP / PGDN move  |  R / SHIFT+R turn "
-                           "(models 15 deg, CTRL 1; boxes 90)  |  DEL remove  |  CTRL+D duplicate  |  [ ] I add model  |  CTRL+I id",
-                           DesignerSnap(d)), x, y, Fade(EDIT_COLOR, 0.95f));
-        y += 20;
+        UiHudHints(TextFormat("EDIT MODE {M}|snap %g m ({N}, {CTRL} none)|arrows / {PGUP} / {PGDN} move|{R} / {SHIFT+R} turn "
+                              "(models 15 deg, {CTRL} 1; boxes 90)|{DEL} remove|{CTRL+D} duplicate|{[} {]} {I} add model|{CTRL+I} id",
+                              DesignerSnap(d)), x, y, UI_HUD_LINE, UI_S, Fade(EDIT_COLOR, 0.95f));
+        y += UI_HUD_LINE;
         char sel[160] = "nothing selected";
         if (d->selectedCount > 0) {
             char where[128];
@@ -384,28 +384,27 @@ int EditModeDrawHud(const EditMode *m, const Designer *d, int x, int y)
                            m->modelCount ? m->models[m->modelPick] : "(no models in ASSETS.md)",
                            m->modelCount ? TextFormat(" (%d of %d)", m->modelPick + 1, m->modelCount) : "",
                            m->ed.undoCount, m->ed.redoCount), x, y, dim);
-        y += 20;
+        y += UI_HUD_LINE;
     }
     if (m->idOpen) {
         // The id panel: a boxed number field under the mode's lines
         y += 8;
         const char *title = TextFormat("ID for line %d  (now: %s)", m->idLine,
                                        m->idHas ? TextFormat("id %d", m->idHas) : "implicit, changes when the line does");
-        const char *hint = TextFormat("ENTER set  |  ESC cancel  |  empty: the next free id (%d)  |  1..2147483647, unique in the map",
+        const char *hint = TextFormat("{ENTER} set|{ESC} cancel|empty: the next free id (%d)|1..2147483647, unique in the map",
                                       m->idNext);
-        int w = 24 + (int)fmaxf((float)MeasureText(title, 16), (float)MeasureText(hint, 16));
-        DrawRectangle(x - 6, y - 4, w, 74, (Color){ 20, 20, 24, 210 });
-        DrawRectangleLines(x - 6, y - 4, w, 74, Fade(EDIT_COLOR, 0.9f));
-        HudText(title, x + 6, y + 2, EDIT_COLOR);
-        DrawRectangle(x + 6, y + 24, 140, 22, (Color){ 0, 0, 0, 200 });
-        HudText(TextFormat("%s_", m->idText), x + 12, y + 27, RAYWHITE);
-        HudText(hint, x + 6, y + 50, Fade(RAYWHITE, 0.7f));
-        y += 80;
+        int w = 24 + (int)fmaxf((float)UiMeasureBold(title, UI_S), (float)UiHintsWidth(hint, UI_S));
+        UiPanel((Rectangle){ (float)(x - 6), (float)(y - 4), (float)w, 88 }, UI_PANEL, Fade(EDIT_COLOR, 0.9f));
+        UiTextBold(title, x + 6, y + 4, UI_S, EDIT_COLOR);
+        UiPanel((Rectangle){ (float)(x + 6), (float)(y + 28), 160, 26 }, (Color){ 0, 0, 0, 200 }, Fade(EDIT_COLOR, 0.5f));
+        UiText(TextFormat("%s_", m->idText), x + 14, y + 28 + (26 - UiLineHeight(UI_M)) / 2, UI_M, UI_INK);
+        UiHints(hint, x + 6, y + 60, UI_S, UI_DIM);
+        y += 92;
     }
     if (m->messageTime > 0.0f) {
         Color c = m->messageError ? (Color){ 255, 110, 90, 255 } : EDIT_COLOR;
         HudText(m->message, x, y, Fade(c, fminf(m->messageTime, 1.0f)));
-        y += 20;
+        y += UI_HUD_LINE;
     }
     return y - y0;
 }

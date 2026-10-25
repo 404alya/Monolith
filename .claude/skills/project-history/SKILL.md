@@ -83,6 +83,16 @@ Until then every program that used a map parsed its text at load, an exported ga
 - **Compiled files are build output, never committed** (the developer's call; `.gitignore` has `*.mapb`): a committed binary could drift from its text. The export ships both, the text as the source.
 - Little-endian only (a big-endian host is refused); map line numbers kept (public API, 4 bytes per object); detection by the file's magic, not its extension; editor builds prefer a package's `.map` over its `.mapb`.
 
+## The editor font (2026-10-25)
+
+The editor's text moved from raylib's 10 px bitmap font (scaled to 16–24 px: blurry, uneven) to Outfit, with one UI module (`src/ui.c`) and the panels restyled together (backdrop behind the HUD, key caps, one type scale and colour tokens, pill labels). The choices:
+- **Compiled in, not a file:** `build/linux/` and `build/win/` stay copy-as-is folders and nothing is read at run time (`tools/embed_font.py` writes the bytes into `src/font_outfit.h`).
+- **Editor only:** the runtime, exports and examples keep raylib's font, so games built from an export carry no font and no extra licence.
+- **SIL OFL 1.1 allowed for editor fonts** (the developer's call; CC0 UI fonts are rare). The OFL permits embedding if the licence travels with the program, so `build.sh` copies `OFL.txt` next to the binary.
+- **Per-size bitmap atlases, not one SDF font:** sharper at 14–24 px, no shader. All sizes and both weights share **one** atlas that is also raylib's shapes texture, so text and panels stay in one batch; the UI is drawn every frame, also over a reused frame where it is a large share of the time.
+- **Rounded shapes from the atlas, not raylib's `DrawRectangleRounded*`:** the first version with raylib's rounded rectangles made the overlay +0.14 ms per frame (0.22 → 0.36 ms, measured around the UI block); nine-slices from atlas discs brought it to +0.05 ms, and key caps baked per line size (3 quads each) to within ~0.005 ms of the old UI.
+- **Loaded on first use**, so headless and plain `--shot` runs never create it; plain shots and `view.png` in bundles stay pixel-identical. `view-marked.png` labels changed with the look.
+
 ## The instruction files
 
 Superseded layouts, for reading old bundles, commits and notes; the current layout is `CLAUDE.md` + `.claude/skills/` + `docs/`.

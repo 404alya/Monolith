@@ -348,6 +348,7 @@
 #include "windowemu.h"
 #include "settings.h"
 #include "settingspanel.h"
+#include "ui.h"
 #include <errno.h>
 #include <limits.h>
 #include <math.h>
@@ -1711,37 +1712,39 @@ static int Run(int argc, char **argv)
             // Snip mode (screen regions) shows even with the HUD off, like the prompt box
             if (drawUi && designerUi) DesignerDrawRegions(&designer, GetScreenWidth(), GetScreenHeight(), false);
             if (drawUi && hud) {
-                DrawText(TextFormat("%d fps%s  |  %s  |  1 volFog:%s  2 fog:%s  3 ssao:%s  4 ssil:%s  5 bloom:%s  6 sun:%s  |  F2 settings: %s",
-                         GetFPS(), reused ? " (cached)" : "", spec.active ? "SPECTATOR" : player.fly ? "FLY" : "WALK",
-                         env->volumetricFog.enabled ? "on" : "off", env->fog.mode ? "on" : "off",
-                         env->ssao.enabled ? "on" : "off", env->ssil.enabled ? "on" : "off",
-                         env->bloom.mode ? "on" : "off", MS_GetRenderSettings(scene).sunOn ? "on" : "off",
-                         MS_QualityName(GfxPreset(&gfx))),
-                         12, 10, 16, (Color){ 230, 230, 230, 160 });
+                // The status line: fps | mode | effect toggles (on / off by colour) | preset
+#define TOGGLE_TEXT(on, name) ((on) ? "^" name "^" : "~" name "~")
+                UiHudHints(TextFormat("%d fps%s|%s|{1} %s  {2} %s  {3} %s  {4} %s  {5} %s  {6} %s|{F2} settings: %s",
+                           GetFPS(), reused ? " (cached)" : "", spec.active ? "SPECTATOR" : player.fly ? "FLY" : "WALK",
+                           TOGGLE_TEXT(env->volumetricFog.enabled, "volFog"), TOGGLE_TEXT(env->fog.mode, "fog"),
+                           TOGGLE_TEXT(env->ssao.enabled, "ssao"), TOGGLE_TEXT(env->ssil.enabled, "ssil"),
+                           TOGGLE_TEXT(env->bloom.mode, "bloom"), TOGGLE_TEXT(MS_GetRenderSettings(scene).sunOn, "sun"),
+                           MS_QualityName(GfxPreset(&gfx))),
+                           12, 10, UI_HUD_LINE, UI_S, UI_TEXT);
+#undef TOGGLE_TEXT
 
                 if (spec.active) {
-                    DrawText(TextFormat("speed %.1f m/s (wheel)  |  <- -> viewpoints  |  P copy view  |  G drop player  |  TAB exit  |  K / SHIFT+K / CTRL+K n close terminals",
-                             spec.speed), 12, 32, 16, (Color){ 230, 230, 230, 120 });
-                    DrawText("LMB select  |  SHIFT+LMB add/remove  |  CTRL+LMB group  |  RMB clear  |  C snip regions  |  V volumes (SHIFT+V from selection)  |  M edit by hand  |  ENTER request  |  R fly to last result",
-                             12, 52, 16, (Color){ 230, 230, 230, 120 });
-                    int y = 80;
+                    UiHudHints(TextFormat("speed %.1f m/s {wheel}|{<-} {->} viewpoints|{P} copy view|{G} drop player|{TAB} exit|"
+                                          "{K} / {SHIFT+K} / {CTRL+K} n close terminals", spec.speed),
+                               12, 10 + UI_HUD_LINE, UI_HUD_LINE, UI_S, UI_DIM);
+                    UiHudHints("{LMB} select|{SHIFT+LMB} add/remove|{CTRL+LMB} group|{RMB} clear|{C} snip regions|"
+                               "{V} volumes ({SHIFT+V} from selection)|{M} edit by hand|{ENTER} request|{R} fly to last result",
+                               12, 10 + 2 * UI_HUD_LINE, UI_HUD_LINE, UI_S, UI_DIM);
+                    int y = 10 + 3 * UI_HUD_LINE + 8;
                     y += DesignerDrawHud(&designer, 12, y);
                     y += EditModeDrawHud(&edit, &designer, 12, y);
                     LauncherDrawHud(12, y + 4);
-                    if (spec.messageTime > 0.0f && !designer.promptOpen) {
-                        float a = fminf(spec.messageTime, 1.0f);
-                        int w = MeasureText(spec.message, 24);
-                        DrawText(spec.message, (GetScreenWidth() - w) / 2, GetScreenHeight() - 70, 24,
-                                 Fade((Color){ 235, 232, 225, 255 }, a));
-                    }
+                    if (spec.messageTime > 0.0f && !designer.promptOpen)
+                        UiToast(spec.message, GetScreenWidth() / 2, GetScreenHeight() - 76, UI_XL, UI_INK, fminf(spec.messageTime, 1.0f));
                 } else if (!shotPath) {
-                    LauncherDrawHud(12, 32);    // finished requests also show while walking
+                    LauncherDrawHud(12, 10 + UI_HUD_LINE + 4);  // finished requests also show while walking
                 }
             }
             if (drawUi && (mapMessageError || mapMessageTime > 0.0f) && !designer.promptOpen) {
-                Color c = mapMessageError ? (Color){ 255, 110, 90, 255 }
-                                          : Fade((Color){ 235, 232, 225, 255 }, fminf(mapMessageTime, 1.0f));
-                DrawText(mapMessage, 12, GetScreenHeight() - 30, 18, c);
+                float a = mapMessageError ? 1.0f : fminf(mapMessageTime, 1.0f);
+                int y = GetScreenHeight() - 36;
+                DrawRectangle(6, y, UiMeasure(mapMessage, UI_M) + 12, 26, Fade(UI_BACKDROP, a));
+                UiText(mapMessage, 12, y + (26 - UiLineHeight(UI_M)) / 2, UI_M, Fade(mapMessageError ? UI_ERROR : UI_INK, a));
             }
             // The prompt box shows even with the HUD off (Enter opened it, it must be visible)
             if (drawUi && designerUi) DesignerDrawPrompt(&designer, GetScreenWidth(), GetScreenHeight());
@@ -1835,6 +1838,7 @@ static int Run(int argc, char **argv)
     if (reuse.composite.id) UnloadShader(reuse.composite);
     MS_Unload(scene);
     R3D_Close();
+    UiClose();
     CloseWindow();
     return exitStatus;
 }
