@@ -20,6 +20,9 @@ submodules/r3d/external/raylib/examples/
 # Map exports written by F9 (src/export.c); examples/build/ is covered by build/ above
 export/
 
+# Compiled maps (monolith --compile, docs/compiled-map.md): build output of exports and examples
+*.mapb
+
 # Maps are local, except the pine_forest package
 maps/*
 !maps/pine_forest/

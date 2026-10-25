@@ -8,6 +8,8 @@ Terms used across these pages, in alphabetical order.
 
 **Bundle:** the folder the game writes for one request, `requests/<date>_<slug>/`: the prompt, screenshots, the camera, what the crosshair hit, the selection, the regions and the volumes, and later the result.
 
+**Compiled map** (`<name>.mapb`): a map's text compiled by `monolith --compile` (and by `--export`) into fixed-size binary records. Games and the game-style examples load it; their runtime has no text parser. The `.map` text stays the source: edit it and compile again ([compiled-map.md](compiled-map.md)).
+
 **Coordinator:** the one Claude Code session the game opens in its own terminal. It takes requests from the queue and hands each to a subagent ([request-queue.md](request-queue.md)).
 
 **Edit mode, manual edit:** key M in spectator mode: move, turn, remove, duplicate or add the selected objects yourself. Each edit is a minimal text edit to the map file (with undo / redo); no request is made ([user-guide.md](user-guide.md)).

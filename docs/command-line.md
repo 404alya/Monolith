@@ -2,7 +2,7 @@
 
 Every flag and environment variable of `monolith` (Linux: `./build/linux/monolith`, Windows: `build\win\monolith.exe`). The header comment of `src/main.c` is the source of truth. Timings quoted below were measured on an RTX 4050 Laptop GPU: a rough guide only, your machine's will differ. Keys and mouse: [user-guide.md](user-guide.md). "Patch N" means a local change to R3D ([glossary.md](glossary.md)).
 
-Flags that never open a visible window, safe for scripts: `--shot` (renders in a hidden window), `--dump-boxes`, `--dump-scene`, `--dump-scene-diff`, `--dump-entities`, `--apply-edits`, `--inspect-model`, `--new-map`, `--export`, `--classify`, and `--bench` together with `--headless`. `--import` opens no game window either, but it queues an import request, which can open the coordinator's terminal. Anything else opens the game window.
+Flags that never open a visible window, safe for scripts: `--shot` (renders in a hidden window), `--dump-boxes`, `--dump-scene`, `--dump-scene-diff`, `--dump-entities`, `--apply-edits`, `--inspect-model`, `--new-map`, `--export`, `--compile`, `--classify`, and `--bench` together with `--headless`. `--import` opens no game window either, but it queues an import request, which can open the coordinator's terminal. Anything else opens the game window.
 
 ## Flags
 
@@ -15,7 +15,7 @@ An unknown flag, a missing or unparsable value, a value that is itself a `--flag
 | `--look yawDeg pitchDeg` | Start angles; with `--view` they override the viewpoint's |
 | `--view n` | Start in spectator mode at viewpoint *n* (1-based; a number beyond the map's viewpoints is ignored) |
 | `--off <digits>` | Start with these effect toggles off (`--off 16`) |
-| `--map <path>` | Package folder (loads `<folder>/<folder name>.map`, else its only `.map`) or `.map` file instead of `maps/monolith/`; hot-reloaded |
+| `--map <path>` | Package folder (loads `<folder>/<folder name>.map`, else its only `.map`, else a compiled `.mapb`) or a `.map` file instead of `maps/monolith/`; hot-reloaded. A compiled map (`.mapb`) loads too, for `--shot` and the `--dump-*` checks; it has no text, so edits and requests refuse it, and a warning says when its `.map` changed after it was compiled |
 | `--ao full\|ssao\|lite\|off\|baked` | AO trade-off (`atmosphere.c`): `ssao` = SSIL off, `lite` = SSIL off + SSAO 8 samples, `off` = both off, `baked` = both off + the occlusion volume (`--ao-volume 0.5 0.6`) |
 | `--ao-volume <voxel> <intensity>` | **Trade-off, off.** World-space occlusion volume (signed distance to boxes, 1 byte/voxel, ≤ 32 MB, ~60 ms CPU bake per load) darkening the ambient light (patch 11). View-independent, ~0.03 ms/frame. Boxes only. |
 | `--render-scale <s>` | **Trade-off, default 1.** R3D renders at `s` (0.25–1) × the output size; `--upscale nearest\|linear\|bicubic\|lanczos` (default bicubic) |
@@ -28,7 +28,8 @@ An unknown flag, a missing or unparsable value, a value that is itself a `--flag
 | `--settings-panel` | With `--shot --shot-hud`: draw the open panel |
 | `--fx key=value` | One effect override, after `--ao`/`--bloom`: `ssao.samples\|radius\|intensity\|power`, `ssil.samples\|radius\|gi\|ao`, `bloom.levels\|intensity`, `exposure`, `vfog.step\|length`. Range-checked like the `env` key. |
 | `--new-map <name\|path>` | Create `maps/<name>/` (or the folder a path with `/` names; its parent must exist): map with ground slab, default material, built-in environment written out, spawn, two viewpoints; `MAP.md` template; empty `shaders/ models/ textures/`, `ASSETS.md`. Checks it loads, no window, refuses to overwrite. |
-| `--export <dir>` | No window: `<dir>/<name>/` (every referenced file + `MAP.md`, `ASSETS.md`, sidecars, files model files refer to), `monolith_scene.h/.c`, `viewer.c`, `README.md`. Refuses a non-empty dir; checks the copy loads ([export.md](export.md)). |
+| `--export <dir>` | No window: `<dir>/<name>/` (the compiled `<name>.mapb`, the `<name>.map` it is compiled from, every referenced file + `MAP.md`, `ASSETS.md`, sidecars, files model files refer to), `monolith_scene.h/.c` (without the text parser), `viewer.c`, `README.md`. Refuses a non-empty dir; checks the compiled copy loads ([export.md](export.md)). A compiled `--map` exports from its `.map`, which must be next to it and unchanged |
+| `--compile <out>` | No window: compile the map's text (`--map` or the default) into the compiled map `<out>` (`<name>.mapb`), the file a game build of the runtime loads ([compiled-map.md](compiled-map.md)). Checks the package like `--dump-boxes`, reads the result back, writes it atomically; the same text always gives the same bytes. Paths in it are package-relative, so write it into the package folder (or a copy of it) |
 | `--import <project dir> <name\|path>` | Package as `--new-map` + an import bundle `requests/<stamp>_import-<name>/` (`kind: "import"`, heavy tier), queued for the coordinator like a submitted request; no game window |
 | `--dump-boxes <file>` | No window: every box as hex floats (`%a`, `min max` per line). Exact-box-list check and full parse check (exit 1 + `file:line: message`); model files are imported on the CPU (a missing or broken one fails; no window) |
 | `--dump-scene <file>` | Also model files, instances (transform, world bounds), colliders, materials, lights (`src/dumpscene.c`); hidden window when the map has models |

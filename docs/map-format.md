@@ -32,6 +32,10 @@ The brief is what keeps a map consistent: every request on the map is carried ou
 
 The first statement `monolith 2` makes a file format 2: everything in §2. Without it a file is **format 1** (only `group`, `box`, `block`, `stairs`, `waffle`, `repeat`, `at`; everything else takes the built-in defaults, and boxes use the plain `"default"` material). To give a format-1 file materials, models or `env` lines, add `monolith 2` as its first statement. A file with `monolith N` newer than the runtime supports is rejected with a clear message.
 
+### 1.4 The compiled form
+
+The `.map` text is the source and stays authoritative: the editor, hot reload, requests and manual edits all work on it. Programs that only play a map (an export, a game) load its compiled form, `<name>.mapb`, which `monolith --compile` and `--export` write from the text: the same scene, already parsed, read without parsing ([compiled-map.md](compiled-map.md)). It is build output: never edit it, never commit it; after changing the text, compile again (a compiled file whose `.map` has changed since loads with a warning in monolith, and `--export` refuses it).
+
 ## 2. Map format reference
 
 Each statement takes one line, so a line number identifies an object. The parser is in `runtime/monolith_scene.c`, and the header comment there is authoritative.

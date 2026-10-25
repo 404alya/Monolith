@@ -2,14 +2,16 @@
 // raylib + R3D program. C11; depends only on raylib (raymath, rlgl) and R3D.
 //
 // monolith draws its maps with this same module, so a scene looks the same there and in
-// your game. Map format: the header comment of monolith_scene.c. Compile with
+// your game. It reads a map's compiled form, <name>.mapb (monolith's docs/compiled-map.md),
+// which monolith writes from the map's text (docs/map-format.md). Compile with
 // -DMS_PATCHED_R3D when building against monolith's patched R3D (see its patches.md);
 // without it the runtime uses upstream R3D APIs only (camera-fitted sun shadow, no depth
 // pre-pass toggle, no fog cache).
 #ifdef MONOLITH_EDITOR
 //
 // Built with -DMONOLITH_EDITOR (the monolith editor, its tools and the examples), the module
-// also has hot reload, the map's source lines and the package / environment writers (the
+// also has the map text's parser (the format: the header comment of monolith_scene.c), the
+// compiler, hot reload, the map's source lines and the package / environment writers (the
 // sections marked "editor"). --export writes the module without them.
 #endif
 //
@@ -58,6 +60,7 @@
                                         // model collision boxes, counted separately)
 #define MS_MAX_FILE_BYTES       (4 * 1024 * 1024)   // map file (and a .gltf/.obj read for its references)
 #define MS_PATH_MAX             1024    // longest path the loader builds (package root + relative path)
+#define MS_MAX_COMPILED_BYTES   (256 * 1024 * 1024) // compiled map file (<name>.mapb)
 #define MS_DEFAULT_EYE_HEIGHT   1.62f   // eye above the spawn's feet (for the viewpoint made from the spawn)
 
 // ======================================================================================
@@ -246,8 +249,14 @@ typedef struct {
     float shadowRangeOverride;  // > 0: overrides sun.range
 } MS_LoadOptions;
 
-// Loads a package folder (<name>/<name>.map, or its only .map file) or a .map file. Needs
-// R3D_Init first unless opt->noGpu. Returns NULL and "file:line: message" in err on failure.
+// Loads a compiled map (<name>.mapb: the map's text compiled by monolith, read without parsing) or
+// a package folder holding one (<name>/<name>.mapb, or its only .mapb file). Needs R3D_Init first
+// unless opt->noGpu. Returns NULL and "file: message" in err on failure (a map line, when there is
+// one, refers to the map's text: "file:line: message").
+#ifdef MONOLITH_EDITOR
+// Editor builds also read the map's text: a folder's <name>.map (else its only .map file) comes
+// before a compiled map, and a file's first bytes tell the two apart.
+#endif
 MS_Scene *MS_Load(const char *path, const MS_LoadOptions *opt, char *err, int errSize);
 void MS_Unload(MS_Scene *scene);
 
@@ -304,6 +313,27 @@ const char *MS_MapText(const MS_Scene *scene, int *size);
 // map lines.
 enum { MS_AXIS_NONE = 0, MS_AXIS_X, MS_AXIS_Y, MS_AXIS_Z, MS_AXIS_INT };
 int MS_PrimitiveArgs(const char *name, unsigned char axes[8]);
+
+// ======================================================================================
+// Compiled maps (editor; docs/compiled-map.md)
+// ======================================================================================
+// A compiled map has no map text: MS_GetLine, MS_LineText and MS_MapText return nothing for it.
+
+// Compiles the map text at mapPath (a package folder or a .map file) into a compiled map at
+// outPath: parsed, checked like a noGpu load (model files included), read back, then written
+// (to outPath + ".partial", renamed). The same text always gives the same bytes. Paths in it
+// stay relative to the package, so outPath belongs in the package folder (or in a copy of it).
+// False with "file:line: message" in err.
+bool MS_Compile(const char *mapPath, const char *outPath, char *err, int errSize);
+
+typedef enum {
+    MS_SOURCE_TEXT = 0,     // the scene was loaded from its map text
+    MS_SOURCE_CURRENT,      // from a compiled map; the .map it was compiled from is next to it, unchanged
+    MS_SOURCE_STALE,        // ... and has changed since (compile it again)
+    MS_SOURCE_MISSING,      // ... and is not there
+} MS_SourceState;
+// sourcePath (may be NULL): the map text's path (for a text load, scene->path)
+MS_SourceState MS_CompiledSource(const MS_Scene *scene, const char **sourcePath);
 #endif
 
 // ======================================================================================

@@ -22,8 +22,9 @@
 # a failing command; --dump-entities; the edit-mode HUD),
 # --submit (tools/stub-terminal.sh instead of a terminal, MONOLITH_WORKSPACE=) on both maps, in
 # coordinator mode (queue + coordinator start, a cancel with no coordinator) and per-request mode,
-# --export, --inspect-model, --new-map, --import (stub terminal), --classify, and every
-# example's --shot (plus the capture shim). Bundles go to its own requests folder
+# --export, --compile and compiled maps (dumps, a shot with a reload, a damaged file, a stale one
+# and its refused export), --inspect-model, --new-map, --import (stub terminal), --classify, and
+# every example's --shot (plus the capture shim; the game-style ones load compiled maps). Bundles go to its own requests folder
 # (MONOLITH_REQUESTS_DIR=<tmp>/requests), never to requests/: a coordinator running meanwhile
 # never sees them, and bundles queued meanwhile are left alone. Files it creates (that folder,
 # the export, the new map packages) go to the trash afterwards (gio trash), never rm.
@@ -195,6 +196,19 @@ Run submit-cancel 0     env MONOLITH_REQUESTS_DIR="$REQ" MONOLITH_TERMINAL="$STU
                             "$M" --shot "$TMP/s3.png" --view 2 --submit 'leakcheck: cancel me' --submit-wait 1 --close-submitted
 Run export-default 0    "$M" --export "$TMP/export-default"
 Run export-models 0     "$M" --export "$TMP/export-models" --map tests/models
+# Compiled maps: a copy of tests/models compiled, loaded (dumps, a shot with a reload), a damaged
+# file, then its source changed (stale: a warning when loaded, the export refuses it)
+CM="$TMP/compiled-models"
+mkdir -p "$CM" && cp -r tests/models/. "$CM/"
+Run compile 0           "$M" --compile "$CM/models.mapb" --map "$CM"
+Run compile-broken 1    "$M" --compile "$TMP/broken.mapb" --map "$TMP/missing-package"
+Run dump-scene-compiled 0 "$M" --dump-scene "$TMP/scene-compiled.txt" --map "$CM/models.mapb"
+Run shot-compiled 0     "$M" --shot "$TMP/compiled.png" --view 1 --map "$CM/models.mapb" --reload-test "$CM/models.mapb"
+head -c 4000 "$CM/models.mapb" > "$CM/damaged.mapb"
+Run compiled-damaged 1  "$M" --dump-boxes "$TMP/damaged.txt" --map "$CM/damaged.mapb"
+echo '# changed' >> "$CM/models.map"
+Run compiled-stale 0    "$M" --dump-entities "$TMP/stale.txt" --map "$CM/models.mapb"
+Run export-stale 1      "$M" --export "$TMP/export-stale" --map "$CM/models.mapb"
 Run inspect-model 0     "$M" --inspect-model tests/models/models/tree_oak.glb
 Run inspect-missing 1   "$M" --inspect-model "$TMP/missing.glb"
 NEWMAP="_leakcheck_$STAMP"

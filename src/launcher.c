@@ -2986,6 +2986,10 @@ int LauncherCloseCoordinator(char *msg, int msgSize)
 
 bool LauncherSubmit(const DesignRequest *req, Image view, Image marked, char *msg, int msgSize)
 {
+    if (MS_CompiledSource(scene, NULL) != MS_SOURCE_TEXT) {
+        snprintf(msg, msgSize, "%s is a compiled map: requests change the map's text (load its .map)", scene->path);
+        return false;
+    }
     InitPaths();
     Bundle *Bp = calloc(1, sizeof(Bundle));
     if (!Bp) { snprintf(msg, msgSize, "out of memory"); return false; }

@@ -11,7 +11,8 @@
 // runtime without its editor parts (no hot reload). See README.md.
 //
 //   entities [package] [--find <key>:<index>]
-//     package             default: scene/ next to the executable (e.g. maps/pine_forest)
+//     package             default: scene/ next to the executable (or a package with its compiled
+//                         map, e.g. a copy of maps/pine_forest after monolith --compile)
 //     --find <key>:<index>   print the entity with this id (as monolith --dump-entities writes
 //                         it, e.g. 0000000c:0 or a278642c:3)
 //   Interactive: right mouse + WASD/QE fly, LEFT/RIGHT viewpoints, TAB next beacon entity.

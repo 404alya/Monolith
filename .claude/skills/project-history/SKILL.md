@@ -71,6 +71,18 @@ Until then every request opened its own terminal with its own `claude` process. 
 - **The coordinator stays small**: it reads only the queue listing and one-line replies, never images or maps, so a session can last all day.
 - The old mode stays behind `MONOLITH_LAUNCH=per-request`; tests use `MONOLITH_REQUESTS_DIR` and a stub coordinator, never a real session.
 
+## Compiled maps (2026-10-25)
+
+Until then every program that used a map parsed its text at load, an exported game included: its runtime shipped the tokenizer, the statement parser, `repeat` expansion and the glTF / OBJ reference scan. Now the text stays the source (editor, hot reload, requests, manual edits, `MS_GetLine`), `monolith --compile` (and `--export`, and `examples/build.sh`) writes `<name>.mapb`, and the runtime without `MONOLITH_EDITOR` reads only that (`docs/compiled-map.md`). Why, and the choices behind it:
+- **Why:** a smaller, simpler game runtime with less attack surface, no number parsing of map data at load, and a stable boundary between the editor and games.
+- **One parser:** the compiler is the text parser plus a writer of the `SceneData` it fills, so the two inputs can't drift; the reader fills the same `SceneData` and the rest of the load is shared (`FinishLoad`). Verified pixel-identical (text vs compiled) on every map in `maps/` and `tests/models`, every viewpoint, plus identical dumps and entity ids.
+- **The parser's state, not the scene:** the file stores what the parser produces before `FinishParse` (boxes already expanded, lights with their defaults, every env key with its final value), not the public structs (pointers, R3D handles) and not derived data. Rejected for now: storing hidden faces, cell meshes or colliders, because they depend on the GPU load or are cheap; worth measuring as a follow-up.
+- **Env keys by name** (`CmEnv.key` is a string): the key tables can be reordered and grow without breaking compiled files; a new statement or record field bumps `MS_COMPILED_VERSION` (`CM_VERSION`) instead, and old files are refused with a message to recompile.
+- **The reader trusts nothing:** everything is checked before use, with the parser's own rules where they exist (`CheckEnvValue`, `InsidePackage`); `MS_Compile` reads its own output back, so what compiles also loads. Corruption test: `tests/unit/compiled_test.sh` (~18,000 damaged files under ASan + UBSan, no crash).
+- **The model-file reference check runs at compile / export, not in games** (the developer's call): a game trusts the model files it ships with, as it trusts its own executable; keeping the JSON / OBJ scanner in games was the rejected alternative.
+- **Compiled files are build output, never committed** (the developer's call; `.gitignore` has `*.mapb`): a committed binary could drift from its text. The export ships both, the text as the source.
+- Little-endian only (a big-endian host is refused); map line numbers kept (public API, 4 bytes per object); detection by the file's magic, not its extension; editor builds prefer a package's `.map` over its `.mapb`.
+
 ## The instruction files
 
 Superseded layouts, for reading old bundles, commits and notes; the current layout is `CLAUDE.md` + `.claude/skills/` + `docs/`.

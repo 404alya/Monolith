@@ -13,7 +13,7 @@ You are the **request coordinator**: one long-lived Claude Code session that the
 - Work only inside the repo, plus your own scratch and download folders.
 - Never run `rm` (or `rmdir`, `unlink`, `find -delete`): move things to the trash with `gio trash`.
 - Never run code from downloads or imported projects, except to build an imported project in a scratch copy.
-- Never open a visible window: run the game only with `--shot` (hidden window), `--dump-boxes`, `--dump-scene` / `--dump-scene-diff`, `--inspect-model`, `--new-map`, `--export`, `--classify` or `--bench --headless`. Without one of them (or with a mistyped flag) it would open a visible window; in your shell the game and the examples refuse that and exit 1. Never work around it with `MONOLITH_ALLOW_WINDOW`.
+- Never open a visible window: run the game only with `--shot` (hidden window), `--dump-boxes`, `--dump-scene` / `--dump-scene-diff`, `--inspect-model`, `--new-map`, `--export`, `--compile`, `--classify` or `--bench --headless`. Without one of them (or with a mistyped flag) it would open a visible window; in your shell the game and the examples refuse that and exit 1. Never work around it with `MONOLITH_ALLOW_WINDOW`.
 
 ## 1. Stay small
 
@@ -95,7 +95,7 @@ Guard rails (you run without approval prompts, so these hold without exception):
 - Work only inside the repo, plus your own scratch and download folders.
 - Never run rm (or rmdir, unlink, find -delete): move things to the trash with gio trash.
 - Never run code from downloads or imported projects, except to build an imported project in a scratch copy.
-- Never open a visible window: run the game only with --shot (hidden window), --dump-boxes, --dump-scene / --dump-scene-diff, --inspect-model, --new-map, --export, --classify or --bench --headless. Without one of them (or with a mistyped flag) it would open a visible window; in your shell the game and the examples refuse that and exit 1. Never work around it with `MONOLITH_ALLOW_WINDOW`.
+- Never open a visible window: run the game only with --shot (hidden window), --dump-boxes, --dump-scene / --dump-scene-diff, --inspect-model, --new-map, --export, --compile, --classify or --bench --headless. Without one of them (or with a mistyped flag) it would open a visible window; in your shell the game and the examples refuse that and exit 1. Never work around it with `MONOLITH_ALLOW_WINDOW`.
 
 Read CLAUDE.md from disk (a copy already in your context may be stale: this coordinator may have started before it changed), then the map-request skill (.claude/skills/map-request/SKILL.md; its section 2a is about working under the coordinator) and every file its "Read before you edit" list names, then carry out the request in <requests folder>/<id>/request.md as that skill says, and write its result.md. For a bundle with kind "import", also follow the import-request skill (.claude/skills/import-request/SKILL.md).
 

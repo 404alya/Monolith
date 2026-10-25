@@ -57,6 +57,7 @@ The first request opens one terminal, the **coordinator**, which works through e
 | [docs/map-format.md](docs/map-format.md) | writing or reading a `.map` file and its design brief |
 | [docs/command-line.md](docs/command-line.md) | every flag and environment variable |
 | [docs/export.md](docs/export.md) | using a map in your own raylib + R3D program; [examples/README.md](examples/README.md) |
+| [docs/compiled-map.md](docs/compiled-map.md) | the compiled form games load (`<name>.mapb`, `--compile`) |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | when something doesn't start, render or answer |
 | [docs/glossary.md](docs/glossary.md) | the terms used in these pages |
 | [docs/architecture.md](docs/architecture.md), [docs/request-queue.md](docs/request-queue.md), [docs/known-issues.md](docs/known-issues.md) | how the code is organised, how requests travel, what is open |

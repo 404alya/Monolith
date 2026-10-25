@@ -5,8 +5,8 @@
 //
 //   minimal [package]            open a window at the map's first viewpoint; hold the right
 //                                mouse button to orbit (wheel zooms), LEFT/RIGHT switch
-//                                viewpoints, ESC quits. package: a map package folder or .map
-//                                file (default: scene/ next to the executable)
+//                                viewpoints, ESC quits. package: a map package folder or its
+//                                compiled map, <name>.mapb (default: scene/ next to the executable)
 //   --size <w> <h>               window size (default 1600 900)
 //   --view <n>                   start at the map's viewpoint n (1-based, default 1)
 //   --eye x y z --look yaw pitch start at this eye position / view angles (degrees; yaw 0 looks

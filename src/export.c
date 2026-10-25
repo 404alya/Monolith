@@ -11,7 +11,9 @@
 //   <dir>/viewer.c             a plain example program: window, fly camera, the map's
 //                              viewpoints (= runtime/export/viewer.c with the map's name)
 //   <dir>/monolith_scene.h/.c  the scene runtime without the editor parts (below)
-//   <dir>/<name>/              the map package: <name>.map, MAP.md, ASSETS.md and every file
+//   <dir>/<name>/              the map package: <name>.mapb (the compiled map the program loads,
+//                              docs/compiled-map.md), <name>.map (its source text, byte for byte;
+//                              the program never reads it), MAP.md, ASSETS.md and every file
 //                              the map references (shaders, textures, panoramas, models), plus
 //                              provenance sidecars (<file>.asset.md), licence files in the same
 //                              folders and the files a model file refers to (.gltf: buffers and
@@ -40,8 +42,10 @@
 //
 // Nothing partial: every source is checked before anything is written (a referenced file
 // that is missing fails the export with the list of missing files), then the folder is
-// written as <dir>.partial, loaded again (parse only) and renamed to <dir>. If writing or the
-// check fails, the files written into <dir>.partial are removed again.
+// written as <dir>.partial, its map compiled there (MS_Compile), the compiled map loaded again
+// (no GPU) and the folder renamed to <dir>. If writing, compiling or the check fails, the files
+// written into <dir>.partial are removed again. A compiled map exports from its source text,
+// which must be next to it and unchanged since it was compiled.
 //
 // Sources: the repo (PROJECT_PATH: runtime/, cmake/; R3D_SOURCE_PATH, the R3D tree build.sh
 // built against). Without the repo (a copied build folder) the export fails with a message.
@@ -153,6 +157,16 @@ static void AddPkg(Plan *P, const char *root, const char *name, const char *rel,
     else { fprintf(stderr, "monolith: export: out of memory\n"); P->errors++; }
     free(from);
     free(to);
+}
+
+// A file written into the export by other means than the plan (the compiled map): listed so that
+// RemoveWritten removes it again
+static void AddWritten(Plan *P, const char *to)
+{
+    char *t = MS_StrDup(to);
+    PlanItem *it = t ? MS_PUSH(P->items, P->count, P->cap) : NULL;
+    if (!it) { free(t); fprintf(stderr, "monolith: export: out of memory\n"); P->errors++; return; }
+    it->to = t;
 }
 
 static bool IsPkgCopied(const Plan *P, const char *rel)
@@ -545,7 +559,8 @@ static char *MakeReadme(const MS_Scene *s, const char *name, const char *assetsP
             when, s->formatVersion, s->boxCount, s->modelCount, s->materialCount, s->lightCount, s->viewpointCount, pkgFiles);
     fprintf(f,
         "| Path | What |\n|---|---|\n"
-        "| `%s/` | The map package: `%s.map` (geometry, materials, lights, sky, fog, post-processing), "
+        "| `%s/` | The map package: `%s.mapb` (the compiled map: what the program loads), `%s.map` (its source "
+        "text: geometry, materials, lights, sky, fog, post-processing; see \"The compiled map\"), "
         "`MAP.md` (its design brief), `ASSETS.md` (sources and licences of external files) and every file the map uses. "
         "All paths inside are relative to this folder, so it can live anywhere. |\n"
         "| `monolith_scene.h`, `monolith_scene.c` | The scene runtime: loads and draws the package, and answers "
@@ -560,7 +575,7 @@ static char *MakeReadme(const MS_Scene *s, const char *name, const char *assetsP
         "(`prebuilt/<linux|win>/lib/`; the targets are listed under \"Build and run\"). |\n"
         "| `cmake/` | The MinGW-w64 toolchain file for `./build.sh --win`. |\n"
         "| `LICENSES/` | Licence texts of monolith, R3D, raylib, assimp and uthash. |\n\n",
-        name, name);
+        name, name, name);
 
     fprintf(f,
         "## Build and run\n\n"
@@ -594,10 +609,23 @@ static char *MakeReadme(const MS_Scene *s, const char *name, const char *assetsP
               "builds only what changed.\n\n");
 
     fprintf(f,
+        "## The compiled map\n\n"
+        "`%s/%s.mapb` is `%s.map` compiled by monolith: the same scene, already parsed, stored as fixed-size binary "
+        "records (map format %d). The scene runtime reads only the compiled file (it has no text parser) and checks "
+        "it completely before using it; `%s.map` is here as the source and is never read by the program. To change "
+        "the map, edit `%s.map` (in monolith, or by hand: the format is described in monolith's `docs/map-format.md`) "
+        "and compile it again with monolith, from this folder:\n\n"
+        "```sh\n"
+        "monolith --map %s --compile %s/%s.mapb\n"
+        "```\n\n"
+        "A compiled map from an older or newer monolith is refused with a message to compile it again.\n\n",
+        name, name, name, s->formatVersion, name, name, name, name, name);
+
+    fprintf(f,
         "## Use the map in your own program\n\n"
         "Add `monolith_scene.c` to your sources, this folder to the include path and ship the `%s/` folder with the "
-        "program. The scene only renders and answers queries: the window, the main loop, the camera, the player and "
-        "the physics stay yours.\n\n"
+        "program (`MS_Load` on the folder opens its `.mapb`; the `.map` can stay behind). The scene only renders and "
+        "answers queries: the window, the main loop, the camera, the player and the physics stay yours.\n\n"
         "```c\n"
         "#include \"monolith_scene.h\"\n\n"
         "char err[512];\n"
@@ -850,6 +878,28 @@ static long long FileBytes(const char *path)
 
 bool ExportScene(const MS_Scene *s, const char *outDirIn, char *msg, int msgSize)
 {
+    // A compiled map: the export ships its text and compiles that, so the text must be current
+    const char *source;
+    MS_SourceState state = MS_CompiledSource(s, &source);
+    if (state != MS_SOURCE_TEXT) {
+        if (state != MS_SOURCE_CURRENT) {
+            snprintf(msg, msgSize, state == MS_SOURCE_STALE
+                     ? "export: %s was compiled from an older %s: export the .map (or compile it again); nothing written"
+                     : "export: %s is a compiled map and its source %s is not next to it: the export needs the map's text; "
+                       "nothing written", s->path, source);
+            return false;
+        }
+        char err[512];
+        MS_Scene *text = MS_Load(source, &(MS_LoadOptions){ .noGpu = true }, err, sizeof(err));
+        if (!text) {
+            snprintf(msg, msgSize, "export: %s; nothing written", err);
+            return false;
+        }
+        bool ok = ExportScene(text, outDirIn, msg, msgSize);
+        MS_Unload(text);
+        return ok;
+    }
+
     char outDir[MS_PATH_MAX];
     snprintf(outDir, sizeof(outDir), "%s", outDirIn);
     size_t ol = strlen(outDir);
@@ -932,7 +982,7 @@ bool ExportScene(const MS_Scene *s, const char *outDirIn, char *msg, int msgSize
     static const char *const DOCS[] = { "MAP.md", "ASSETS.md" };
     for (int i = 0; i < 2; i++)
         if (FileExists(TextFormat("%s%s", root, DOCS[i])) && (ownFolder || s->formatVersion >= 2)) AddPkg(&P, root, name, DOCS[i], NULL);
-    int pkgFiles = P.count;
+    int pkgFiles = P.count + 1;         // (+ the compiled map, made after writing the package)
 
     // --- Plan: the runtime without its editor parts, viewer.c + build.sh from the templates
     char err[MS_PATH_MAX + 512] = "";      // (room for a source path in the message)
@@ -1009,21 +1059,39 @@ bool ExportScene(const MS_Scene *s, const char *outDirIn, char *msg, int msgSize
         else bytesOther += b;
         free(to);
     }
+    // The compiled map, from the copied text: what the exported program loads
+    bool written = ok;
+    char *mapText = ok ? Fmt("%s/%s/%s.map", staging, name, name) : NULL;
+    char *compiledTo = ok ? Fmt("%s/%s.mapb", name, name) : NULL;
+    char *compiled = compiledTo ? Fmt("%s/%s", staging, compiledTo) : NULL;
+    if (ok && (!mapText || !compiledTo || !compiled)) {
+        ok = false;
+        snprintf(msg, msgSize, "export: out of memory; nothing written");
+    }
     if (ok) {
-        char *pkg = Fmt("%s/%s/", staging, name);
-        MS_Scene *check = pkg ? MS_Load(pkg, &(MS_LoadOptions){ .noGpu = true }, err, sizeof(err)) : NULL;
-        free(pkg);
+        AddWritten(&P, compiledTo);
+        if (!MS_Compile(mapText, compiled, err, sizeof(err))) {
+            ok = false;
+            snprintf(msg, msgSize, "export: the map does not compile: %s; nothing written", err);
+        }
+        bytesPkg += FileBytes(compiled);
+    }
+    if (ok) {
+        MS_Scene *check = MS_Load(compiled, &(MS_LoadOptions){ .noGpu = true }, err, sizeof(err));
         if (!check) {
             ok = false;
             snprintf(msg, msgSize, "export: the exported package does not load: %s; nothing written", err);
         } else {
-            if (check->boxCount != s->boxCount || check->modelCount != s->modelCount) {
+            if (check->boxCount != s->boxCount || check->modelCount != s->modelCount || check->entityCount != s->entityCount) {
                 ok = false;
                 snprintf(msg, msgSize, "export: the exported package has a different object count; nothing written");
             }
             MS_Unload(check);
         }
-    } else snprintf(msg, msgSize, "export: writing %s failed (see the log); nothing written", staging);
+    } else if (!written) snprintf(msg, msgSize, "export: writing %s failed (see the log); nothing written", staging);
+    free(mapText);
+    free(compiledTo);
+    free(compiled);
     if (ok && DirectoryExists(outDir) && RemoveDir(outDir) != 0) {      // (empty: checked above)
         ok = false;
         snprintf(msg, msgSize, "export: cannot replace the empty folder %s: %s; nothing written", outDir, strerror(errno));

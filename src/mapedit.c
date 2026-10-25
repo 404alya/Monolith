@@ -1172,6 +1172,10 @@ EditResult MapEditApply(MapEditor *E, const MS_ObjRef *sel, int selCount, const 
 {
     *outSel = NULL;
     *outSelCount = 0;
+    if (MS_CompiledSource(scene, NULL) != MS_SOURCE_TEXT) {
+        snprintf(msg, msgSize, "%s is a compiled map: edits change the map's text (load its .map)", scene->path);
+        return EDIT_FAILED;
+    }
     unsigned long long before = scene->hash;
     int size;
     char *disk = ReadLoadedMap(before, &size, msg, msgSize);

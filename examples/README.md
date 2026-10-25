@@ -27,6 +27,13 @@ flags (zero warnings) and static linking, and the runtime as an export has it (w
 loads (`scene/` or `assets/`), so it runs from any working directory. `examples/build/` is not
 committed.
 
+A game build of the runtime reads only compiled maps (`<name>.mapb`, [docs/compiled-map.md](../docs/compiled-map.md)):
+it has no text parser. So `examples/build.sh` copies `01_minimal/scene/` next to each game-style
+program and compiles its `courtyard.map` there with `build/linux/monolith --compile` (which is why
+`./build.sh` comes first, also before `--win`). `03_live_editing` is an editor build and loads
+the text, which it hot-reloads. To open another package with a game-style example, compile it
+first: `build/linux/monolith --map <package> --compile <package>/<name>.mapb`.
+
 ## The test build: screenshots without a window
 
 The examples are plain integration code: they open a window and run until it is closed. Tests

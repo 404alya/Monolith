@@ -198,8 +198,11 @@
 //   --map <path>   load this map package (folder) or .map file instead of maps/monolith/
 //                  (relative to the CWD; the default is the repo's maps/ while it exists,
 //                  else maps/ next to the executable). A folder loads <folder>/<name>.map,
-//                  else its only .map file. The package is reloaded whenever one of its
-//                  files changes (format: runtime/monolith_scene.c)
+//                  else its only .map file (else a compiled <name>.mapb). The package is
+//                  reloaded whenever one of its files changes (format: runtime/monolith_scene.c).
+//                  A compiled map (.mapb, --compile) loads too, for the --shot and --dump-*
+//                  checks; it has no text, so --apply-edits, manual edits and requests refuse it,
+//                  and a warning says when its .map has changed since it was compiled
 //   --reload-test <path>   with --shot: after 10 frames, load this map (package or file)
 //                  through the hot-reload path (as if the map had changed), then render the
 //                  remaining frames. The shot must equal a plain --shot --map <path> (proves
@@ -243,6 +246,10 @@
 //
 //   --dump-entities <file>   load the map (no window), write every entity (box, model, light)
 //                  with its stable id, source line, copy and transform (src/dumpscene.c) and exit
+//   --compile <out>   compile the map's text (--map or the default) into the compiled map <out>
+//                  (<name>.mapb, docs/compiled-map.md), the file games load, and exit without a
+//                  window. Checks the package like --dump-boxes; the same text always gives the
+//                  same bytes. Paths in it are package-relative: write it into the package folder
 //   --apply-edits <script>   run an edit script (select / move / turn / remove / duplicate / add /
 //                  undo / redo; format: the header comment of src/mapedit.c) against the map
 //                  file of --map, which is required (the script rewrites that file), and exit
@@ -794,6 +801,7 @@ static int Run(int argc, char **argv)
     bool settingsPanelFlag = false;     // --settings-panel
     const char *newMapName = NULL;
     const char *exportDir = NULL;               // --export
+    const char *compilePath = NULL;             // --compile
     const char *importDir = NULL, *importName = NULL;   // --import
     float fogCacheVoxel = -1.0f;    // --fog-cache
     int fogCacheSub = 2;
@@ -883,6 +891,7 @@ static int Run(int argc, char **argv)
         else if (strcmp(a, "--shadow-camera") == 0) { if (shadowMode != (int)MS_SHADOW_ALWAYS) shadowMode = MS_SHADOW_CAMERA; }
         else if (strcmp(a, "--new-map") == 0) { NEED(1); newMapName = argv[++i]; }
         else if (strcmp(a, "--export") == 0) { NEED(1); exportDir = argv[++i]; }
+        else if (strcmp(a, "--compile") == 0) { NEED(1); compilePath = argv[++i]; }
         else if (strcmp(a, "--import") == 0) { NEED(2); importDir = argv[i + 1]; importName = argv[i + 2]; i += 2; }
         else if (strcmp(a, "--fog-cache") == 0) {
             // Clamped: 0.25 m is already 228 MB over the default region; 0 or less turns it off
@@ -1067,11 +1076,11 @@ static int Run(int argc, char **argv)
     // Every mode below that isn't one of these opens the visible game window. An agent's shell
     // may not (a mistyped or forgotten flag would put the game on the developer's screen).
     bool windowless = shotPath || (bench && headless) || dumpPath || dumpScenePath || dumpEntitiesPath || applyEditsPath ||
-                      exportDir || classifyText;
+                      exportDir || compilePath || classifyText;
     if (!windowless && AgentShell()) {
         fprintf(stderr, "monolith: refusing to open the game window from an AI agent's shell (CLAUDECODE / AI_AGENT is set).\n"
                         "  Use --shot, --dump-boxes, --dump-scene(-diff), --dump-entities, --apply-edits, --inspect-model, --new-map,\n"
-                        "  --export, --classify or --bench --headless; a person who wants the window from this shell sets\n"
+                        "  --export, --compile, --classify or --bench --headless; a person who wants the window from this shell sets\n"
                         "  MONOLITH_ALLOW_WINDOW=1.\n");
         return 1;
     }
@@ -1083,7 +1092,8 @@ static int Run(int argc, char **argv)
     // don't depend on what the developer last chose. --no-settings: no file at all. Then
     // --quality, then the single flags: they apply to this run and are never saved.
     // Last --settings-set: a change "as if made in the panel" (applies, and is saved).
-    bool automated = shotPath || bench || dumpPath || dumpScenePath || dumpEntitiesPath || applyEditsPath || exportDir || classifyText;
+    bool automated = shotPath || bench || dumpPath || dumpScenePath || dumpEntitiesPath || applyEditsPath || exportDir ||
+                     compilePath || classifyText;
     const char *settingsFile = noSettings ? NULL : settingsPath ? settingsPath : automated ? NULL : GfxDefaultPath();
     GfxSettings gfx = GfxDefaults();
     if (settingsFile) {
@@ -1128,6 +1138,13 @@ static int Run(int argc, char **argv)
         return 1;
     }
     if (!mapPath) mapPath = defaultMap;
+    if (compilePath) {
+        char err[512];
+        bool ok = MS_Compile(mapPath, compilePath, err, sizeof(err));
+        if (ok) printf("monolith: compiled %s into %s\n", mapPath, compilePath);
+        else fprintf(stderr, "monolith: cannot compile the map\n%s\n", err);
+        return ok ? 0 : 1;
+    }
     // (shadow size: an init hint, so a load option; the range is applied by MS_ApplyQuality)
     MS_LoadOptions loadOpt = { .noGpu = true, .shadowSizeOverride = gfx.q.shadowSize };
     MS_Scene *peek;     // parsed only (no GPU); gives the R3D init hints once a GL context exists
@@ -1146,6 +1163,11 @@ static int Run(int argc, char **argv)
                     peek->entityCount, dumpEntitiesPath);
             MS_Unload(peek);
             return ok ? 0 : 1;
+        }
+        if (applyEditsPath && MS_CompiledSource(peek, NULL) != MS_SOURCE_TEXT) {
+            fprintf(stderr, "monolith: %s is a compiled map: --apply-edits edits the map's text (its .map file)\n", peek->path);
+            MS_Unload(peek);
+            return 1;
         }
         if (applyEditsPath) {
             // The edits work on the text and the parsed lines only: a noGpu scene, reloaded

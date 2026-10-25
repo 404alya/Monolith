@@ -17,7 +17,9 @@
 # Same compiler flags as the game (zero warnings), same static linking and glibc
 # compatibility shim (src/glibc_compat.c) on Linux. R3D_DIR overrides the R3D tree. The runtime
 # is built like an exported game (no -DMONOLITH_EDITOR), except for 03_live_editing (MS_Poll)
-# and the capture shim (MS_WriteR3DEnvironment).
+# and the capture shim (MS_WriteR3DEnvironment). A game build reads only compiled maps, so the
+# game-style examples get their scene compiled next to the copied text (<name>.mapb, through
+# ../build/linux/monolith --compile, also for --win); 03_live_editing loads the text.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -53,6 +55,11 @@ else
   EXTRA_SRC=("$ROOT/src/glibc_compat.c")
   LIBS=(-L"$LIBDIR/lib" -lr3d -lraylib -lassimp -lzlibstatic -l:libstdc++.a -lgcc_s -lGL -lm -lpthread -ldl
         -Wl,--wrap="${GLIBC_WRAP//,/,--wrap=}")
+fi
+MONOLITH="$ROOT/build/linux/monolith"
+if [[ ! -x "$MONOLITH" ]]; then
+  echo "examples/build.sh: $MONOLITH not found (it compiles the examples' scenes): run ./build.sh in the repo root first" >&2
+  exit 1
 fi
 if [[ ! -f "$LIBDIR/lib/libr3d.a" ]]; then
   echo "examples/build.sh: $LIBDIR/lib/libr3d.a not found: run ./build.sh$([[ $WIN == 1 ]] && echo ' --win') in the repo root first" >&2
@@ -90,18 +97,31 @@ Data() {
   cp -r "$from"/. "$OUT/$dir/$to/"
 }
 
+# Compiled <dir> <package>: compiles the copied package's only .map into <name>.mapb next to it
+Compiled() {
+  local pkg="$OUT/$1/$2" maps=()
+  maps=("$pkg"/*.map)
+  [[ ${#maps[@]} == 1 && -f "${maps[0]}" ]] || { echo "examples/build.sh: $pkg must hold exactly one .map file" >&2; exit 1; }
+  "$MONOLITH" --map "${maps[0]}" --compile "${maps[0]}b" >"$OUT-obj/compile.log" 2>&1 ||
+    { cat "$OUT-obj/compile.log" >&2; exit 1; }
+  echo "compiled: ${maps[0]#"$ROOT/"}b"
+}
+
 Example 01_minimal minimal "$HERE/01_minimal/main.c" -- "${RUNTIME[@]}"
 Data 01_minimal "$HERE/01_minimal/scene" scene
+Compiled 01_minimal scene
 
 Example 02_existing_project before "$HERE/02_existing_project/before.c" -DHARNESS_MAIN_NO_ARGS
 Example 02_existing_project after "$HERE/02_existing_project/after.c" -- "${RUNTIME[@]}"
 Data 02_existing_project "$HERE/01_minimal/scene" scene
+Compiled 02_existing_project scene
 
 Example 03_live_editing live_editing "$HERE/03_live_editing/main.c" -DMONOLITH_EDITOR -- "${RUNTIME[@]}"
 Data 03_live_editing "$HERE/01_minimal/scene" scene
 
 Example 05_entities entities "$HERE/05_entities/main.c" -- "${RUNTIME[@]}"
 Data 05_entities "$HERE/01_minimal/scene" scene
+Compiled 05_entities scene
 
 Example 04_import_source import_source "$HERE/04_import_source/main.c" -DHARNESS_MAIN_NO_ARGS
 Data 04_import_source "$HERE/04_import_source/assets" assets
