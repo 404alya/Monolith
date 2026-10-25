@@ -16,6 +16,9 @@
 //   add        `id N model "models/x.glb" x y z origin bottom` after the line of the object it
 //              stands on (so it joins that object's group); wrapped in `use "default"` ...
 //              `use "<active>"` when a `use` is active there, which would restyle the model
+//   id         gives the objects' line an `id N` prefix (or changes it) and nothing else: a chosen
+//              N for one line (unique in the file), or the next free one for each selected line
+//              without an id; a `repeat` line is not split (the id names the whole line)
 // Splitting a `repeat` line keeps the copies in their map order: the rows before the
 // changed copy, its row split around it, the rows after. Each untouched piece is written
 // with plain `repeat` prefixes and adjusted start values when that gives exactly the same
@@ -46,6 +49,8 @@
 //   remove
 //   duplicate <dx> <dy> <dz>       copies shifted by this
 //   add "<models/x.glb>" <x> <y> <z>   after the line of the first selected object
+//   id [<n>]                       the selection's line gets `id n` (one line), or without n each
+//                                  selected line without an id gets the next free one
 //   undo, redo
 //   print                          the selection (entity id, kind, line, copy)
 // Each command prints one "edits: ..." line; the first failing one stops the script (exit 1).
@@ -759,6 +764,24 @@ static LineOut *OutFor(Patch *P, int line)
     return o;
 }
 
+// The line (1-based) whose `id` is `id`, 0 for none
+static int IdLine(const Patch *P, int id)
+{
+    int found = 0;
+    Stmt st = { 0 };
+    for (int l = 0; l < P->lineCount && !found; l++) {
+        const char *s = P->text + P->lines[l].start;
+        int len = P->lines[l].contentEnd - P->lines[l].start, i = 0, v;
+        while (i < len && (s[i] == ' ' || s[i] == '\t')) i++;
+        if (len - i < 3 || memcmp(s + i, "id", 2) != 0 || (s[i + 2] != ' ' && s[i + 2] != '\t')) continue;
+        st.text = s;
+        st.len = len;
+        if (Tokenize(&st) && st.n >= 2 && TokIs(&st, 0, "id") && TokInt(&st, 1, &v) && v == id) found = l + 1;
+    }
+    free(st.tok);
+    return found;
+}
+
 // Lines and entities of one statement among the selected objects
 typedef struct {
     int prim, line;
@@ -906,6 +929,59 @@ static void FreePatch(Patch *P)
     free(P->sel);
 }
 
+// EDIT_ID on the selected statements (sorted by line): only their `id` prefixes change
+static bool IdLines(Ctx *C, Patch *P, const StmtSel *ss, int ssCount, Stmt *st)
+{
+    int want = C->op->id;
+    if (want < 0) { snprintf(C->why, sizeof(C->why), "an id is a number from 1 to 2147483647"); return false; }
+    if (want > 0 && ssCount > 1) {
+        snprintf(C->why, sizeof(C->why), "one id names one line: select objects of a single line (the selection has %d)", ssCount);
+        return false;
+    }
+    int other = want > 0 ? IdLine(P, want) : 0;
+    if (other && other != ss[0].line) { snprintf(C->why, sizeof(C->why), "id %d is used on line %d already", want, other); return false; }
+    int changed = 0, objects = 0, firstId = 0, lastId = 0, oldId = 0, lastCount = 0, lastLine = 0;
+    for (int k = 0; k < ssCount; k++) {
+        const StmtSel *S = &ss[k];
+        if (S->line < 1 || S->line > P->lineCount) { snprintf(C->why, sizeof(C->why), "line %d is not in the file", S->line); return false; }
+        const LineSpan *ls = &P->lines[S->line - 1];
+        if (!Analyze(st, P->text + ls->start, ls->contentEnd - ls->start, C->why, sizeof(C->why))) return false;
+        if (CopyCount(st) != S->copies) { snprintf(C->why, sizeof(C->why), "line %d: the copies don't match the loaded map", S->line); return false; }
+        int has = st->idTok >= 0 ? st->id : 0;
+        int id = want > 0 ? want : has ? has : C->nextId++;
+        // The selection keeps the same objects (their line's new key, the same index)
+        for (int i = 0; i < S->entityCount; i++)
+            if (S->copySel[scene->entitySources[S->firstEntity + i].copy]) SelAdd(P, (unsigned int)id, i);
+        if (id == has) continue;
+        LineOut *o = OutFor(P, S->line);
+        if (!o) { snprintf(C->why, sizeof(C->why), "out of memory"); return false; }
+        RwReset(&C->rw);
+        RwId(&C->rw, st, id);
+        RwBuild(&C->rw, st, &o->text);
+        if (C->rw.oom || o->text.oom) { snprintf(C->why, sizeof(C->why), "out of memory"); return false; }
+        if (!changed) firstId = id;
+        lastId = id;
+        oldId = has;
+        lastCount = S->entityCount;
+        lastLine = S->line;
+        objects += S->entityCount;
+        changed++;
+    }
+    if (!changed) {
+        if (ssCount == 1) snprintf(C->why, sizeof(C->why), "line %d has id %d already", ss[0].line, want > 0 ? want : st->id);
+        else snprintf(C->why, sizeof(C->why), "every selected line has an id already");
+        return false;
+    }
+    const char *kept = changed < ssCount ? TextFormat("; %d other line%s had an id already", ssCount - changed,
+                                                      ssCount - changed == 1 ? "" : "s") : "";
+    if (changed == 1)
+        snprintf(P->what, sizeof(P->what), "id %d on line %d (%d object%s: %d:0%s)%s%s", lastId, lastLine, lastCount,
+                 lastCount == 1 ? "" : "s", lastId, lastCount > 1 ? TextFormat(" .. %d:%d", lastId, lastCount - 1) : "",
+                 oldId ? TextFormat(", was id %d", oldId) : "", kept);
+    else snprintf(P->what, sizeof(P->what), "ids %d..%d on %d lines (%d objects)%s", firstId, lastId, changed, objects, kept);
+    return true;
+}
+
 // Fills P->outs (one per changed line) and P->sel for op on sel[]. False with C->why.
 static bool BuildPatch(Ctx *C, Patch *P, const MS_ObjRef *sel, int selCount)
 {
@@ -972,6 +1048,10 @@ static bool BuildPatch(Ctx *C, Patch *P, const MS_ObjRef *sel, int selCount)
     if (op->kind == EDIT_ROTATE && boxes > 0 && fmod(fabs(op->degrees), 90.0) != 0.0) { snprintf(C->why, sizeof(C->why), "boxes turn only in 90 degree steps"); goto doneSel; }
     if (op->kind == EDIT_ROTATE && boxes > 0 && QuarterTurns(op->degrees) % 2 == 0) { snprintf(C->why, sizeof(C->why), "a box turned by 180 degrees is the same box"); goto doneSel; }
     qsort(ss, (size_t)ssCount, sizeof(StmtSel), CompareStmtSel);
+    if (op->kind == EDIT_ID) {
+        ok = IdLines(C, P, ss, ssCount, &st);
+        goto doneSel;
+    }
 
     int splits = 0, extraLines = 0;
     for (int k = 0; k < ssCount; k++) {
@@ -1293,6 +1373,25 @@ void MapEditAnchor(MS_ObjRef o, double out[3])
     out[2] = Round4(p.z);
 }
 
+void MapEditIdText(MS_ObjRef o, char *out, int outSize)
+{
+    int e = MS_ObjectEntity(scene, o);
+    if (e < 0) { if (outSize > 0) out[0] = '\0'; return; }
+    MS_EntityId id = scene->entityIds[e];
+    if (MS_ENTITY_EXPLICIT(id)) snprintf(out, outSize, "id %u:%d", id.stmt, id.index);
+    else snprintf(out, outSize, "id %08x:%d (implicit)", id.stmt, id.index);
+}
+
+int MapEditNextId(void)
+{
+    int size;
+    const char *text = MS_MapText(scene, &size);
+    Patch P = { .text = text, .size = size };
+    int next = IndexLines(&P) ? MaxId(&P) + 1 : 1;
+    free(P.lines);
+    return next > 0 ? next : 1;
+}
+
 void MapEditDescribe(MS_ObjRef o, char *out, int outSize)
 {
     int e = MS_ObjectEntity(scene, o);
@@ -1302,11 +1401,10 @@ void MapEditDescribe(MS_ObjRef o, char *out, int outSize)
     while (a > 0 && scene->entitySources[a - 1].prim == s->prim) a--;
     while (b + 1 < scene->entityCount && scene->entitySources[b + 1].prim == s->prim) b++;
     int copies = scene->entitySources[b].copy + 1;
-    MS_EntityId id = scene->entityIds[e];
-    char idText[32] = "";
-    if (MS_ENTITY_EXPLICIT(id)) snprintf(idText, sizeof(idText), ", id %u", id.stmt);
-    if (copies > 1) snprintf(out, outSize, "line %d (copy %d of %d%s)", s->line, s->copy, copies, idText);
-    else snprintf(out, outSize, "line %d%s%s%s", s->line, idText[0] ? " (" : "", idText[0] ? idText + 2 : "", idText[0] ? ")" : "");
+    char idText[48];
+    MapEditIdText(o, idText, sizeof(idText));
+    if (copies > 1) snprintf(out, outSize, "line %d (copy %d of %d), %s", s->line, s->copy, copies, idText);
+    else snprintf(out, outSize, "line %d, %s", s->line, idText);
 }
 
 // #endregion
@@ -1440,6 +1538,12 @@ int MapEditRunScript(const char *scriptPath)
             isEdit = n == 5 && ScriptNum(w[2], &op.pos[0]) && ScriptNum(w[3], &op.pos[1]) && ScriptNum(w[4], &op.pos[2]) && sel.n > 0;
             if (isEdit) op.anchor = sel.v[0];
             else snprintf(msg, sizeof(msg), "add \"<model file>\" <x> <y> <z> (after the first selected object's line)");
+        } else if (strcmp(w[0], "id") == 0) {
+            long v = 0;
+            op.kind = EDIT_ID;
+            isEdit = n == 1 || (n == 2 && ScriptInt(w[1], &v) && v >= 1 && v <= 2147483647);
+            op.id = (int)v;
+            if (!isEdit) snprintf(msg, sizeof(msg), "id [<n>] (1..2147483647; without n: the next free id for each line without one)");
         } else if ((strcmp(w[0], "undo") == 0 || strcmp(w[0], "redo") == 0) && n == 1) {
             MS_EntityId *ids;
             int count;
@@ -1455,7 +1559,7 @@ int MapEditRunScript(const char *scriptPath)
             }
             snprintf(msg, sizeof(msg), "%d selected", sel.n);
             ok = true;
-        } else snprintf(msg, sizeof(msg), "unknown command '%s' (select also move turn remove duplicate add undo redo print)", w[0]);
+        } else snprintf(msg, sizeof(msg), "unknown command '%s' (select also move turn remove duplicate add id undo redo print)", w[0]);
 
         if (isEdit) {
             MS_EntityId *ids;

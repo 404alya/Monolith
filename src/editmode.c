@@ -15,6 +15,11 @@
 //   [ ]                    pick the model to add (the package's models/ files listed in ASSETS.md)
 //   I                      add it at the crosshair (origin bottom), after the line of the object
 //                          under it, in its group
+//   CTRL+I                 give the selection's line an id: with objects of one line selected, the
+//                          id panel (a number field, prefilled with the line's id or the next free
+//                          one; digits, BACKSPACE, ENTER sets it, ESC cancels; empty = the next
+//                          free id); with objects of several lines, each line without an id gets
+//                          the next free one at once. Only the `id n` prefix changes (mapedit.c)
 //   M / ESC                leave the mode (V and C leave it too)
 // CTRL+Z / CTRL+SHIFT+Z (or CTRL+Y) undo / redo manual edits anywhere in spectator mode. When
 // a request of this game run is queued or running on the map, an edit first warns; the same
@@ -236,6 +241,53 @@ static EditModeResult AddModel(EditMode *m, Designer *d, int key)
     return Apply(m, d, key, &op);
 }
 
+// CTRL+I: the panel for one line; several lines get the next free ids at once
+static EditModeResult IdKey(EditMode *m, Designer *d)
+{
+    if (d->selectedCount == 0) {
+        Say(m, true, "nothing selected (LMB selects, SHIFT+LMB adds, CTRL+LMB a group)");
+        return EDITMODE_NONE;
+    }
+    int first = MS_ObjectEntity(scene, d->selected[0]);
+    for (int i = 1; i < d->selectedCount && first >= 0; i++) {
+        int e = MS_ObjectEntity(scene, d->selected[i]);
+        if (e >= 0 && scene->entitySources[e].prim != scene->entitySources[first].prim)
+            return Apply(m, d, KEY_I, &(EditOp){ .kind = EDIT_ID });
+    }
+    if (first < 0) return EDITMODE_NONE;
+    EditModeOpenIdPanel(m, d, NULL);
+    return EDITMODE_NONE;
+}
+
+void EditModeOpenIdPanel(EditMode *m, Designer *d, const char *text)
+{
+    int e = d->selectedCount > 0 ? MS_ObjectEntity(scene, d->selected[0]) : -1;
+    if (e < 0) return;
+    MS_EntityId id = scene->entityIds[e];
+    m->idOpen = true;
+    m->idLine = scene->entitySources[e].line;
+    m->idHas = MS_ENTITY_EXPLICIT(id) ? (int)id.stmt : 0;
+    m->idNext = MapEditNextId();
+    if (text) snprintf(m->idText, sizeof(m->idText), "%s", text);
+    else snprintf(m->idText, sizeof(m->idText), "%d", m->idHas ? m->idHas : m->idNext);
+    while (GetCharPressed()) {}     // (nothing typed before the panel opened goes into it)
+}
+
+static EditModeResult IdPanel(EditMode *m, Designer *d)
+{
+    if (IsKeyPressed(KEY_ESCAPE)) { m->idOpen = false; return EDITMODE_NONE; }
+    size_t n = strlen(m->idText);
+    if (KeyRepeat(KEY_BACKSPACE) && n > 0) m->idText[--n] = '\0';
+    for (int c = GetCharPressed(); c; c = GetCharPressed())
+        if (c >= '0' && c <= '9' && n < 10 && !(n == 0 && c == '0')) { m->idText[n++] = (char)c; m->idText[n] = '\0'; }
+    if (!IsKeyPressed(KEY_ENTER) && !IsKeyPressed(KEY_KP_ENTER)) return EDITMODE_NONE;
+    long v = n ? strtol(m->idText, NULL, 10) : 0;
+    if (v > 2147483647L) { Say(m, true, "an id is a number from 1 to 2147483647"); return EDITMODE_NONE; }
+    EditModeResult r = Apply(m, d, KEY_ENTER, &(EditOp){ .kind = EDIT_ID, .id = (int)v });
+    if (r == EDITMODE_RELOADED) m->idOpen = false;      // (refused: stays open with the reason shown)
+    return r;
+}
+
 static EditModeResult History(EditMode *m, Designer *d, bool undo)
 {
     if (!Confirmed(m, undo ? KEY_Z : KEY_Y)) return EDITMODE_NONE;
@@ -261,6 +313,8 @@ void EditModeOpen(EditMode *m, Designer *d)
 
 bool EditModeTakesArrows(const EditMode *m) { return m->active; }
 
+bool EditModeCapturesInput(const EditMode *m) { return m->idOpen; }
+
 void EditModeSync(EditMode *m)
 {
     char msg[256];
@@ -272,6 +326,8 @@ EditModeResult EditModeUpdate(EditMode *m, Designer *d, float dt)
     if (m->messageTime > 0.0f) m->messageTime -= dt;
     if (m->warnTime > 0.0f) m->warnTime -= dt;
     if (m->active && (d->volumeMode || d->snipping)) m->active = false;    // V / C took over
+    if (!m->active) m->idOpen = false;
+    if (m->idOpen) return IdPanel(m, d);
 
     bool ctrl = Ctrl(), shift = Shift();
     if (ctrl && IsKeyPressed(KEY_Z)) return History(m, d, !shift);
@@ -297,6 +353,7 @@ EditModeResult EditModeUpdate(EditMode *m, Designer *d, float dt)
     if (IsKeyPressed(KEY_R)) return Turn(m, d, KEY_R);
     if (IsKeyPressed(KEY_DELETE)) return Apply(m, d, KEY_DELETE, &(EditOp){ .kind = EDIT_REMOVE });
     if (ctrl && IsKeyPressed(KEY_D)) return Duplicate(m, d, KEY_D);
+    if (ctrl && IsKeyPressed(KEY_I)) return IdKey(m, d);
     if (IsKeyPressed(KEY_I)) return AddModel(m, d, KEY_I);
     return EDITMODE_NONE;
 }
@@ -313,7 +370,7 @@ int EditModeDrawHud(const EditMode *m, const Designer *d, int x, int y)
     Color dim = { 230, 230, 230, 130 };
     if (m->active) {
         HudText(TextFormat("EDIT MODE (M)  |  snap %g m (N, CTRL: none)  |  arrows / PGUP / PGDN move  |  R / SHIFT+R turn "
-                           "(models 15 deg, CTRL 1; boxes 90)  |  DEL remove  |  CTRL+D duplicate  |  [ ] I add model",
+                           "(models 15 deg, CTRL 1; boxes 90)  |  DEL remove  |  CTRL+D duplicate  |  [ ] I add model  |  CTRL+I id",
                            DesignerSnap(d)), x, y, Fade(EDIT_COLOR, 0.95f));
         y += 20;
         char sel[160] = "nothing selected";
@@ -321,13 +378,29 @@ int EditModeDrawHud(const EditMode *m, const Designer *d, int x, int y)
             char where[128];
             MapEditDescribe(d->selected[0], where, sizeof(where));
             snprintf(sel, sizeof(sel), "%d selected, first: %s %s", d->selectedCount,
-                     d->selected[0].kind == MS_OBJ_MODEL ? "model" : "box", where);
+                     d->selected[0].kind == MS_OBJ_MODEL ? "model" : d->selected[0].kind == MS_OBJ_LIGHT ? "light" : "box", where);
         }
         HudText(TextFormat("%s  |  add: %s%s  |  CTRL+Z undo (%d)  CTRL+SHIFT+Z redo (%d)", sel,
                            m->modelCount ? m->models[m->modelPick] : "(no models in ASSETS.md)",
                            m->modelCount ? TextFormat(" (%d of %d)", m->modelPick + 1, m->modelCount) : "",
                            m->ed.undoCount, m->ed.redoCount), x, y, dim);
         y += 20;
+    }
+    if (m->idOpen) {
+        // The id panel: a boxed number field under the mode's lines
+        y += 8;
+        const char *title = TextFormat("ID for line %d  (now: %s)", m->idLine,
+                                       m->idHas ? TextFormat("id %d", m->idHas) : "implicit, changes when the line does");
+        const char *hint = TextFormat("ENTER set  |  ESC cancel  |  empty: the next free id (%d)  |  1..2147483647, unique in the map",
+                                      m->idNext);
+        int w = 24 + (int)fmaxf((float)MeasureText(title, 16), (float)MeasureText(hint, 16));
+        DrawRectangle(x - 6, y - 4, w, 74, (Color){ 20, 20, 24, 210 });
+        DrawRectangleLines(x - 6, y - 4, w, 74, Fade(EDIT_COLOR, 0.9f));
+        HudText(title, x + 6, y + 2, EDIT_COLOR);
+        DrawRectangle(x + 6, y + 24, 140, 22, (Color){ 0, 0, 0, 200 });
+        HudText(TextFormat("%s_", m->idText), x + 12, y + 27, RAYWHITE);
+        HudText(hint, x + 6, y + 50, Fade(RAYWHITE, 0.7f));
+        y += 80;
     }
     if (m->messageTime > 0.0f) {
         Color c = m->messageError ? (Color){ 255, 110, 90, 255 } : EDIT_COLOR;

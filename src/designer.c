@@ -1,4 +1,5 @@
 #include "designer.h"
+#include "mapedit.h"
 #include <math.h>
 #include <limits.h>
 
@@ -1936,18 +1937,20 @@ int DesignerDrawHud(const Designer *d, int x, int y)
     if (!ObjIsNone(d->hit.obj)) {
         MS_Ref r = *MS_ObjectRef(scene, d->hit.obj);
         const char *group = r.group >= 0 ? scene->groups[r.group] : "(no group)";
+        char idText[48];
+        MapEditIdText(d->hit.obj, idText, sizeof(idText));
         if (d->hit.obj.kind == MS_OBJ_MODEL) {
             const MS_ModelInstance *m = &scene->models[d->hit.obj.index];
-            HudText(TextFormat("crosshair: %s  |  model %s  |  material %s  |  line %d  |  model %d  |  %.1f m", group,
-                    scene->modelFiles[m->file].path, DesignerMaterialLabel(d->hit.obj), r.line, d->hit.obj.index, d->hit.dist),
-                    x, y, main);
+            HudText(TextFormat("crosshair: %s  |  model %s  |  material %s  |  line %d  |  %s  |  model %d  |  %.1f m", group,
+                    scene->modelFiles[m->file].path, DesignerMaterialLabel(d->hit.obj), r.line, idText, d->hit.obj.index,
+                    d->hit.dist), x, y, main);
             y += 20;
             HudText(TextFormat("  at %.2f %.2f %.2f  rot %.1f %.1f %.1f  scale %.2f %.2f %.2f", m->position.x, m->position.y,
                     m->position.z, m->rotationDeg.x, m->rotationDeg.y, m->rotationDeg.z, m->scale.x, m->scale.y, m->scale.z),
                     x, y, dim);
         } else
-            HudText(TextFormat("crosshair: %s  |  material %s  |  line %d  |  box %d  |  %.1f m",
-                    group, DesignerMaterialLabel(d->hit.obj), r.line, d->hit.obj.index, d->hit.dist),
+            HudText(TextFormat("crosshair: %s  |  material %s  |  line %d  |  %s  |  box %d  |  %.1f m",
+                    group, DesignerMaterialLabel(d->hit.obj), r.line, idText, d->hit.obj.index, d->hit.dist),
                     x, y, main);
         y += 20;
         char line[128];     // (cut below anyway)

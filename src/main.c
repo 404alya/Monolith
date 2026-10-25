@@ -76,9 +76,10 @@
 //                  mode; the arrows follow the world axes nearest to the view and don't fly to
 //                  viewpoints then; CTRL: no grid), R / SHIFT+R turn it (models 15 deg, CTRL 1;
 //                  boxes 90), DELETE removes it, CTRL+D duplicates it, [ ] pick a package model
-//                  listed in ASSETS.md and I adds it at the crosshair. M / ESC (and V, C) leave.
-//                  The HUD shows the snap step, the first selected object's map line, the last
-//                  edit. With a request of this run queued or running on the map, the first key
+//                  listed in ASSETS.md and I adds it at the crosshair, CTRL+I gives the selection's
+//                  line an id (one line: a panel to type it, ENTER sets, ESC cancels; several
+//                  lines: the next free ids). M / ESC (and V, C) leave. The HUD shows the snap
+//                  step, the first selected object's map line and entity id, the last edit. With a request of this run queued or running on the map, the first key
 //                  only warns (again within 3 s: edit anyway)
 //   CTRL+Z / CTRL+SHIFT+Z (CTRL+Y)   undo / redo manual edits (spectator mode); the history is
 //                  dropped when the map changes on disk for any other reason
@@ -281,6 +282,8 @@
 //   --shot-hud     with --shot: draw the HUD, crosshair, selection overlay, regions, volumes and prompt box
 //                  into the shot (to look at the UI; plain shots never contain it)
 //   --edit-mode    with --shot --shot-hud: open the edit mode (M), to see its HUD
+//   --edit-id <digits>   with --edit-mode and --select: open its id panel (CTRL+I) for the
+//                  selection with these digits typed ("" for an empty field), to see it
 //   --submit-wait <s>   with --submit: keep polling the request (state, result.md, terminal
 //                  process) for <s> seconds before exiting; state changes are logged
 //   --close-submitted   with --submit: then close the submitted request like CTRL+K n (twice
@@ -817,6 +820,7 @@ static int Run(int argc, char **argv)
     Vector3 eye = { 0 };
     bool pickFlag = false, shotHud = false;
     bool editModeFlag = false;          // --edit-mode
+    const char *editIdText = NULL;      // --edit-id
     int frameReuseFlag = -1;    // --no-frame-reuse 0, --frame-reuse 1, default -1 (see below)
     const char *submitText = NULL, *typeText = NULL;
     float submitWait = -1.0f;       // --submit-wait: keep polling the request this long
@@ -955,6 +959,7 @@ static int Run(int argc, char **argv)
         }
         else if (strcmp(a, "--shot-hud") == 0) shotHud = true;
         else if (strcmp(a, "--edit-mode") == 0) editModeFlag = true;
+        else if (strcmp(a, "--edit-id") == 0) { NEED(1); editIdText = argv[++i]; }
         else if (strcmp(a, "--no-frame-reuse") == 0) frameReuseFlag = 0;
         else if (strcmp(a, "--frame-reuse") == 0) frameReuseFlag = 1;
         else if (strcmp(a, "--submit") == 0) { NEED(1); submitText = argv[++i]; }
@@ -1339,6 +1344,7 @@ static int Run(int argc, char **argv)
     // Edit mode (M): manual edits of the selection (editmode.c); --edit-mode opens it for --shot-hud
     static EditMode edit;
     if (editModeFlag) EditModeOpen(&edit, &designer);
+    if (editModeFlag && editIdText) EditModeOpenIdPanel(&edit, &designer, editIdText);
 
     if (!hidden) DisableCursor();
     if (typeText) {
@@ -1418,7 +1424,7 @@ static int Run(int argc, char **argv)
 
         // While the prompt box is open (and a couple of frames after it closed) every
         // game key and the camera are frozen: the keys are text now
-        bool typing = DesignerCapturesInput(&designer);
+        bool typing = DesignerCapturesInput(&designer) || EditModeCapturesInput(&edit);
 
         // Graphics settings panel (F2, both modes; settingspanel.c). A change goes to this
         // run's settings and to the saved ones (the command-line overrides of other settings
@@ -1614,15 +1620,20 @@ static int Run(int argc, char **argv)
         else if (!shotPath) {
             DesignerAction action = DESIGNER_NONE;
             if (spec.active && !PanelCapturesInput(&panel)) {
-                action = DesignerUpdate(&designer, dt);
-                typing = DesignerCapturesInput(&designer);
-                if (designer.snipping || designer.volumeMode) edit.active = false;   // C and V leave the edit mode
+                // The edit mode's id panel takes every key while it is open (digits, ENTER, ESC)
+                bool idPanel = EditModeCapturesInput(&edit);
+                if (!idPanel) {
+                    action = DesignerUpdate(&designer, dt);
+                    typing = DesignerCapturesInput(&designer);
+                    if (designer.snipping || designer.volumeMode) edit.active = false;   // C and V leave the edit mode
+                }
                 // Manual edits rewrite and reload the map: then the environment applies again,
                 // as after a hot reload (the selection already follows the edited objects)
-                if (!typing && action == DESIGNER_NONE && EditModeUpdate(&edit, &designer, dt) == EDITMODE_RELOADED) {
+                if ((idPanel || !typing) && action == DESIGNER_NONE && EditModeUpdate(&edit, &designer, dt) == EDITMODE_RELOADED) {
                     ApplyEnvironment(&effects);
                     mapMessageError = false;
                 }
+                typing = typing || EditModeCapturesInput(&edit);
             }
             spec.holdMove = edit.active && (IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL));
             if (spec.active && !typing && !EditModeTakesArrows(&edit) && IsKeyPressed(KEY_R)) {

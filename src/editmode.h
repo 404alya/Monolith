@@ -19,6 +19,10 @@ typedef struct {
     int warnKey;            // a request is open on this map: this key again within warnTime edits anyway
     float warnTime;
     int ackCount, ackNewest;    // the open requests the developer chose to edit beside
+    // The id panel (CTRL+I with objects of one line selected): the number being typed
+    bool idOpen;
+    char idText[12];
+    int idLine, idHas, idNext; // the line, its id (0 = implicit), the next free id
 } EditMode;
 
 typedef enum {
@@ -30,8 +34,14 @@ typedef enum {
 // Spectator-mode input, after DesignerUpdate and only when the designer doesn't capture the
 // keys: M toggles the mode; in it arrows / PGUP / PGDN move the selection (snap: N), R / SHIFT+R
 // turn it, DELETE removes it, CTRL+D duplicates it, [ ] pick a model and I adds it at the
-// crosshair. CTRL+Z / CTRL+SHIFT+Z (CTRL+Y) undo / redo in spectator mode, in the mode or not.
+// crosshair, CTRL+I gives the selection's line an id (the id panel). CTRL+Z / CTRL+SHIFT+Z
+// (CTRL+Y) undo / redo in spectator mode, in the mode or not. While the id panel is open it
+// takes every key (call it then even though the game is "typing").
 EditModeResult EditModeUpdate(EditMode *m, Designer *d, float dt);
+// The id panel is open: every key is its (digits, BACKSPACE, ENTER, ESC); freeze the game keys
+bool EditModeCapturesInput(const EditMode *m);
+// Opens the id panel for the selection with this text typed (--edit-id, for HUD shots)
+void EditModeOpenIdPanel(EditMode *m, Designer *d, const char *text);
 // The arrow keys belong to the mode (not to the spectator's viewpoints), and R too
 bool EditModeTakesArrows(const EditMode *m);
 // After any reload (MS_Poll too): drops the undo history when the map changed elsewhere

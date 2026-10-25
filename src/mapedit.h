@@ -5,7 +5,7 @@
 
 #include "common.h"
 
-typedef enum { EDIT_MOVE, EDIT_ROTATE, EDIT_REMOVE, EDIT_DUPLICATE, EDIT_ADD } EditOpKind;
+typedef enum { EDIT_MOVE, EDIT_ROTATE, EDIT_REMOVE, EDIT_DUPLICATE, EDIT_ADD, EDIT_ID } EditOpKind;
 
 typedef struct {
     EditOpKind kind;
@@ -14,6 +14,8 @@ typedef struct {
     const char *modelPath;  // EDIT_ADD: package-relative model file
     double pos[3];          // EDIT_ADD: where it stands (origin bottom)
     MS_ObjRef anchor;       // EDIT_ADD: the new line goes right after this object's line (its group)
+    int id;                 // EDIT_ID: the id the selected objects' line gets (1..2147483647, unique in
+                            // the file; one line only); 0 = each line without an id gets the next free one
 } EditOp;
 
 // One part of an edit: bytes [offset, offset + oldLen) of the file before it became newText
@@ -64,6 +66,13 @@ void MapEditFree(MapEditor *E);
 // The world position an arrow step snaps from: box min corner, model / light position,
 // rounded to 0.1 mm so that the float of a decimal coordinate gives back that decimal
 void MapEditAnchor(MS_ObjRef o, double out[3]);
+
+// The object's entity id as the HUD shows it: "id 12:0" for a line with `id 12` (decimal, as
+// written there and in `select id 12`), else "id a7d95ba7:0 (implicit)" (hex, as --dump-entities
+// and `select entity` write it); "" when the object has no entity
+void MapEditIdText(MS_ObjRef o, char *out, int outSize);
+// The next free `id` of the loaded map file (the largest one + 1)
+int MapEditNextId(void);
 
 // A short description of where an object comes from: "line 120 (copy 3 of 8, id 7)"
 void MapEditDescribe(MS_ObjRef o, char *out, int outSize);

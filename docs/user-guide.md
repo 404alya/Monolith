@@ -28,7 +28,7 @@ All of this happens in spectator mode.
 
 | Input | Action |
 |---|---|
-| Crosshair | outlines the object under it; the HUD shows its group, material, map line and distance |
+| Crosshair | outlines the object under it; the HUD shows its group, material, map line, entity id and distance. The id is `id 12:0` when the line has `id 12` (stable whatever happens to the line), else `id a7d95ba7:0 (implicit)` (from the line's text: changes when that line changes); the number after the colon is the object's place among the objects of its line ([map-format.md](map-format.md) §2.9) |
 | Left click / Shift+click | select the object / add or remove it |
 | Ctrl+click / Ctrl+Shift+click | select / add the object's whole group |
 | Right click | clear the selection |
@@ -64,7 +64,7 @@ Volumes are drawn as green boxes, fainter where they are hidden, numbered V1, V2
 
 ### Editing by hand (M)
 
-Small changes don't need Claude: select objects as usual (click, Shift+click, Ctrl+click for a group), press **M**, and use the keys below. Each edit is written straight into the map file as the smallest possible text change (the numbers on one line, a deleted line, a line split in two, a new line), and the map reloads at once; comments, groups and every other line stay as they were. The selection follows the edited objects. The HUD shows the snap step, what the first selected object's map line is, the model **I** adds, the undo / redo counts and what the last edit did.
+Small changes don't need Claude: select objects as usual (click, Shift+click, Ctrl+click for a group), press **M**, and use the keys below. Each edit is written straight into the map file as the smallest possible text change (the numbers on one line, a deleted line, a line split in two, a new line), and the map reloads at once; comments, groups and every other line stay as they were. The selection follows the edited objects. The HUD shows the snap step, the first selected object's map line and entity id, the model **I** adds, the undo / redo counts and what the last edit did.
 
 | In edit mode | Action |
 |---|---|
@@ -75,9 +75,10 @@ Small changes don't need Claude: select objects as usual (click, Shift+click, Ct
 | Ctrl+D | duplicate: the copies go one footprint to the right and become the selection |
 | [ / ] | choose the model to add: the package's `models/` files that `ASSETS.md` lists (new models need a request: they need a licence) |
 | I | add that model where the crosshair hits, standing on the surface (it snaps like a volume corner; Ctrl: exact); it joins the group of the object it stands on |
+| Ctrl+I | give the selection's line an id. With objects of one line selected, a small panel opens: type the number (it starts with the line's id, or the next free one), Enter sets it, Esc cancels, an empty field takes the next free id; the number must be unused in the map. With objects of several lines selected, each line without an id gets the next free one at once. Only the `id n` in front of the line changes (a `repeat` line keeps all its copies: the id names the line, its objects are `n:0`, `n:1`, …) |
 | M or Esc | leave edit mode (V and C leave it too); the arrows fly to viewpoints again |
 
-Editing one copy of a `repeat` row (a single pillar of a row of eight) splits that line: the moved copy gets its own line and the others stay exactly where they were. Lines you edit get an `id n` in front, so later edits and the selection keep track of them ([map format](map-format.md) §2.9).
+Editing one copy of a `repeat` row (a single pillar of a row of eight) splits that line: the moved copy gets its own line and the others stay exactly where they were. Lines you edit get an `id n` in front, so later edits and the selection keep track of them ([map format](map-format.md) §2.9); Ctrl+I gives a line one without changing anything else, for objects your own code looks up by id.
 
 **Undo** (Ctrl+Z) writes the old text back, byte for byte; redo writes the edit again. The history belongs to the file as you left it: when the map changes for another reason (a request finishes, you save it in a text editor), the history is cleared, so an undo never takes back a change you didn't make here. If a request of yours is queued or running on the same map, the first edit key only warns you (the request's session may be changing the same lines); press it again within 3 seconds to edit anyway. An edit is refused while the file on disk differs from what the game has loaded (the reload is still coming).
 

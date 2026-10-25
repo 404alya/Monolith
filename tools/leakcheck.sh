@@ -18,7 +18,7 @@
 # shader materials, shadowed lights), of examples/01_minimal/scene and maps/pine_forest
 # (textured ground, many restyled models), --reload-test both ways
 # and into a broken map, a broken map on the command line, --shot-hud with --select / --region / --volume,
-# manual edits (--apply-edits on a copy of tests/models: move, turn, split, duplicate, add, undo, redo and
+# manual edits (--apply-edits on a copy of tests/models: move, turn, split, duplicate, add, id, undo, redo and
 # a failing command; --dump-entities; the edit-mode HUD),
 # --submit (tools/stub-terminal.sh instead of a terminal, MONOLITH_WORKSPACE=) on both maps, in
 # coordinator mode (queue + coordinator start, a cancel with no coordinator) and per-request mode,
@@ -176,12 +176,19 @@ undo
 undo
 redo
 print
+select id 1
+id 40
+select line 26
+also id 40
+id
+undo
 select line 9999
 remove
 EDITS
 Run apply-edits 1       "$M" --apply-edits "$TMP/edits.txt" --map "$TMP/edit-models"
 Run dump-entities 0     "$M" --dump-entities "$TMP/entities.txt" --map tests/models
 Run edit-mode-hud 0     "$M" --shot "$TMP/edit.png" --view 1 --map tests/models --shot-hud --edit-mode --select 36
+Run edit-id-panel 0     "$M" --shot "$TMP/edit-id.png" --view 1 --map tests/models --shot-hud --edit-mode --select 30 --edit-id 57
 Run shot-hud 0          "$M" --shot "$TMP/hud.png" --view 2 --shot-hud --select 192 --select 198 \
                             --region 100 100 300 200 --region 800 300 200 200 --volume -11 0 -34 -7 20 34 \
                             --volume 3 4 12 -4 0 4 --type 'make it\ntaller' --pick --pick-at 10 10 --pick-at 1590 890
