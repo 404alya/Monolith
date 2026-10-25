@@ -1246,7 +1246,7 @@ bool r3d_render_cluster_begin(BoundingBox aabb)
 
     r3d_render_cluster_t cluster = {
         .aabb = aabb,
-        .visible = R3D_RENDER_VISBILITY_UNKNOWN
+        .visible = R3D_RENDER_VISIBILITY_UNKNOWN
     };
 
     R3D_MOD_RENDER.activeCluster = (int)R3D_LIST_LENGTH(R3D_MOD_RENDER.clusters);
@@ -1266,7 +1266,7 @@ void r3d_render_group_push(const r3d_render_group_t* group)
 {
     r3d_render_group_visibility_t visibility = {
         .clusterIndex = R3D_MOD_RENDER.activeCluster,
-        .visible = R3D_RENDER_VISBILITY_UNKNOWN
+        .visible = R3D_RENDER_VISIBILITY_UNKNOWN
     };
 
     r3d_render_indices_t indices = {0};
@@ -1343,11 +1343,11 @@ void r3d_render_cull_groups(const R3D_Frustum* frustum)
     {
         for (size_t i = 0; i < numGroups; i++)
         {
-            R3D_LIST_GET(R3D_MOD_RENDER.groupVisibility, r3d_render_group_visibility_t, i).visible = R3D_RENDER_VISBILITY_UNKNOWN;
+            R3D_LIST_GET(R3D_MOD_RENDER.groupVisibility, r3d_render_group_visibility_t, i).visible = R3D_RENDER_VISIBILITY_UNKNOWN;
         }
         for (size_t i = 0; i < numClusters; i++)
         {
-            R3D_LIST_GET(R3D_MOD_RENDER.clusters, r3d_render_cluster_t, i).visible = R3D_RENDER_VISBILITY_UNKNOWN;
+            R3D_LIST_GET(R3D_MOD_RENDER.clusters, r3d_render_cluster_t, i).visible = R3D_RENDER_VISIBILITY_UNKNOWN;
         }
     }
     R3D_MOD_RENDER.groupCulled = true;
@@ -1364,22 +1364,22 @@ void r3d_render_cull_groups(const R3D_Frustum* frustum)
             r3d_render_cluster_t* cluster = &R3D_LIST_GET(R3D_MOD_RENDER.clusters, r3d_render_cluster_t, visibility->clusterIndex);
 
             // Test cluster once (shared by multiple groups)
-            if (cluster->visible == R3D_RENDER_VISBILITY_UNKNOWN)
+            if (cluster->visible == R3D_RENDER_VISIBILITY_UNKNOWN)
             {
                 cluster->visible = is_aabb_visible(frustum, cluster->aabb);
             }
 
             // If cluster is visible, test the group
-            if (cluster->visible == R3D_RENDER_VISBILITY_TRUE)
+            if (cluster->visible == R3D_RENDER_VISIBILITY_TRUE)
             {
                 // For instanced: trust cluster visibility
                 // For others: test group AABB individually
-                if (r3d_render_has_instances(group)) visibility->visible = R3D_RENDER_VISBILITY_TRUE;
+                if (r3d_render_has_instances(group)) visibility->visible = R3D_RENDER_VISIBILITY_TRUE;
                 else visibility->visible = is_obb_visible(frustum, group->obb);
             }
             else
             {
-                visibility->visible = R3D_RENDER_VISBILITY_FALSE;
+                visibility->visible = R3D_RENDER_VISIBILITY_FALSE;
             }
         }
         // Branch 2: Group without cluster
@@ -1387,7 +1387,7 @@ void r3d_render_cull_groups(const R3D_Frustum* frustum)
         {
             // For instanced: always visible
             // For others: test group AABB
-            if (r3d_render_has_instances(group)) visibility->visible = R3D_RENDER_VISBILITY_TRUE;
+            if (r3d_render_has_instances(group)) visibility->visible = R3D_RENDER_VISIBILITY_TRUE;
             else visibility->visible = is_obb_visible(frustum, group->obb);
         }
     }
@@ -1402,13 +1402,13 @@ bool r3d_render_call_is_visible(const r3d_render_call_t* call, const R3D_Frustum
     r3d_render_visibility_enum_t groupVisibility = R3D_LIST_GET(R3D_MOD_RENDER.groupVisibility, r3d_render_group_visibility_t, groupIndex).visible;
 
     // If the group was already culled, reject immediately
-    if (groupVisibility == R3D_RENDER_VISBILITY_FALSE)
+    if (groupVisibility == R3D_RENDER_VISIBILITY_FALSE)
     {
         return false;
     }
 
     // If the group passed culling, check if we can skip per-call testing
-    if (groupVisibility == R3D_RENDER_VISBILITY_TRUE)
+    if (groupVisibility == R3D_RENDER_VISIBILITY_TRUE)
     {
         // Single-call groups were already tested at the group level
         if (R3D_LIST_GET(R3D_MOD_RENDER.callIndices, r3d_render_indices_t, groupIndex).numCall == 1)
@@ -1423,7 +1423,7 @@ bool r3d_render_call_is_visible(const r3d_render_call_t* call, const R3D_Frustum
         // Multi-call group: fall through to individual call testing
     }
     // If the group hasn't been tested yet, check instanced/skinned groups now
-    else if (groupVisibility == R3D_RENDER_VISBILITY_UNKNOWN)
+    else if (groupVisibility == R3D_RENDER_VISIBILITY_UNKNOWN)
     {
         if (r3d_render_has_instances(group) || group->skinTexture > 0)
         {

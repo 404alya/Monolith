@@ -4500,3 +4500,35 @@ examples build without warnings; `tools/leakcheck.sh`: zero leaks of ours.
 
 **If R3D changes the sort:** keep every sort key free of addresses (pointers, `uintptr_t` of
 heap objects); GL object ids and creation counters are reproducible.
+
+## Patch 18: misspelled visibility enum (2026-10-25)
+
+**Symptom.** The render module's visibility enum was spelled `R3D_RENDER_VISBILITY_*`, and its
+comments were vague about what "visible" is relative to.
+
+**Cause.** A typo upstream.
+
+**Change.** Renamed `R3D_RENDER_VISBILITY_UNKNOWN / _FALSE / _TRUE` to
+`R3D_RENDER_VISIBILITY_*` (all 15 uses), and reworded the three comments: the state is per
+view (camera, shadow map or probe face) and is reset before each view's cull. A rename only:
+the values and the generated code are unchanged. When refreshing from upstream, check whether
+upstream fixed the spelling; if not, redo the rename with
+`sed -i 's/R3D_RENDER_VISBILITY_/R3D_RENDER_VISIBILITY_/g' src/modules/r3d_render.[ch]`.
+
+Files: `src/modules/r3d_render.h`, `src/modules/r3d_render.c`.
+
+```diff
+--- src/modules/r3d_render.h  (r3d_render_visibility_enum_t)
+-    R3D_RENDER_VISBILITY_UNKNOWN = -1,    //< Visibility has not been evaluated yet
+-    R3D_RENDER_VISBILITY_FALSE = 0,       //< Determined to be not visible (culled)
+-    R3D_RENDER_VISBILITY_TRUE = 1,        //< Determined to be visible
++    R3D_RENDER_VISIBILITY_UNKNOWN = -1,   //< Not tested yet for the current view
++    R3D_RENDER_VISIBILITY_FALSE = 0,      //< Outside the view (culled)
++    R3D_RENDER_VISIBILITY_TRUE = 1,       //< Inside the view (drawn)
+--- src/modules/r3d_render.c  (12 uses)
+-R3D_RENDER_VISBILITY_
++R3D_RENDER_VISIBILITY_
+```
+
+**Verification.** No `VISBILITY` left in the tree; both targets build without warnings;
+`tools/leakcheck.sh`: zero leaks of ours.

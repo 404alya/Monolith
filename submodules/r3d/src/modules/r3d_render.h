@@ -95,9 +95,9 @@ typedef enum {
  * Used by culling passes to indicate whether drawing is required.
  */
 typedef enum {
-    R3D_RENDER_VISBILITY_UNKNOWN = -1,    //< Visibility has not been evaluated yet
-    R3D_RENDER_VISBILITY_FALSE = 0,       //< Determined to be not visible (culled)
-    R3D_RENDER_VISBILITY_TRUE = 1,        //< Determined to be visible
+    R3D_RENDER_VISIBILITY_UNKNOWN = -1,   //< Not tested yet for the current view
+    R3D_RENDER_VISIBILITY_FALSE = 0,      //< Outside the view (culled)
+    R3D_RENDER_VISIBILITY_TRUE = 1,       //< Inside the view (drawn)
 } r3d_render_visibility_enum_t;
 
 /*
