@@ -40,6 +40,14 @@ unsigned long __wrap___isoc23_strtoul(const char *s, char **end, int base)
     return strtoul(s, end, base);
 }
 
+// GLIBC_2.38: C23 strtol (also accepts a "0b" prefix), used by assimp's glTF, OBJ / MTL and
+// XML (pugixml) readers. Model files write integers in decimal, so plain strtol is equivalent.
+long __wrap___isoc23_strtol(const char *s, char **end, int base);
+long __wrap___isoc23_strtol(const char *s, char **end, int base)
+{
+    return strtol(s, end, base);
+}
+
 // GLIBC_2.36: used by libstdc++'s std::random_device. getrandom() is GLIBC_2.25.
 uint32_t __wrap_arc4random(void);
 uint32_t __wrap_arc4random(void)

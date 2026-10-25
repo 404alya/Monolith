@@ -158,7 +158,7 @@ mkdir -p "$OUT"
 # --wrap: route symbols whose newest glibc version is newer than 2.34 to older
 # versions, see src/glibc_compat.c. The result runs on glibc >= 2.34.
 # The baked-in repo paths are only used while they exist (see InitDataPaths in src/main.c).
-GLIBC_WRAP=acosf,asinf,atan2f,sqrtf,fmod,fmodf,hypot,hypotf,__isoc23_strtoul,arc4random
+GLIBC_WRAP=acosf,asinf,atan2f,sqrtf,fmod,fmodf,hypot,hypotf,__isoc23_strtoul,__isoc23_strtol,arc4random
 "$CC" "${CFLAGS[@]}" "${INCLUDES[@]}" \
   -DBENCHMARK_PATH="\"$ROOT/benchmark/\"" \
   -DMAPS_PATH="\"$ROOT/maps/\"" -DPROJECT_PATH="\"$ROOT/\"" -DR3D_SOURCE_PATH="\"$R3D_DIR/\"" \

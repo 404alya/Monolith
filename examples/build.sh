@@ -51,7 +51,7 @@ else
   [[ $LSAN == 1 ]] && OUT="$HERE/build/linux-lsan"
   EXE=
   # Like ../build.sh: libstdc++ static, symbols newer than glibc 2.34 routed to old versions
-  GLIBC_WRAP=acosf,asinf,atan2f,sqrtf,fmod,fmodf,hypot,hypotf,__isoc23_strtoul,arc4random
+  GLIBC_WRAP=acosf,asinf,atan2f,sqrtf,fmod,fmodf,hypot,hypotf,__isoc23_strtoul,__isoc23_strtol,arc4random
   EXTRA_SRC=("$ROOT/src/glibc_compat.c")
   LIBS=(-L"$LIBDIR/lib" -lr3d -lraylib -lassimp -lzlibstatic -l:libstdc++.a -lgcc_s -lGL -lm -lpthread -ldl
         -Wl,--wrap="${GLIBC_WRAP//,/,--wrap=}")
