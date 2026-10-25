@@ -35,6 +35,8 @@ All of this happens in spectator mode.
 | C | snip mode: the camera freezes and the cursor is free. Drag a rectangle over the screen (Shift+drag adds another); Enter opens the prompt with the regions; right click, Esc or C leaves |
 | V | volume mode: mark boxes in world space (below) |
 | Shift+V | a volume from the selection's bounds (or the bounds of the object under the crosshair) |
+| M | edit mode: move, turn, remove, duplicate or add objects yourself, without a request (below) |
+| Ctrl+Z / Ctrl+Shift+Z | undo / redo the last manual edit (also Ctrl+Y) |
 | Enter | open the prompt box |
 
 Type what you want ("make this wall twice as tall", "plant three more pines along the path", "hang a neon sign over each of these stalls") and press **Enter** to send it; Shift+Enter starts a new line, Esc cancels. "This" and "here" mean what the crosshair points at, "these" the selection, the rectangles mean "this area" (useful for "fill this gap" or "make this part darker"), and the volumes mean "this space" (V1, V2, ...). Selections are highlighted in orange and survive map reloads.
@@ -59,6 +61,25 @@ Points snap to a grid (**N** cycles 0.1, 0.25, 0.5, 1 and 2 m; 0.5 m to start) a
 | V, Esc or right click | leave volume mode (the volumes stay) |
 
 Volumes are drawn as green boxes, fainter where they are hidden, numbered V1, V2, ... They are sent with every request until you remove them, survive map reloads, and are never saved into the map.
+
+### Editing by hand (M)
+
+Small changes don't need Claude: select objects as usual (click, Shift+click, Ctrl+click for a group), press **M**, and use the keys below. Each edit is written straight into the map file as the smallest possible text change (the numbers on one line, a deleted line, a line split in two, a new line), and the map reloads at once; comments, groups and every other line stay as they were. The selection follows the edited objects. The HUD shows the snap step, what the first selected object's map line is, the model **I** adds, the undo / redo counts and what the last edit did.
+
+| In edit mode | Action |
+|---|---|
+| arrows, PgUp / PgDn | move the selection one step along the world axis nearest to where you look (up / down with PgUp / PgDn). The first selected object lands on the snap grid; the others keep their distance to it. With Ctrl: exactly one step, no grid |
+| N | snap step 0.1, 0.25, 0.5, 1 or 2 m (shared with volume mode) |
+| R / Shift+R | turn: models 15° of yaw (Ctrl: 1°), boxes 90° about their centre (from `box` and `block` lines; stairs and waffles can't turn, and boxes and models are turned separately) |
+| Delete | remove |
+| Ctrl+D | duplicate: the copies go one footprint to the right and become the selection |
+| [ / ] | choose the model to add: the package's `models/` files that `ASSETS.md` lists (new models need a request: they need a licence) |
+| I | add that model where the crosshair hits, standing on the surface (it snaps like a volume corner; Ctrl: exact); it joins the group of the object it stands on |
+| M or Esc | leave edit mode (V and C leave it too); the arrows fly to viewpoints again |
+
+Editing one copy of a `repeat` row (a single pillar of a row of eight) splits that line: the moved copy gets its own line and the others stay exactly where they were. Lines you edit get an `id n` in front, so later edits and the selection keep track of them ([map format](map-format.md) §2.9).
+
+**Undo** (Ctrl+Z) writes the old text back, byte for byte; redo writes the edit again. The history belongs to the file as you left it: when the map changes for another reason (a request finishes, you save it in a text editor), the history is cleared, so an undo never takes back a change you didn't make here. If a request of yours is queued or running on the same map, the first edit key only warns you (the request's session may be changing the same lines); press it again within 3 seconds to edit anyway. An edit is refused while the file on disk differs from what the game has loaded (the reload is still coming).
 
 **Picking the model.** The game chooses a fast, default or heavy Claude model per request from its wording and context. Start the prompt with `@fast`, `@default` or `@heavy` to choose yourself.
 

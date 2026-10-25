@@ -233,7 +233,7 @@ typedef struct {
  */
 typedef struct {
     int32_t priority;       ///< User-defined render order (signed, lower = first)
-    uintptr_t shader;       ///< Shader program pointer
+    uintptr_t shader;       ///< Custom shader's creation serial, 0 = none (local patch 17; was its pointer)
     uint32_t shading;       ///< Shading mode (lit/unlit)
     uint32_t albedo;        ///< Albedo texture ID
     uint32_t normal;        ///< Normal map texture ID

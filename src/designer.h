@@ -243,6 +243,15 @@ void DesignerMessage(Designer *d, bool error, const char *text);
 // Selection helpers (also used by --select)
 void DesignerClearSelection(Designer *d);
 void DesignerSelectLine(Designer *d, int line);
+// Adds one box or model to the selection (the edit mode's selection after an edit)
+bool DesignerSelectObject(Designer *d, MS_ObjRef o);
+
+// The snap step shared by volume mode and the edit mode (metres), and N's cycle through
+// 0.1 / 0.25 / 0.5 / 1 / 2 m (returns the new step)
+float DesignerSnap(const Designer *d);
+float DesignerCycleSnap(Designer *d);
+// Leaves volume mode (cancels a volume being made)
+void DesignerVolumeModeEnd(Designer *d);
 
 // After LauncherSubmit: closes the box (and clears the text) on success, keeps it on failure
 void DesignerSubmitDone(Designer *d, bool ok, const char *msg);

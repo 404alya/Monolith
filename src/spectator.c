@@ -125,10 +125,12 @@ void UpdateSpectator(Spectator *s, Player *player, float dt, bool arrows)
     Vector3 right = { -cosf(s->yaw), 0, sinf(s->yaw) };
 
     Vector3 wish = Vector3Zero();
-    if (IsKeyDown(KEY_W)) wish = Vector3Add(wish, fwd);
-    if (IsKeyDown(KEY_S)) wish = Vector3Subtract(wish, fwd);
-    if (IsKeyDown(KEY_D)) wish = Vector3Add(wish, right);
-    if (IsKeyDown(KEY_A)) wish = Vector3Subtract(wish, right);
+    if (!s->holdMove) {
+        if (IsKeyDown(KEY_W)) wish = Vector3Add(wish, fwd);
+        if (IsKeyDown(KEY_S)) wish = Vector3Subtract(wish, fwd);
+        if (IsKeyDown(KEY_D)) wish = Vector3Add(wish, right);
+        if (IsKeyDown(KEY_A)) wish = Vector3Subtract(wish, right);
+    }
     if (IsKeyDown(KEY_E) || IsKeyDown(KEY_SPACE))        wish.y += 1.0f;
     // Not Ctrl: Ctrl+click selects a whole group, and the camera must not sink meanwhile
     if (IsKeyDown(KEY_Q)) wish.y -= 1.0f;

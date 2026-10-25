@@ -4432,3 +4432,71 @@ before/after images). `lighting.frag`, `vfog_radiance.frag`, `forward.frag` pass
 forward.frag with the runtime `MAX_*` defines). Both targets and the examples build without
 warnings; `tools/leakcheck.sh`: zero leaks of ours. Performance not benchmarked (one box test
 per light pixel; clipped lights still use their full scissor rect).
+
+## Patch 17: draw order depended on heap addresses, so identical runs rendered differently (2026-10-24)
+
+**Symptom.** The same program rendering the same view of `maps/monolith` produced 2-6 slightly
+different images over 6-15 runs (1-550 of 1.44 M pixels, up to 34 levels: isolated pixels at
+coplanar faces and in accumulated passes), in monolith's `--shot`, in the examples and in an
+exported package. Which images appeared also changed with the build and with the length of a
+path argument. Maps with few shader materials (`maps/pine_forest`, `tests/models`) were stable.
+
+**Cause.** `sort_fill_state_data` (`src/modules/r3d_render.c`) puts the material's custom shader
+*pointer* into the draw sort key (`state->shader = (uintptr_t)material.shader`), right after the
+priority. Heap addresses are not reproducible: the GL driver's threads allocate from the same
+heap at timing-dependent moments, and a different build changes the allocation sizes. So the
+draws of materials with different surface shaders (monolith: one shader instance per map
+material, ~100 on the default map) came in a different order on each run, and with them the
+winner at equal depths and the order of accumulated results.
+
+**Change.** Every custom shader instance gets a creation serial (`r3d_shader_custom_t.serial`,
+1, 2, ... in `r3d_shader_custom_alloc` and `r3d_shader_custom_clone`), and the sort key is the
+serial (0 without a shader, as the NULL pointer was). Loading order is deterministic, so the
+draw order is. Draws are still grouped by shader exactly as before; only the order between
+shader groups is now fixed (creation order) instead of address order.
+
+Files: `src/modules/r3d_shader.h`, `src/modules/r3d_shader.c`, `src/modules/r3d_render.h`,
+`src/modules/r3d_render.c`.
+
+```diff
+--- src/modules/r3d_shader.h  (r3d_shader_custom_t)
+     bool programOwner;
++    uint32_t serial;    // creation order (1, 2, ...): the draw sort key instead of the address (local patch 17)
+ } r3d_shader_custom_t;
+--- src/modules/r3d_shader.c
++static uint32_t r3d_shader_custom_serial = 0;
+ r3d_shader_custom_t* r3d_shader_custom_alloc(void)
+     shader->programOwner = true;
++    shader->serial = ++r3d_shader_custom_serial;
+ r3d_shader_custom_t* r3d_shader_custom_clone(r3d_shader_custom_t* custom)
+     clone->programOwner = false;
++    clone->serial = ++r3d_shader_custom_serial;
+--- src/modules/r3d_render.h  (r3d_render_sort_state_t)
+-    uintptr_t shader;       ///< Shader program pointer
++    uintptr_t shader;       ///< Custom shader's creation serial, 0 = none (local patch 17; was its pointer)
+--- src/modules/r3d_render.c
++#include "./r3d_shader.h"      // r3d_shader_custom_t (shader_sort_key, local patch 17)
++static inline uintptr_t shader_sort_key(const struct R3D_ShaderCustom* shader)
++{
++    return shader ? (uintptr_t)shader->serial : 0;
++}
+-        state->shader       = (uintptr_t)call->mesh.material.shader;
++        state->shader       = shader_sort_key(call->mesh.material.shader);
+-        state->shader   = (uintptr_t)call->decal.instance.shader;
++        state->shader   = shader_sort_key(call->decal.instance.shader);
+```
+
+**Verification.** Determinism: `maps/monolith`, monolith `--shot` of views 3, 4, 7 15 runs each,
+`examples/01_minimal` views 1 and 4 15 runs each, `examples/05_entities` 10 runs on each of the
+three maps, a standalone program built against an `--export` of the map (its own R3D copy and
+prebuilt libraries) views 4 and 7 10 runs each: one image per view every time (before: 2-6). A
+sweep of 53 shots (every viewpoint, yaw 0-300 at two heights, `--reload-test`, all three maps)
+run twice: identical. Against the build before the patch: `maps/pine_forest` and `tests/models`
+pixel-identical (33 shots); `maps/monolith` 6 of 20 shots identical to one pre-patch run, 3 more
+equal to an image the pre-patch build produced in some run, the other 11 differ from every
+pre-patch image seen by 2-553 pixels (max 34 levels; the pre-patch build differed from itself by
+up to 258 pixels / 21 levels): isolated pixels, invisible at 5x zoom. Both targets and the
+examples build without warnings; `tools/leakcheck.sh`: zero leaks of ours.
+
+**If R3D changes the sort:** keep every sort key free of addresses (pointers, `uintptr_t` of
+heap objects); GL object ids and creation counters are reproducible.

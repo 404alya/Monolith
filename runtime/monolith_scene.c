@@ -64,9 +64,15 @@
 //     package.
 //
 // Placement prefixes, written before a primitive on the same line:
-//   repeat n dx dy dz          [1] n copies, copy i (0-based) shifted by i * (dx, dy, dz); up to 3
+//   id n                           a stable name for the line's objects (an integer 1..2147483647,
+//                                  unique in the file), written first: id 12 repeat 4 0 0 3 box ...
+//                                  Changes nothing in the scene; it keys the entities (MS_EntityId)
+//                                  so they keep their identity when the line itself changes
+//   repeat n dx dy dz [from k] [1] n copies, copy i (0-based) shifted by i * (dx, dy, dz); up to 3
 //                                  repeats on one line give a grid (the first is the outer loop,
-//                                  so it decides the box order)
+//                                  so it decides the box order). `from k`: the copies are
+//                                  i = k .. k+n-1 instead (the same floats as copies k.. of the
+//                                  longer row, so a row split in two keeps its exact positions)
 //   at x y z                   [1] shift by (x, y, z): the primitive's own coordinates are
 //                                  relative to this point
 // Shifts apply to the position arguments only (box: all six; block: cx y0 cz; stairs:
@@ -157,6 +163,8 @@
 // models + lights; a `repeat` grid multiplying to more fails), MS_MAX_FILE_BYTES (4 MB file),
 // spawn / viewpoint / light positions within +-1000000 m.
 // Every box remembers the map line of the statement that made it (boxRefs[]).
+// Every box, model and light is an entity (MS_Scene entity* arrays) with a stable id: the
+// line's `id` (or a key derived from the statement's text) and its index within the line.
 // Errors are reported as "file:line: message".
 //
 // ======================================================================================
@@ -167,6 +175,7 @@
 #include <rlgl.h>
 #include <ctype.h>
 #include <errno.h>
+#include <limits.h>
 #include <math.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -343,6 +352,25 @@ typedef struct {
     BvhNode *colliderNodes;             // BVH over the published colliders (MS_Raycast, MS_FirstCollision)
     int *colliderOrder;                 // collider indices in leaf order
     int colliderNodeCount;
+
+    // Statements (lines that make objects), by MS_Ref.prim: their entity key, and a set of the
+    // keys in use (open addressing: statement index + 1, 0 = empty) for ids and implicit keys
+    unsigned int *stmtKeys;
+    int *stmtLines;                     // map line of each (for the duplicate id message)
+    int stmtCount, stmtCap, stmtLineCap;
+    int *stmtSet;
+    int stmtSetCap;                     // a power of two, at most half full
+    // Entities (BuildEntities): components by entity, object -> entity per kind, and an id ->
+    // entity hash (entity + 1, 0 = empty)
+    MS_EntityId *entityIds;
+    MS_ObjRef *entityObjects;
+    MS_Transform *entityTransforms;
+    MS_Source *entitySources;
+    int *entityModels;
+    int entityCount;
+    int *objEntities;                   // boxes, then models, then lights
+    int *entityHash;
+    int entityHashCap;
 
 #ifdef MONOLITH_EDITOR
     char **deps;                        // files it depends on; [0] = the map file
@@ -1171,6 +1199,7 @@ static bool Box(Parser *P, float x0, float y0, float z0, float x1, float y1, flo
     }
     d->boxes[d->boxCount] = b;
     d->boxRefs[d->boxCount++] = P->cur;
+    P->cur.part++;
     return true;
 }
 
@@ -1218,13 +1247,16 @@ static const PrimDef PRIMS[] = {
     { "waffle", 8, { AX_X, AX_X, AX_Y, AX_Y, AX_Z, AX_NONE, AX_NONE, AX_NONE } },
 };
 
-// `repeat` / `at` prefixes of a line
+// `id` / `repeat` / `at` prefixes of a line
 typedef struct {
     float at[3];
     bool hasAt;
     int repN[MS_REPEATS_MAX];
+    int repFrom[MS_REPEATS_MAX];        // `from k`: the first copy index of that repeat (default 0)
     float repD[MS_REPEATS_MAX][3];
     int reps;
+    bool hasId;
+    int id;                             // `id n`
 } Placement;
 
 static bool ParsePlacement(Parser *P, Token *tok, int n, int *tIn, Placement *pl)
@@ -1243,8 +1275,19 @@ static bool ParsePlacement(Parser *P, Token *tok, int n, int *tIn, Placement *pl
             total *= pl->repN[pl->reps] > 0 ? pl->repN[pl->reps] : 1;
             // Bounds the work even for primitives that make no boxes (stairs with 0 steps)
             if (total > MS_MAX_OBJECTS) return Fail(P, "too many copies (a map makes at most 1000000 objects)", NULL);
-            pl->reps++;
             t += 5;
+            if (t < n && !tok[t].quoted && strcmp(tok[t].s, "from") == 0) {
+                if (t + 1 >= n) return Fail(P, "from takes the first copy index: repeat n dx dy dz from k", NULL);
+                if (!NumI(P, tok[t + 1], 0, MS_MAX_OBJECTS, &pl->repFrom[pl->reps])) return false;
+                t += 2;
+            }
+            pl->reps++;
+        } else if (strcmp(tok[t].s, "id") == 0 && !tok[t].quoted) {
+            if (pl->hasId) return Fail(P, "only one 'id' per line", NULL);
+            if (t + 1 >= n) return Fail(P, "id takes a number: id n (1..2147483647)", NULL);
+            if (!NumI(P, tok[t + 1], 1, 2147483647, &pl->id)) return false;
+            pl->hasId = true;
+            t += 2;
         } else if (strcmp(tok[t].s, "at") == 0 && !tok[t].quoted) {
             if (pl->hasAt) return Fail(P, "only one 'at' per line", NULL);
             if (t + 3 >= n) return Fail(P, "at takes 3 numbers: at x y z", NULL);
@@ -1258,13 +1301,21 @@ static bool ParsePlacement(Parser *P, Token *tok, int n, int *tIn, Placement *pl
     return true;
 }
 
-// Offset of copy (i0, i1, i2): (at + i*d1 + j*d2 + k*d3), in this order of float additions
+// Offset of copy (i0, i1, i2): (at + i*d1 + j*d2 + k*d3), in this order of float additions;
+// with `from`, i counts from there (the same floats as that copy of the longer row)
 static void CopyOffset(const Placement *pl, const int *idx, float off[3])
 {
     for (int a = 0; a < 3; a++) {
         off[a] = pl->at[a];
-        for (int r = 0; r < pl->reps; r++) off[a] += (float)idx[r] * pl->repD[r][a];
+        for (int r = 0; r < pl->reps; r++) off[a] += (float)(idx[r] + pl->repFrom[r]) * pl->repD[r][a];
     }
+}
+
+// Stamps the copy (i0, i1, i2) of a cnt[] grid on the objects that follow (MS_Ref.copy, .part)
+static void BeginCopy(Parser *P, const int *cnt, int i0, int i1, int i2)
+{
+    P->cur.copy = (i0 * cnt[1] + i1) * cnt[2] + i2;
+    P->cur.part = 0;
 }
 
 static bool ParsePrimitive(Parser *P, const PrimDef *def, Token *args, int argc, const Placement *pl)
@@ -1294,6 +1345,7 @@ static bool ParsePrimitive(Parser *P, const PrimDef *def, Token *args, int argc,
         int idx[MS_REPEATS_MAX] = { i0, i1, i2 };
         float off[3];
         CopyOffset(pl, idx, off);
+        BeginCopy(P, cnt, i0, i1, i2);
         float p[8];
         for (int a = 0; a < argc; a++) {
             int k = def->kind[a];
@@ -1388,6 +1440,7 @@ static bool ParseLight(Parser *P, Token *args, int n, const Placement *pl)
         int idx[MS_REPEATS_MAX] = { i0, i1, i2 };
         float off[3];
         CopyOffset(pl, idx, off);
+        BeginCopy(P, cnt, i0, i1, i2);
         R3D_Light c = L;
         if (shifted && nPos) c.position = (Vector3){ off[0] + pos.x, off[1] + pos.y, off[2] + pos.z };
         BoundingBox cbox = { 0 };
@@ -2174,7 +2227,9 @@ static bool ParseModel(Parser *P, Token *args, int n, const Placement *pl)
         int idx[MS_REPEATS_MAX] = { i0, i1, i2 };
         float off[3];
         CopyOffset(pl, idx, off);
+        BeginCopy(P, cnt, i0, i1, i2);
         MS_ModelInstance c = M;
+        c.ref.copy = P->cur.copy;
         c.position = shifted ? (Vector3){ off[0] + pos[0], off[1] + pos[1], off[2] + pos[2] } : (Vector3){ pos[0], pos[1], pos[2] };
         if (!isfinite(c.position.x) || !isfinite(c.position.y) || !isfinite(c.position.z))
             return Fail(P, "coordinate out of range", NULL);
@@ -2183,6 +2238,65 @@ static bool ParseModel(Parser *P, Token *args, int n, const Placement *pl)
         *slot = c;
         d->modelColliderCount += perCopy;
     }
+    return true;
+}
+
+// --- Statement keys (MS_EntityId.stmt): `id n`, else derived from the statement's tokens
+
+static unsigned int KeySlot(unsigned int key, int cap) { return (key * 2654435761u) & (unsigned int)(cap - 1); }
+
+// The set slot holding `key`, or the empty slot where it would go
+static int *StmtSlot(const SceneData *d, unsigned int key)
+{
+    unsigned int i = KeySlot(key, d->stmtSetCap);
+    while (d->stmtSet[i] && d->stmtKeys[d->stmtSet[i] - 1] != key) i = (i + 1) & (unsigned int)(d->stmtSetCap - 1);
+    return &d->stmtSet[i];
+}
+
+static bool GrowStmtSet(SceneData *d)
+{
+    int cap = d->stmtSetCap ? d->stmtSetCap * 2 : 64;
+    int *set = calloc((size_t)cap, sizeof(int));
+    if (!set) return false;
+    free(d->stmtSet);
+    d->stmtSet = set;
+    d->stmtSetCap = cap;
+    for (int s = 0; s < d->stmtCount; s++) *StmtSlot(d, d->stmtKeys[s]) = s + 1;
+    return true;
+}
+
+// Registers the statement P->cur.prim: its explicit id (unique in the file), or an implicit key
+// from its text. Identical statements (and the rare hash collision) take the next free key,
+// in map order, so the n-th copy of a line keeps its key while the lines before it stay.
+static bool AddStatement(Parser *P, const Placement *pl, const Token *tok, int n)
+{
+    SceneData *d = P->d;
+    if (!MS_RESERVE(d->stmtKeys, d->stmtCap, d->stmtCount + 1) || !MS_RESERVE(d->stmtLines, d->stmtLineCap, d->stmtCount + 1) ||
+        (2 * (d->stmtCount + 1) > d->stmtSetCap && !GrowStmtSet(d)))
+        return Fail(P, "out of memory", NULL);
+    unsigned int key;
+    int *slot;
+    if (pl->hasId) {
+        key = (unsigned int)pl->id;
+        slot = StmtSlot(d, key);
+        if (*slot) {
+            char msg[96];
+            snprintf(msg, sizeof(msg), "duplicate id %d (also on line %d)", pl->id, d->stmtLines[*slot - 1]);
+            return Fail(P, "%s", msg);
+        }
+    } else {
+        unsigned long long h = FNV_OFFSET;
+        for (int i = 0; i < n; i++) {
+            unsigned char q = tok[i].quoted ? 1 : 2;
+            h = Fnv1a64Update(h, &q, 1);
+            h = Fnv1a64Update(h, tok[i].s, strlen(tok[i].s));
+        }
+        key = 0x80000000u | ((unsigned int)(h ^ (h >> 32)) & 0x7fffffffu);
+        while (*(slot = StmtSlot(d, key))) key = 0x80000000u | ((key + 1) & 0x7fffffffu);
+    }
+    d->stmtKeys[d->stmtCount] = key;
+    d->stmtLines[d->stmtCount] = P->line;
+    *slot = ++d->stmtCount;
     return true;
 }
 
@@ -2276,6 +2390,8 @@ static bool ParseStatement(Parser *P, Token *tok, int n)
     if (!ParsePlacement(P, tok, n, &t, &pl)) return false;
     const char *prim = tok[t].quoted ? "" : tok[t].s;
     P->cur.prim = P->prim++;
+    if (!AddStatement(P, &pl, tok, n)) return false;
+    P->cur.copy = P->cur.part = 0;
     if (strcmp(prim, "light") == 0) {
         if (!v2) return Fail(P, "'light' needs map format 2: add 'monolith 2' as the first line", NULL);
         if (!NoStrings(P, tok, t + 1, n)) return false;
@@ -2296,7 +2412,7 @@ static bool ParseStatement(Parser *P, Token *tok, int n)
 static bool ParseText(Parser *P, const char *text, int size)
 {
     int lineNo = 0, pos = 0;
-    P->cur = (MS_Ref){ 0, -1, -1, 0 };
+    P->cur = (MS_Ref){ 0, -1, -1, 0, 0, 0 };
     if (size >= 3 && memcmp(text, "\xEF\xBB\xBF", 3) == 0) pos = 3;     // a UTF-8 byte order mark: skipped
     while (pos < size) {
         int start = pos;
@@ -2841,6 +2957,74 @@ static void FinishGeometry(SceneData *d)
             b.max = Vector3Max(b.max, d->lights[i].light.position);
         }
     d->bounds = b;
+}
+
+static unsigned int EntityHash(MS_EntityId id, int cap)
+{
+    unsigned int h = id.stmt * 0x9E3779B1u ^ (unsigned int)id.index * 0x85EBCA77u;
+    return (h ^ (h >> 15)) & (unsigned int)(cap - 1);
+}
+
+// The entities (after ResolveModels): every box, model and light in map order (the three
+// arrays merged by statement), each with its components and its id: the statement's key and
+// the object's index within the statement
+static bool BuildEntities(SceneData *d)
+{
+    int n = d->boxCount + d->modelCount + d->lightCount, m = n > 0 ? n : 1;
+    int cap = 16;
+    while (cap < 2 * n) cap *= 2;
+    d->entityIds = malloc(sizeof(MS_EntityId) * m);
+    d->entityObjects = malloc(sizeof(MS_ObjRef) * m);
+    d->entityTransforms = malloc(sizeof(MS_Transform) * m);
+    d->entitySources = malloc(sizeof(MS_Source) * m);
+    d->entityModels = malloc(sizeof(int) * m);
+    d->objEntities = malloc(sizeof(int) * m);
+    d->entityHash = calloc((size_t)cap, sizeof(int));
+    d->entityHashCap = cap;
+    if (!d->entityIds || !d->entityObjects || !d->entityTransforms || !d->entitySources || !d->entityModels ||
+        !d->objEntities || !d->entityHash)
+        return false;
+    int ib = 0, im = 0, il = 0, lastPrim = -1, index = 0;
+    for (int e = 0; e < n; e++) {
+        int pb = ib < d->boxCount ? d->boxRefs[ib].prim : INT_MAX;
+        int pm = im < d->modelCount ? d->models[im].ref.prim : INT_MAX;
+        int pli = il < d->lightCount ? d->lights[il].ref.prim : INT_MAX;
+        const MS_Ref *r;
+        MS_Transform tr = { .scale = { 1, 1, 1 } };
+        int model = -1;
+        if (pb <= pm && pb <= pli) {
+            BoundingBox b = d->boxes[ib];
+            r = &d->boxRefs[ib];
+            tr.position = Vector3Scale(Vector3Add(b.min, b.max), 0.5f);
+            tr.scale = Vector3Subtract(b.max, b.min);
+            d->entityObjects[e] = (MS_ObjRef){ MS_OBJ_BOX, ib };
+            d->objEntities[ib++] = e;
+        } else if (pm <= pli) {
+            const MS_ModelInstance *M = &d->models[im];
+            r = &M->ref;
+            tr = (MS_Transform){ M->position, M->rotationDeg, M->scale };
+            model = M->file;
+            d->entityObjects[e] = (MS_ObjRef){ MS_OBJ_MODEL, im };
+            d->objEntities[d->boxCount + im++] = e;
+        } else {
+            r = &d->lights[il].ref;
+            tr.position = d->lights[il].light.position;
+            d->entityObjects[e] = (MS_ObjRef){ MS_OBJ_LIGHT, il };
+            d->objEntities[d->boxCount + d->modelCount + il++] = e;
+        }
+        index = r->prim == lastPrim ? index + 1 : 0;
+        lastPrim = r->prim;
+        MS_EntityId id = { r->prim >= 0 && r->prim < d->stmtCount ? d->stmtKeys[r->prim] : 0, index };
+        d->entityIds[e] = id;
+        d->entityTransforms[e] = tr;
+        d->entitySources[e] = (MS_Source){ r->line, r->prim, r->copy, r->part };
+        d->entityModels[e] = model;
+        unsigned int h = EntityHash(id, cap);
+        while (d->entityHash[h]) h = (h + 1) & (unsigned int)(cap - 1);
+        d->entityHash[h] = e + 1;
+    }
+    d->entityCount = n;
+    return true;
 }
 
 // The colliders MS_Scene publishes: boxes, then model colliders (without models: the box array itself)
@@ -3945,6 +4129,16 @@ static void FreeData(SceneData *d)
     free(d->boxes);
     free(d->boxRefs);
     free(d->lights);
+    free(d->stmtKeys);
+    free(d->stmtLines);
+    free(d->stmtSet);
+    free(d->entityIds);
+    free(d->entityObjects);
+    free(d->entityTransforms);
+    free(d->entitySources);
+    free(d->entityModels);
+    free(d->objEntities);
+    free(d->entityHash);
     free(d->path);
     free(d->root);
 #ifdef MONOLITH_EDITOR
@@ -3993,6 +4187,15 @@ static void Publish(MS_Scene *s, SceneData *d)
     s->viewpoints = d->viewpoints;
     s->viewpointCount = d->viewpointCount;
     s->bounds = d->bounds;
+    s->entityCount = d->entityCount;
+    s->entityIds = d->entityIds;
+    s->entityObjects = d->entityObjects;
+    s->entityTransforms = d->entityTransforms;
+    s->entitySources = d->entitySources;
+    s->entityModels = d->entityModels;
+    s->boxEntities = d->objEntities;
+    s->modelEntities = d->objEntities + d->boxCount;
+    s->lightEntities = d->objEntities + d->boxCount + d->modelCount;
 }
 
 #ifdef MONOLITH_EDITOR
@@ -4048,6 +4251,10 @@ static bool LoadText(MS_Scene *s, const char *mapPath, char *text, int size, cha
     if (ok) {
         FinishGeometry(d);
         ok = BuildColliderBvh(d, err, errSize);
+    }
+    if (ok && !BuildEntities(d)) {
+        snprintf(err, errSize, "%s: out of memory", mapPath);
+        ok = false;
     }
     if (ok && p->gpu) {
         ok = UploadGpu(d, err, errSize);
@@ -4244,6 +4451,23 @@ const char *MS_LineText(const MS_Scene *s, int line, int *length)
     if (len > 0 && d->text[pos + len - 1] == '\r') len--;
     *length = len;
     return d->text + pos;
+}
+
+const char *MS_MapText(const MS_Scene *s, int *size)
+{
+    const SceneData *d = s->priv->d;
+    *size = d && d->text ? d->textSize : 0;
+    return d && d->text ? d->text : "";
+}
+
+int MS_PrimitiveArgs(const char *name, unsigned char axes[8])
+{
+    for (int i = 0; i < COUNT(PRIMS); i++)
+        if (strcmp(name, PRIMS[i].name) == 0) {
+            memcpy(axes, PRIMS[i].kind, sizeof(PRIMS[i].kind));
+            return PRIMS[i].argc;
+        }
+    return -1;
 }
 
 bool MS_GetLine(const MS_Scene *s, int line, char *out, int outSize)
@@ -4864,6 +5088,7 @@ const MS_Ref *MS_ObjectRef(const MS_Scene *s, MS_ObjRef obj)
 {
     if (obj.kind == MS_OBJ_BOX && obj.index >= 0 && obj.index < s->boxCount) return &s->boxRefs[obj.index];
     if (obj.kind == MS_OBJ_MODEL && obj.index >= 0 && obj.index < s->modelCount) return &s->models[obj.index].ref;
+    if (obj.kind == MS_OBJ_LIGHT && obj.index >= 0 && obj.index < s->lightCount) return &s->lights[obj.index].ref;
     return NULL;
 }
 
@@ -4871,7 +5096,28 @@ BoundingBox MS_ObjectBounds(const MS_Scene *s, MS_ObjRef obj)
 {
     if (obj.kind == MS_OBJ_BOX && obj.index >= 0 && obj.index < s->boxCount) return s->boxes[obj.index];
     if (obj.kind == MS_OBJ_MODEL && obj.index >= 0 && obj.index < s->modelCount) return s->models[obj.index].bounds;
+    if (obj.kind == MS_OBJ_LIGHT && obj.index >= 0 && obj.index < s->lightCount)
+        return (BoundingBox){ s->lights[obj.index].light.position, s->lights[obj.index].light.position };
     return (BoundingBox){ 0 };
+}
+
+int MS_ObjectEntity(const MS_Scene *s, MS_ObjRef obj)
+{
+    if (obj.kind == MS_OBJ_BOX && obj.index >= 0 && obj.index < s->boxCount) return s->boxEntities[obj.index];
+    if (obj.kind == MS_OBJ_MODEL && obj.index >= 0 && obj.index < s->modelCount) return s->modelEntities[obj.index];
+    if (obj.kind == MS_OBJ_LIGHT && obj.index >= 0 && obj.index < s->lightCount) return s->lightEntities[obj.index];
+    return -1;
+}
+
+int MS_FindEntity(const MS_Scene *s, MS_EntityId id)
+{
+    const SceneData *d = s->priv->d;
+    if (!d || !d->entityHashCap) return -1;
+    for (unsigned int h = EntityHash(id, d->entityHashCap); d->entityHash[h]; h = (h + 1) & (unsigned int)(d->entityHashCap - 1)) {
+        int e = d->entityHash[h] - 1;
+        if (d->entityIds[e].stmt == id.stmt && d->entityIds[e].index == id.index) return e;
+    }
+    return -1;
 }
 
 // #endregion

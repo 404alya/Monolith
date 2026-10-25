@@ -86,6 +86,9 @@ int LauncherCloseNumber(int number, char *msg, int msgSize);
 int LauncherCloseCoordinator(char *msg, int msgSize);
 // Number of the newest listed request (0 if none)
 int LauncherNewestNumber(void);
+// Requests of this game run that are queued or running on the map file mapPath (absolute or
+// relative): how many, and the HUD number of the newest one (*newest, 0 = none)
+int LauncherOpenOnMap(const char *mapPath, int *newest);
 // A closed request's terminal process is still running (being shut down)
 bool LauncherClosing(void);
 // MONOLITH_CLOSE_ON_EXIT=1: close every finished request's terminal, or the coordinator if

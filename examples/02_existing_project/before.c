@@ -5,12 +5,11 @@
 // a lamp) and its own sky, on a flat floor. after.c is the same game with the level coming
 // from a monolith map package; README.md shows and explains the diff.
 //
-//   before [--shot <file>]     WASD move, LEFT/RIGHT (or mouse) turn, SPACE jump, ESC quit
+//   before                     WASD move, LEFT/RIGHT (or mouse) turn, SPACE jump, ESC quit
 
 #include <r3d/r3d.h>
 #include <raymath.h>
 #include <math.h>
-#include "../common/shot.h"
 
 // #region Game objects
 typedef struct {
@@ -77,13 +76,13 @@ static Camera3D FollowCamera(const Player *p)
 }
 // #endregion
 
-int main(int argc, char **argv)
+int main(void)
 {
-    Shot shot = ShotParse(argc, argv);
-    ShotInitWindow(&shot, 1280, 720, "my game");
+    SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE);
+    InitWindow(1280, 720, "my game");
+    SetTargetFPS(60);
     R3D_Init(GetScreenWidth(), GetScreenHeight());
     R3D_SetAntiAliasingMode(R3D_ANTI_ALIASING_MODE_FXAA);
-    ShotBegin(&shot);
 
     // Meshes and materials of the game's own objects
     R3D_Mesh floorMesh = R3D_GenMeshPlane(60, 60, 1, 1);
@@ -111,7 +110,7 @@ int main(int argc, char **argv)
     R3D_Light lamp = R3D_CreateOmniLight((Vector3){ 2, 2.5f, 12 }, 10.0f, (Color){ 120, 200, 255, 255 }, 3.0f);
 
     Player player = { .feet = { 0, 0, 16 }, .yaw = PI };
-    if (!shot.path) DisableCursor();
+    DisableCursor();
 
     while (!WindowShouldClose()) {
         UpdatePlayer(&player, fminf(GetFrameTime(), 1.0f / 20.0f));
@@ -119,7 +118,7 @@ int main(int argc, char **argv)
 
         BeginDrawing();
             ClearBackground(BLACK);
-            R3D_BeginPro((R3D_View){ .camera = R3D_CameraFromRL(camera), .target = shot.target });
+            R3D_Begin(camera);
                 R3D_PushLightEx(sun, sunShadow, true);
                 R3D_PushLight(lamp);
                 R3D_DrawMesh(floorMesh, floorMat, Vector3Zero(), 1.0f);
@@ -127,12 +126,10 @@ int main(int argc, char **argv)
                     R3D_DrawMesh(crateMesh, crateMat, Vector3Add(CRATES[i], (Vector3){ 0, 0.5f, 0 }), 1.0f);
                 R3D_DrawMesh(playerMesh, playerMat, Vector3Add(player.feet, (Vector3){ 0, 0.9f, 0 }), 1.0f);
             R3D_End();
-            if (!shot.path) DrawText("WASD move, LEFT/RIGHT or mouse turn, SPACE jump", 12, 10, 18, RAYWHITE);
+            DrawText("WASD move, LEFT/RIGHT or mouse turn, SPACE jump", 12, 10, 18, RAYWHITE);
         EndDrawing();
-        if (ShotFrameDone(&shot)) break;
     }
 
-    ShotEnd(&shot);
     R3D_UnloadShadowMap(sunShadow);
     R3D_UnloadAmbientMap(ambient);
     R3D_UnloadCubemap(sky);

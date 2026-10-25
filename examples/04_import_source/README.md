@@ -8,7 +8,8 @@ point light and a blue spot light, a dusk procedural sky with its ambient map, e
 and ACES tonemapping. Nothing in it knows about monolith.
 
 ```sh
-examples/build/linux/04_import_source/import_source --shot /tmp/forest.png
+examples/build/linux/04_import_source/import_source                      # a window
+examples/build/linux-test/04_import_source/import_source --shot /tmp/forest.png   # test build: an image, no window
 ```
 
 ## Route 1: an import request (Claude Code reads the source)
@@ -23,7 +24,8 @@ model tier) on a bundle
 `requests/<stamp>_import-forest/` that follows the `import-request` skill (`.claude/skills/import-request/SKILL.md`): it reads
 `main.c` as data, copies the models into the package, records them in `ASSETS.md`, translates
 the cubes, models, materials, lights, sky, fog and post-processing into the map, writes
-`MAP.md`, and compares a `--shot` of this program with `monolith --shot` of the new map.
+`MAP.md`, and compares an image of this program (its test build, `--shot`) with
+`monolith --shot` of the new map.
 
 ## Route 2: the capture shim (records what R3D draws)
 
@@ -31,7 +33,8 @@ the cubes, models, materials, lights, sky, fog and post-processing into the map,
 put in front of it (`-include`, see `examples/build.sh`); the source is unchanged:
 
 ```sh
-MONOLITH_CAPTURE=/tmp/cap/forest examples/build/linux/04_import_source/import_source_capture --shot /tmp/x.png
+MONOLITH_CAPTURE=/tmp/cap/forest examples/build/linux/04_import_source/import_source_capture
+MONOLITH_CAPTURE=/tmp/cap/forest examples/build/linux-test/04_import_source/import_source_capture --shot /tmp/x.png   # no window
 ```
 
 writes `/tmp/cap/forest/` (`forest.map`, `models/`, `MAP.md`, `ASSETS.md`, `CAPTURE.md`) from
@@ -46,7 +49,7 @@ No imported package is checked in here: an import is a request, so its result is
 package in `maps/` (or wherever `--import` was pointed). Compare it with the original:
 
 ```sh
-examples/build/linux/04_import_source/import_source --shot /tmp/original.png
+examples/build/linux-test/04_import_source/import_source --shot /tmp/original.png
 build/linux/monolith --map maps/forest --shot /tmp/imported.png --shot-size 1280 720 --view 1
 ```
 
@@ -56,9 +59,10 @@ and the Kenney models' colours if their materials were overridden with `inherit 
 override's `albedo` defaults to white and replaces the file's colour factor: copy the colours
 `--inspect-model` lists into the override, or override only roughness / metalness per slot).
 
-The program builds only through `examples/build.sh` (it links monolith's R3D copy and the static
-libraries `../build.sh` builds, and includes `../common/shot.h` from outside this folder): to
-build a scratch copy, copy `examples/04_import_source/` and `examples/common/` together.
+The program builds through `examples/build.sh` (it links monolith's R3D copy and the static
+libraries `../build.sh` builds); `main.c` itself includes nothing from outside this folder, so a
+scratch copy of `examples/04_import_source/` builds on its own with the same compiler line. The
+test build (`examples/build.sh test`) adds `-include tests/examples/harness.h` for `--shot`.
 
 ## Assets
 

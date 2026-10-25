@@ -64,9 +64,10 @@
 // Scene contents (read-only for callers; valid until MS_Unload)
 // ======================================================================================
 
-typedef enum { MS_OBJ_NONE = 0, MS_OBJ_BOX, MS_OBJ_MODEL } MS_ObjKind;
+typedef enum { MS_OBJ_NONE = 0, MS_OBJ_BOX, MS_OBJ_MODEL, MS_OBJ_LIGHT } MS_ObjKind;
 
-// An object of the scene: a box (index into boxes[]) or a model instance (into models[])
+// An object of the scene: a box (index into boxes[]), a model instance (into models[]) or a
+// light (into lights[]; MS_Raycast never returns lights)
 typedef struct { MS_ObjKind kind; int index; } MS_ObjRef;
 
 // Where an object came from in the map file
@@ -75,7 +76,39 @@ typedef struct {
     int prim;               // index of the statement (map line) that generated it, -1 = none
     int group;              // index into groups[], -1 = no group
     int material;           // index into materials[] (boxes: the material; models: the override, -1 = own)
+    int copy;               // which copy of the statement's `repeat` grid made it (0-based, first repeat
+                            // outermost, counted from the line's first copy)
+    int part;               // index among the objects that copy made (stairs steps, waffle pieces; else 0)
 } MS_Ref;
+
+// ======================================================================================
+// Entities: every box, model instance and light, with its data attached as components
+// ======================================================================================
+// Entities are numbered 0..entityCount-1 in map order (one load; a reload renumbers them).
+// What stays the same across loads is the MS_EntityId: the statement's key plus the object's
+// index within that statement. The key is the line's `id N` when it has one (N, 1..2^31-1,
+// bit 31 clear: stable while the line keeps its id), else an implicit key derived from the
+// statement's text (bit 31 set: stable while that text, and the order of identical
+// statements, stays the same; lines inserted, removed or moved elsewhere don't change it).
+// Components are parallel arrays indexed by entity; new components are new arrays.
+
+typedef struct {
+    unsigned int stmt;      // `id N`, or an implicit key with bit 31 set
+    int index;              // the object's index among the objects of its statement (map order)
+} MS_EntityId;
+
+#define MS_ENTITY_EXPLICIT(eid) (((eid).stmt & 0x80000000u) == 0)
+
+typedef struct {
+    Vector3 position;       // boxes: the centre; models: the position as written; lights: the position
+    Vector3 rotationDeg;    // models: yaw, pitch, roll; boxes and lights: 0
+    Vector3 scale;          // boxes: the size; models: the scale; lights: 1
+} MS_Transform;
+
+typedef struct {
+    int line, prim;         // map line and statement index (= MS_Ref)
+    int copy, part;         // `repeat` copy and the object within it (= MS_Ref)
+} MS_Source;
 
 // Strings in scene contents (names, paths) are heap strings owned by the scene
 typedef struct {
@@ -185,6 +218,17 @@ typedef struct {
 
     BoundingBox bounds;             // everything (boxes, models, lights)
 
+    // Entities (see "Entities" above): components indexed by entity, in map order
+    int entityCount;                // = boxCount + modelCount + lightCount
+    const MS_EntityId *entityIds;   // stable id
+    const MS_ObjRef *entityObjects; // the box, model instance or light it is
+    const MS_Transform *entityTransforms;
+    const MS_Source *entitySources;
+    const int *entityModels;        // model file (index into modelFiles[]), -1 for boxes and lights
+    const int *boxEntities;         // object index -> entity, per kind
+    const int *modelEntities;
+    const int *lightEntities;
+
     MS_Private *priv;               // GPU resources, caches, parsed data
 } MS_Scene;
 
@@ -249,6 +293,17 @@ bool MS_GetLine(const MS_Scene *scene, int line, char *out, int outSize);
 // bytes, not NUL-terminated (print it with "%.*s"); NULL if there is no such line. Valid
 // until the next reload. Lines have no length limit.
 const char *MS_LineText(const MS_Scene *scene, int line, int *length);
+
+// The whole loaded map file (*size bytes, not NUL-terminated; its FNV-1a 64 is scene->hash).
+// Valid until the next reload.
+const char *MS_MapText(const MS_Scene *scene, int *size);
+
+// The argument layout of a box primitive (box, block, stairs, waffle): returns the argument
+// count and fills axes[0..count-1] with what `repeat` / `at` shift: MS_AXIS_X/Y/Z, MS_AXIS_NONE
+// (a size), MS_AXIS_INT (a count). -1 if `name` is not a box primitive. For tools that edit
+// map lines.
+enum { MS_AXIS_NONE = 0, MS_AXIS_X, MS_AXIS_Y, MS_AXIS_Z, MS_AXIS_INT };
+int MS_PrimitiveArgs(const char *name, unsigned char axes[8]);
 #endif
 
 // ======================================================================================
@@ -414,7 +469,12 @@ bool MS_Collides(const MS_Scene *scene, BoundingBox box);
 int MS_FirstCollision(const MS_Scene *scene, BoundingBox box);
 
 const MS_Ref *MS_ObjectRef(const MS_Scene *scene, MS_ObjRef obj);     // NULL for MS_OBJ_NONE
-BoundingBox MS_ObjectBounds(const MS_Scene *scene, MS_ObjRef obj);    // world AABB
+BoundingBox MS_ObjectBounds(const MS_Scene *scene, MS_ObjRef obj);    // world AABB (lights: their position)
+
+// The entity of an object, -1 for none / out of range
+int MS_ObjectEntity(const MS_Scene *scene, MS_ObjRef obj);
+// The entity with this id in the loaded map, -1 if there is none (a hash lookup)
+int MS_FindEntity(const MS_Scene *scene, MS_EntityId id);
 
 #ifdef MONOLITH_EDITOR
 // ======================================================================================

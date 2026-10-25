@@ -18,13 +18,7 @@ last good scene (`MS_RELOAD_FAILED`, the reason in `MS_Error(scene)` as `file:li
 Keys: right mouse + WASD / Q / E fly, LEFT/RIGHT viewpoints. Both programs only read the
 package, so any number of them can watch it.
 
-## Testing it without a window
-
-`--reload <package>` reloads from another package after 10 frames through the same code path
-as a file change (`MS_Reload`). Its `--shot` must equal a plain `--shot` of that package, which
-proves that everything (instances, materials, shadow tiles, environment) is rebuilt:
-
-```sh
-live_editing scene --reload /tmp/sceneB --shot /tmp/reloaded.png
-live_editing /tmp/sceneB --shot /tmp/direct.png        # identical image
-```
+The same reload path is tested without a window by monolith itself: `monolith --shot x.png
+--reload-test <package>` reloads after 10 frames and must render the same image as a plain shot
+of that package. This example is built with the editor runtime (`-DMONOLITH_EDITOR`: `MS_Poll`
+is an editor function); a shipped game doesn't need it.

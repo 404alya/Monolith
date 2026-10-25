@@ -19,6 +19,7 @@
 #include "../common/r3d_helper.h"
 #include "../common/r3d_math.h"
 #include "../common/r3d_hash.h"
+#include "./r3d_shader.h"      // r3d_shader_custom_t (shader_sort_key, local patch 17)
 #include "../r3d_core_state.h"
 
 // ========================================
@@ -728,6 +729,13 @@ static inline float calculate_max_distance_to_camera(const BoundingBox* aabb, co
     return maxDistSq;
 }
 
+// Sort key of a custom shader: its creation serial, 0 = none (local patch 17; was its address,
+// which differs from run to run, so identical runs drew in different orders)
+static inline uintptr_t shader_sort_key(const struct R3D_ShaderCustom* shader)
+{
+    return shader ? (uintptr_t)shader->serial : 0;
+}
+
 static inline void sort_fill_state_data(r3d_render_sort_state_t* state, const r3d_render_call_t* call)
 {
     memset(state, 0, sizeof(*state));
@@ -736,7 +744,7 @@ static inline void sort_fill_state_data(r3d_render_sort_state_t* state, const r3
     {
     case R3D_RENDER_CALL_MESH:
         state->priority     = call->mesh.material.priority;
-        state->shader       = (uintptr_t)call->mesh.material.shader;
+        state->shader       = shader_sort_key(call->mesh.material.shader);
         state->shading      = call->mesh.material.unlit;
         state->albedo       = call->mesh.material.albedo.texture.id;
         state->normal       = call->mesh.material.normal.texture.id;
@@ -751,7 +759,7 @@ static inline void sort_fill_state_data(r3d_render_sort_state_t* state, const r3
         break;
 
     case R3D_RENDER_CALL_DECAL:
-        state->shader   = (uintptr_t)call->decal.instance.shader;
+        state->shader   = shader_sort_key(call->decal.instance.shader);
         state->albedo   = call->decal.instance.albedo.texture.id;
         state->normal   = call->decal.instance.normal.texture.id;
         state->orm      = call->decal.instance.orm.texture.id;

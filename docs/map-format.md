@@ -68,6 +68,8 @@ block 6 0 -12 3 2.6 2                   # neon street: a 3 x 2 m market stall, 2
 They go in front of a primitive (box primitive, `model` or `light`) on the same line.
 
 - `repeat n dx dy dz` makes n copies (n ≥ 0). Copy *i* (0-based) is shifted by `i · (dx, dy, dz)`. Up to **3** repeats on one line make a grid. The first repeat is the outer loop, so it decides the object order.
+- `repeat n dx dy dz from k` counts the copies from *k*: copy *i* = k … k+n−1 is shifted by `i · (dx, dy, dz)`. It gives exactly the same floats as copies k… of the longer row, so a row split in two (`repeat 3 0 0 2.6 …` + `repeat 5 0 0 2.6 from 3 …`) keeps every position bit for bit, even with steps like 2.6 where moving the start value into the coordinates would change the last bit. Manual edits write it when they split a row (§2.9); for whole and half-number steps they write plain start values instead.
+- `id n` gives the line's objects a stable name (an integer 1 … 2147483647, unique in the file, written first: `id 12 repeat 4 0 0 3 box …`). It changes nothing in the scene. It is the key of the line's entities (§2.9), so they keep their identity when the line's numbers change. Manual edits add it to the lines they change; keep it when you edit such a line, and when you split it, keep it on the first piece only (two lines with the same id fail to load).
 - `at x y z` shifts the primitive by (x, y, z), so its own coordinates become relative to that point. Only one `at` is allowed per line.
 - Shifts move **position arguments only** (box: all six numbers; block: `cx y0 cz`; stairs: `cx baseY startZ`; waffle: `x0 x1 y0 y1 z`; model and light: `x y z`, never a direction). Sizes, `steps`, `rise`, `run`, `depth`, `bayW`, `floorH`, rotations and scales are never shifted.
 
@@ -195,3 +197,15 @@ model "models/tree_pineTallC.glb" -30.07 0 15.26 rot 35 0 0 scale 12.84 origin b
 ### 2.8 Limits and errors
 
 **No limits on content:** any number of boxes, models, groups, materials, lights and viewpoints, and lines of any length (everything is allocated as needed). Sanity caps only: at most 1 000 000 objects (boxes + model instances + lights) per map, so a `repeat` grid that multiplies to millions fails with a clear message, and a 4 MB map file. Spawn, viewpoint and light positions are limited to ±1 000 000 m, and a spot light's `inner` angle must not exceed `outer`. **Errors** (unknown keyword, wrong argument count, bad number, a missing file, a path outside the package, an undefined material, too many objects, a map with no boxes and no models) are reported as `file:line: message`.
+
+### 2.9 Entities and manual edits
+
+Every box, model instance and light is an **entity**: an id plus its data (components) in the runtime's entity arrays (`MS_Scene.entityIds`, `entityObjects`, `entityTransforms`, `entitySources`, `entityModels`; `MS_FindEntity`, `MS_ObjectEntity` in `runtime/monolith_scene.h`). The id is the line's key plus the object's index within the line:
+
+- a line with `id n` has the key *n*: stable as long as the line keeps its `id`, wherever it moves and however its numbers change;
+- a line without one has a key derived from its text (shown with bit 31 set, e.g. `a278642c`): stable while that text stays the same, also when other lines are inserted, removed or moved; it changes when the line itself changes. Identical lines are numbered in map order, so removing the first of two identical lines gives the second one the first one's key.
+
+`examples/05_entities` shows how a game uses them (its own components and systems, lookup by id). `--dump-entities <file>` lists them (`entity <e> id <key>:<index> explicit|implicit <kind> …`).
+
+**Manual edits** (the edit mode, **M**, and `--apply-edits`) change the map file itself, with the smallest text edit, and the game reloads it: moving or turning an object rewrites the numbers on its line (and adds `id n` to it), removing it deletes the line, and one copy of a `repeat` line is split out onto its own line (the other copies keep their exact floats, with `from` where needed). Duplicated and added objects are new lines with a new `id`; an added model goes right after the line of the object it stands on (in its group), wrapped in `use "default"` … `use "<material>"` when a `use` is active there (a `use` would restyle it). Comments, spacing, groups and every other line stay as they were. Only boxes from `box` and `block` lines can turn (in 90° steps about their centre: the footprint's x and z extents swap); stairs and waffles can't.
+

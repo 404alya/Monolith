@@ -10,6 +10,10 @@ Terms used across these pages, in alphabetical order.
 
 **Coordinator:** the one Claude Code session the game opens in its own terminal. It takes requests from the queue and hands each to a subagent ([request-queue.md](request-queue.md)).
 
+**Edit mode, manual edit:** key M in spectator mode: move, turn, remove, duplicate or add the selected objects yourself. Each edit is a minimal text edit to the map file (with undo / redo); no request is made ([user-guide.md](user-guide.md)).
+
+**Entity, entity id:** every box, model instance and light of a loaded map, with its data (transform, source line, model file) attached as components. Its id stays the same across reloads: the line's `id n` (or a key from the line's text) plus the object's index within the line ([map-format.md](map-format.md) §2.9).
+
 **Fog cache** (`--fog-cache`): the volumetric fog's sun visibility baked once per load into a 3D texture, so the fog doesn't sample the shadow map every frame. A quality trade-off used by the high, medium and low presets.
 
 **Frame reuse:** when the camera and everything else that affects the image stand still, the game shows the last rendered frame again instead of rendering a new one.

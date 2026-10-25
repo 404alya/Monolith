@@ -4,16 +4,11 @@
 // every Claude Code request it launches) shows up here within a second, and a broken edit
 // keeps the last good scene and shows the error. See README.md.
 //
-//   live_editing [package] [--shot <file>] [--reload <package>]
-//     package             the package to watch (default: scene/ next to the executable),
-//                         e.g. maps/pine_forest (run from the repo root)
-//     --shot <file>       hidden-window screenshot after 30 frames (../common/shot.h)
-//     --reload <package>  test: after 10 frames reload from this package through the same
-//                         path as a file change (MS_Reload), then keep rendering
+//   live_editing [package]   the package to watch (default: scene/ next to the executable),
+//                            e.g. maps/pine_forest (run from the repo root)
 //   Interactive: right mouse + WASD/QE fly (raylib's free camera), LEFT/RIGHT viewpoints.
 
 #include "monolith_scene.h"
-#include "../common/shot.h"
 #include <raymath.h>
 #include <math.h>
 #include <stdlib.h>
@@ -27,25 +22,19 @@ static Camera3D ViewpointCamera(const MS_Scene *s, int i)
 
 int main(int argc, char **argv)
 {
-    Shot shot = ShotParse(argc, argv);
-    const char *package = NULL, *reloadPath = NULL;
-    for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--shot") == 0) i++;
-        else if (strcmp(argv[i], "--reload") == 0 && i + 1 < argc) reloadPath = argv[++i];
-        else if (argv[i][0] != '-') package = argv[i];
-    }
-    if (!package) package = TextFormat("%sscene", GetApplicationDirectory());
+    const char *package = argc > 1 ? argv[1] : TextFormat("%sscene", GetApplicationDirectory());
 
     char err[512];
     MS_Scene *peek = MS_Load(package, &(MS_LoadOptions){ .noGpu = true }, err, sizeof(err));
     if (!peek) { fprintf(stderr, "%s\n", err); return 1; }
-    ShotInitWindow(&shot, 1280, 720, "live editing");
+    SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE);
+    InitWindow(1280, 720, "live editing");
+    SetTargetFPS(60);
     MS_SetInitHints(peek);
     MS_Unload(peek);
     R3D_Init(GetScreenWidth(), GetScreenHeight());
     R3D_SetAntiAliasingMode(R3D_ANTI_ALIASING_MODE_FXAA);
     MS_InitRenderer();                  // depth clamp for the sun's shadow (see monolith_scene.h)
-    ShotBegin(&shot);
 
     MS_Scene *scene = MS_Load(package, NULL, err, sizeof(err));
     if (!scene) { fprintf(stderr, "%s\n", err); return 1; }
@@ -55,14 +44,13 @@ int main(int argc, char **argv)
 
     char status[600] = "watching for changes";
     float statusTime = 0.0f;
-    for (int frame = 0; !WindowShouldClose(); frame++) {
+    while (!WindowShouldClose()) {
         float dt = GetFrameTime();
 
         // --- The live part: poll every file of the package (map, shaders, textures, models).
         // A reload swaps in the new scene (version + 1); the environment is part of the map,
         // so it has to be applied again (then your own overrides, if any).
         MS_ReloadResult r = MS_Poll(scene, dt);
-        if (reloadPath && frame == 10) r = MS_Reload(scene, reloadPath, err, sizeof(err));
         if (r == MS_RELOADED) {
             MS_ApplyEnvironment(scene);
             snprintf(status, sizeof(status), "reloaded: %d boxes, %d models (version %u)", scene->boxCount,
@@ -77,30 +65,24 @@ int main(int argc, char **argv)
             printf("%s\n", status);
         }
 
-        if (!shot.path) {
-            int step = IsKeyPressed(KEY_RIGHT) - IsKeyPressed(KEY_LEFT);
-            if (step) {
-                view = (view + step + scene->viewpointCount) % scene->viewpointCount;
-                camera = ViewpointCamera(scene, view);
-            }
-            if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT)) UpdateCamera(&camera, CAMERA_FREE);
-            if (IsWindowResized()) R3D_SetResolution(GetScreenWidth(), GetScreenHeight());
+        int step = IsKeyPressed(KEY_RIGHT) - IsKeyPressed(KEY_LEFT);
+        if (step) {
+            view = (view + step + scene->viewpointCount) % scene->viewpointCount;
+            camera = ViewpointCamera(scene, view);
         }
+        if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT)) UpdateCamera(&camera, CAMERA_FREE);
+        if (IsWindowResized()) R3D_SetResolution(GetScreenWidth(), GetScreenHeight());
 
         BeginDrawing();
             ClearBackground(BLACK);
-            MS_Draw(scene, camera, shot.target);
-            if (!shot.path) {
-                DrawText(TextFormat("%s  |  RMB+WASD fly, LEFT/RIGHT viewpoints", package), 12, 10, 18, RAYWHITE);
-                if (statusTime > 0.0f) DrawText(status, 12, GetScreenHeight() - 30, 18,
-                                                MS_Error(scene)[0] ? (Color){ 255, 110, 90, 255 } : RAYWHITE);
-            }
+            MS_Draw(scene, camera, (RenderTexture){ 0 });
+            DrawText(TextFormat("%s  |  RMB+WASD fly, LEFT/RIGHT viewpoints", package), 12, 10, 18, RAYWHITE);
+            if (statusTime > 0.0f) DrawText(status, 12, GetScreenHeight() - 30, 18,
+                                            MS_Error(scene)[0] ? (Color){ 255, 110, 90, 255 } : RAYWHITE);
         EndDrawing();
         statusTime -= dt;
-        if (ShotFrameDone(&shot)) break;
     }
 
-    ShotEnd(&shot);
     MS_Unload(scene);
     R3D_Close();
     CloseWindow();

@@ -1711,6 +1711,7 @@ typedef struct {
     long seq;                   // submit order, for "most recent first"
     char id[128], slug[SLUG_MAX + 1];
     char dir[1300];             // bundle folder, trailing slash
+    char map[1024];             // absolute path of the map file it edits ("" = imports)
     double submitTime, doneTime;
     bool queue;                 // coordinator mode: tracked through requests/<id>/state
     char state[16];             // queue: first word of the state file ("" = not read yet)
@@ -3062,6 +3063,7 @@ bool LauncherSubmit(const DesignRequest *req, Image view, Image marked, char *ms
     snprintf(q->id, sizeof(q->id), "%s", B.id);
     snprintf(q->slug, sizeof(q->slug), "%s", B.slug);
     snprintf(q->dir, sizeof(q->dir), "%s", dir);
+    snprintf(q->map, sizeof(q->map), "%s", B.mapPath);
     q->submitTime = clockTime;
     q->eye = req->eye;
     q->yaw = req->yaw;
@@ -3117,6 +3119,22 @@ bool LauncherStartBundle(const char *id, const char *slug, const char *claudePro
     }
     snprintf(msg, msgSize, "request sent: %s (Claude Code opens in a new terminal)", id);
     return true;
+}
+
+int LauncherOpenOnMap(const char *mapPath, int *newest)
+{
+    char abs[1024];
+    AbsPath(mapPath, abs, sizeof(abs));
+    int count = 0;
+    long seq = -1;
+    *newest = 0;
+    for (int i = 0; i < reqCount; i++) {
+        const OpenRequest *q = &reqs[i];
+        if (!Listed(q) || q->done || strcmp(q->map, abs) != 0) continue;
+        count++;
+        if (q->seq > seq) { seq = q->seq; *newest = q->number; }
+    }
+    return count;
 }
 
 const char *LauncherRequestsDir(void)

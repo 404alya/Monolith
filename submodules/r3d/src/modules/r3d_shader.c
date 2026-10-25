@@ -2028,6 +2028,11 @@ void r3d_shader_bind_uniform_block(r3d_shader_block_t block)
     }
 }
 
+// Creation counter of custom shaders (local patch 17): heap addresses differ from run to run
+// (the GL driver's threads allocate from the same heap), so sorting draws by address made the
+// draw order, and with it coplanar faces and blending, vary between identical runs
+static uint32_t r3d_shader_custom_serial = 0;
+
 r3d_shader_custom_t* r3d_shader_custom_alloc(void)
 {
     size_t programOffset = (sizeof(r3d_shader_custom_t) + alignof(r3d_shader_custom_program_t) - 1) & ~(alignof(r3d_shader_custom_program_t) - 1);
@@ -2038,6 +2043,7 @@ r3d_shader_custom_t* r3d_shader_custom_alloc(void)
 
     shader->program = (r3d_shader_custom_program_t*)programAddress;
     shader->programOwner = true;
+    shader->serial = ++r3d_shader_custom_serial;
 
     return shader;
 }
@@ -2048,6 +2054,7 @@ r3d_shader_custom_t* r3d_shader_custom_clone(r3d_shader_custom_t* custom)
 
     clone->program = custom->program;
     clone->programOwner = false;
+    clone->serial = ++r3d_shader_custom_serial;
 
     memcpy(clone->data.samplers, custom->data.samplers, sizeof(custom->data.samplers));
 

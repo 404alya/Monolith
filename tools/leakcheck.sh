@@ -18,6 +18,8 @@
 # shader materials, shadowed lights), of examples/01_minimal/scene and maps/pine_forest
 # (textured ground, many restyled models), --reload-test both ways
 # and into a broken map, a broken map on the command line, --shot-hud with --select / --region / --volume,
+# manual edits (--apply-edits on a copy of tests/models: move, turn, split, duplicate, add, undo, redo and
+# a failing command; --dump-entities; the edit-mode HUD),
 # --submit (tools/stub-terminal.sh instead of a terminal, MONOLITH_WORKSPACE=) on both maps, in
 # coordinator mode (queue + coordinator start, a cancel with no coordinator) and per-request mode,
 # --export, --inspect-model, --new-map, --import (stub terminal), --classify, and every
@@ -154,6 +156,31 @@ Run reload-to-default 0 "$M" --shot "$TMP/r2.png" --view 1 --map tests/models --
 printf 'monolith 2\nbox 0 0 0 1 1 1\nbogus statement here\n' > "$TMP/broken.map"
 Run reload-to-broken 0  "$M" --shot "$TMP/r3.png" --view 1 --map tests/models --reload-test "$TMP/broken.map"
 Run broken-map 1        "$M" --dump-boxes "$TMP/broken.txt" --map "$TMP/broken.map"
+# Manual edits (mapedit.c) on a copy; the last command fails on purpose (exit 1)
+cp -r tests/models "$TMP/edit-models"
+cat > "$TMP/edits.txt" <<'EDITS'
+select line 47
+move 0 1 0
+select line 36 copy 1
+move 0.5 0 0
+turn 15
+select line 32
+turn 90
+duplicate 0 0 3
+select line 30 copy 2
+remove
+select line 26
+add "models/tree_oak.glb" 8 0 8
+undo
+undo
+redo
+print
+select line 9999
+remove
+EDITS
+Run apply-edits 1       "$M" --apply-edits "$TMP/edits.txt" --map "$TMP/edit-models"
+Run dump-entities 0     "$M" --dump-entities "$TMP/entities.txt" --map tests/models
+Run edit-mode-hud 0     "$M" --shot "$TMP/edit.png" --view 1 --map tests/models --shot-hud --edit-mode --select 36
 Run shot-hud 0          "$M" --shot "$TMP/hud.png" --view 2 --shot-hud --select 192 --select 198 \
                             --region 100 100 300 200 --region 800 300 200 200 --volume -11 0 -34 -7 20 34 \
                             --volume 3 4 12 -4 0 4 --type 'make it\ntaller' --pick --pick-at 10 10 --pick-at 1590 890
@@ -186,6 +213,7 @@ if [[ $MODE == lsan ]]; then
   Run ex-02-before 0          "$EX_DIR/02_existing_project/before" --shot "$TMP/e2a.png"
   Run ex-02-after 0           "$EX_DIR/02_existing_project/after" --shot "$TMP/e2b.png"
   Run ex-03-live-editing 0    "$EX_DIR/03_live_editing/live_editing" --shot "$TMP/e3.png"
+  Run ex-05-entities 0        "$EX_DIR/05_entities/entities" --shot "$TMP/e5.png" --find a7d95ba7:0
   Run ex-04-import-source 0   "$EX_DIR/04_import_source/import_source" --shot "$TMP/e4.png"
   Run ex-04-capture 0         env MONOLITH_CAPTURE="$TMP/capture" "$EX_DIR/04_import_source/import_source_capture" --shot "$TMP/e4c.png"
 fi

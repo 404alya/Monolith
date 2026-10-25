@@ -10,4 +10,7 @@
 // dumps of a map before and after inserting lines diff to just the changed objects
 bool DumpScene(const MS_Scene *s, const char *path, bool diff);
 
+// --dump-entities: one line per entity (map order) with its id, object, source and transform
+bool DumpEntities(const MS_Scene *s, const char *path);
+
 #endif

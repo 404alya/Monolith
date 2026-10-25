@@ -14,6 +14,12 @@
 //   light <i> <point|spot|dir> line <l> position <3 hex> direction <3 hex> color r g b energy <hex> range <hex> shadow <on|off> [clip <3 hex> <3 hex>]
 //   sun direction <3 hex> energy <hex> range <hex> shadow <on|off>
 //
+// --dump-entities writes the entities (runtime/monolith_scene.h, "Entities"), map order:
+//   monolith-entity-dump 1
+//   map "<path>" entities <n>
+//   entity <e> id <stmt as 8 hex digits>:<index> <explicit|implicit> <box|model|light> <object index>
+//          line <l> copy <c> part <p> position <3 hex> rotationDeg <3 hex> scale <3 hex> model <file|-1>
+//
 // --dump-scene-diff writes the same items without anything that shifts when lines are
 // inserted or removed above them: no object, group, material, file or collider indices and
 // no map lines. References are by name instead (group "<name>", material "<name>" or -,
@@ -138,5 +144,26 @@ bool DumpScene(const MS_Scene *s, const char *path, bool diff)
     Hex3(f, s->sun.light.direction);
     fprintf(f, " energy %a range %a shadow %s enabled %s\n", s->sun.light.energy, s->sun.light.range,
             s->sun.shadow ? "on" : "off", s->sun.enabled ? "on" : "off");
+    return fclose(f) == 0;
+}
+
+bool DumpEntities(const MS_Scene *s, const char *path)
+{
+    FILE *f = fopen(path, "w");
+    if (!f) return false;
+    static const char *const KIND[] = { "none", "box", "model", "light" };
+    fprintf(f, "monolith-entity-dump 1\nmap \"%s\" entities %d\n", s->path, s->entityCount);
+    for (int e = 0; e < s->entityCount; e++) {
+        MS_EntityId id = s->entityIds[e];
+        const MS_Source *src = &s->entitySources[e];
+        const MS_Transform *t = &s->entityTransforms[e];
+        fprintf(f, "entity %d id %08x:%d %s %s %d line %d copy %d part %d position", e, id.stmt, id.index,
+                MS_ENTITY_EXPLICIT(id) ? "explicit" : "implicit", KIND[s->entityObjects[e].kind % 4], s->entityObjects[e].index,
+                src->line, src->copy, src->part);
+        Hex3(f, t->position);
+        fprintf(f, " rotationDeg"); Hex3(f, t->rotationDeg);
+        fprintf(f, " scale"); Hex3(f, t->scale);
+        fprintf(f, " model %d\n", s->entityModels[e]);
+    }
     return fclose(f) == 0;
 }

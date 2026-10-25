@@ -7,12 +7,11 @@
 // lantern spot), a dusk procedural sky with its ambient map, exp2 fog, bloom and ACES
 // tonemapping. Nothing here knows about monolith; README.md shows how to import it.
 //
-//   import_source [--shot <file>]      a still camera; ESC quits
+//   import_source                      a still camera; ESC quits
 
 #include <r3d/r3d.h>
 #include <raymath.h>
 #include <math.h>
-#include "../common/shot.h"
 
 typedef struct { Vector3 pos; float yawDeg, scale; } Placement;
 
@@ -39,13 +38,13 @@ static void MakeLit(R3D_Model *model, float roughness)
     }
 }
 
-int main(int argc, char **argv)
+int main(void)
 {
-    Shot shot = ShotParse(argc, argv);
-    ShotInitWindow(&shot, 1280, 720, "forest clearing");
+    SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE);
+    InitWindow(1280, 720, "forest clearing");
+    SetTargetFPS(60);
     R3D_Init(GetScreenWidth(), GetScreenHeight());
     R3D_SetAntiAliasingMode(R3D_ANTI_ALIASING_MODE_FXAA);
-    ShotBegin(&shot);
 
     // --- Geometry: generated cubes (ground, cabin) and model files (trees, rocks)
     R3D_Mesh cube = R3D_GenMeshCube(1, 1, 1);
@@ -110,7 +109,7 @@ int main(int argc, char **argv)
     while (!WindowShouldClose()) {
         BeginDrawing();
             ClearBackground(BLACK);
-            R3D_BeginPro((R3D_View){ .camera = R3D_CameraFromRL(camera), .target = shot.target });
+            R3D_Begin(camera);
                 R3D_PushLightEx(sun, sunShadow, true);
                 R3D_PushLight(fire);
                 R3D_PushLight(lantern);
@@ -131,10 +130,8 @@ int main(int argc, char **argv)
                 for (int i = 0; i < COUNT(ROCKS); i++) DrawPlaced(rock, ROCKS[i]);
             R3D_End();
         EndDrawing();
-        if (ShotFrameDone(&shot)) break;
     }
 
-    ShotEnd(&shot);
     R3D_UnloadShadowMap(sunShadow);
     R3D_UnloadAmbientMap(ambient);
     R3D_UnloadCubemap(sky);

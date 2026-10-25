@@ -6,8 +6,8 @@ flat floor. `after.c` is the same game with the level coming from a monolith map
 courtyard of `01_minimal`). Every changed line is marked `monolith:`.
 
 ```sh
-examples/build/linux/02_existing_project/before --shot /tmp/before.png
-examples/build/linux/02_existing_project/after  --shot /tmp/after.png     # [package] optional
+examples/build/linux/02_existing_project/before
+examples/build/linux/02_existing_project/after [package]      # default: scene/ next to the executable
 ```
 
 Keys: WASD move, LEFT/RIGHT or the mouse turn, SPACE jumps.
@@ -27,9 +27,10 @@ Keys: WASD move, LEFT/RIGHT or the mouse turn, SPACE jumps.
 4. **Collision.** `MS_Collides(scene, box)` (strict AABB overlap with every box and model
    collider of the map) replaces the floor test; the crates are still tested by the game.
 5. **Start at the map's spawn** (`scene->spawnFeet`, `spawnYawDeg`), optional.
-6. **Hot reload** (optional): `if (MS_Poll(scene, dt) == MS_RELOADED) MS_ApplyEnvironment(scene);`
-   (see `03_live_editing`).
-7. **Unload**: `MS_Unload(scene)` before `R3D_Close`.
+6. **Unload**: `MS_Unload(scene)` before `R3D_Close`.
+
+`after` is built like an exported game: the runtime without `-DMONOLITH_EDITOR` (a shipped game
+loads the package once; watching it for changes while monolith edits it is `03_live_editing`).
 
 ## The diff
 
@@ -41,12 +42,17 @@ Keys: WASD move, LEFT/RIGHT or the mouse turn, SPACE jumps.
 @@ Blocked()
 -    if (b.min.y < 0.0f) return true;
 +    if (MS_Collides(scene, b)) return true;         // monolith: was the flat floor (y < 0)
+@@ main()
+-int main(void)
++int main(int argc, char **argv)
 @@ main(): before R3D_Init
 +    const char *package = argc > 1 && argv[1][0] != '-' ? argv[1] : TextFormat("%sscene", GetApplicationDirectory());
 +    char err[512];
 +    MS_Scene *peek = MS_Load(package, &(MS_LoadOptions){ .noGpu = true }, err, sizeof(err));
 +    if (!peek) { puts(err); return 1; }
-     ShotInitWindow(&shot, 1280, 720, "my game");
+     SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE);
+     InitWindow(1280, 720, "my game");
+     SetTargetFPS(60);
 +    MS_SetInitHints(peek);                          // monolith
 +    MS_Unload(peek);                                // monolith
      R3D_Init(GetScreenWidth(), GetScreenHeight());
@@ -62,7 +68,6 @@ Keys: WASD move, LEFT/RIGHT or the mouse turn, SPACE jumps.
 -    Player player = { .feet = { 0, 0, 16 }, .yaw = PI };
 +    Player player = { .feet = scene->spawnFeet, .yaw = scene->spawnYawDeg * DEG2RAD };   // monolith: the map's spawn
 @@ main loop
-+        if (MS_Poll(scene, GetFrameTime()) == MS_RELOADED) MS_ApplyEnvironment(scene);  // monolith: hot reload (optional)
 -                R3D_PushLightEx(sun, sunShadow, true);
 +                MS_PushLights(scene, camera, (float)GetScreenWidth() / GetScreenHeight());   // monolith: sun + map lights
 +                MS_DrawGeometry(scene);                                                     // monolith: the level

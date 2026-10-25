@@ -15,7 +15,7 @@ How to change code. Reference: `docs/architecture.md` (technology, layout, archi
 ./build.sh              # -> build/linux/monolith + build/linux/maps/  (clang, -O2)
 ./build.sh run [args]   # build, then run with args
 ./build.sh debug        # -g -O0 + ASan/UBSan -> build/linux-debug/
-./build.sh lsan         # -O1 -g + LeakSanitizer -> build/linux-lsan/; examples: examples/build.sh lsan
+./build.sh lsan         # -O1 -g + LeakSanitizer -> build/linux-lsan/; examples: examples/build.sh lsan (test build)
 tools/leakcheck.sh [--asan]     # every main code path under LSan (or ASan + UBSan); exit 1 on a leak
 R3D_DIR=/other/r3d ./build.sh   # another R3D tree;  CC=gcc ./build.sh: another compiler
 ./build.sh --win [run [args]]   # -> build/win/monolith.exe + build/win/maps/ (MinGW-w64); run under wine
@@ -49,7 +49,7 @@ A change is done only when it **builds with no warnings** on both targets, **`to
 
 **Edit or start a level.** Edit the package following its `MAP.md` (format: `docs/map-format.md`; rules: the `map-editing` skill); it hot-reloads, no rebuild. New level: `--new-map <name>`, fill in `MAP.md`, build (or submit a first request: the session writes the brief first), or `--import` a raylib + R3D project. Models: the `assets-and-licences` skill.
 
-**Add a map primitive or statement.** A builder next to `Box`/`Block`/`Stairs`/`WaffleFacade` in `runtime/monolith_scene.c` plus a `PRIMS[]` entry (name, argument count, per argument its shift axis `AX_X/Y/Z`, `AX_NONE` for sizes, `AX_INT` for counts), and its call where `ParseStatement()` dispatches. That code switches on the argument count (box and block, both 6, differ by `PRIMS[]` entry), so a new 6–8-argument primitive means switching on the entry. Builders return false when the map is full (`MS_MAX_OBJECTS`) or out of memory, and loops add a box per iteration so the cap bounds them. New statements need `monolith 2` (bump `MS_FORMAT_VERSION` only for changes older runtimes would misread). Document it in the `monolith_scene.c` header comment and `docs/map-format.md` §2.
+**Add a map primitive or statement.** A builder next to `Box`/`Block`/`Stairs`/`WaffleFacade` in `runtime/monolith_scene.c` plus a `PRIMS[]` entry (name, argument count, per argument its shift axis `AX_X/Y/Z`, `AX_NONE` for sizes, `AX_INT` for counts), and its call where `ParseStatement()` dispatches. That code switches on the argument count (box and block, both 6, differ by `PRIMS[]` entry), so a new 6–8-argument primitive means switching on the entry. Builders return false when the map is full (`MS_MAX_OBJECTS`) or out of memory, and loops add a box per iteration so the cap bounds them. New statements need `monolith 2` (bump `MS_FORMAT_VERSION` only for changes older runtimes would misread). Document it in the `monolith_scene.c` header comment and `docs/map-format.md` §2. Manual edits (`src/mapedit.c`, `Analyze`) learn a new box primitive's position arguments from `PRIMS[]` through `MS_PrimitiveArgs`; a new statement of another shape (like `light` / `model`) needs its position numbers added to `Analyze`, or the edit mode can't move it.
 
 **Add an environment key.** Key tables in `monolith_scene.c` (region "Key tables": `ENV_KEYS` for `R3D_Environment` fields, sky / sun tables otherwise, a range in `ENV_RANGES`), its built-in default in `BuiltinEnvironment()` equal to today's value, written by `MS_WriteEnvironment`. Image changes without a reload must reach `FrameKey`.
 
@@ -69,9 +69,9 @@ A change is done only when it **builds with no warnings** on both targets, **`to
 
 No test suite; verification is **visual and numeric**:
 
-1. **Build cleanly:** `./build.sh` and `./build.sh --win`, no warnings; `examples/build.sh` (and `--win`) when the runtime or an example changed. Shaders pass `glslangValidator`.
+1. **Build cleanly:** `./build.sh` and `./build.sh --win`, no warnings; `examples/build.sh` (and `--win`, `test`) when the runtime or an example changed. The examples are plain integration code (no tool flags); `--shot` exists only in their test build, `tests/examples/harness.h` force-included by `examples/build.sh test` / `lsan`: keep test hooks there, not in the examples. Shaders pass `glslangValidator`.
 2. **No leaks:** `tools/leakcheck.sh` ends with `leakcheck: OK: zero leaks of ours` (the `leak-check` skill). After larger changes also `--asan`.
-3. **Every map is unchanged** by engine work: for each map in `maps/` (and `tests/models` when models, materials, lights or environment code changed), identical `--dump-boxes` and pixel-identical `--shot`s against a build from before the change: every viewpoint, yaw sweeps 0/60/…/300 from one position at a few eye heights, a `--reload-test`, plus the extra views the map's `MAP.md` lists under *Engine verification* (if it has that section).
+3. **Every map is unchanged** by engine work: for each map in `maps/` (and `tests/models` when models, materials, lights or environment code changed), identical `--dump-boxes` and pixel-identical `--shot`s against a build from before the change: every viewpoint, yaw sweeps 0/60/…/300 from one position at a few eye heights, a `--reload-test`, plus the extra views the map's `MAP.md` lists under *Engine verification* (if it has that section). Rendering is deterministic (the same build gives the same image on every run; R3D patch 17 fixed draw order that followed heap addresses): a shot that differs between two runs of one build is a bug, so check with two runs of the new build before blaming the change.
 4. **Fixed views:**
    ```bash
    ./build/linux/monolith --shot a.png --view 2                          # viewpoint 2
@@ -82,7 +82,7 @@ No test suite; verification is **visual and numeric**:
    For lighting or shadows, take a **yaw sweep from one position**: the black-curtain and shadow-popping bugs only showed when rotating.
 5. **Isolate effects** with `--off` (1 volumetric fog, 2 fog, 3 SSAO, 4 SSIL, 5 bloom, 6 sun).
 6. **Performance:** the `benchmarking` skill.
-7. **Window titles:** automated runs are titled `monolith-bench` / `monolith-shot` (also the examples), normal play `monolith`; a window-manager rule can move the first two out of the way (i3: `for_window [title="^monolith-(bench|shot)$"] …`). Keep these titles. Request terminals: `monolith-claude: coordinator`, per-request mode `monolith-claude: <slug> <HHMMSS>`.
+7. **Window titles:** automated runs are titled `monolith-bench` / `monolith-shot` (also the examples' test build), normal play `monolith`; a window-manager rule can move the first two out of the way (i3: `for_window [title="^monolith-(bench|shot)$"] …`). Keep these titles. Request terminals: `monolith-claude: coordinator`, per-request mode `monolith-claude: <slug> <HHMMSS>`.
 8. **Movement** (collision, controls) can only be tested by playing.
 9. **Map loader and edits:** diff `--dump-boxes` / `--dump-scene` / `--dump-scene-diff` before and after (identical for every map after a loader change). A broken map prints `file:line: message` and exits 1 before any window; the running game keeps the old map. Hot reload runs only interactively; `--reload-test` exercises it in a shot.
 10. **Designer and launcher without a window:**
@@ -90,7 +90,7 @@ No test suite; verification is **visual and numeric**:
     - `--shot-hud` with `--select` / `--region` / `--type` / `--settings-panel` puts the overlay into the shot.
     - `--submit` **always** with `MONOLITH_REQUESTS_DIR=<scratch folder>`, `MONOLITH_TERMINAL=tools/stub-terminal.sh` (logs to `$MONOLITH_STUB_LOG`) and `MONOLITH_WORKSPACE=`; `gio trash` the folder afterwards. `tools/test-coordinator.sh` tests the queue end to end (one terminal for many submits, scheduling, cancel, recovery after killing the coordinator, per-request mode). `--classify` checks the model choice without a bundle.
     - Mouse and keyboard input can only be tested by hand.
-11. **Export and examples:** export into a scratch folder, build its `viewer.c` outside the repo (the README's compiler line), compare its `--shot` with `monolith --shot` (pixel-identical for the shipped packages).
+11. **Export and examples:** export into a scratch folder and build it there (its `build.sh`). Its `viewer.c` has no screenshot flag: render it with the test harness (compile `viewer.c` with `-include <repo>/tests/examples/harness.h -I<repo>/runtime` and run with `--shot`), or with `examples/build/linux-test/01_minimal/minimal <export>/<map> --shot … --view n`; compare with `monolith --shot … --view n` (pixel-identical for the shipped packages).
 
 ## 3a. Export changes
 

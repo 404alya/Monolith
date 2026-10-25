@@ -1,17 +1,23 @@
 #!/usr/bin/env bash
 # Build the examples: examples/build.sh          -> examples/build/linux/<example>/
 #                     examples/build.sh --win    -> examples/build/win/<example>/ (MinGW-w64)
-#                     examples/build.sh lsan     -> examples/build/linux-lsan/<example>/ (LeakSanitizer,
-#                                                   -O1 -g; tools/leakcheck.sh runs these)
+#                     examples/build.sh test     -> examples/build/linux-test/<example>/ (test build)
+#                     examples/build.sh lsan     -> examples/build/linux-lsan/<example>/ (test build with
+#                                                   LeakSanitizer, -O1 -g; tools/leakcheck.sh runs these)
 # Each output folder holds the program(s) and the data they load (scene/ or assets/), so it
-# runs from anywhere: e.g. examples/build/linux/01_minimal/minimal --shot /tmp/x.png
+# runs from anywhere.
+#
+# The examples are plain integration code. The test builds compile each example's main file
+# with -include tests/examples/harness.h: the same program then needs --shot <file>, renders 30
+# frames in a hidden window, saves the image and exits (it never opens a visible window), e.g.
+# examples/build/linux-test/01_minimal/minimal --shot /tmp/x.png --view 2
 #
 # Builds against monolith's R3D copy (submodules/r3d, with -DMS_PATCHED_R3D) and its static
 # libraries, which ../build.sh builds (run it once first, or ../build.sh --win for --win).
 # Same compiler flags as the game (zero warnings), same static linking and glibc
-# compatibility shim (src/glibc_compat.c) on Linux. R3D_DIR overrides the R3D tree. The
-# runtime is built with -DMONOLITH_EDITOR like in the game (03_live_editing uses MS_Poll,
-# the capture shim MS_WriteR3DEnvironment).
+# compatibility shim (src/glibc_compat.c) on Linux. R3D_DIR overrides the R3D tree. The runtime
+# is built like an exported game (no -DMONOLITH_EDITOR), except for 03_live_editing (MS_Poll)
+# and the capture shim (MS_WriteR3DEnvironment).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -22,6 +28,8 @@ WIN=0
 [[ "${1:-}" == "--win" ]] && WIN=1
 LSAN=0
 [[ "${1:-}" == "lsan" ]] && LSAN=1
+TEST=$LSAN
+[[ "${1:-}" == "test" ]] && TEST=1
 
 CFLAGS=(-std=c11 -Wall -Wextra -Wno-missing-field-initializers -O2)
 [[ $LSAN == 1 ]] && CFLAGS=(-std=c11 -Wall -Wextra -Wno-missing-field-initializers -g -O1 -fno-omit-frame-pointer -fsanitize=leak)
@@ -37,6 +45,7 @@ else
   CC="${CC:-clang}"
   LIBDIR="$R3D_DIR/build-linux"
   OUT="$HERE/build/linux"
+  [[ $TEST == 1 ]] && OUT="$HERE/build/linux-test"
   [[ $LSAN == 1 ]] && OUT="$HERE/build/linux-lsan"
   EXE=
   # Like ../build.sh: libstdc++ static, symbols newer than glibc 2.34 routed to old versions
@@ -51,12 +60,25 @@ if [[ ! -f "$LIBDIR/lib/libr3d.a" ]]; then
 fi
 INCLUDES=(-I"$R3D_DIR/include" -I"$LIBDIR/external/raylib/raylib/include" -I"$ROOT/runtime")
 
-# Example <dir> <program> <sources...> -- builds one program into $OUT/<dir>/
+# Example <dir> <program> <main file> <flags...> [-- <more sources...>]: the main file is
+# compiled on its own (in the test builds with the harness force-included, which must not reach
+# the runtime), then linked with the other sources. Flags: -DMONOLITH_EDITOR for the editor
+# runtime, -DHARNESS_MAIN_NO_ARGS for a main(void), -include ... for a shim.
+HARNESS=()
+[[ $TEST == 1 ]] && HARNESS=(-include "$ROOT/tests/examples/harness.h")
 Example() {
-  local dir="$1" prog="$2"
-  shift 2
-  mkdir -p "$OUT/$dir"
-  "$CC" "${CFLAGS[@]}" "${INCLUDES[@]}" -DMS_PATCHED_R3D -DMONOLITH_EDITOR "$@" "${EXTRA_SRC[@]}" -o "$OUT/$dir/$prog$EXE" "${LIBS[@]}"
+  local dir="$1" prog="$2" main="$3"
+  shift 3
+  local flags=() more=()
+  while [[ $# -gt 0 && "$1" != "--" ]]; do flags+=("$1"); shift; done
+  [[ $# -gt 0 ]] && { shift; more=("$@"); }
+  local editor=()
+  for f in "${flags[@]}"; do [[ "$f" == -DMONOLITH_EDITOR ]] && editor=(-DMONOLITH_EDITOR); done
+  local obj="$OUT-obj/$dir/$prog.o"     # (outside the program folders, which stay copyable)
+  mkdir -p "$OUT/$dir" "$OUT-obj/$dir"
+  "$CC" "${CFLAGS[@]}" "${INCLUDES[@]}" -DMS_PATCHED_R3D "${flags[@]}" "${HARNESS[@]}" -c "$main" -o "$obj"
+  "$CC" "${CFLAGS[@]}" "${INCLUDES[@]}" -DMS_PATCHED_R3D "${editor[@]}" "$obj" "${more[@]}" "${EXTRA_SRC[@]}" \
+    -o "$OUT/$dir/$prog$EXE" "${LIBS[@]}"
   echo "built: ${OUT#"$ROOT/"}/$dir/$prog$EXE"
 }
 
@@ -68,23 +90,25 @@ Data() {
   cp -r "$from"/. "$OUT/$dir/$to/"
 }
 
-Example 01_minimal minimal "$HERE/01_minimal/main.c" "${RUNTIME[@]}"
+Example 01_minimal minimal "$HERE/01_minimal/main.c" -- "${RUNTIME[@]}"
 Data 01_minimal "$HERE/01_minimal/scene" scene
 
-Example 02_existing_project before "$HERE/02_existing_project/before.c"
-Example 02_existing_project after "$HERE/02_existing_project/after.c" "${RUNTIME[@]}"
+Example 02_existing_project before "$HERE/02_existing_project/before.c" -DHARNESS_MAIN_NO_ARGS
+Example 02_existing_project after "$HERE/02_existing_project/after.c" -- "${RUNTIME[@]}"
 Data 02_existing_project "$HERE/01_minimal/scene" scene
 
-Example 03_live_editing live_editing "$HERE/03_live_editing/main.c" "${RUNTIME[@]}"
+Example 03_live_editing live_editing "$HERE/03_live_editing/main.c" -DMONOLITH_EDITOR -- "${RUNTIME[@]}"
 Data 03_live_editing "$HERE/01_minimal/scene" scene
 
-Example 04_import_source import_source "$HERE/04_import_source/main.c"
+Example 05_entities entities "$HERE/05_entities/main.c" -- "${RUNTIME[@]}"
+Data 05_entities "$HERE/01_minimal/scene" scene
+
+Example 04_import_source import_source "$HERE/04_import_source/main.c" -DHARNESS_MAIN_NO_ARGS
 Data 04_import_source "$HERE/04_import_source/assets" assets
 
 # The same program with the capture shim compiled in (runtime/monolith_capture.h), unchanged
-# source: -include puts the shim in front of main.c. Two steps, so the shim's implementation
-# only goes into main.c, not into the runtime it links. MONOLITH_CAPTURE=<dir> ./import_source_capture
-mkdir -p "$OUT/04_import_source"
-"$CC" "${CFLAGS[@]}" "${INCLUDES[@]}" -DMS_PATCHED_R3D -DMONOLITH_EDITOR -include monolith_capture.h -DMONOLITH_CAPTURE_IMPLEMENTATION \
-  -c "$HERE/04_import_source/main.c" -o "$OUT/04_import_source/main-capture.o"
-Example 04_import_source import_source_capture "$OUT/04_import_source/main-capture.o" "${RUNTIME[@]}"
+# source: -include puts the shim in front of main.c (in the test builds before the harness,
+# which then wraps its recorders), and only main.c gets its implementation.
+# MONOLITH_CAPTURE=<dir> ./import_source_capture
+Example 04_import_source import_source_capture "$HERE/04_import_source/main.c" -DHARNESS_MAIN_NO_ARGS -DMONOLITH_EDITOR \
+  -include monolith_capture.h -DMONOLITH_CAPTURE_IMPLEMENTATION -- "${RUNTIME[@]}"

@@ -3,21 +3,19 @@
 // Depends on nothing but raylib, R3D and the scene runtime (monolith_scene.h/.c). (The
 // viewer.c that --export writes is runtime/export/viewer.c: a fly camera, no tool flags.)
 //
-//   minimal [package]            open a window: the camera orbits the map's first viewpoint;
-//                                mouse wheel zooms, LEFT/RIGHT switch viewpoints, ESC quits.
-//                                package: a map package folder or .map file (default: scene/
-//                                next to the executable)
-//   --shot <file>                render 30 frames in a hidden window, save <file>, exit
-//   --size <w> <h>               window / shot size (default 1600 900)
+//   minimal [package]            open a window at the map's first viewpoint; hold the right
+//                                mouse button to orbit (wheel zooms), LEFT/RIGHT switch
+//                                viewpoints, ESC quits. package: a map package folder or .map
+//                                file (default: scene/ next to the executable)
+//   --size <w> <h>               window size (default 1600 900)
 //   --view <n>                   start at the map's viewpoint n (1-based, default 1)
 //   --eye x y z --look yaw pitch start at this eye position / view angles (degrees; yaw 0 looks
 //                                toward +Z, yaw 180 toward -Z), like monolith's --eye / --look
 //   --quality low|medium|high|ultra   graphics quality preset of the scene runtime (MS_Quality;
 //                                ultra = the map exactly, the same as leaving it out)
 //
-// The shot renders exactly like `monolith --shot <file> --view n` (same camera math, FXAA,
-// depth clamp, 30 frames into a RenderTexture), so the two images can be compared pixel by
-// pixel.
+// The camera math, FXAA and depth clamp are monolith's, so a viewpoint looks exactly as in
+// monolith's spectator view.
 
 #include "monolith_scene.h"
 #include <raymath.h>
@@ -43,7 +41,7 @@ static Camera3D CameraFromViewpoint(const MS_Viewpoint *v)
 
 int main(int argc, char **argv)
 {
-    const char *package = NULL, *shotPath = NULL;
+    const char *package = NULL;
     int width = 1600, height = 900, view = 1;
     bool eyeSet = false, lookSet = false;
     Vector3 eye = { 0 };
@@ -51,8 +49,7 @@ int main(int argc, char **argv)
     bool qualitySet = false;
     MS_Quality quality = MS_QualityPreset(MS_QUALITY_ULTRA);
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--shot") == 0 && i + 1 < argc) shotPath = argv[++i];
-        else if (strcmp(argv[i], "--size") == 0 && i + 2 < argc) { width = atoi(argv[i + 1]); height = atoi(argv[i + 2]); i += 2; }
+        if (strcmp(argv[i], "--size") == 0 && i + 2 < argc) { width = atoi(argv[i + 1]); height = atoi(argv[i + 2]); i += 2; }
         else if (strcmp(argv[i], "--view") == 0 && i + 1 < argc) view = atoi(argv[++i]);
         else if (strcmp(argv[i], "--eye") == 0 && i + 3 < argc) {
             eye = (Vector3){ (float)atof(argv[i + 1]), (float)atof(argv[i + 2]), (float)atof(argv[i + 3]) };
@@ -85,20 +82,8 @@ int main(int argc, char **argv)
     MS_Scene *peek = MS_Load(package, &(MS_LoadOptions){ .noGpu = true, .shadowSizeOverride = quality.shadowSize }, err, sizeof(err));
     if (!peek) { fprintf(stderr, "%s\n", err); return 1; }
 
-    // In an AI agent's shell (Claude Code sets CLAUDECODE=1, others AI_AGENT) only --shot may
-    // run: a visible window would land on the developer's screen. MONOLITH_ALLOW_WINDOW=1 overrides.
-    const char *cc = getenv("CLAUDECODE"), *ai = getenv("AI_AGENT"), *allow = getenv("MONOLITH_ALLOW_WINDOW");
-    bool agent = (cc && cc[0] && strcmp(cc, "0") != 0) || (ai && ai[0] && strcmp(ai, "0") != 0);
-    if (!shotPath && agent && !(allow && allow[0] && strcmp(allow, "0") != 0)) {
-        fprintf(stderr, "refusing to open a window from an AI agent's shell: use --shot <file> (or MONOLITH_ALLOW_WINDOW=1)\n");
-        MS_Unload(peek);
-        return 1;
-    }
-
-    // A shot opens a hidden window that is never mapped. The title "monolith-shot" lets a
-    // window manager rule route it (i3: for_window [title="^monolith-(bench|shot)$"] ...).
-    SetConfigFlags(FLAG_MSAA_4X_HINT | (shotPath ? FLAG_WINDOW_HIDDEN : FLAG_WINDOW_RESIZABLE));
-    InitWindow(width, height, shotPath ? "monolith-shot" : "monolith scene");
+    SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE);
+    InitWindow(width, height, "monolith scene");
     MS_SetInitHints(peek);
     MS_Unload(peek);
     R3D_Init(GetScreenWidth(), GetScreenHeight());
@@ -126,50 +111,36 @@ int main(int argc, char **argv)
         camera = CameraFromAngles(eyeSet ? eye : camera.position, yaw, pitch);
     }
 
-    // Shot: hidden windows have no visible pixels, so render into a texture and read that
-    RenderTexture target = { 0 };
-    if (shotPath) target = LoadRenderTexture(width, height);
-
-    // Orbit around the point the view looks at (where the centre ray hits the scene)
+    // Orbit around the point the view looks at (where the centre ray hits the scene), while
+    // the right mouse button is held; until then the camera is exactly the viewpoint
     bool orbitReady = false;
-    for (int frame = 0; !WindowShouldClose(); frame++) {
-        if (!shotPath) {
-            if (IsWindowResized()) MS_ApplyRenderResolution(scene, GetScreenWidth(), GetScreenHeight());
-            int step = IsKeyPressed(KEY_RIGHT) - IsKeyPressed(KEY_LEFT);
-            if (step) {
-                view = (view - 1 + step + scene->viewpointCount) % scene->viewpointCount + 1;
-                camera = CameraFromViewpoint(&scene->viewpoints[view - 1]);
-                orbitReady = false;
-            }
+    while (!WindowShouldClose()) {
+        if (IsWindowResized()) MS_ApplyRenderResolution(scene, GetScreenWidth(), GetScreenHeight());
+        int step = IsKeyPressed(KEY_RIGHT) - IsKeyPressed(KEY_LEFT);
+        if (step) {
+            view = (view - 1 + step + scene->viewpointCount) % scene->viewpointCount + 1;
+            camera = CameraFromViewpoint(&scene->viewpoints[view - 1]);
+            orbitReady = false;
+        }
+        if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT) || GetMouseWheelMove() != 0.0f) {
             if (!orbitReady) {
                 Vector3 dir = Vector3Normalize(Vector3Subtract(camera.target, camera.position));
                 MS_Hit hit = MS_Raycast(scene, camera.position, dir, 500.0f);
                 camera.target = hit.obj.kind != MS_OBJ_NONE ? hit.point : Vector3Add(camera.position, Vector3Scale(dir, 30.0f));
                 orbitReady = true;
             }
-            UpdateCamera(&camera, CAMERA_ORBITAL);  // slow automatic orbit, wheel = zoom
+            UpdateCamera(&camera, CAMERA_ORBITAL);  // orbit, wheel = zoom
         }
 
         BeginDrawing();
             ClearBackground(BLACK);
-            MS_Draw(scene, camera, target);
-            if (!shotPath) DrawText(TextFormat("%d fps  |  viewpoint %d/%d: %s  |  LEFT/RIGHT viewpoints, wheel zoom", GetFPS(),
-                                               view, scene->viewpointCount, scene->viewpoints[view - 1].name),
-                                    12, 10, 18, RAYWHITE);
+            MS_Draw(scene, camera, (RenderTexture){ 0 });   // R3D_Begin .. R3D_End into the window
+            DrawText(TextFormat("%d fps  |  viewpoint %d/%d: %s  |  LEFT/RIGHT viewpoints, right mouse orbit, wheel zoom",
+                                GetFPS(), view, scene->viewpointCount, scene->viewpoints[view - 1].name),
+                     12, 10, 18, RAYWHITE);
         EndDrawing();
-
-        if (shotPath && frame == 29) {
-            Image img = LoadImageFromTexture(target.texture);
-            ImageFlipVertical(&img);                            // GL textures are bottom-up
-            ImageFormat(&img, PIXELFORMAT_UNCOMPRESSED_R8G8B8); // drop alpha, like monolith
-            bool ok = ExportImage(img, shotPath);
-            UnloadImage(img);
-            printf("%s %s\n", ok ? "saved" : "failed to save", shotPath);
-            break;
-        }
     }
 
-    if (shotPath) UnloadRenderTexture(target);
     MS_Unload(scene);
     R3D_Close();
     CloseWindow();

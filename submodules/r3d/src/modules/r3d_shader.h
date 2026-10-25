@@ -1258,6 +1258,7 @@ typedef struct R3D_ShaderCustom {
     r3d_shader_custom_program_t* program;
     r3d_shader_custom_data_t data;
     bool programOwner;
+    uint32_t serial;    // creation order (1, 2, ...): the draw sort key instead of the address (local patch 17)
 } r3d_shader_custom_t;
 
 // ========================================

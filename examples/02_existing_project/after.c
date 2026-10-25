@@ -5,12 +5,11 @@
 // player collides with the scene through MS_Collides. Every change is marked "monolith:";
 // README.md shows the diff.
 //
-//   after [package] [--shot <file>]   package: default scene/ next to the executable
+//   after [package]            package: default scene/ next to the executable
 
 #include <r3d/r3d.h>
 #include <raymath.h>
 #include <math.h>
-#include "../common/shot.h"
 #include "monolith_scene.h"                         // monolith: the scene runtime
 
 static MS_Scene *scene;                             // monolith: the level
@@ -82,19 +81,19 @@ static Camera3D FollowCamera(const Player *p)
 
 int main(int argc, char **argv)
 {
-    Shot shot = ShotParse(argc, argv);
     // monolith: parse the package before R3D_Init (errors before a window; the sun's shadow map size is an init hint)
     const char *package = argc > 1 && argv[1][0] != '-' ? argv[1] : TextFormat("%sscene", GetApplicationDirectory());
     char err[512];
     MS_Scene *peek = MS_Load(package, &(MS_LoadOptions){ .noGpu = true }, err, sizeof(err));
     if (!peek) { puts(err); return 1; }
-    ShotInitWindow(&shot, 1280, 720, "my game");
+    SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE);
+    InitWindow(1280, 720, "my game");
+    SetTargetFPS(60);
     MS_SetInitHints(peek);                          // monolith
     MS_Unload(peek);                                // monolith
     R3D_Init(GetScreenWidth(), GetScreenHeight());
     R3D_SetAntiAliasingMode(R3D_ANTI_ALIASING_MODE_FXAA);
     MS_InitRenderer();                              // monolith: GL state for the sun's shadow (depth clamp)
-    ShotBegin(&shot);
 
     scene = MS_Load(package, NULL, err, sizeof(err));   // monolith: load the level
     if (!scene) { puts(err); return 1; }
@@ -114,16 +113,15 @@ int main(int argc, char **argv)
     R3D_Light lamp = R3D_CreateOmniLight((Vector3){ 2, 2.5f, 12 }, 10.0f, (Color){ 120, 200, 255, 255 }, 3.0f);
 
     Player player = { .feet = scene->spawnFeet, .yaw = scene->spawnYawDeg * DEG2RAD };   // monolith: the map's spawn
-    if (!shot.path) DisableCursor();
+    DisableCursor();
 
     while (!WindowShouldClose()) {
-        if (MS_Poll(scene, GetFrameTime()) == MS_RELOADED) MS_ApplyEnvironment(scene);  // monolith: hot reload (optional)
         UpdatePlayer(&player, fminf(GetFrameTime(), 1.0f / 20.0f));
         Camera3D camera = FollowCamera(&player);
 
         BeginDrawing();
             ClearBackground(BLACK);
-            R3D_BeginPro((R3D_View){ .camera = R3D_CameraFromRL(camera), .target = shot.target });
+            R3D_Begin(camera);
                 MS_PushLights(scene, camera, (float)GetScreenWidth() / GetScreenHeight());   // monolith: sun + map lights
                 MS_DrawGeometry(scene);                                                     // monolith: the level
                 R3D_PushLight(lamp);
@@ -131,12 +129,10 @@ int main(int argc, char **argv)
                     R3D_DrawMesh(crateMesh, crateMat, Vector3Add(CRATES[i], (Vector3){ 0, 0.5f, 0 }), 1.0f);
                 R3D_DrawMesh(playerMesh, playerMat, Vector3Add(player.feet, (Vector3){ 0, 0.9f, 0 }), 1.0f);
             R3D_End();
-            if (!shot.path) DrawText("WASD move, LEFT/RIGHT or mouse turn, SPACE jump", 12, 10, 18, RAYWHITE);
+            DrawText("WASD move, LEFT/RIGHT or mouse turn, SPACE jump", 12, 10, 18, RAYWHITE);
         EndDrawing();
-        if (ShotFrameDone(&shot)) break;
     }
 
-    ShotEnd(&shot);
     MS_Unload(scene);                               // monolith
     R3D_UnloadMesh(playerMesh);
     R3D_UnloadMesh(crateMesh);

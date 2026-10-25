@@ -26,6 +26,8 @@ typedef struct {
 
     char message[128];      // short-lived HUD message
     float messageTime;
+    bool holdMove;          // WASD don't move the camera (set per frame: edit mode with CTRL down,
+                            // where CTRL+D duplicates)
 } Spectator;
 
 void LookAngles(Vector3 eye, Vector3 target, float *yaw, float *pitch);

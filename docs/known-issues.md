@@ -11,4 +11,4 @@ Open questions that need a decision, and what automated checks can't cover. Limi
 
 ## Only testable by hand
 
- snip mode (C, drag, Shift+drag, Esc / right click / C, Enter); closing request terminals (K, Shift+K, Ctrl+K n); the F2 panel (presets, rows, Reset, a restart to check the settings stick); walking through the maps (collision, passing under tree crowns, steps).
+ snip mode (C, drag, Shift+drag, Esc / right click / C, Enter); the edit mode (M: arrows / PgUp / PgDn with and without Ctrl, N, R / Shift+R, Delete, Ctrl+D, [ ] and I, Ctrl+Z / Ctrl+Shift+Z, the warning while a request runs on the map; its operations themselves are covered by `--apply-edits`); closing request terminals (K, Shift+K, Ctrl+K n); the F2 panel (presets, rows, Reset, a restart to check the settings stick); walking through the maps (collision, passing under tree crowns, steps).

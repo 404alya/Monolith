@@ -70,6 +70,18 @@
 //                  submits too) until removed; they are never written to the map. The bundle
 //                  lists what each volume holds (designer.c, volumes[])
 //   SHIFT+V        a volume from the selection's bounds (or the crosshair object's)
+//   M              edit mode (editmode.c): manual edits of the selection, written straight into
+//                  the map file as minimal text edits (mapedit.c) and reloaded, no request.
+//                  Arrows / PGUP / PGDN move it one snap step (N: 0.1 .. 2 m, shared with volume
+//                  mode; the arrows follow the world axes nearest to the view and don't fly to
+//                  viewpoints then; CTRL: no grid), R / SHIFT+R turn it (models 15 deg, CTRL 1;
+//                  boxes 90), DELETE removes it, CTRL+D duplicates it, [ ] pick a package model
+//                  listed in ASSETS.md and I adds it at the crosshair. M / ESC (and V, C) leave.
+//                  The HUD shows the snap step, the first selected object's map line, the last
+//                  edit. With a request of this run queued or running on the map, the first key
+//                  only warns (again within 3 s: edit anyway)
+//   CTRL+Z / CTRL+SHIFT+Z (CTRL+Y)   undo / redo manual edits (spectator mode); the history is
+//                  dropped when the map changes on disk for any other reason
 //   R              fly back to the camera of the last finished request
 //   The HUD lists the coordinator ("running", "starting", "not running") and the open
 //   requests ("queued", "running", "[?]" = a question waits in the coordinator terminal)
@@ -229,6 +241,13 @@
 //                  the raylib + R3D project's scene into it (import.c, the import-request
 //                  skill); no window. Same queue / coordinator as edit requests
 //
+//   --dump-entities <file>   load the map (no window), write every entity (box, model, light)
+//                  with its stable id, source line, copy and transform (src/dumpscene.c) and exit
+//   --apply-edits <script>   run an edit script (select / move / turn / remove / duplicate / add /
+//                  undo / redo; format: the header comment of src/mapedit.c) against the map
+//                  file of --map, which is required (the script rewrites that file), and exit
+//                  without a window; 1 at the first failing command
+//
 // Designer debug flags (for testing without a visible window):
 //   --pick         with --shot: print what the crosshair (screen centre) hits on the shot
 //                  frame: box or model index, group, map line + its text, point, normal,
@@ -254,6 +273,7 @@
 //   --type "text"  open the prompt box with this text (cursor at the end)
 //   --shot-hud     with --shot: draw the HUD, crosshair, selection overlay, regions, volumes and prompt box
 //                  into the shot (to look at the UI; plain shots never contain it)
+//   --edit-mode    with --shot --shot-hud: open the edit mode (M), to see its HUD
 //   --submit-wait <s>   with --submit: keep polling the request (state, result.md, terminal
 //                  process) for <s> seconds before exiting; state changes are logged
 //   --close-submitted   with --submit: then close the submitted request like CTRL+K n (twice
@@ -313,6 +333,8 @@
 #include "import.h"
 #include "inspect.h"
 #include "dumpscene.h"
+#include "mapedit.h"
+#include "editmode.h"
 #include "windowemu.h"
 #include "settings.h"
 #include "settingspanel.h"
@@ -779,11 +801,14 @@ static int Run(int argc, char **argv)
     const char *mapPath = NULL;
     const char *dumpPath = NULL;
     const char *dumpScenePath = NULL;   // --dump-scene, --dump-scene-diff
+    const char *dumpEntitiesPath = NULL;    // --dump-entities
+    const char *applyEditsPath = NULL;      // --apply-edits
     bool dumpSceneDiff = false;         // --dump-scene-diff: no indices or lines
     const char *reloadTestPath = NULL;
     bool eyeSet = false, lookSet = false;   // --eye / --look given (they override --view)
     Vector3 eye = { 0 };
     bool pickFlag = false, shotHud = false;
+    bool editModeFlag = false;          // --edit-mode
     int frameReuseFlag = -1;    // --no-frame-reuse 0, --frame-reuse 1, default -1 (see below)
     const char *submitText = NULL, *typeText = NULL;
     float submitWait = -1.0f;       // --submit-wait: keep polling the request this long
@@ -906,6 +931,8 @@ static int Run(int argc, char **argv)
         else if (strcmp(a, "--dump-boxes") == 0) { NEED(1); dumpPath = argv[++i]; }
         else if (strcmp(a, "--dump-scene") == 0) { NEED(1); dumpScenePath = argv[++i]; dumpSceneDiff = false; }
         else if (strcmp(a, "--dump-scene-diff") == 0) { NEED(1); dumpScenePath = argv[++i]; dumpSceneDiff = true; }
+        else if (strcmp(a, "--dump-entities") == 0) { NEED(1); dumpEntitiesPath = argv[++i]; }
+        else if (strcmp(a, "--apply-edits") == 0) { NEED(1); applyEditsPath = argv[++i]; }
         else if (strcmp(a, "--inspect-model") == 0) { NEED(1); inspectPath = argv[++i]; }
         else if (strcmp(a, "--reload-test") == 0) { NEED(1); reloadTestPath = argv[++i]; }
         else if (strcmp(a, "--pick") == 0) pickFlag = true;
@@ -918,6 +945,7 @@ static int Run(int argc, char **argv)
             i += 2;
         }
         else if (strcmp(a, "--shot-hud") == 0) shotHud = true;
+        else if (strcmp(a, "--edit-mode") == 0) editModeFlag = true;
         else if (strcmp(a, "--no-frame-reuse") == 0) frameReuseFlag = 0;
         else if (strcmp(a, "--frame-reuse") == 0) frameReuseFlag = 1;
         else if (strcmp(a, "--submit") == 0) { NEED(1); submitText = argv[++i]; }
@@ -1038,11 +1066,13 @@ static int Run(int argc, char **argv)
 
     // Every mode below that isn't one of these opens the visible game window. An agent's shell
     // may not (a mistyped or forgotten flag would put the game on the developer's screen).
-    bool windowless = shotPath || (bench && headless) || dumpPath || dumpScenePath || exportDir || classifyText;
+    bool windowless = shotPath || (bench && headless) || dumpPath || dumpScenePath || dumpEntitiesPath || applyEditsPath ||
+                      exportDir || classifyText;
     if (!windowless && AgentShell()) {
         fprintf(stderr, "monolith: refusing to open the game window from an AI agent's shell (CLAUDECODE / AI_AGENT is set).\n"
-                        "  Use --shot, --dump-boxes, --dump-scene(-diff), --inspect-model, --new-map, --export, --classify or\n"
-                        "  --bench --headless; a person who wants the window from this shell sets MONOLITH_ALLOW_WINDOW=1.\n");
+                        "  Use --shot, --dump-boxes, --dump-scene(-diff), --dump-entities, --apply-edits, --inspect-model, --new-map,\n"
+                        "  --export, --classify or --bench --headless; a person who wants the window from this shell sets\n"
+                        "  MONOLITH_ALLOW_WINDOW=1.\n");
         return 1;
     }
     LauncherScrubEnv();     // the sessions this game starts must not inherit the override
@@ -1053,7 +1083,7 @@ static int Run(int argc, char **argv)
     // don't depend on what the developer last chose. --no-settings: no file at all. Then
     // --quality, then the single flags: they apply to this run and are never saved.
     // Last --settings-set: a change "as if made in the panel" (applies, and is saved).
-    bool automated = shotPath || bench || dumpPath || dumpScenePath || exportDir || classifyText;
+    bool automated = shotPath || bench || dumpPath || dumpScenePath || dumpEntitiesPath || applyEditsPath || exportDir || classifyText;
     const char *settingsFile = noSettings ? NULL : settingsPath ? settingsPath : automated ? NULL : GfxDefaultPath();
     GfxSettings gfx = GfxDefaults();
     if (settingsFile) {
@@ -1092,6 +1122,11 @@ static int Run(int argc, char **argv)
     // the sun's shadow map size (an R3D init hint) is known before R3D_Init
     char defaultMap[1100];
     snprintf(defaultMap, sizeof(defaultMap), "%smonolith", mapsDir);
+    // (an edit script writes the map file: never the default one by accident)
+    if (applyEditsPath && !mapPath) {
+        fprintf(stderr, "monolith: --apply-edits needs --map <package or .map file> (it rewrites that map file)\n");
+        return 1;
+    }
     if (!mapPath) mapPath = defaultMap;
     // (shadow size: an init hint, so a load option; the range is applied by MS_ApplyQuality)
     MS_LoadOptions loadOpt = { .noGpu = true, .shadowSizeOverride = gfx.q.shadowSize };
@@ -1105,6 +1140,22 @@ static int Run(int argc, char **argv)
         }
         TraceLog(LOG_INFO, "monolith: %s: %d boxes, %d groups (format %d)", peek->path, peek->boxCount,
                  peek->groupCount, peek->formatVersion);
+        if (dumpEntitiesPath) {
+            bool ok = DumpEntities(peek, dumpEntitiesPath);
+            fprintf(ok ? stdout : stderr, ok ? "monolith: wrote %d entities to %s\n" : "monolith: cannot write %d entities to %s\n",
+                    peek->entityCount, dumpEntitiesPath);
+            MS_Unload(peek);
+            return ok ? 0 : 1;
+        }
+        if (applyEditsPath) {
+            // The edits work on the text and the parsed lines only: a noGpu scene, reloaded
+            // after every edit like the game's
+            scene = peek;
+            int status = MapEditRunScript(applyEditsPath);
+            MS_Unload(peek);
+            scene = NULL;
+            return status;
+        }
         if (dumpPath) {
             bool ok = DumpBoxes(peek, dumpPath);
             fprintf(ok ? stdout : stderr, ok ? "monolith: wrote %d boxes to %s\n" : "monolith: cannot write %d boxes to %s\n",
@@ -1263,6 +1314,9 @@ static int Run(int argc, char **argv)
                      regionArgs[i].x, regionArgs[i].y, regionArgs[i].width, regionArgs[i].height, GetScreenWidth(), GetScreenHeight());
     // --volume: as if made in volume mode (world space)
     for (int i = 0; i < volumeArgCount; i++) DesignerAddVolume(&designer, volumeArgs[i]);
+    // Edit mode (M): manual edits of the selection (editmode.c); --edit-mode opens it for --shot-hud
+    static EditMode edit;
+    if (editModeFlag) EditModeOpen(&edit, &designer);
 
     if (!hidden) DisableCursor();
     if (typeText) {
@@ -1508,6 +1562,7 @@ static int Run(int argc, char **argv)
                 mapMessageTime = 3.0f;
                 mapMessageError = false;
                 TraceLog(LOG_INFO, "monolith: %s", mapMessage);
+                EditModeSync(&edit);    // a change made elsewhere ends the undo history
             } else if (r == MS_RELOAD_FAILED) {
                 snprintf(mapMessage, sizeof(mapMessage), "%s", MS_Error(scene));
                 mapMessageError = true;
@@ -1539,8 +1594,16 @@ static int Run(int argc, char **argv)
             if (spec.active && !PanelCapturesInput(&panel)) {
                 action = DesignerUpdate(&designer, dt);
                 typing = DesignerCapturesInput(&designer);
+                if (designer.snipping || designer.volumeMode) edit.active = false;   // C and V leave the edit mode
+                // Manual edits rewrite and reload the map: then the environment applies again,
+                // as after a hot reload (the selection already follows the edited objects)
+                if (!typing && action == DESIGNER_NONE && EditModeUpdate(&edit, &designer, dt) == EDITMODE_RELOADED) {
+                    ApplyEnvironment(&effects);
+                    mapMessageError = false;
+                }
             }
-            if (spec.active && !typing && IsKeyPressed(KEY_R)) {
+            spec.holdMove = edit.active && (IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL));
+            if (spec.active && !typing && !EditModeTakesArrows(&edit) && IsKeyPressed(KEY_R)) {
                 Vector3 eye;
                 float yaw, pitch;
                 if (LauncherLastDone(&eye, &yaw, &pitch)) {
@@ -1548,7 +1611,7 @@ static int Run(int argc, char **argv)
                     SpectatorMessage(&spec, "back to the last finished request");
                 } else SpectatorMessage(&spec, "no finished request yet");
             }
-            if (spec.active) { if (!typing) UpdateSpectator(&spec, &player, dt, !DesignerTakesArrows(&designer)); }
+            if (spec.active) { if (!typing) UpdateSpectator(&spec, &player, dt, !DesignerTakesArrows(&designer) && !EditModeTakesArrows(&edit)); }
             else if (!typing) UpdatePlayer(&player, dt);
 
             if (action == DESIGNER_SUBMIT) {
@@ -1626,10 +1689,11 @@ static int Run(int argc, char **argv)
                 if (spec.active) {
                     DrawText(TextFormat("speed %.1f m/s (wheel)  |  <- -> viewpoints  |  P copy view  |  G drop player  |  TAB exit  |  K / SHIFT+K / CTRL+K n close terminals",
                              spec.speed), 12, 32, 16, (Color){ 230, 230, 230, 120 });
-                    DrawText("LMB select  |  SHIFT+LMB add/remove  |  CTRL+LMB group  |  RMB clear  |  C snip regions  |  V volumes (SHIFT+V from selection)  |  ENTER request  |  R fly to last result",
+                    DrawText("LMB select  |  SHIFT+LMB add/remove  |  CTRL+LMB group  |  RMB clear  |  C snip regions  |  V volumes (SHIFT+V from selection)  |  M edit by hand  |  ENTER request  |  R fly to last result",
                              12, 52, 16, (Color){ 230, 230, 230, 120 });
                     int y = 80;
                     y += DesignerDrawHud(&designer, 12, y);
+                    y += EditModeDrawHud(&edit, &designer, 12, y);
                     LauncherDrawHud(12, y + 4);
                     if (spec.messageTime > 0.0f && !designer.promptOpen) {
                         float a = fminf(spec.messageTime, 1.0f);
@@ -1731,6 +1795,7 @@ static int Run(int argc, char **argv)
     R3D_SetProfilerEnabled(false);  // frees its GL queries
     BenchFree();
     DesignerFree(&designer);
+    EditModeFree(&edit);
     if (emulateWindow) WindowEmuUnload(&windowEmu);
     else if (hidden) UnloadRenderTexture(shotTarget);
     if (reuse.rt.id) UnloadRenderTexture(reuse.rt);

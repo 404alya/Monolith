@@ -134,7 +134,7 @@ static bool InsideDir(const char *path, const char *dir)
 #define INCLUDE_SCAN_BYTES (4 << 20)    // source files larger than this are not scanned for includes
 
 // `#include "x"` lines of the project's sources that name a file outside the project folder
-// (e.g. "../common/shot.h"): a scratch copy of the project folder alone doesn't build
+// (e.g. "../common/util.h"): a scratch copy of the project folder alone doesn't build
 // without them. Listed once each, with the first source that includes it.
 static void WriteOutsideIncludes(FILE *f, const char *projectDir, const char *const *paths, int count)
 {

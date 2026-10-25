@@ -705,6 +705,12 @@ void DesignerClearSelection(Designer *d)
     d->selectedCount = 0;
 }
 
+bool DesignerSelectObject(Designer *d, MS_ObjRef o)
+{
+    if ((o.kind != MS_OBJ_BOX && o.kind != MS_OBJ_MODEL) || o.index < 0 || o.index >= KindCount(o.kind)) return false;
+    return SelectionAdd(d, o);
+}
+
 void DesignerSelectLine(Designer *d, int line)
 {
     for (int k = MS_OBJ_BOX; k <= MS_OBJ_MODEL; k++)
@@ -1178,6 +1184,16 @@ static const float VOLUME_SNAPS[] = { 0.1f, 0.25f, 0.5f, 1.0f, 2.0f };
 
 static float VolumeSnap(const Designer *d) { return d->volumeSnap > 0.0f ? d->volumeSnap : VOLUME_SNAP_DEFAULT; }
 
+float DesignerSnap(const Designer *d) { return VolumeSnap(d); }
+
+float DesignerCycleSnap(Designer *d)
+{
+    float s = VolumeSnap(d);
+    int n = (int)(sizeof(VOLUME_SNAPS) / sizeof(VOLUME_SNAPS[0])), k = 0;
+    while (k < n && VOLUME_SNAPS[k] != s) k++;
+    return d->volumeSnap = VOLUME_SNAPS[(k + 1) % n];
+}
+
 static float SnapTo(float x, float step) { return roundf(x / step) * step; }
 
 // The crosshair hit point, snapped on the axes along the hit face (none with Ctrl)
@@ -1258,6 +1274,8 @@ static void VolumeModeEnd(Designer *d)
     VolumeCancel(d);
     d->volumeMode = false;
 }
+
+void DesignerVolumeModeEnd(Designer *d) { VolumeModeEnd(d); }
 
 // Arrows / PgUp / PgDn on the active volume. The horizontal arrows follow the world axis
 // nearest to the camera's forward / right, so "up" pushes the volume away from the eye.
@@ -1351,13 +1369,7 @@ static DesignerAction VolumeInput(Designer *d)
         }
         return DESIGNER_NONE;
     }
-    if (IsKeyPressed(KEY_N)) {
-        float s = VolumeSnap(d);
-        int n = (int)(sizeof(VOLUME_SNAPS) / sizeof(VOLUME_SNAPS[0])), k = 0;
-        while (k < n && VOLUME_SNAPS[k] != s) k++;
-        d->volumeSnap = VOLUME_SNAPS[(k + 1) % n];
-        DesignerMessage(d, false, TextFormat("volume snap %g m", d->volumeSnap));
-    }
+    if (IsKeyPressed(KEY_N)) DesignerMessage(d, false, TextFormat("volume snap %g m", DesignerCycleSnap(d)));
     if (d->volumeCount > 0 && (IsKeyPressed(KEY_LEFT_BRACKET) || IsKeyPressed(KEY_RIGHT_BRACKET))) {
         int step = IsKeyPressed(KEY_RIGHT_BRACKET) ? 1 : -1;
         d->activeVolume = ((d->activeVolume < 0 ? 0 : d->activeVolume) + step + d->volumeCount) % d->volumeCount;

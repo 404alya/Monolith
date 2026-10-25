@@ -2,7 +2,7 @@
 
 Every flag and environment variable of `monolith` (Linux: `./build/linux/monolith`, Windows: `build\win\monolith.exe`). The header comment of `src/main.c` is the source of truth. Timings quoted below were measured on an RTX 4050 Laptop GPU: a rough guide only, your machine's will differ. Keys and mouse: [user-guide.md](user-guide.md). "Patch N" means a local change to R3D ([glossary.md](glossary.md)).
 
-Flags that never open a visible window, safe for scripts: `--shot` (renders in a hidden window), `--dump-boxes`, `--dump-scene`, `--dump-scene-diff`, `--inspect-model`, `--new-map`, `--export`, `--classify`, and `--bench` together with `--headless`. `--import` opens no game window either, but it queues an import request, which can open the coordinator's terminal. Anything else opens the game window.
+Flags that never open a visible window, safe for scripts: `--shot` (renders in a hidden window), `--dump-boxes`, `--dump-scene`, `--dump-scene-diff`, `--dump-entities`, `--apply-edits`, `--inspect-model`, `--new-map`, `--export`, `--classify`, and `--bench` together with `--headless`. `--import` opens no game window either, but it queues an import request, which can open the coordinator's terminal. Anything else opens the game window.
 
 ## Flags
 
@@ -33,6 +33,8 @@ An unknown flag, a missing or unparsable value, a value that is itself a `--flag
 | `--dump-boxes <file>` | No window: every box as hex floats (`%a`, `min max` per line). Exact-box-list check and full parse check (exit 1 + `file:line: message`); model files are imported on the CPU (a missing or broken one fails; no window) |
 | `--dump-scene <file>` | Also model files, instances (transform, world bounds), colliders, materials, lights (`src/dumpscene.c`); hidden window when the map has models |
 | `--dump-scene-diff <file>` | The same without object indices and map lines (names instead), so a diff shows only changed objects across inserted lines |
+| `--dump-entities <file>` | No window: every entity (box, model instance, light) in map order with its stable id (`<key>:<index>`, explicit `id` or implicit), kind, object index, map line, `repeat` copy, transform and model file ([map-format.md](map-format.md) §2.9) |
+| `--apply-edits <script>` | No window: run an edit script against the map file of `--map` (required: it **rewrites that file**), the same edits as the edit mode (**M**): `select line <n> [copy <c>]` / `select id <n> [index <i>]` / `select entity <hex> <index>` / `select none` (`also …` adds), `move dx dy dz`, `turn deg`, `remove`, `duplicate dx dy dz`, `add "models/x.glb" x y z` (after the first selected object's line), `undo`, `redo`, `print`; `#` comments. Line numbers are those of the file as it is at that command. One `edits: …` line per command; exit 1 at the first failing one. Format: the header comment of `src/mapedit.c` |
 | `--inspect-model <file>` | No window: bounds, origin, meshes/triangles, material slots, textures, up axis / unit hints, glTF extensions, warnings, a placement line. Refuses files whose references leave their folder. |
 | `--shot <file>` | Render 30 frames into a **hidden window** (never mapped), save, exit (1600×900 unless `--shot-size`). No hot reload or request polling. |
 | `--shadow <size> <range>` | Override `env shadow.size` / `sun.range` (default `8192 100`; clamped 256–16384 px, 10–2000 m) |
@@ -64,6 +66,7 @@ For testing the designer without a visible window:
 | `--type "text"` | Open the prompt box with this text |
 | `--classify "text"` | No window: print the model tier the launcher would pick (context: map, `--select`, `--region`, `--volume`, hit; `--classify-kind edit\|import\|new-map`) |
 | `--shot-hud` | Draw HUD, crosshair, overlay, regions, volumes, prompt box into the shot |
+| `--edit-mode` | With `--shot --shot-hud`: open the edit mode (**M**), so the shot shows its HUD |
 | `--shot-size w h` | Shot size (64–8192) |
 | `--reload-test <path>` | With `--shot`: load `<path>` through the hot-reload path after 10 frames; must equal a plain `--shot --map <path>` (proves every static cache is rebuilt) |
 
@@ -80,7 +83,7 @@ How the game starts Claude Code:
 | `MONOLITH_TERMINAL` | Terminal program + optional args (`"kitty --single-instance"`); over `TERMINAL`; else the first of `alacritty`, `kitty`, `foot`, `wezterm`, `xterm` in `PATH` |
 | `MONOLITH_CLAUDE_ARGS` | Extra Claude Code flags (whitespace-split), after the two permission flags and `--model <name>`, on the coordinator's (per-request: each request's) command line; a `--model` here replaces the chosen one (the coordinator's and every request's) |
 | `MONOLITH_CLAUDE_SAFE` | Non-empty and not `0`: drop the permission flags (they are also dropped when the working folder has no `CLAUDE.md`) |
-| `MONOLITH_ALLOW_WINDOW` | Non-empty and not `0`: open the game (or an example) window even when `CLAUDECODE` or `AI_AGENT` is set. In such an AI agent's shell the game otherwise refuses, with exit status 1, every run that would show its window; the safe flags listed at the top of this page still work |
+| `MONOLITH_ALLOW_WINDOW` | Non-empty and not `0`: open the game window even when `CLAUDECODE` or `AI_AGENT` is set. In such an AI agent's shell the game otherwise refuses, with exit status 1, every run that would show its window; the safe flags listed at the top of this page still work |
 | `MONOLITH_MODEL` | One model for every request (turns the tier choice off) |
 | `MONOLITH_MODEL_FAST` / `_DEFAULT` / `_HEAVY` | Model per tier (`haiku`, `sonnet`, `opus`). `ClassifyRequest` ("Model choice" in `launcher.c`): **heavy** for imports / new maps, an empty map or no `MAP.md`, asset, look/engine or large design words, > 280 bytes, 3+ sentences or > 2 regions and volumes together; **fast** for one short sentence (≤ 120 bytes) with a local edit word, no creation word and a target (crosshair hit, a selection of ≤ 100 objects, or exactly one region or volume); **default** otherwise. Written to `request.md` / `request.json`. |
 | `@fast` / `@default` / `@heavy` (also `@haiku` / `@sonnet` / `@opus`) | Prompt prefix picking the tier, stripped from the bundle (`model.override: true`); `MONOLITH_MODEL` and a `--model` in the args still win |
