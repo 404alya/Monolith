@@ -1614,7 +1614,17 @@ void raster_geometry(const r3d_render_call_t* call, geometry_raster_mode_t mode)
 
     /* --- Send matrices --- */
 
-    Matrix matNormal = r3d_matrix_normal(&group->transform);
+    // Local patch 21: the normal matrix depends on the transform alone, so it is recomputed
+    // only when the transform changes (instanced map geometry: the identity for every draw,
+    // and each pre-passed draw comes twice per frame)
+    static Matrix normalFor, matNormal;
+    static bool normalKnown = false;
+    if (!normalKnown || memcmp(&normalFor, &group->transform, sizeof(Matrix)) != 0)
+    {
+        matNormal = r3d_matrix_normal(&group->transform);
+        normalFor = group->transform;
+        normalKnown = true;
+    }
 
     R3D_SHADER__SET_MAT4_IMPL(program, uMatModel, group->transform);
     R3D_SHADER__SET_MAT4_IMPL(program, uMatNormal, matNormal);
@@ -1665,8 +1675,20 @@ void raster_geometry(const r3d_render_call_t* call, geometry_raster_mode_t mode)
     /* --- Applying material parameters that are independent of shaders --- */
 
     r3d_driver_set_cull_mode(material->cullMode);
-    r3d_driver_set_depth_state(material->depth);
-    r3d_driver_set_stencil_state(material->stencil);
+
+    if (mode == GEOMETRY_RASTER_EQUAL)
+    {
+        // Local patch 21: the EQUAL pass overrides the material's depth function and its
+        // whole stencil function and operations below; setting them first only toggled
+        // the GL state back and forth on every draw (2 glDepthFunc + 2 glStencilFunc)
+        r3d_driver_set_depth_range(material->depth.rangeNear, material->depth.rangeFar);
+        r3d_driver_set_depth_offset(material->depth.offsetUnits, material->depth.offsetFactor);
+    }
+    else
+    {
+        r3d_driver_set_depth_state(material->depth);
+        r3d_driver_set_stencil_state(material->stencil);
+    }
 
     /* --- Depth pre-pass handling (monolith patch) --- */
 
@@ -2307,7 +2329,9 @@ void pass_prepare_pyramid(int maxLevel)
 
     for (int iDst = 1; iDst <= maxLevel; iDst++)
     {
-        R3D_TARGET_BIND_CLEAR(iDst, true, R3D_TARGET_DEPTH, R3D_TARGET_SELECTOR);
+        // Local patch 20: no clear, the full-screen draw below writes every pixel of both
+        // attachments and the depth (depth test ALWAYS, no blend, no discard)
+        R3D_TARGET_BIND_LOAD(iDst, true, R3D_TARGET_DEPTH, R3D_TARGET_SELECTOR);
         R3D_SHADER_BIND_SAMPLER(prepare.pyramid, uDepthTex, r3d_target_get_level(R3D_TARGET_DEPTH, iDst - 1));
         R3D_RENDER_SCREEN();
     }
@@ -2727,7 +2751,10 @@ void pass_deferred_fog(r3d_target_t sceneTarget)
     r3d_driver_enable(GL_BLEND);
     r3d_driver_set_blend_func_separate(GL_FUNC_ADD, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
 
-    R3D_TARGET_BIND_LOAD(0, false, sceneTarget);
+    // Local patch 20: bind the scene with the depth attachment, the FBO the passes before and
+    // after use, to save two framebuffer switches; the depth test is off here, so the
+    // attached depth buffer is neither tested nor written
+    R3D_TARGET_BIND_LOAD(0, true, sceneTarget);
     R3D_SHADER_USE(deferred.fog);
 
     R3D_SHADER_BIND_SAMPLER(deferred.fog, uDepthTex, r3d_target_get_level(R3D_TARGET_DEPTH, 0));
@@ -2745,7 +2772,7 @@ void pass_deferred_volumetric_fog(r3d_target_t sceneTarget)
     r3d_driver_enable(GL_BLEND);
     r3d_driver_set_blend_func_separate(GL_FUNC_ADD, GL_ONE, GL_SRC_ALPHA, GL_ZERO, GL_ONE);
 
-    R3D_TARGET_BIND_LOAD(0, false, sceneTarget);
+    R3D_TARGET_BIND_LOAD(0, true, sceneTarget);   // with depth: see pass_deferred_fog (local patch 20)
 
     PROF_BEGIN(R3D_PROFILER_VFOG_TRANSMITTANCE);
     R3D_SHADER_USE(deferred.vfogTransmittance);
@@ -2822,7 +2849,7 @@ void pass_deferred_volumetric_fog(r3d_target_t sceneTarget)
     /* --- Compose radiance to the scene --- */
 
     PROF_BEGIN(R3D_PROFILER_VFOG_COMPOSE);
-    R3D_TARGET_BIND_LOAD(0, false, sceneTarget);
+    R3D_TARGET_BIND_LOAD(0, true, sceneTarget);   // with depth: see pass_deferred_fog (local patch 20)
     R3D_SHADER_USE(deferred.vfogCompose);
 
     r3d_driver_enable(GL_BLEND);

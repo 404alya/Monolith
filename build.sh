@@ -8,6 +8,10 @@
 #                                     exit) in build/linux-debug/
 #        ./build.sh lsan           -> LeakSanitizer-only build (-O1 -g, fast) in build/linux-lsan/,
 #                                     what tools/leakcheck.sh runs
+#        ./build.sh profile        -> CPU-profiling build in build/linux-profile/: -O2 -g
+#                                     -fno-omit-frame-pointer, with R3D/raylib/assimp as
+#                                     RelWithDebInfo + frame pointers in $R3D_DIR/build-linux-profile
+#                                     (so build-linux stays Release); what tools/profile.sh runs
 #        ./build.sh --win          -> Windows x86_64 build in build/win/ (MinGW-w64):
 #                                     monolith.exe (statically linked) + maps/ (packages),
 #                                     the folder can be zipped and copied as-is
@@ -90,6 +94,7 @@ if [[ $WIN == 1 ]]; then
     -I"$R3D_WIN/generated/include" \
     -I"$R3D_WIN/external/raylib/raylib/include" \
     -I"$R3D_DIR/external/assimp/include" -I"$R3D_WIN/external/assimp/include" \
+    -I"$R3D_DIR/external/assimp/contrib/zlib" -I"$R3D_WIN/external/assimp/contrib/zlib" \
     -DR3D_BUILD_TYPE_NAME='"Release"' \
     -I"$ROOT/runtime" -DMS_PATCHED_R3D -DMONOLITH_EDITOR \
     "$ROOT"/src/*.c "$ROOT"/runtime/*.c -o "$OUT/monolith.exe" \
@@ -121,17 +126,26 @@ fi
 # ASSIMP_BUILD_MINIZIP: use assimp's bundled unzip; a system minizip (Arch:
 # /usr/include/minizip/) is found by pkg-config but its headers aren't where assimp's
 # #include <unzip.h> looks, so the build fails.
+# The profile build has its own R3D dir: RelWithDebInfo (-O2 -g) with frame pointers, so
+# perf --call-graph fp unwinds through R3D, raylib and assimp (tools/profile.sh).
+MODE="${1:-}"
 R3D_LINUX="$R3D_DIR/build-linux"
+R3D_EXTRA=()
+if [[ "$MODE" == "profile" ]]; then
+  R3D_LINUX="$R3D_DIR/build-linux-profile"
+  R3D_BUILD_TYPE=RelWithDebInfo
+  R3D_EXTRA=(-DCMAKE_C_FLAGS="-fno-omit-frame-pointer -mno-omit-leaf-frame-pointer"
+             -DCMAKE_CXX_FLAGS="-fno-omit-frame-pointer -mno-omit-leaf-frame-pointer")
+fi
 R3D_BUILD_TYPE="${R3D_BUILD_TYPE:-Release}"
 [[ "$R3D_BUILD_TYPE" == "None" ]] && R3D_CMAKE_TYPE="" || R3D_CMAKE_TYPE="$R3D_BUILD_TYPE"
-BuildR3D "$R3D_LINUX" Linux \
-  -DCMAKE_BUILD_TYPE="$R3D_CMAKE_TYPE" \
+BuildR3D "$R3D_LINUX" "Linux ($R3D_BUILD_TYPE)" \
+  -DCMAKE_BUILD_TYPE="$R3D_CMAKE_TYPE" "${R3D_EXTRA[@]}" \
   -DBUILD_SHARED_LIBS=OFF -DR3D_RAYLIB_VENDORED=ON -DR3D_ASSIMP_VENDORED=ON \
   -DASSIMP_BUILD_ZLIB=ON -DASSIMP_BUILD_MINIZIP=ON -DR3D_BUILD_EXAMPLES=OFF \
   -DR3D_GPU_PROFILER=ON
 
 OUT="$ROOT/build/linux"
-MODE="${1:-}"
 INCLUDES=(
   -I"$R3D_DIR/include"
   -I"$R3D_LINUX/generated/include"
@@ -139,6 +153,9 @@ INCLUDES=(
   # assimp's headers: --inspect-model (src/inspect.c) reads model files with assimp directly
   -I"$R3D_DIR/external/assimp/include"
   -I"$R3D_LINUX/external/assimp/include"
+  # assimp's zlib: the PNG writer (src/png.c)
+  -I"$R3D_DIR/external/assimp/contrib/zlib"
+  -I"$R3D_LINUX/external/assimp/contrib/zlib"
 )
 
 CFLAGS=(-std=c11 -Wall -Wextra -Wno-missing-field-initializers -O2)
@@ -151,6 +168,9 @@ if [[ "$MODE" == "debug" ]]; then
 elif [[ "$MODE" == "lsan" ]]; then
   CFLAGS=(-std=c11 -Wall -Wextra -Wno-missing-field-initializers -g -O1 -fno-omit-frame-pointer -fsanitize=leak)
   OUT="$ROOT/build/linux-lsan"
+elif [[ "$MODE" == "profile" ]]; then
+  CFLAGS=(-std=c11 -Wall -Wextra -Wno-missing-field-initializers -O2 -g -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer)
+  OUT="$ROOT/build/linux-profile"
 fi
 
 mkdir -p "$OUT"

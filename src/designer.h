@@ -165,6 +165,9 @@ typedef struct {
     int activeVolume;       // index into volumes[] (edited by the arrows), -1 = none
     float volumeSnap;       // metres; 0 = VOLUME_SNAP_DEFAULT
     Vector3 eye, viewFwd;   // the camera of the last DesignerPickCamera (arrow directions)
+    bool pickValid;         // hit is the crosshair pick of pickPos/pickTarget at pickVersion
+    unsigned int pickVersion;
+    Vector3 pickPos, pickTarget;
 
     // Prompt box
     bool promptOpen;

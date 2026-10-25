@@ -102,6 +102,12 @@ void r3d_driver_set_stencil_op(GLenum fail, GLenum zFail, GLenum zPass);
 void r3d_driver_set_stencil_mask(uint8_t mask);
 
 /*
+ * Returns true when the cached state is known to have depth writes off and a zero stencil
+ * write mask, so a depth/stencil clear would change nothing (local patch 20).
+ */
+bool r3d_driver_depth_stencil_writes_off(void);
+
+/*
  * Sets separate blend factors for RGB and alpha channels.
  */
 void r3d_driver_set_blend_func_separate(GLenum equation, GLenum srcRGB, GLenum dstRGB, GLenum srcAlpha, GLenum dstAlpha);

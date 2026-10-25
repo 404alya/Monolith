@@ -1,6 +1,6 @@
 # Command line
 
-Every flag and environment variable of `monolith` (Linux: `./build/linux/monolith`, Windows: `build\win\monolith.exe`). The header comment of `src/main.c` is the source of truth. Timings quoted below were measured on an RTX 4050 Laptop GPU: a rough guide only, your machine's will differ. Keys and mouse: [user-guide.md](user-guide.md). "Patch N" means a local change to R3D ([glossary.md](glossary.md)).
+Every flag and environment variable of `monolith` (Linux: `./build/linux/monolith`, Windows: `build\win\monolith.exe`; the debug, LeakSanitizer and profiling builds of `./build.sh debug|lsan|profile` in `build/linux-<mode>/` take the same flags). The header comment of `src/main.c` is the source of truth. Timings quoted below were measured on an RTX 4050 Laptop GPU: a rough guide only, your machine's will differ. Keys and mouse: [user-guide.md](user-guide.md). "Patch N" means a local change to R3D ([glossary.md](glossary.md)).
 
 Flags that never open a visible window, safe for scripts: `--shot` (renders in a hidden window), `--dump-boxes`, `--dump-scene`, `--dump-scene-diff`, `--dump-entities`, `--apply-edits`, `--inspect-model`, `--new-map`, `--export`, `--compile`, `--classify`, and `--bench` together with `--headless`. `--import` opens no game window either, but it queues an import request, which can open the coordinator's terminal. Anything else opens the game window.
 
@@ -95,7 +95,7 @@ How the game starts Claude Code:
 | `MONOLITH_REQUESTS_DIR` | Requests folder instead of `<repo>/requests` (tests only: bundles, queue and lock in a scratch folder, away from a real coordinator) |
 | `MONOLITH_CLOSE_METHOD` | `wm` or `signal` only (tests; default both, WM first) |
 
-Other variables: `MONOLITH_CAPTURE` / `MONOLITH_CAPTURE_FRAME` (capture shim output folder / frame, default 3), `MONOLITH_DOWNLOADS` (`fetch_asset.py`, default `~/.cache/monolith/downloads`), `POLY_PIZZA_API_KEY` (or `~/.config/monolith/poly-pizza.key`; never printed), `MONOLITH_STUB_LOG` / `MONOLITH_STUB_OPENED` / `MONOLITH_STUB_RUN` (stub terminal: argv log, one line per "window", run the command; `tools/stub-terminal.sh`), `MONOLITH_STUB_WORK` (stub coordinator's seconds per request), `__GL_SYNC_TO_VBLANK=0` / `vblank_mode=0` (driver vsync off for benches).
+Other variables: `MONOLITH_CAPTURE` / `MONOLITH_CAPTURE_FRAME` (capture shim output folder / frame, default 3), `MONOLITH_DOWNLOADS` (`fetch_asset.py`, default `~/.cache/monolith/downloads`), `POLY_PIZZA_API_KEY` (or `~/.config/monolith/poly-pizza.key`; never printed), `MONOLITH_STUB_LOG` / `MONOLITH_STUB_OPENED` / `MONOLITH_STUB_RUN` (stub terminal: argv log, one line per "window", run the command; `tools/stub-terminal.sh`), `MONOLITH_STUB_WORK` (stub coordinator's seconds per request), `__GL_SYNC_TO_VBLANK=0` / `vblank_mode=0` (driver vsync off for benches), `__GL_YIELD=USLEEP` (NVIDIA: `glFinish` sleeps instead of spinning; `tools/profile.sh` sets it, so the wait doesn't look like work in a CPU profile).
 
 
 ## Settings file

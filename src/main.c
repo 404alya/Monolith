@@ -349,6 +349,7 @@
 #include "settings.h"
 #include "settingspanel.h"
 #include "ui.h"
+#include "png.h"
 #include <errno.h>
 #include <limits.h>
 #include <math.h>
@@ -1772,7 +1773,7 @@ static int Run(int argc, char **argv)
 
         if (shotPath && ++frame == 30) {
             Image img = ReadTarget(shotTarget);
-            if (!ExportImage(img, shotPath)) TraceLog(LOG_ERROR, "monolith: failed to save %s", shotPath);
+            if (!PngWrite(img, shotPath)) TraceLog(LOG_ERROR, "monolith: failed to save %s", shotPath);
             UnloadImage(img);
             if (pickFlag) DesignerPrintHit(designer.hit);
             if (pickAtCount > 0) {

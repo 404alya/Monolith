@@ -8,7 +8,7 @@ Measurement history and the reasoning behind the engine's caches and trade-off k
 
 | Machine | Hardware | Sections |
 |---|---|---|
-| **A** | Laptop: NVIDIA GeForce RTX 4050 Laptop GPU, driver 615.71, AMD Ryzen 7 7435HS (CPU recorded 2026-10-24, same GPU and driver), CachyOS (Linux), picom compositor | everything up to 2026-10-13 |
+| **A** | Laptop: NVIDIA GeForce RTX 4050 Laptop GPU, driver 615.71, AMD Ryzen 7 7435HS (CPU recorded 2026-10-24, same GPU and driver), CachyOS (Linux), picom compositor | everything up to 2026-10-13, editor UI font, CPU profile (2026-10-25) |
 | **B** | NVIDIA GeForce GTX 1660 Ti, Intel i5-10400F (desktop) | box culling, collider BVH (2026-10-20) |
 
 When you add a section, start it with the machine: the bench report's *Setup* table (GPU, driver, CPU, system, resolution), or a new row in this table.
@@ -138,7 +138,7 @@ Session-to-session swings were large (the clusters-alone low run measured 3.44 i
 
 ## CPU: collider BVH (2026-10-20, machine B)
 
-Profiled with `perf record --call-graph lbr` (LBR stacks unwind through the NVIDIA driver, which has no CFI) and `__GL_YIELD=USLEEP` (so `glFinish`'s spin-wait in headless benches doesn't pose as work). On the default map the crosshair pick (`DesignerPickCamera` → linear `PickBoxes` over 46,322 boxes) was ~21% of the CPU samples, ~0.57 ms per frame in spectator mode; walking (`player.c` `Overlap`, 3–5 linear scans per frame) and `MS_Raycast` / `MS_Collides` had the same shape.
+Profiled with `perf record --call-graph lbr` (Intel only; on AMD + NVIDIA the recipe is the `benchmarking` skill's "CPU profiling", DWARF stacks) and `__GL_YIELD=USLEEP` (so `glFinish`'s spin-wait in headless benches doesn't pose as work). On the default map the crosshair pick (`DesignerPickCamera` → linear `PickBoxes` over 46,322 boxes) was ~21% of the CPU samples, ~0.57 ms per frame in spectator mode; walking (`player.c` `Overlap`, 3–5 linear scans per frame) and `MS_Raycast` / `MS_Collides` had the same shape.
 
 A BVH over the published colliders (built at load, leaves of ≤ 4, also for noGpu loads) now serves `MS_Raycast`, `MS_Collides` and the new `MS_FirstCollision`; the designer's pick and the player go through them. Results are bit-identical to the linear scans (in-process self-test, 700k random/axis-aligned/corner rays and touching/apart boxes over the three test maps: 0 mismatches). A ray: 383 → 2.3 µs. Headless bench, 3 interleaved pairs: low 2.71 → 2.20 ms (CPU until finish 1.07 → 0.57 ms), ultra 8.52 → 7.87 ms. After it, `R3D_End` (draw submission, ~0.34 ms of it the geometry pass) is the largest CPU item.
 
@@ -155,3 +155,122 @@ Outfit embedded font + restyled overlay (`src/ui.c`) against the build before it
   - Rounded shapes as nine-slices from atlas discs / rings: 0.266 ms (+0.05); without the key-cap boxes 0.207 → the caps (~15 quads each) were the rest.
   - Key caps baked per line size into the atlas, drawn as 3-slices: **0.220 vs 0.216 ms reused (+0.004), 0.247 vs 0.235 ms spinning (+0.011)**, 4 interleaved pairs each; whole frames 0.611 → 0.613 ms and 5.31 → 5.33 ms (+0.3%).
 - Final full runs (600 frames, uninstrumented), interleaved: still + reuse 4 pairs −0.5 / +3.5 / +6.3 / +0.8% (median +2.2%), spinning 3 pairs −2.5 / +1.2 / +5.8% — within the clock-state noise.
+
+## CPU profile: frames and map loads (2026-10-25, machine A)
+
+Measuring only; nothing below is implemented. Method: the `benchmarking` skill, "CPU profiling" (`./build.sh profile`, `tools/profile.sh`). Setup: NVIDIA GeForce RTX 4050 Laptop GPU, driver 615.71.09, AMD Ryzen 7 7435HS, Linux 7.2.5-1-cachyos, 1920 × 1006 headless, ultra; perf 7.2.11, `cycles:u` every 5,692,478 cycles (`perf_event_max_sample_rate` was 2000, lowered by the kernel itself), `--call-graph dwarf,16384`, `__GL_YIELD=USLEEP`, no throttle events in any run used here. Data in `benchmark/profile/2026-10-25_round3/` (frames, 2 runs per configuration of 2400 frames per view, still 6000) and `_round2/` (loads, 5 runs per map); `_round1/` was throttled and is not used.
+
+**The profile build** is representative: against Release, 26 shots (both maps: every viewpoint, a 6-yaw sweep, a `--reload-test`) pixel-identical, `--dump-boxes` and `--dump-scene` identical, frame time −1.1 / −0.7 / −1.3% and CPU until finish −4.1 / −5.0 / +1.9% (3 interleaved short pairs). perf itself (3 interleaved short pairs, profile build alone vs. under `profile.sh`): CPU until finish +0.3 / +0.1 / +1.3%, frame time −0.2 / −0.3 / −0.1%.
+
+**Cross-checks.** Each frame profile is scaled to its own report's *CPU until finish*; `R3D_End`'s share of the frame's samples then matches *CPU in R3D_End* ÷ *CPU until finish*: default map spinning 84.7 / 86.0% vs. 84.1 / 85.2%, HUD 64.8 / 62.9% vs. 62.1 / 63.6%, pine_forest spinning 78.6 / 78.6% vs. 77.2 / 78.2%, HUD 49.9 / 49.6% vs. 50.2 / 49.6%. The two runs of a configuration have the same top 6–7 self symbols (neighbours less than 0.3 points apart swap places), and ranks 8–15 are within 0.2–0.4 points of each other (HUD: the same top 10). Every driver sample has a monolith caller in its stack (100.0%: DWARF unwinds through the driver).
+
+### Frames
+
+Spinning, default map: *CPU until finish* 0.92 ms (0.99 / 0.84 in the two runs: CPU clock state), GPU 4.6 ms. Of the frame loop's samples 35–38% are work, 4% the driver polling the clock in `glFinish`, 57–59% the `glFinish` sleep. Self time by DSO: NVIDIA `libnvidia-glcore` 75%, monolith (with R3D, raylib) 17%, libc 5% (qsort, list growth, the driver's memcpy), libm 1.4%, GL dispatch / GLX / X11 ~2%. The frame's CPU time is GL calls, not R3D's own code.
+
+| ms per frame (spinning) | default map | pine_forest |
+|---|---:|---:|
+| *CPU until finish* | 0.92 | 0.59 |
+| `R3D_End` (draw submission) | 0.78 | 0.47 |
+| · `pass_scene_geometry` → `raster_geometry` | 0.34 → 0.31 | 0.10 → 0.08 |
+| · · driver in the instanced draw call (`r3d_draw.c:1709`) | 0.164 | 0.023 |
+| · · `glUseProgram` (`:1611`), model matrix uniform (`:1619`) | 0.035, 0.019 | –, 0.003 |
+| · `glBindFramebuffer` (`r3d_target.c:397`, every pass) | 0.134 | 0.130 |
+| · `glClearBuffer*` (`r3d_target.c:381`) | 0.030 | 0.027 |
+| · bloom, lights, vol. fog, SSIL, SSAO, forward | 0.060, 0.055, 0.030, 0.032, 0.028, 0.021 | 0.062, 0.024, 0.034, 0.032, 0.026, 0.006 |
+| · draw-call sort (`r3d_render_sort_list` + `qsort_r`) | 0.037 | 0.013 |
+| `MS_DrawGeometry`, `MS_PushLights` | 0.034, 0.019 | 0.023, 0.004 |
+| `EndDrawing` (the hidden window's swap) | 0.035 | 0.031 |
+| `ClearBackground` (`main.c:1673`) | ~0.011 | 0.020 |
+| crosshair pick (`DesignerPickCamera` → `MS_Raycast`) | 0.005 | 0.028 |
+
+- **Spectator HUD and overlay** (`--bench-window 4`): +0.36 ms (default map, 1.28 vs. 0.92) and +0.29 ms (pine_forest). The key-hint lines (`ui.c` `Hints`) 0.115 / 0.119 ms, `DesignerDrawHud` 0.077 / 0.089 of which `MS_LineText` 0.046 / 0.015 (it walks the map text from the start to the hovered line, every frame), raylib's `GetGlyphIndex` (a linear search over the atlas glyphs per character) 0.041 / 0.055, `rlVertex3f` (the text and quad vertices) 0.066 / 0.087, the window stand-in's resolve 0.034 / 0.030.
+- **Still camera with frame reuse:** 0.18–0.22 ms per frame including `glFinish`; the work is ~180–210 thousand cycles (~0.05 ms): the hidden window's swap ~70k, the cached-frame blit 30k, `BeginTextureMode` 20k, `ClearBackground` 15k, the crosshair pick 6k (default map) and 50k (pine_forest: 24% of a reused frame, the models' triangle BVH; the camera hasn't moved).
+- The frame is GPU-bound at ultra (4.6 ms GPU vs. 0.9 ms CPU): a CPU saving here shortens CPU time and power; it shows in frame time only partly in the headless bench (`glFinish` per frame) and where the GPU is faster (lower presets, another GPU).
+
+### Map load and hot reload
+
+Wall times from an instrumented scratch build (`GetTime`/`getrusage` around the steps; median of 3), shares from perf (5 runs merged, user cycles: ~4.2 GHz for the CPU-bound steps). Wall ≈ process CPU time for every step: the load never waits.
+
+| ms | default map: load | reload | pine_forest: load | reload |
+|---|---:|---:|---:|---:|
+| `MS_Load` / `MS_Reload` | 418 | 383 | 84 | 63 |
+| parse | 26 | 24 | 2.3 | 2.2 |
+| surface shaders (88 loads of 17 files) | 186 | 186 | – | – |
+| textures | 83 | 59 | 35 | 27 |
+| hidden faces (`FindHiddenFaces`) | 56 | 55 | – | – |
+| box meshes (rest of `UploadBoxes`) | 40 | 38 | 1 | 0.1 |
+| model files (assimp) | – | – | 37 | 28 |
+| collider BVH | 8.1 | 8.0 | 0.1 | 0.1 |
+| watch + hash, entities, sky + ambient, free old map | 11.5 | 8.4 | 5.3 | 4.4 |
+| first frame after it (a normal frame: ~4.5 ms; pine_forest's reload: the frame after that) | 111 | 96 | 18 | 19 |
+
+- **A hot reload of the default map is ~480 ms** (383 + ~92 in the first frame). By perf's user cycles (1.445 Gc ≈ 344 ms per reload; the rest is kernel time): surface shaders 53%, hidden faces 16%, textures 13%, parse 7%, box meshes 7%, BVH 2.4%. Kernel time (`getrusage`): textures 36% of their time, `UploadBoxes` 19%, shaders 7%.
+- **Surface shaders:** every material with a shader compiles its own copy, 88 compiles of 17 files per load, the same again on reload (R3D keeps no compiled programs). The first frame after a load then compiles the variants the frame needs (~60 ms: `load_shader` / `link_shader` under `R3D_End`) and pays the driver's first-draw work in the draw call (~30 ms). That is with NVIDIA's shader disk cache; **without it** (`__GL_SHADER_DISK_CACHE=0`, as after a driver update) the shaders take 10.0 s per load and reload and the first frame 7.9 / 7.2 s: a reload ~17 s (pine_forest: first frame 553 ms).
+- **Hidden faces + box meshes** (93 ms): `FindHiddenFaces`' own loops 35%, sorting the grid entries (`qsort`) 15%, `FaceHidden` and its cover tests 16%, the mesh uploads (`R3D_LoadMesh` → driver) 18%.
+- **Cold start** (to the end of the first frame: 744 ms default map, 263 ms pine_forest): 45 ms before `InitWindow` (the hint-reading peek load parses the whole map), `InitWindow` 130–210 ms (GLX context, driver), `R3D_Init` 0.6 ms, then the load and the first frame.
+- **Optional caches:** the AO volume (`--ao-volume 0.5 0.6`) bakes in 141 ms at load and 125 ms at reload (perf: ~0.51 Gc per bake); the fog sun-visibility bake (`--fog-cache 0.5 2`) adds ~21 ms to the first frame's `R3D_End` (GPU work behind a `glFinish`). The sun's shadow tile is rendered in the first frame.
+- **`--shot` PNGs:** `ExportImage` → `stbi_write_png` takes ~200 ms of CPU for 1600 × 900 (85% in stb's zlib); every verification shot and every image of a request bundle pays it.
+
+### Candidates (as measured before the optimisation round; results in the next section)
+
+Ordered by expected gain ÷ risk. Load items are what the developer waits on at every hot reload; frame items save CPU time, not frame time, on this machine at ultra.
+
+| # | Candidate | Measured | Expected gain | Risk |
+|---|---|---|---|---|
+| 1 | One compiled surface shader per file, the other materials as `R3D_LoadSurfaceShaderAlias` (own uniforms, shared program and lazily compiled variants) | 186 ms per load and reload + ~60 ms in the first frame; 88 compiles of 17 files | ~−150 ms per load / reload and ~−45 ms first frame: reload ~480 → ~280 ms; without the disk cache ~17 s → ~3.5 s | low–medium: runtime only; aliases must be unloaded before their original; verify draw order (sort keys) stays pixel-identical |
+| 2 | Line-start index for `MS_LineText` (built with the text) | 0.046 ms per HUD frame (default map; grows with the file, up to 4 MB) | −0.045 ms per HUD frame, also on reused frames | low |
+| 3 | Glyph table for the editor's text (`src/ui.c`), instead of raylib's linear `GetGlyphIndex` | 0.041 / 0.055 ms per HUD frame | ~−0.04 ms per HUD frame | low (same quads, pixel-identical) |
+| 4 | Faster PNG writing for shots and bundles (stb's compression level) | ~200 ms per 1600 × 900 image | ~−100 ms per image (not measured) | low (same pixels, other bytes) |
+| 5 | Keep compiled shaders and uploaded textures across a reload when their file is unchanged | after 1: ~36 ms shaders + 59 ms textures per reload (pine_forest: 27 ms textures) | ~−90 ms per reload (pine_forest ~−27) | medium: ownership across the swap; keyed on file content like the watch list, so every changed file still reloads |
+| 6 | Hidden faces in parallel over cells (8 cores), without the grid sort | 93 ms per load with the box meshes | ~−50…−70 ms per load | medium: the result must stay identical (box dumps, shots); threads in the runtime |
+| 7 | Fewer framebuffer switches in R3D (one FBO per target set; NVIDIA validates on bind) | `glBindFramebuffer` 0.13 ms + clears 0.03 ms per frame (15–22% of frame CPU) | ~−0.05…−0.1 ms per frame | medium: R3D patch across many passes |
+| 8 | Leaner geometry submission: pre-pass draws without material uniforms and textures, pre-pass sorted by program | `raster_geometry` 0.31 ms (draw call 0.16, program switches 0.035) | ~−0.05…−0.1 ms per frame | medium: R3D patch; the pre-pass and its stencil tie-break (patch 6) must hold |
+| 9 | Cache the draw-call sort keys between frames | 0.037 ms per frame | ~−0.02 ms | low–medium (R3D) |
+| 10 | Skip the crosshair pick while camera and `scene->version` are unchanged | pine_forest 0.012 ms per reused frame (24% of it), 0.028 ms spinning | tiny; power on still frames | low |
+| 11 | No peek parse before `InitWindow` (read only the hints) | ~25 ms at cold start only | small | low–medium |
+
+Not covered: kernel and driver-kernel time (`perf_event_paranoid` 2; a spinning headless bench spends 2.6% of its CPU time in the kernel, 0.24 of 9.2 s), and the windowed present path (the bench's window stand-in only).
+
+## CPU optimisations: loads, editor frames, R3D submission (2026-10-25, machine A)
+
+The candidates above, implemented and measured one by one. Setup as in the section above (RTX 4050 Laptop, driver 615.71.09, Ryzen 7 7435HS, Linux 7.2.5-1-cachyos, 1920 × 1006 headless, ultra). Base: the tree before the round plus the load-timing log (that log changes no image or dump). Every kept change: the 90-file shot set (every viewpoint of `maps/monolith`, `maps/pine_forest`, `tests/models`; yaw sweeps 0–300 at heights 1.6 / 30 / 60; `--reload-test` of each map and both ways between the maps; `--off 16`; the steep view; picks; box, scene and entity dumps) 0 differ against the base, `--shot-hud` shots (selection, regions, prompt box with non-Latin text, settings panel, edit mode) 0 differ, both builds and the examples without warnings, leak check OK. Loads: the runtime's load log, median of 5 `--shot --view 1 --reload-test <same map>` runs per binary interleaved (no disk cache: 3). Frames: `--bench --headless` full runs in interleaved sets, *CPU until finish* (CPU in the frame before its `glFinish`).
+
+**Load log** (new, permanent): `monolith_scene: load|reload <ms>: parse, models, collider BVH, surface shaders (n compiled), textures (n), hidden faces, box meshes, rest` per load with the GPU, and `first frames after the load a + b ms` (the two frames after it, each from one `MS_PushLights` to the next: they compile the shader variants; pine_forest's reload compiles in the second).
+
+| ms, median | default map before | after | pine_forest before | after |
+|---|---:|---:|---:|---:|
+| load | 418.5 | 222.5 | 85.6 | 87.6 |
+| reload | 387.8 | 198.2 | 63.2 | 64.0 |
+| · surface shaders (reload) | 191.4 (88 compiled) | 41.3 (17 compiled) | – | – |
+| · hidden faces (reload) | 55.2 | 14.3 | – | – |
+| first frames after the load | 115.2 + 2.1 | 42.0 + 0.8 | 17.4 + 4.1 | 19.1 + 1.6 |
+| first frames after the reload | 100.9 + 4.4 | 25.9 + 9.0 | 0.9 + 20.3 | 0.8 + 20.3 |
+| **reload + its first frames** | **493** | **233 (−53 %)** | 84 | 85 |
+| no shader disk cache: reload | 10 314 | 2 793 | 64.0 | 64.1 |
+| no shader disk cache: first frames after the reload | 7 365 | 1 882 | 18.9 | 18.9 |
+| **no disk cache: reload + first frames** | **17.7 s** | **4.7 s (−74 %)** | | |
+
+| ms per frame, interleaved full runs | before | after | change |
+|---|---:|---:|---:|
+| default map spinning, *CPU until finish* (4 pairs) | 0.699 | 0.561 | −0.138 (−20 %) |
+| · *CPU in R3D_End* | 0.591 | 0.454 | −0.137 (−23 %) |
+| · frame time (GPU-bound) | 5.303 | 5.165 | −0.138 (−2.6 %) |
+| default map, HUD + overlay (`--bench-window 4`, 3 pairs, before the sort cache was dropped) | 1.026 | 0.734 | −0.293 (−29 %) |
+| pine_forest spinning (3 + 3 pairs) | 0.440 | ~0.43–0.45 | within noise (±0.02) |
+| pine_forest still with frame reuse and HUD, frame time (3 pairs) | 0.673 | 0.589 | −0.085 (−13 %) |
+
+What each change brought, and the decision:
+1. **One compiled surface shader per file, aliases per material** (runtime): kept. Reload shaders 191 → 41 ms, first frames −75 ms, without the disk cache −13 s per reload cycle. Unexpected frame gain: the aliases share one GL program per file, so R3D skips the program switches between materials of one shader and the driver's per-draw work drops: spinning *CPU until finish* −0.116 ms (−17 %, 3 pairs: −0.108 / −0.109 / −0.132) with all the runtime and editor changes but no R3D patch; in the profile the geometry pass 0.194 → 0.077 ms per frame (driver time in the draw path 0.148 → ~0.05, with patch 20). Draw order unchanged (aliases are created in material order; the sort key is the creation serial).
+6. **Hidden faces on threads, a hash instead of the sorted grid** (runtime, pthreads, up to 8 threads in chunks of 512 boxes): kept. 55 → 13–14 ms per load; the hidden-face masks are bit-identical (FNV hash and count of the masks compared on all three maps; 79 108 faces on the default map).
+2. **Line-start index for `MS_LineText`** (editor block): kept. HUD profile: `MS_LineText` 0.037 ms per frame → not visible; `DesignerDrawHud` 0.061 → 0.022 ms.
+3. **Glyph table in `ui.c`** (raylib's `DrawTextEx` / `MeasureTextEx` layout with a table instead of `GetGlyphIndex`): kept. HUD profile: `GetGlyphIndex` gone (pine_forest still frame: 197 of 1 402 kcycles), the key-hint lines 0.100 → 0.060 ms, text drawing 0.078 → 0.057 ms.
+4. **PNG writing:** kept as a new writer (`src/png.c`: zlib level 1 on Sub-filtered rows, assimp's zlib), not stb's level. stb's knobs (level 5–8, a forced filter) gave at best 200 → 140 ms for 1600 × 900; zlib level 1 + Sub: ExportImage 178 / 176 / 155 ms → 48 / 44 / 39 ms on three 1600 × 900 images (300 × 200 crop: 7.5 → 2.0 ms), files ~20 % smaller (1.99 → 1.58 MB); decoded pixels identical (shots and every bundle image). raylib's own `CompressData` (sdefl) was slower than stb (173 ms unfiltered, 1.3 s Sub).
+10. **Crosshair pick skipped while camera and scene are unchanged** (`DesignerPickCamera`): kept. pine_forest still frame: `MS_RaycastModel` gone from the profile; `--pick` output identical.
+9. **Draw-call sort cached between frames** (R3D): **dropped.** The profile showed the `qsort` gone but the key fill staying (−0.01 ms per frame); benches: +0.006 ms (pairs −0.022 / +0.010 / +0.030), not measurable. Below the ~0.02 ms bar for an R3D patch: a memo with its own invariant isn't worth it.
+7. **Fewer framebuffer binds and clears** (R3D patch 19): kept, −0.029 ms *CPU until finish* (3 pairs). Only 2 of 22 binds per frame could go (fog passes on the scene FBO with depth) and 9 of 10 depth/stencil clears (nothing written); the rest are real pass switches.
+8. **Leaner geometry submission** (R3D patch 20: cached matrix uniforms, normal matrix only when the transform changes, no depth/stencil state set only to be overwritten after the pre-pass): kept, −0.027 ms (3 pairs). Not done: sorting the pre-pass by program (it already runs in the shading pass's shader-grouped order: no switches to save) and drawing it without material uniforms and textures (a custom `vertex()` may read them; 0 calls saved for the built-in program). Patches 19 + 20 without the sort cache: −0.025 ms (4 pairs; the pairs scatter by ±0.03).
+11. **No peek load before `InitWindow`:** not done. A hints-only read would duplicate the parser, and without the parse a broken map would open the window before it fails (today it exits with `file:line` before any window); skipping only the peek's collider BVH and entities needs a new `MS_LoadOptions` field (public API, the developer's call) for ~10–20 ms at cold start only.
+5. **Keeping shaders and textures across a reload:** not done (needs the developer's approval of a content-keyed cache that survives a reload).
+
+Profiles: `benchmark/profile/2026-10-25_round4-base/` (spin, still, hud, still-pine) and `_round4-final/` (spin without the sort cache; still, hud and still-pine with it). In this round's frame profiles 26–30 % of the frame's driver samples have no monolith caller ("stack ends in the driver"; the round above had ~0 %): compare call trees between the two runs here, not with that round.

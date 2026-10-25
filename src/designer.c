@@ -793,6 +793,7 @@ void DesignerSync(Designer *d)
     bool first = d->version == 0;
     d->version = scene->version;
     d->hit.obj = (MS_ObjRef){ MS_OBJ_NONE, -1 };    // re-picked on the next DesignerUpdate
+    d->pickValid = false;
     if (first || d->selectedCount == 0) { DesignerClearSelection(d); return; }
 
     // The old indices mean nothing now: take the keys out and start over
@@ -1481,6 +1482,15 @@ static DesignerAction SnipInput(Designer *d)
 
 void DesignerPickCamera(Designer *d, Camera3D cam)
 {
+    // A still camera over the same scene hits the same thing (the ray cast is most of a reused
+    // frame's CPU time on a map with many model triangles). Bitwise compares: -0 and +0 give
+    // different ray slopes. DesignerSync invalidates it whenever the scene changes.
+    if (d->pickValid && d->pickVersion == scene->version && memcmp(&d->pickPos, &cam.position, sizeof(Vector3)) == 0 &&
+        memcmp(&d->pickTarget, &cam.target, sizeof(Vector3)) == 0) return;
+    d->pickValid = true;
+    d->pickVersion = scene->version;
+    d->pickPos = cam.position;
+    d->pickTarget = cam.target;
     d->eye = cam.position;
     d->viewFwd = Vector3Normalize(Vector3Subtract(cam.target, cam.position));
     d->hit = DesignerPick(cam.position, d->viewFwd);

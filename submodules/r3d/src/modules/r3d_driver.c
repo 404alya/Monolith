@@ -371,6 +371,13 @@ void r3d_driver_set_stencil_mask(uint8_t mask)
     }
 }
 
+bool r3d_driver_depth_stencil_writes_off(void)
+{
+    const pipeline_cache_t* pipe = &R3D_MOD_DRIVER.pipeCache;
+    return pipe->depthMask.known && pipe->depthMask.vbool == GL_FALSE
+        && pipe->stencilMask.known && pipe->stencilMask.vbyte == 0;
+}
+
 void r3d_driver_set_blend_func_separate(GLenum equation, GLenum srcRGB, GLenum dstRGB, GLenum srcAlpha, GLenum dstAlpha)
 {
     if (CHECK_PIPE(blendEquation, enum, equation))

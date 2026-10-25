@@ -4532,3 +4532,192 @@ Files: `src/modules/r3d_render.h`, `src/modules/r3d_render.c`.
 
 **Verification.** No `VISBILITY` left in the tree; both targets build without warnings;
 `tools/leakcheck.sh`: zero leaks of ours.
+
+## Patch 19: framebuffer switches and clears that change nothing (2026-10-25)
+
+**Symptom.** In the CPU profile of `maps/monolith` (2026-10-25, machine A) `glBindFramebuffer`
+cost 0.13 ms per frame (22 binds; NVIDIA validates the FBO on each bind) and `glClearBuffer*`
+0.03 ms (30 calls): 15–22% of the frame's CPU time.
+
+**Cause.** (Found with a scratch build that logged every target bind and clear of one frame.)
+1. The screen-space passes that depth-test against the depth pyramid (`pass_prepare_downsample`,
+   `pass_prepare_ssao`, `pass_prepare_ssil`: 8 binds per frame at ultra) bind with
+   `R3D_TARGET_BIND_CLEAR(level, true, ...)` after turning depth writes off and the stencil
+   write mask to 0. `glClearBufferfi(GL_DEPTH_STENCIL)` honours both write masks, so those 8
+   depth/stencil clears changed nothing.
+2. `pass_prepare_pyramid` clears both colour attachments and the depth of each level that it then
+   overwrites completely: a full-screen triangle, depth test `ALWAYS` with depth writes on, no
+   blending, no `discard` (`shaders/prepare/pyramid.frag` writes both outputs and `gl_FragDepth`).
+   2 colour clears and 1 depth clear per level, all overwritten.
+3. The fog passes (`pass_deferred_fog`, the transmittance and compose steps of
+   `pass_deferred_volumetric_fog`) bind the scene target *without* the depth attachment: another
+   FBO than the one `pass_deferred_compose`, `pass_scene_background` and `pass_scene_forward`
+   use around them (the scene target *with* depth). So the frame switched compose / background
+   → fog → vfog radiance → fog → forward: 2 switches more than needed.
+
+**Change.**
+1. `r3d_target_bind_clear` skips the depth/stencil clear when the driver's cached state is known
+   to have depth writes off and a zero stencil write mask (`r3d_driver_depth_stencil_writes_off()`,
+   new; it returns false while that state is unknown, e.g. right after
+   `r3d_driver_invalidate_cache()`, and the clear then happens as before).
+2. The pyramid binds with `R3D_TARGET_BIND_LOAD` instead of `R3D_TARGET_BIND_CLEAR`.
+3. The fog passes bind `R3D_TARGET_BIND_LOAD(0, true, sceneTarget)`. Their depth test is off,
+   so the attached depth buffer is neither tested nor written, and none of them samples the
+   hardware depth texture (they read the `R3D_TARGET_DEPTH` colour target), so attaching it
+   makes no feedback loop.
+
+Looked at and not done: the frame-start clear binds an 8-attachment FBO (G-buffer, specular,
+scene) only to clear it, 1 switch; clearing the G-buffer through the geometry pass's FBO and the
+other two where they are first bound would save it, but moves clears across `R3D_End`'s branches
+(no visible lights, no opaque draws, the debug output modes) for one bind. The SSIL denoise
+ping-pong (4 binds) and the bloom mip chain (10 re-attachments of one FBO) would need FBOs per
+level or shared attachments; whether binding a cached FBO per mip is cheaper on NVIDIA than
+re-attaching would have to be measured. `glViewport` (34 per frame) is set on every target bind;
+caching it would need every other `glViewport` call in R3D (sky, cubemaps, probes, shadows,
+blits) to invalidate the cache, for a cheap call.
+
+Files: `src/modules/r3d_driver.h`, `src/modules/r3d_driver.c` (`r3d_driver_depth_stencil_writes_off`),
+`src/modules/r3d_target.c` (`r3d_target_bind_clear`), `src/r3d_draw.c` (`pass_prepare_pyramid`,
+`pass_deferred_fog`, `pass_deferred_volumetric_fog`).
+
+```diff
+--- src/modules/r3d_driver.c
++bool r3d_driver_depth_stencil_writes_off(void)
++{
++    const pipeline_cache_t* pipe = &R3D_MOD_DRIVER.pipeCache;
++    return pipe->depthMask.known && pipe->depthMask.vbool == GL_FALSE
++        && pipe->stencilMask.known && pipe->stencilMask.vbyte == 0;
++}
+--- src/modules/r3d_target.c  (r3d_target_bind_clear; now includes "./r3d_driver.h")
+-    if (depth)
++    if (depth && !r3d_driver_depth_stencil_writes_off())
+     {
+         glClearBufferfi(GL_DEPTH_STENCIL, 0, 1.0f, 0);
+     }
+--- src/r3d_draw.c
+ pass_prepare_pyramid:
+-        R3D_TARGET_BIND_CLEAR(iDst, true, R3D_TARGET_DEPTH, R3D_TARGET_SELECTOR);
++        R3D_TARGET_BIND_LOAD(iDst, true, R3D_TARGET_DEPTH, R3D_TARGET_SELECTOR);
+ pass_deferred_fog, pass_deferred_volumetric_fog (transmittance and compose):
+-    R3D_TARGET_BIND_LOAD(0, false, sceneTarget);
++    R3D_TARGET_BIND_LOAD(0, true, sceneTarget);
+```
+
+**Verification.** Call counts per frame (a scratch build that wraps R3D's GL calls and counts them; not kept), on every view counted
+of the three maps: `glBindFramebuffer` 22 → 20 (`tests/models`: 20 → 18), `glClearBufferfv`
+20 → 18 (19 → 17), `glClearBufferfi` 10 → 1; `glFramebufferTexture2D` (10) and `glViewport` (34)
+unchanged. The bind log of one frame after the patch: compose, background, fog and vfog
+transmittance on one FBO, vfog radiance, then vfog compose and forward on the first again.
+Image: 90 files (every viewpoint of `maps/monolith`, `maps/pine_forest` and `tests/models`, yaw sweeps 0–300 at three heights, `--reload-test` both ways, `--off 16`, the steep view, picks, box / scene / entity dumps) against the build before: 0 differ. Builds
+without warnings on Linux and MinGW; `tools/leakcheck.sh`: zero leaks of ours.
+
+**Measured** (machine A of `.claude/skills/benchmarking/measurements.md`, `--bench --headless`, default map, 3 interleaved full pairs, on top of the dropped sort cache described there): *CPU until finish* −0.029 ms per frame (−5 %; pairs −0.016 / −0.023 / −0.049), *CPU in R3D_End* −0.026 ms; frame time −0.037 ms (the frame is GPU-bound). With patch 20, without the sort cache, 4 pairs: −0.025 ms *CPU until finish* for both.
+
+**If R3D changes these passes:** a pass that binds with `BIND_CLEAR` and *wants* its depth
+cleared must have depth writes on when it binds (as the frame-start clear does); the pyramid may
+only stay without a clear while its draw covers every pixel without blending or `discard`; a
+fog pass that turns the depth test on or samples `r3d_target_get_depth_buffer()` must go back to
+the scene FBO without depth.
+
+## Patch 20: geometry draws re-uploaded unchanged matrices and toggled depth / stencil state (2026-10-25)
+
+**Symptom.** `raster_geometry` (`src/r3d_draw.c`) cost 0.31 ms of CPU per frame on
+`maps/monolith` (CPU profile 2026-10-25, machine A), 0.019 ms of it the model-matrix uniform
+alone. Counted per frame (view 2): 874 `glUniformMatrix4fv`, 351 `glDepthFunc`, 345
+`glStencilFunc`.
+
+**Cause.**
+1. `R3D_SHADER__SET_MAT4_IMPL` uploaded every matrix on every call; unlike the scalar and vector
+   setters it kept no copy of the last value. Each geometry draw uploads its model and normal
+   matrix, and with the depth pre-pass (patch 6) each pre-passed draw comes twice. monolith's map
+   geometry is instanced with the identity as group transform, so nearly all of these were the
+   same matrix on the same program.
+2. The normal matrix (an inverse transpose) was recomputed for every draw from the same transform.
+3. In the pre-pass's shading pass (`GEOMETRY_RASTER_EQUAL`) `raster_geometry` first set the
+   material's depth state (`LESS`) and stencil state (`ALWAYS`, ...), then overrode the depth
+   function with `GL_EQUAL` and the stencil function with the tie-break test: 2 `glDepthFunc`
+   and 2 `glStencilFunc` per draw that only flipped the state back and forth.
+
+**Change.**
+1. `r3d_shader_uniform_mat4_t` stores the last uploaded matrix; the setter uploads only when the
+   new one differs bit for bit (`memcmp`). The cache starts zeroed with the program struct (GL's
+   default uniform value is the zero matrix too), the same discipline as the other uniform
+   caches; custom shader clones share the program struct and with it the caches. It applies to
+   every matrix uniform in R3D (geometry, forward, unlit, decals, shadow depth, probes, sky):
+   the uploaded values are unchanged, only repeats are skipped.
+2. `raster_geometry` keeps the last transform and its normal matrix and recomputes only when the
+   transform changes (a pure function of the transform, so the result is identical).
+3. In `GEOMETRY_RASTER_EQUAL` mode only the material's depth range and offset are set, not its
+   depth function or its stencil function and operations, which the code that follows sets
+   anyway. The GL state at the draw is the same as before.
+
+Looked at and not done: the pre-pass already draws in the shading pass's order, which the
+material sort groups by surface shader (one program per shader), so sorting it "by program"
+would drop no program switches; a `GL_LESS` pre-pass leaves the minimum depth whatever the order,
+and the shading pass's order (the stencil tie-break of patch 6) is untouched. Each pre-passed
+material keeps its own program in the pre-pass (patch 6: the same program in both passes keeps
+the depths bit-identical). Leaving the material uniforms and textures out of the pre-pass draws
+was tried and removed: a custom `vertex()` may read any material value (`COLOR`, `TEXCOORD`,
+`EMISSION`, `MATRIX_NORMAL`; `maps/monolith` has surface shaders with vertex code), so they could
+only be skipped for the built-in program, and with the uniform caches that saved 0 calls on every
+tested view (the pre-passed draws there all use custom shaders; `maps/pine_forest` has no
+pre-passed draws).
+
+Files: `src/modules/r3d_shader.h` (`r3d_shader_uniform_mat4_t`, `R3D_SHADER__SET_MAT4_IMPL`,
+`#include <string.h>`), `src/r3d_draw.c` (`raster_geometry`).
+
+```diff
+--- src/modules/r3d_shader.h
+-typedef struct { int loc; } r3d_shader_uniform_mat4_t;
++typedef struct { Matrix val; int loc; } r3d_shader_uniform_mat4_t;
+ #define R3D_SHADER__SET_MAT4_IMPL(target, uniform, value)                       \
+ do {                                                                            \
+-    glUniformMatrix4fv((target)->uniform.loc, 1, GL_TRUE, (float*)&(value));    \
++    const Matrix* r3d__m = &(value);                                            \
++    if (memcmp(&(target)->uniform.val, r3d__m, sizeof(Matrix)) != 0)            \
++    {                                                                           \
++        (target)->uniform.val = *r3d__m;                                        \
++        glUniformMatrix4fv((target)->uniform.loc, 1, GL_TRUE, (const float*)r3d__m); \
++    }                                                                           \
+ } while (0)
+--- src/r3d_draw.c  (raster_geometry)
+-    Matrix matNormal = r3d_matrix_normal(&group->transform);
++    static Matrix normalFor, matNormal;
++    static bool normalKnown = false;
++    if (!normalKnown || memcmp(&normalFor, &group->transform, sizeof(Matrix)) != 0)
++    {
++        matNormal = r3d_matrix_normal(&group->transform);
++        normalFor = group->transform;
++        normalKnown = true;
++    }
+     ...
+     r3d_driver_set_cull_mode(material->cullMode);
+-    r3d_driver_set_depth_state(material->depth);
+-    r3d_driver_set_stencil_state(material->stencil);
++    if (mode == GEOMETRY_RASTER_EQUAL)
++    {
++        r3d_driver_set_depth_range(material->depth.rangeNear, material->depth.rangeFar);
++        r3d_driver_set_depth_offset(material->depth.offsetUnits, material->depth.offsetFactor);
++    }
++    else
++    {
++        r3d_driver_set_depth_state(material->depth);
++        r3d_driver_set_stencil_state(material->stencil);
++    }
+```
+
+**Verification.** Call counts per frame with a still camera (a scratch build that wraps R3D's GL calls and counts them; not kept):
+`glUniformMatrix4fv` 798–1106 → 0 on the `maps/monolith` views counted (1, 2, 3, 7, the steep
+view), 370–376 → 0 on `maps/pine_forest`, 28 → 0 on `tests/models` (a moving camera still uploads
+the view-dependent ones: the sky's inverse view and projection, and a shadow map's matrices when
+it is redrawn); `glDepthFunc` 321–467 → 13 and `glStencilFunc` 315–461 → 7 on `maps/monolith`
+(unchanged on the other maps: no pre-passed draws); `glUseProgram`, draws and texture binds
+unchanged. Image: the same 90 files against the build before: 0 differ,
+and two runs of the patched build: 0 differ. Builds without warnings on Linux and MinGW;
+`tools/leakcheck.sh`: zero leaks of ours.
+
+**Measured** (as for patch 19, 3 interleaved full pairs on top of it): *CPU until finish* −0.027 ms per frame (pairs −0.034 / −0.024 / −0.022), *CPU in R3D_End* −0.028 ms. The profile's driver time under the geometry pass (with the runtime's shader aliases, which share one program per shader file): 0.148 → ~0.05 ms per frame.
+
+**If R3D adds a path that sets a matrix uniform with `glUniformMatrix4fv` directly** (outside
+`R3D_SHADER__SET_MAT4_IMPL`), or reloads a program without zeroing its struct, the matrix cache
+must be reset there, as the other uniform caches would need.

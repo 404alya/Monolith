@@ -13,6 +13,7 @@
 
 #include "../common/r3d_helper.h"
 #include "../common/r3d_math.h"
+#include "./r3d_driver.h"   // r3d_driver_depth_stencil_writes_off (local patch 20)
 
 // ========================================
 // MODULE STATE
@@ -381,7 +382,10 @@ void r3d_target_bind_clear(const r3d_target_t* targets, int count, int level, bo
         glClearBufferfv(GL_COLOR, i, TARGET_CONFIG[targets[i]].clear);
     }
 
-    if (depth)
+    // Local patch 20: a depth/stencil clear honours the depth and stencil write masks, so
+    // with both off (the screen-space passes that only depth-test against the pyramid)
+    // it changes nothing and is skipped
+    if (depth && !r3d_driver_depth_stencil_writes_off())
     {
         glClearBufferfi(GL_DEPTH_STENCIL, 0, 1.0f, 0);
     }

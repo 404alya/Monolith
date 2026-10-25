@@ -14,6 +14,7 @@
 #include <stdalign.h>
 #include <raylib.h>
 #include <stdint.h>
+#include <string.h>     // memcmp in R3D_SHADER__SET_MAT4_IMPL (local patch 21)
 #include <glad.h>
 
 #include "../common/r3d_rshade.h"
@@ -157,9 +158,15 @@ do {                                                                            
     }                                                                           \
 } while (0)
 
+// Local patch 21: skip the upload when the matrix is bit-identical to the last one uploaded
 #define R3D_SHADER__SET_MAT4_IMPL(target, uniform, value)                       \
 do {                                                                            \
-    glUniformMatrix4fv((target)->uniform.loc, 1, GL_TRUE, (float*)&(value));    \
+    const Matrix* r3d__m = &(value);                                            \
+    if (memcmp(&(target)->uniform.val, r3d__m, sizeof(Matrix)) != 0)            \
+    {                                                                           \
+        (target)->uniform.val = *r3d__m;                                        \
+        glUniformMatrix4fv((target)->uniform.loc, 1, GL_TRUE, (const float*)r3d__m); \
+    }                                                                           \
 } while (0)
 
 // ----------------------------------------
@@ -416,8 +423,10 @@ typedef struct { Vector4 val; int loc; } r3d_shader_uniform_vec4_t;
 typedef struct { Color val; int loc; } r3d_shader_uniform_col3_t;
 typedef struct { Color val; int loc; } r3d_shader_uniform_col4_t;
 
-/* Represents matrices, stores only the uniform location for efficiency */
-typedef struct { int loc; } r3d_shader_uniform_mat4_t;
+/* Represents matrices, stores the last uploaded value and uniform location (local patch 21:
+ * the value was not stored, so every draw re-uploaded its model and normal matrices even
+ * when they had not changed; zero-initialised like the other caches, which is GL's default) */
+typedef struct { Matrix val; int loc; } r3d_shader_uniform_mat4_t;
 
 // ========================================
 // UNIFORM BLOCK ENUM / SLOTS

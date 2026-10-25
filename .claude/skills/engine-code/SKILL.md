@@ -16,6 +16,7 @@ How to change code. Reference: `docs/architecture.md` (technology, layout, archi
 ./build.sh run [args]   # build, then run with args
 ./build.sh debug        # -g -O0 + ASan/UBSan -> build/linux-debug/
 ./build.sh lsan         # -O1 -g + LeakSanitizer -> build/linux-lsan/; examples: examples/build.sh lsan (test build)
+./build.sh profile      # -O2 -g + frame pointers (R3D/raylib/assimp RelWithDebInfo) -> build/linux-profile/; tools/profile.sh
 tools/leakcheck.sh [--asan]     # every main code path under LSan (or ASan + UBSan); exit 1 on a leak
 R3D_DIR=/other/r3d ./build.sh   # another R3D tree;  CC=gcc ./build.sh: another compiler
 ./build.sh --win [run [args]]   # -> build/win/monolith.exe + build/win/maps/ (MinGW-w64); run under wine

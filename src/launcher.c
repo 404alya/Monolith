@@ -84,6 +84,7 @@
 #include "launcher.h"
 #include "wincmd.h"
 #include "ui.h"
+#include "png.h"
 #include <ctype.h>
 #include <errno.h>
 #include <math.h>
@@ -3039,9 +3040,9 @@ bool LauncherSubmit(const DesignRequest *req, Image view, Image marked, char *ms
     bool ok = true;
     char path[1400];
     snprintf(path, sizeof(path), "%sview.png", dir);
-    if (view.data) ok &= ExportImage(view, path);
+    if (view.data) ok &= PngWrite(view, path);
     snprintf(path, sizeof(path), "%sview-marked.png", dir);
-    if (marked.data) ok &= ExportImage(marked, path);
+    if (marked.data) ok &= PngWrite(marked, path);
     // One crop per region, from view.png's pixels
     for (int i = 0; i < req->regionCount && view.data; i++) {
         Rectangle r = req->regions[i].rect;
@@ -3050,7 +3051,7 @@ bool LauncherSubmit(const DesignRequest *req, Image view, Image marked, char *ms
         if (x1 - x0 < 1.0f || y1 - y0 < 1.0f) continue;
         Image crop = ImageFromImage(view, (Rectangle){ x0, y0, x1 - x0, y1 - y0 });
         snprintf(path, sizeof(path), "%sregion-%d.png", dir, i + 1);
-        ok &= ExportImage(crop, path);
+        ok &= PngWrite(crop, path);
         UnloadImage(crop);
     }
     snprintf(path, sizeof(path), "%srequest.md", dir);

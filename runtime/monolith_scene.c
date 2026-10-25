@@ -98,7 +98,8 @@
 //                                  roughness 0.9, metalness 0) and may be redefined.
 //   use "name"                     following boxes (and models) use this material, like `group`;
 //                                  `use "default"` goes back. Must be defined before the `use`.
-//   keys: shader "shaders/x.glsl"  R3D surface shader (one instance per material)
+//   keys: shader "shaders/x.glsl"  R3D surface shader (compiled once per file; each material draws
+//                                    with its own alias of it: its own uniforms and samplers)
 //         uniform <name> f [f f f] float / vec2 / vec3 / vec4 uniform of that shader
 //         sampler <name> "textures/x.png"   sampler2D uniform of that shader
 //         albedo R G B [A]  albedo_map "p"  normal_map "p"  normal_scale f  orm_map "p"
@@ -185,7 +186,9 @@
 #include <errno.h>
 #include <limits.h>
 #include <math.h>
+#include <pthread.h>
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -282,6 +285,20 @@ typedef struct {
 
 typedef struct { char *path; bool isColor; int wrap; Texture2D tex; } TexEntry;
 
+// A surface shader file of the map, compiled once: every material that uses it draws with an
+// alias of it (its own uniforms and samplers, the shared program and shader variants)
+typedef struct {
+    const char *rel;                    // the materials' shader path (not owned)
+    R3D_SurfaceShader *shader;          // never drawn with: aliases copy its default uniform values
+    bool scanned, needsCube, cutout;    // ScanShader of its source (unreadable: both true)
+} ShaderFile;
+
+// Where a load's time went (ms), for the load log line (LogLoadTimes)
+typedef struct {
+    double parse, models, bvh, shaders, textures, hidden, meshes;
+    int shaderLoads;                    // R3D_LoadSurfaceShader calls (compiled shaders)
+} LoadTimes;
+
 // Picking data of a model file: a CPU copy of its triangles (model space) and a BVH over them
 typedef struct { Vector3 mn, mx; int left, first, count; } BvhNode;    // leaf: count > 0 (left = -1)
 typedef struct {
@@ -325,6 +342,8 @@ typedef struct {
     long mtime;
     char *text;                         // the map file, for MS_GetLine (NULL for a compiled map)
     int textSize;
+    int *lineStarts;                    // offset of each line in text (NULL: out of memory, MS_LineText walks the text)
+    int lineCount;
     bool compiled;                      // loaded from a compiled map: its source's hash and size
     unsigned long long srcHash;
     long long srcSize;
@@ -403,8 +422,11 @@ typedef struct {
     int boxMeshCount;                   // merged ranges that have a mesh
     long long boxTrisDrawn;             // triangles the boxes draw per pass (12 per instanced box)
     float mergeMs;                      // time the hidden-face search and the meshes took
+    LoadTimes times;
     TexEntry *textures;
     int textureCount, textureCap;
+    ShaderFile *shaderFiles;
+    int shaderFileCount, shaderFileCap;
     R3D_Cubemap sky;
     R3D_AmbientMap ambientMap;
     R3D_ShadowMap *lightShadow;         // per light (lightCount)
@@ -467,6 +489,10 @@ struct MS_Private {
     unsigned int fogCacheVersion;               // scene version the fog volume was baked for, 0 = none
     unsigned int aoVersion;                     // scene version the occlusion volume was baked for, 0 = none
     bool warnedShadowSize;                      // the shadow.size vs. R3D hint warning, once
+    unsigned int frameVersion;                  // scene version MS_PushLights last saw
+    double frameStart;                          // time of its last call
+    int firstFrames;                            // frames timed since the last load (first two)
+    double firstFrameMs[2];
 };
 
 // #endregion
@@ -4128,7 +4154,9 @@ static Texture2D GetTexture(SceneData *d, const char *rel, bool isColor, int wra
     // R3D's default wrap is clamp, which would make uv_scale > 1 useless; map materials repeat
     // unless `wrap clamp|mirror`. Filter: trilinear with generated mipmaps (R3D's default).
     static const TextureWrap WRAPS[] = { TEXTURE_WRAP_REPEAT, TEXTURE_WRAP_CLAMP, TEXTURE_WRAP_MIRROR_REPEAT };
+    double t0 = GetTime();
     Texture2D tex = R3D_LoadTextureEx(full, WRAPS[wrap % 3], TEXTURE_FILTER_TRILINEAR, isColor);
+    d->times.textures += (GetTime() - t0) * 1000.0;
     if (tex.id == 0) {
         free(path);
         snprintf(err, errSize, "%s:%d: cannot load the texture \"%s\"", d->srcPath, line, rel);
@@ -4597,6 +4625,11 @@ static void FreeGpu(SceneData *d)
         if (d->materials[i].material.shader) R3D_UnloadSurfaceShader(d->materials[i].material.shader);
         d->materials[i].material.shader = NULL;
     }
+    // (after their aliases, which share their programs)
+    for (int i = 0; i < d->shaderFileCount; i++) R3D_UnloadSurfaceShader(d->shaderFiles[i].shader);
+    free(d->shaderFiles);
+    d->shaderFiles = NULL;
+    d->shaderFileCount = d->shaderFileCap = 0;
     if (d->unit.capacity > 0) R3D_UnloadInstanceBuffer(d->unit);
     d->unit = (R3D_InstanceBuffer){ 0 };
     free(d->inst);
@@ -4633,10 +4666,10 @@ static void FreeGpu(SceneData *d)
 // toward +a at plane p: B.min[a] <= p < B.max[a]; toward -a: B.min[a] < p <= B.max[a]). Exact
 // float compares, no epsilon (touching boxes come from identical arithmetic), and a face stays
 // whenever it isn't proven covered. The occluders are looked up in a grid of HIDE_CELL cells
-// (sorted entries, binary search); boxes in too many cells are tested against every face.
+// (a hash of the occupied cells); boxes in too many cells are tested against every face.
 #define HIDE_CELL           4.0f
 #define HIDE_CELLS_MAX      1024        // a box in more cells goes to the "big" list; a face over more cells stays
-#define HIDE_ENTRIES_MAX    (1 << 22)   // grid entries (40 B each): more and nothing is hidden (a map of huge overlapping boxes)
+#define HIDE_ENTRIES_MAX    (1 << 22)   // grid entries (~60 B each with the hash): more and nothing is hidden (a map of huge overlapping boxes)
 #define HIDE_PIECES         64          // a face the occluders leave in more pieces stays
 // An occluder must reach this far (m) beyond the face's plane. 0: every covered face goes (25 % of
 // maps/monolith's box triangles), but a face lying only a few cm behind its covering surface shows
@@ -4647,7 +4680,6 @@ static void FreeGpu(SceneData *d)
 
 typedef struct { float mn[3], mx[3]; } Box6;
 typedef struct { float x0, y0, x1, y1; } Rect;                  // on the two axes other than the face's
-typedef struct { unsigned long long key; int id; } GridEntry;
 
 static int HideCell(float v)
 {
@@ -4675,13 +4707,6 @@ static unsigned long long HideKey(const int cell[3])
         k = k << 21 | (unsigned long long)(c < 0 ? 0 : c > 0x1FFFFF ? 0x1FFFFF : c);
     }
     return k;
-}
-
-static int CompareGridEntries(const void *pa, const void *pb)
-{
-    const GridEntry *a = pa, *b = pb;
-    if (a->key != b->key) return a->key < b->key ? -1 : 1;
-    return a->id < b->id ? -1 : a->id > b->id;
 }
 
 // Does B occupy the space right outside the face (axis a, plane p, toward dir) and overlap its rect?
@@ -4727,93 +4752,180 @@ static bool FaceHidden(const Box6 *bx, const int *nb, int nbCount, int i, int a,
     return false;
 }
 
+// The occluder grid: per occupied cell (open-addressed hash of HideKey), its occluders in
+// ascending box order (as sorted entries were), so neighbours come in the same order as before
+typedef struct { unsigned long long key; int first, count; } HideSlot;
+
+typedef struct {
+    const SceneData *d;
+    const Box6 *bx;
+    const int *big;
+    int bigCount;
+    const HideSlot *slots;
+    unsigned int slotMask;
+    const int *ids;                     // the cells' occluders, slot by slot
+    const Box6 *gbox;                   // their boxes, in the same order
+    int axis[6], dir[6];
+    unsigned char *hidden;
+    atomic_int next;                    // first box of the next chunk to take
+} HideJob;
+
+static unsigned int HideHash(unsigned long long key, unsigned int mask)
+{
+    return (unsigned int)((key * 0x9E3779B97F4A7C15ull) >> 32) & mask;
+}
+
+static const HideSlot *HideFind(const HideJob *J, unsigned long long key)
+{
+    for (unsigned int h = HideHash(key, J->slotMask); ; h = (h + 1) & J->slotMask) {
+        const HideSlot *S = &J->slots[h];
+        if (S->count == 0 || S->key == key) return S->count ? S : NULL;
+    }
+}
+
+// The faces of boxes [from, to) (scratch: nb and stamp per box, piece HIDE_PIECES)
+static void HideRange(HideJob *J, int from, int to, int *nb, int *stamp, Rect *piece)
+{
+    const SceneData *d = J->d;
+    for (int i = from; i < to; i++) {
+        int m = d->boxRefs[i].material, nbCount = 0, lo[3], hi[3], cell[3];
+        if (m < 0 || m >= d->materialCount || !d->matDefs[m].merge) continue;
+        const Box6 *A = &J->bx[i];
+        // Neighbours: the occluders in A's cells (a touching box shares a cell with A), once
+        // each, and the big ones. A box in too many cells only has the big ones.
+        if (HideCells(A, lo, hi)) {
+            for (cell[0] = lo[0]; cell[0] <= hi[0]; cell[0]++)
+                for (cell[1] = lo[1]; cell[1] <= hi[1]; cell[1]++)
+                    for (cell[2] = lo[2]; cell[2] <= hi[2]; cell[2]++) {
+                        const HideSlot *S = HideFind(J, HideKey(cell));
+                        for (int e = S ? S->first : 0, end = S ? S->first + S->count : 0; e < end; e++) {
+                            const Box6 *B = &J->gbox[e];
+                            if (!((B->mn[0] <= A->mx[0]) & (B->mx[0] >= A->mn[0]) & (B->mn[1] <= A->mx[1]) &
+                                  (B->mx[1] >= A->mn[1]) & (B->mn[2] <= A->mx[2]) & (B->mx[2] >= A->mn[2]))) continue;
+                            int id = J->ids[e];
+                            if (id == i || stamp[id] == i) continue;
+                            stamp[id] = i;
+                            nb[nbCount++] = id;
+                        }
+                    }
+        }
+        for (int k = 0; k < J->bigCount; k++) {
+            const Box6 *B = &J->bx[J->big[k]];
+            if (J->big[k] == i || B->mn[0] > A->mx[0] || B->mx[0] < A->mn[0] || B->mn[1] > A->mx[1] || B->mx[1] < A->mn[1] ||
+                B->mn[2] > A->mx[2] || B->mx[2] < A->mn[2]) continue;
+            nb[nbCount++] = J->big[k];
+        }
+        for (int f = 0; f < 6; f++)
+            if (FaceHidden(J->bx, nb, nbCount, i, J->axis[f], J->dir[f], piece)) J->hidden[i] |= (unsigned char)(1u << f);
+    }
+}
+
+#define HIDE_CHUNK          512         // boxes a thread takes at a time
+#define HIDE_THREADS        8           // at most (with the calling thread)
+
+// A worker: chunks of boxes until none are left (out of memory: it takes none)
+static void HideWork(HideJob *J)
+{
+    int count = J->d->boxCount;
+    int *nb = malloc(sizeof(int) * (size_t)count), *stamp = malloc(sizeof(int) * (size_t)count);
+    Rect *piece = malloc(sizeof(Rect) * HIDE_PIECES);
+    bool ok = nb && stamp && piece;
+    for (int i = 0; ok && i < count; i++) stamp[i] = -1;
+    for (int from; ok && (from = atomic_fetch_add(&J->next, HIDE_CHUNK)) < count; )
+        HideRange(J, from, from + HIDE_CHUNK < count ? from + HIDE_CHUNK : count, nb, stamp, piece);
+    free(piece);
+    free(stamp);
+    free(nb);
+}
+
+static void *HideThread(void *job)
+{
+    HideWork(job);
+    return NULL;
+}
+
 // hidden[b] bit f: face f of box b (R3D's cube face order) is hidden; only for boxes of merged
-// materials. False when out of memory.
+// materials. Each box's faces depend only on the boxes, so threads take boxes in chunks and the
+// result is the same as one thread's. False when out of memory.
 static bool FindHiddenFaces(const SceneData *d, const R3D_MeshData *cube, unsigned char *hidden)
 {
     int count = d->boxCount;
     size_t cap = count > 0 ? (size_t)count : 1;
     Box6 *bx = malloc(sizeof(Box6) * cap);
-    int *big = malloc(sizeof(int) * cap), *nb = malloc(sizeof(int) * cap), *stamp = malloc(sizeof(int) * cap);
-    Rect *piece = malloc(sizeof(Rect) * HIDE_PIECES);
-    GridEntry *grid = NULL;
+    int *big = malloc(sizeof(int) * cap), *ids = NULL;
+    HideSlot *slots = NULL;
     Box6 *gbox = NULL;
-    int bigCount = 0, gridCount = 0;
-    bool ok = bx && big && nb && stamp && piece;
+    int bigCount = 0;
+    unsigned int slotMask = 0;
+    bool ok = bx && big;
     long long total = 0;
     for (int i = 0; i < count && ok; i++) {
         const BoundingBox *B = &d->boxes[i];
         bx[i] = (Box6){ { B->min.x, B->min.y, B->min.z }, { B->max.x, B->max.y, B->max.z } };
-        stamp[i] = -1;
         int m = d->boxRefs[i].material, lo[3], hi[3];
         if (m < 0 || m >= d->materialCount || !d->matDefs[m].occluder) continue;
         if (!HideCells(&bx[i], lo, hi)) big[bigCount++] = i;
         else total += (long long)(hi[0] - lo[0] + 1) * (hi[1] - lo[1] + 1) * (hi[2] - lo[2] + 1);
     }
     if (ok && total <= HIDE_ENTRIES_MAX) {
-        grid = malloc(sizeof(GridEntry) * (total > 0 ? (size_t)total : 1));
+        // Two passes over the occluders' cells: count per cell, then place each box after the
+        // cell's earlier ones (ascending box order within a cell)
+        unsigned int nslots = 2;
+        while (nslots < 2 * (unsigned long long)total) nslots <<= 1;
+        slotMask = nslots - 1;
+        slots = calloc(nslots, sizeof(HideSlot));
+        ids = malloc(sizeof(int) * (total > 0 ? (size_t)total : 1));
         gbox = malloc(sizeof(Box6) * (total > 0 ? (size_t)total : 1));
-        ok = grid && gbox;
-        for (int i = 0; i < count && ok; i++) {
-            int m = d->boxRefs[i].material, lo[3], hi[3], cell[3];
-            if (m < 0 || m >= d->materialCount || !d->matDefs[m].occluder || !HideCells(&bx[i], lo, hi)) continue;
-            for (cell[0] = lo[0]; cell[0] <= hi[0]; cell[0]++)
-                for (cell[1] = lo[1]; cell[1] <= hi[1]; cell[1]++)
-                    for (cell[2] = lo[2]; cell[2] <= hi[2]; cell[2]++)
-                        grid[gridCount++] = (GridEntry){ HideKey(cell), i };
-        }
-        if (ok) qsort(grid, gridCount, sizeof(GridEntry), CompareGridEntries);
-        for (int k = 0; k < gridCount && ok; k++) gbox[k] = bx[grid[k].id];
-    }
-    if (ok && grid) {
-        int axis[6], dir[6];
-        for (int f = 0; f < 6; f++) {
-            Vector3 nrm = R3D_UnpackNormal(cube->vertices[f * 4].normal);
-            axis[f] = fabsf(nrm.x) > 0.5f ? 0 : fabsf(nrm.y) > 0.5f ? 1 : 2;
-            dir[f] = (axis[f] == 0 ? nrm.x : axis[f] == 1 ? nrm.y : nrm.z) > 0.0f ? 1 : -1;
-        }
-        for (int i = 0; i < count; i++) {
-            int m = d->boxRefs[i].material, nbCount = 0, lo[3], hi[3], cell[3];
-            if (m < 0 || m >= d->materialCount || !d->matDefs[m].merge) continue;
-            const Box6 *A = &bx[i];
-            // Neighbours: the occluders in A's cells (a touching box shares a cell with A), once
-            // each, and the big ones. A box in too many cells only has the big ones.
-            if (HideCells(A, lo, hi)) {
+        ok = slots && ids && gbox;
+        for (int pass = 0; pass < 2 && ok; pass++) {
+            for (unsigned int h = 0, at = 0; pass == 1 && h < nslots; h++) {
+                slots[h].first = (int)at;           // (advanced while filling, set back below)
+                at += (unsigned int)slots[h].count;
+            }
+            for (int i = 0; i < count; i++) {
+                int m = d->boxRefs[i].material, lo[3], hi[3], cell[3];
+                if (m < 0 || m >= d->materialCount || !d->matDefs[m].occluder || !HideCells(&bx[i], lo, hi)) continue;
                 for (cell[0] = lo[0]; cell[0] <= hi[0]; cell[0]++)
                     for (cell[1] = lo[1]; cell[1] <= hi[1]; cell[1]++)
                         for (cell[2] = lo[2]; cell[2] <= hi[2]; cell[2]++) {
                             unsigned long long key = HideKey(cell);
-                            int first = 0, last = gridCount;        // first entry with this key
-                            while (first < last) {
-                                int mid = (first + last) / 2;
-                                if (grid[mid].key < key) first = mid + 1; else last = mid;
-                            }
-                            for (int e = first; e < gridCount && grid[e].key == key; e++) {
-                                const Box6 *B = &gbox[e];
-                                if (!((B->mn[0] <= A->mx[0]) & (B->mx[0] >= A->mn[0]) & (B->mn[1] <= A->mx[1]) &
-                                      (B->mx[1] >= A->mn[1]) & (B->mn[2] <= A->mx[2]) & (B->mx[2] >= A->mn[2]))) continue;
-                                int id = grid[e].id;
-                                if (id == i || stamp[id] == i) continue;
-                                stamp[id] = i;
-                                nb[nbCount++] = id;
+                            unsigned int h = HideHash(key, slotMask);
+                            while (slots[h].count && slots[h].key != key) h = (h + 1) & slotMask;
+                            if (pass == 0) {
+                                slots[h].key = key;
+                                slots[h].count++;
+                            } else {
+                                int e = slots[h].first++;
+                                ids[e] = i;
+                                gbox[e] = bx[i];
                             }
                         }
             }
-            for (int k = 0; k < bigCount; k++) {
-                const Box6 *B = &bx[big[k]];
-                if (big[k] == i || B->mn[0] > A->mx[0] || B->mx[0] < A->mn[0] || B->mn[1] > A->mx[1] || B->mx[1] < A->mn[1] ||
-                    B->mn[2] > A->mx[2] || B->mx[2] < A->mn[2]) continue;
-                nb[nbCount++] = big[k];
-            }
-            for (int f = 0; f < 6; f++)
-                if (FaceHidden(bx, nb, nbCount, i, axis[f], dir[f], piece)) hidden[i] |= (unsigned char)(1u << f);
         }
+        for (unsigned int h = 0; ok && h < nslots; h++) slots[h].first -= slots[h].count;
+    }
+    if (ok && slots) {
+        HideJob J = { .d = d, .bx = bx, .big = big, .bigCount = bigCount, .slots = slots, .slotMask = slotMask,
+                      .ids = ids, .gbox = gbox, .hidden = hidden };
+        atomic_init(&J.next, 0);
+        for (int f = 0; f < 6; f++) {
+            Vector3 nrm = R3D_UnpackNormal(cube->vertices[f * 4].normal);
+            J.axis[f] = fabsf(nrm.x) > 0.5f ? 0 : fabsf(nrm.y) > 0.5f ? 1 : 2;
+            J.dir[f] = (J.axis[f] == 0 ? nrm.x : J.axis[f] == 1 ? nrm.y : nrm.z) > 0.0f ? 1 : -1;
+        }
+        pthread_t thread[HIDE_THREADS - 1];
+        int threads = 0;
+        while (threads < HIDE_THREADS - 1 && count > (threads + 1) * HIDE_CHUNK &&
+               pthread_create(&thread[threads], NULL, HideThread, &J) == 0) threads++;
+        HideWork(&J);
+        for (int t = 0; t < threads; t++) pthread_join(thread[t], NULL);
+        // Done when every chunk was taken: a worker does each chunk it takes, and one that is out
+        // of memory takes none
+        ok = atomic_load(&J.next) >= count;
     }
     free(gbox);
-    free(grid);
-    free(piece);
-    free(stamp);
-    free(nb);
+    free(ids);
+    free(slots);
     free(big);
     free(bx);
     return ok;
@@ -4884,7 +4996,9 @@ static bool UploadBoxes(SceneData *d, char *err, int errSize)
     if (anyMerge) {
         cube = R3D_GenMeshDataCube(1.0f, 1.0f, 1.0f);
         hidden = calloc(d->boxCount, 1);
+        double th = GetTime();
         ok = cube.vertexCount == 24 && cube.indexCount == 36 && hidden && FindHiddenFaces(d, &cube, hidden);
+        d->times.hidden = (GetTime() - th) * 1000.0;
         d->unit = R3D_LoadInstanceBuffer(1, R3D_INSTANCE_POSITION | R3D_INSTANCE_SCALE);
         Vector3 *pos = R3D_MapInstances(d->unit, R3D_INSTANCE_POSITION, false);
         Vector3 *scl = R3D_MapInstances(d->unit, R3D_INSTANCE_SCALE, false);
@@ -4960,6 +5074,36 @@ static void ScanShader(const char *src, bool *needsCube, bool *cutout)
     *needsCube = HasWord(open, end, "POSITION");
 }
 
+// The compiled shader of a material's shader file: loaded (and its source scanned) by the first
+// material that uses the file. NULL when it fails to load or out of memory (err says which).
+static ShaderFile *GetShaderFile(SceneData *d, const MS_Material *M, const MatDef *D, char *err, int errSize)
+{
+    for (int i = 0; i < d->shaderFileCount; i++)
+        if (strcmp(d->shaderFiles[i].rel, M->shader) == 0) return &d->shaderFiles[i];
+    ShaderFile *f = MS_PUSH(d->shaderFiles, d->shaderFileCount, d->shaderFileCap);
+    if (!f) {
+        snprintf(err, errSize, "%s:%d: out of memory", d->srcPath, D->shaderLine);
+        return NULL;
+    }
+    char full[MS_PATH_MAX + MS_PATH_MAX];
+    snprintf(full, sizeof(full), "%s%s", d->root, M->shader);
+    double t0 = GetTime();
+    *f = (ShaderFile){ .rel = M->shader, .shader = R3D_LoadSurfaceShader(full) };
+    d->times.shaderLoads++;
+    if (!f->shader) {
+        d->shaderFileCount--;
+        snprintf(err, errSize, "%s:%d: cannot load the surface shader \"%s\" (see the log)", d->srcPath, D->shaderLine, M->shader);
+        return NULL;
+    }
+    char *src = LoadFileText(full);
+    f->scanned = src != NULL;
+    if (src) ScanShader(src, &f->needsCube, &f->cutout);
+    else f->needsCube = f->cutout = true;
+    UnloadFileText(src);
+    d->times.shaders += (GetTime() - t0) * 1000.0;
+    return f;
+}
+
 // Creates every GPU resource of `d` (a previous load's are still alive: new before old, see
 // the instance-buffer note in LoadBytes). On failure everything created so far is freed.
 static bool UploadGpu(SceneData *d, char *err, int errSize)
@@ -4980,11 +5124,14 @@ static bool UploadGpu(SceneData *d, char *err, int errSize)
         R3D_Material *m = &M->material;
         m->shader = NULL;
         if (M->shader) {
-            char full[MS_PATH_MAX + MS_PATH_MAX];
-            snprintf(full, sizeof(full), "%s%s", d->root, M->shader);
-            m->shader = R3D_LoadSurfaceShader(full);
+            // One compiled shader per file (a compile is ~2 ms, and the first frame compiles each
+            // shader's variants again); the materials' aliases are created in material order, so
+            // R3D's draw sort, which orders shaders by creation, sees the same order as with one
+            // compiled shader per material
+            ShaderFile *f = GetShaderFile(d, M, D, err, errSize);
+            if (f) m->shader = R3D_LoadSurfaceShaderAlias(f->shader);
+            if (f && !m->shader) snprintf(err, errSize, "%s:%d: out of memory", d->srcPath, D->shaderLine);
             if (!m->shader) {
-                snprintf(err, errSize, "%s:%d: cannot load the surface shader \"%s\" (see the log)", d->srcPath, D->shaderLine, M->shader);
                 FreeGpu(d);
                 return false;
             }
@@ -5005,24 +5152,19 @@ static bool UploadGpu(SceneData *d, char *err, int errSize)
         }
     }
 
-    // How the boxes of each material are drawn. After the loop above: reading the shader sources
-    // between the shader loads moved the shaders' addresses, and R3D sorts draws by them, so the
-    // draw order (which of two exactly overlapping boxes shows) changed from run to run
+    // How the boxes of each material are drawn
     for (int i = 0; i < d->materialCount; i++) {
         MS_Material *M = &d->materials[i];
         MatDef *D = &d->matDefs[i];
         R3D_Material *m = &M->material;
         bool needsCube = false, cutout = false;
         if (M->shader) {
-            char full[MS_PATH_MAX + MS_PATH_MAX];
-            snprintf(full, sizeof(full), "%s%s", d->root, M->shader);
-            char *src = LoadFileText(full);
-            if (src) ScanShader(src, &needsCube, &cutout);
-            else needsCube = cutout = true;
-            if (src && needsCube && !D->instanced)
+            const ShaderFile *f = GetShaderFile(d, M, D, err, errSize);     // (loaded above)
+            needsCube = !f || f->needsCube;
+            cutout = !f || f->cutout;
+            if (f && f->scanned && f->needsCube && !D->instanced)
                 TraceLog(LOG_WARNING, "monolith_scene: %s:%d: material \"%s\": shader \"%s\" reads the box instance (INSTANCE_*, "
                          "or POSITION in vertex()): add `instanced on` to the material", d->srcPath, D->shaderLine, M->name, M->shader);
-            UnloadFileText(src);
         }
         // Boxes are merged into a visible-face mesh unless the shader needs the instanced cubes. Only
         // opaque materials: R3D picks the lights of a blended (forward) draw by the mesh's own bounds,
@@ -5033,7 +5175,10 @@ static bool UploadGpu(SceneData *d, char *err, int errSize)
                       !D->maps[MAP_ALBEDO] && m->alphaCutoff <= 1.0f;
     }
 
-    if (!UploadBoxes(d, err, errSize)) {
+    double tBoxes = GetTime();
+    bool boxesOk = UploadBoxes(d, err, errSize);
+    d->times.meshes = (GetTime() - tBoxes) * 1000.0 - d->times.hidden;
+    if (!boxesOk) {
         FreeGpu(d);
         return false;
     }
@@ -5130,6 +5275,7 @@ static void FreeData(SceneData *d)
     free(d->deps);
     free(d->brief);
     free(d->text);
+    free(d->lineStarts);
 #endif
     free(d);
 }
@@ -5211,14 +5357,18 @@ static bool FinishLoad(SceneData *d, const MS_LoadOptions *opt, bool gpu, char *
         return false;
     }
     bool ok;
+    double t0 = GetTime();
     if (gpu) {
         d->gpu = true;                  // (so FreeData unloads what LoadModelFiles loaded)
         ok = LoadModelFiles(d, err, errSize);
     } else ok = CheckModelFiles(d, err, errSize);
     if (ok) ok = ResolveModels(d, err, errSize);
+    d->times.models = (GetTime() - t0) * 1000.0;
     if (ok) {
         FinishGeometry(d);
+        t0 = GetTime();
         ok = BuildColliderBvh(d, err, errSize);
+        d->times.bvh = (GetTime() - t0) * 1000.0;
     }
     if (ok && !BuildEntities(d)) {
         snprintf(err, errSize, "%s: out of memory", d->path);
@@ -5226,6 +5376,40 @@ static bool FinishLoad(SceneData *d, const MS_LoadOptions *opt, bool gpu, char *
     }
     if (ok && gpu) ok = UploadGpu(d, err, errSize);
     return ok;
+}
+
+#ifdef MONOLITH_EDITOR
+// Where each line of the map text starts (MS_LineText is called every frame for the hovered line;
+// walking a 4 MB text to it took ~0.05 ms): a line starts at 0 and after each newline, inside the text
+static void IndexLines(SceneData *d)
+{
+    int n = d->textSize > 0;
+    for (int i = 0; i + 1 < d->textSize; i++) n += d->text[i] == '\n';
+    d->lineStarts = malloc(sizeof(int) * (size_t)(n > 0 ? n : 1));
+    if (!d->lineStarts) return;
+    d->lineCount = 0;
+    if (d->textSize > 0) d->lineStarts[d->lineCount++] = 0;
+    for (int i = 0; i + 1 < d->textSize; i++)
+        if (d->text[i] == '\n') d->lineStarts[d->lineCount++] = i + 1;
+}
+#endif
+
+// One line per load with GPU upload: where the time went (ms). The first frame after it, which
+// compiles the shader variants it draws with, is logged by MS_PushLights.
+static void LogLoadTimes(const SceneData *d, bool again, double total)
+{
+    const LoadTimes *t = &d->times;
+    const char *what = "load";
+#ifdef MONOLITH_EDITOR
+    if (again) what = "reload";
+#else
+    (void)again;
+#endif
+    double rest = total - t->parse - t->models - t->bvh - t->shaders - t->textures - t->hidden - t->meshes;
+    TraceLog(LOG_INFO, "monolith_scene: %s %.1f ms: parse %.1f, models %.1f, collider BVH %.1f, surface shaders %.1f "
+             "(%d compiled), textures %.1f (%d), hidden faces %.1f, box meshes %.1f, rest %.1f",
+             what, total, t->parse, t->models, t->bvh, t->shaders, t->shaderLoads, t->textures, d->textureCount,
+             t->hidden, t->meshes, rest);
 }
 
 // Loads a map from its file's bytes (takes ownership): fills a SceneData from them, finishes the
@@ -5239,6 +5423,7 @@ static bool LoadBytes(MS_Scene *s, const char *mapPath, char *bytes, int size, c
         free(bytes);
         return false;
     }
+    double tLoad = GetTime();
     bool ok = InitData(d, mapPath);
     if (!ok) snprintf(err, errSize, "%s: out of memory", mapPath);
     bool compiled = IsCompiledMap(bytes, size);
@@ -5249,9 +5434,11 @@ static bool LoadBytes(MS_Scene *s, const char *mapPath, char *bytes, int size, c
         ok = false;
     }
     if (ok && !compiled) ok = ParseScene(d, bytes, size, err, errSize);
+    d->times.parse = (GetTime() - tLoad) * 1000.0;
     if (ok && compiled) WarnStale(d);
     d->text = compiled ? NULL : bytes;
     d->textSize = compiled ? 0 : size;
+    if (!compiled) IndexLines(d);
     d->hash = Fnv1a64Update(FNV_OFFSET, bytes, (size_t)size);
     d->mtime = GetFileModTime(mapPath);
     // Watch the files of this attempt (also after a failure: a shader that is still missing
@@ -5261,6 +5448,7 @@ static bool LoadBytes(MS_Scene *s, const char *mapPath, char *bytes, int size, c
     p->settleTime = 0.0f;
     if (compiled) free(bytes);
 #else
+    d->times.parse = (GetTime() - tLoad) * 1000.0;
     if (ok && !compiled) {
         snprintf(err, errSize, "%s: not a compiled map (this program reads compiled maps, <name>.mapb: compile the "
                  "map's text with monolith)", mapPath);
@@ -5288,6 +5476,7 @@ static bool LoadBytes(MS_Scene *s, const char *mapPath, char *bytes, int size, c
     s->version++;
     Publish(s, d);
     FreeData(old);
+    if (p->gpu) LogLoadTimes(d, old != NULL, (GetTime() - tLoad) * 1000.0);
     if (errSize > 0) err[0] = '\0';
     return true;
 }
@@ -5450,10 +5639,15 @@ const char *MS_LineText(const MS_Scene *s, int line, int *length)
     const SceneData *d = s->priv->d;
     if (!d || !d->text || line < 1) return NULL;
     int pos = 0;
-    for (int l = 1; l < line; l++) {
-        while (pos < d->textSize && d->text[pos] != '\n') pos++;
-        if (pos >= d->textSize) return NULL;
-        pos++;
+    if (d->lineStarts) {
+        if (line > d->lineCount) return NULL;
+        pos = d->lineStarts[line - 1];
+    } else {
+        for (int l = 1; l < line; l++) {
+            while (pos < d->textSize && d->text[pos] != '\n') pos++;
+            if (pos >= d->textSize) return NULL;
+            pos++;
+        }
     }
     if (pos >= d->textSize) return NULL;
     int len = 0;
@@ -5850,6 +6044,19 @@ bool MS_PushLights(MS_Scene *s, Camera3D camera, float aspect)
     MS_Private *p = s->priv;
     SceneData *d = p->d;
     bool update = false;
+    // The first frames after a load compile the shader variants they draw with (some only in the
+    // second frame): the first two are logged, each from this call to the next one (the whole
+    // frame, its present included)
+    double now = GetTime();
+    if (p->frameVersion != s->version) {
+        p->frameVersion = s->version;
+        p->firstFrames = 0;
+    } else if (p->firstFrames < 2) {
+        p->firstFrameMs[p->firstFrames++] = (now - p->frameStart) * 1000.0;
+        if (p->firstFrames == 2)
+            TraceLog(LOG_INFO, "monolith_scene: first frames after the load %.1f + %.1f ms", p->firstFrameMs[0], p->firstFrameMs[1]);
+    }
+    p->frameStart = now;
     if (SunOn(p)) {
         R3D_Light sun = d->sunLight;
         // (the tiles and the camera-fitted cache key on the range, so a new one redraws them)

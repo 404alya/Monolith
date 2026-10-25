@@ -13,7 +13,10 @@
 // DrawRectangleRounded* emit dozens of triangles each and switch the batch's draw mode, which
 // made the overlay cost ~0.13 ms more per frame (measured with ~60 key caps on screen). Key
 // caps, the most frequent shape, are one baked sprite per line size (border and fill in one),
-// drawn as a 3-slice: 3 quads per cap instead of ~15.
+// drawn as a 3-slice: 3 quads per cap instead of ~15. Text is laid out here, the way raylib's
+// DrawTextEx / MeasureTextEx do it, but with a codepoint -> glyph table instead of raylib's
+// GetGlyphIndex, a linear search over the ~290 glyphs for every character (0.04-0.05 ms per
+// frame of the HUD); the quads are the same.
 #include "ui.h"
 #include "font_outfit.h"
 #include <math.h>
@@ -37,6 +40,8 @@ static struct {
     Font face[FACE_COUNT];
     Rectangle disc[CORNER_COUNT], ring[CORNER_COUNT];   // 2r x 2r, filled / 1 px outline
     Rectangle cap[SIZE_COUNT];      // key cap of a line of each size: (2 UI_RADIUS + 3) x CapHeight
+    short *glyphOf[FACE_COUNT];     // codepoint 0..glyphMax -> glyph index, as GetGlyphIndex gives it
+    int glyphMax[FACE_COUNT];
     Texture2D atlas;
     Texture2D oldShapes;    // raylib's shapes texture before ours (restored by UiClose)
     Rectangle oldShapesRec;
@@ -52,8 +57,27 @@ static void FreeFaces(void)
     for (int i = 0; i < FACE_COUNT; i++) {
         if (ui.face[i].glyphs) UnloadFontData(ui.face[i].glyphs, ui.face[i].glyphCount);
         free(ui.face[i].recs);
+        free(ui.glyphOf[i]);
+        ui.glyphOf[i] = NULL;
     }
     memset(ui.face, 0, sizeof(ui.face));
+}
+
+// The glyph table of face i: the first glyph with the codepoint, else raylib's fallback ('?')
+static bool BuildGlyphTable(int i)
+{
+    const Font *f = &ui.face[i];
+    int max = 0;
+    for (int g = 0; g < f->glyphCount; g++)
+        if (f->glyphs[g].value > max) max = f->glyphs[g].value;
+    ui.glyphOf[i] = malloc(sizeof(short) * (size_t)(max + 1));
+    if (!ui.glyphOf[i] || f->glyphCount > 32767) return false;
+    short fallback = (short)GetGlyphIndex(*f, -1);
+    for (int c = 0; c <= max; c++) ui.glyphOf[i][c] = fallback;
+    for (int g = f->glyphCount - 1; g >= 0; g--)
+        if (f->glyphs[g].value >= 0) ui.glyphOf[i][f->glyphs[g].value] = (short)g;
+    ui.glyphMax[i] = max;
+    return true;
 }
 
 static void Load(void)
@@ -71,7 +95,7 @@ static void Load(void)
                                  f->baseSize, (int *)(bold ? OUTFIT_SEMIBOLD_CODEPOINTS : OUTFIT_REGULAR_CODEPOINTS),
                                  f->glyphCount, FONT_DEFAULT);
         f->recs = calloc((size_t)f->glyphCount, sizeof(Rectangle));
-        if (!f->glyphs || !f->recs) {
+        if (!f->glyphs || !f->recs || !BuildGlyphTable(i)) {
             TraceLog(LOG_WARNING, "monolith: cannot load the UI font, using raylib's default font");
             FreeFaces();
             return;
@@ -168,18 +192,25 @@ void UiClose(void)
 }
 
 // Font, pixel size and spacing to draw `size` with (the nearest size of the scale; raylib's
-// default font, scaled as DrawText does, if the font could not load)
-typedef struct { Font font; float px, spacing; } Face;
+// default font, scaled as DrawText does, if the font could not load: id -1)
+typedef struct { Font font; float px, spacing; int id; } Face;
 
 static Face GetFace(int size, bool bold)
 {
     if (!ui.tried) Load();
-    if (!ui.ok) return (Face){ GetFontDefault(), (float)size, (float)(size / 10) };
+    if (!ui.ok) return (Face){ GetFontDefault(), (float)size, (float)(size / 10), -1 };
     int best = 0;
     for (int i = 1; i < SIZE_COUNT; i++)
         if (abs(SIZES[i] - size) < abs(SIZES[best] - size)) best = i;
-    Font f = ui.face[(bold ? SIZE_COUNT : 0) + best];
-    return (Face){ f, SIZES[best] == size ? (float)f.baseSize : (float)PixelSize(size), 0.0f };
+    int id = (bold ? SIZE_COUNT : 0) + best;
+    Font f = ui.face[id];
+    return (Face){ f, SIZES[best] == size ? (float)f.baseSize : (float)PixelSize(size), 0.0f, id };
+}
+
+static int GlyphOf(const Face *f, int codepoint)
+{
+    if (f->id < 0 || codepoint < 0 || codepoint > ui.glyphMax[f->id]) return GetGlyphIndex(f->font, codepoint);
+    return ui.glyphOf[f->id][codepoint];
 }
 
 Font UiFont(int size, bool bold) { return GetFace(size, bold).font; }
@@ -189,21 +220,59 @@ int UiLineHeight(int size) { return (int)GetFace(size, false).px; }
 float UiAdvance(int codepoint, int size)
 {
     Face f = GetFace(size, false);
-    int i = GetGlyphIndex(f.font, codepoint);
+    int i = GlyphOf(&f, codepoint);
     float adv = f.font.glyphs[i].advanceX ? (float)f.font.glyphs[i].advanceX : f.font.recs[i].width;
     return adv * f.px / (float)f.font.baseSize + f.spacing;
 }
 
+// MeasureTextEx's width
 static int Measure(const char *text, int size, bool bold)
 {
     Face f = GetFace(size, bold);
-    return (int)ceilf(MeasureTextEx(f.font, text, f.px, f.spacing).x);
+    if (f.id < 0) return (int)ceilf(MeasureTextEx(f.font, text, f.px, f.spacing).x);
+    if (!text || !text[0]) return 0;
+    float width = 0.0f, widest = 0.0f;
+    int bytes = 0, mostBytes = 0;
+    for (int i = 0; text[i]; ) {
+        bytes++;
+        int n = 0, cp = GetCodepointNext(&text[i], &n), g = GlyphOf(&f, cp);
+        i += n;
+        if (cp != '\n') width += f.font.glyphs[g].advanceX > 0 ? f.font.glyphs[g].advanceX : f.font.recs[g].width + f.font.glyphs[g].offsetX;
+        else {
+            if (widest < width) widest = width;
+            bytes = 0;
+            width = 0.0f;
+        }
+        if (mostBytes < bytes) mostBytes = bytes;
+    }
+    if (widest < width) widest = width;
+    return (int)ceilf(widest * (f.px / (float)f.font.baseSize) + (float)((mostBytes - 1) * f.spacing));
 }
 
+// DrawTextEx's quads (DrawTextCodepoint for each glyph); text with line breaks goes to raylib,
+// which owns the line spacing
 static void Text(const char *text, int x, int y, int size, bool bold, Color c)
 {
     Face f = GetFace(size, bold);
-    DrawTextEx(f.font, text, (Vector2){ (float)x, (float)y }, f.px, f.spacing, c);
+    if (f.id < 0 || strchr(text, '\n')) {
+        DrawTextEx(f.font, text, (Vector2){ (float)x, (float)y }, f.px, f.spacing, c);
+        return;
+    }
+    const Font *F = &f.font;
+    float scale = f.px / F->baseSize, pad = (float)F->glyphPadding, offsetX = 0.0f;
+    for (int i = 0; text[i]; ) {
+        int n = 0, cp = GetCodepointNext(&text[i], &n), g = GlyphOf(&f, cp);
+        i += n;
+        const GlyphInfo *gl = &F->glyphs[g];
+        Rectangle r = F->recs[g];
+        if (cp != ' ' && cp != '\t') {
+            Rectangle dst = { (float)x + offsetX + gl->offsetX * scale - pad * scale, (float)y + gl->offsetY * scale - pad * scale,
+                              (r.width + 2.0f * pad) * scale, (r.height + 2.0f * pad) * scale };
+            Rectangle src = { r.x - pad, r.y - pad, r.width + 2.0f * pad, r.height + 2.0f * pad };
+            DrawTexturePro(F->texture, src, dst, (Vector2){ 0, 0 }, 0.0f, c);
+        }
+        offsetX += gl->advanceX == 0 ? r.width * scale + f.spacing : gl->advanceX * scale + f.spacing;
+    }
 }
 
 int UiMeasure(const char *text, int size) { return Measure(text, size, false); }
