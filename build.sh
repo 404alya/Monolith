@@ -11,7 +11,8 @@
 #        ./build.sh profile        -> CPU-profiling build in build/linux-profile/: -O2 -g
 #                                     -fno-omit-frame-pointer, with R3D/raylib/assimp as
 #                                     RelWithDebInfo + frame pointers in $R3D_DIR/build-linux-profile
-#                                     (so build-linux stays Release); what tools/profile.sh runs
+#                                     (so build-linux stays Release), plus the profiling tool
+#                                     build/linux-profile/profile (tools/profile.c, libc only)
 #        ./build.sh --win          -> Windows x86_64 build in build/win/ (MinGW-w64):
 #                                     monolith.exe (statically linked) + maps/ (packages),
 #                                     the folder can be zipped and copied as-is
@@ -127,7 +128,7 @@ fi
 # /usr/include/minizip/) is found by pkg-config but its headers aren't where assimp's
 # #include <unzip.h> looks, so the build fails.
 # The profile build has its own R3D dir: RelWithDebInfo (-O2 -g) with frame pointers, so
-# perf --call-graph fp unwinds through R3D, raylib and assimp (tools/profile.sh).
+# perf --call-graph fp unwinds through R3D, raylib and assimp (tools/profile.c).
 MODE="${1:-}"
 R3D_LINUX="$R3D_DIR/build-linux"
 R3D_EXTRA=()
@@ -196,6 +197,12 @@ cp -r "$ROOT/maps" "$OUT/maps"
 cp "$ROOT/resources/fonts/outfit/OFL.txt" "$OUT/OFL-Outfit.txt"
 
 echo "built: ${OUT#"$ROOT/"}/monolith"
+# The profiling tool runs perf on the binary next to it. Not a game flag: the game stays as it is.
+# Linux only (perf is); plain C, links only libc.
+if [[ "$MODE" == "profile" ]]; then
+  "$CC" -std=c11 -Wall -Wextra -Wno-missing-field-initializers -O2 -g "$ROOT/tools/profile.c" -o "$OUT/profile"
+  echo "built: ${OUT#"$ROOT/"}/profile"
+fi
 if [[ "${1:-}" == "run" ]]; then
   shift
   exec "$OUT/monolith" "$@"

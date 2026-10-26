@@ -18,7 +18,7 @@ sudo apt install build-essential clang cmake python3 libx11-dev libxrandr-dev li
 ```bash
 ./build.sh              # -> build/linux/monolith + build/linux/maps/
 ./build.sh debug        # with AddressSanitizer + UBSan -> build/linux-debug/
-./build.sh profile      # for CPU profiles with perf (tools/profile.sh) -> build/linux-profile/
+./build.sh profile      # for CPU profiles with perf -> build/linux-profile/ (monolith + the profile tool)
 examples/build.sh       # the examples of using a map in your own program (examples/README.md)
 ```
 

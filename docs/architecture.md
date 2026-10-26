@@ -50,7 +50,7 @@ monolith/
 ├── tools/                       # fetch_asset.py, normalize_model.py, record_asset.py (models and licences);
 │                                #   embed_font.py (resources/fonts -> src/font_outfit.h);
 │                                #   leakcheck.sh + lsan.supp + lsan_report.py (build and run); request-queue.sh (the coordinator's queue);
-│                                #   profile.sh + profile_report.py (CPU profiles with perf of ./build.sh profile);
+│                                #   profile.c (CPU profiles with perf of ./build.sh profile, which builds it: build/linux-profile/profile);
 │                                #   stub-terminal.sh, stub-coordinator.sh, test-coordinator.sh (launcher tests)
 ├── examples/                    # 01_minimal (+ scene/), 02_existing_project, 03_live_editing, 04_import_source, 05_entities,
 │                                #   build.sh (§4.3)
@@ -59,6 +59,7 @@ monolith/
 ├── tests/unit/                  # wincmd_test.c: the Windows request command line (build line in its header);
 │                                #   compiled_test.c/.sh: the compiled-map reader under corruption (ASan + UBSan);
 │                                #   export_strip_test.sh: the exported runtime has no text parser
+├── tests/profile/               # perf.txt + bench.md: a cut-down real profile and bench report (leakcheck runs tools/profile.c on them)
 ├── export/, requests/, benchmark/   # gitignored: F9 exports, request bundles, --bench reports
 ├── src/                         # the editor, one module per concern (§4)
 │   ├── main.c                   # header comment (controls + flags), args, data paths, init, main loop, Submit

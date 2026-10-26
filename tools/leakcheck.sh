@@ -24,7 +24,9 @@
 # coordinator mode (queue + coordinator start, a cancel with no coordinator) and per-request mode,
 # --export, --compile and compiled maps (dumps, a shot with a reload, a damaged file, a stale one
 # and its refused export), --inspect-model, --new-map, --import (stub terminal), --classify, and
-# every example's --shot (plus the capture shim; the game-style ones load compiled maps). Bundles go to its own requests folder
+# every example's --shot (plus the capture shim; the game-style ones load compiled maps), and the
+# profiling tool (tools/profile.c) on the fixtures in tests/profile/ (--report-only, no perf run).
+# Bundles go to its own requests folder
 # (MONOLITH_REQUESTS_DIR=<tmp>/requests), never to requests/: a coordinator running meanwhile
 # never sees them, and bundles queued meanwhile are left alone. Files it creates (that folder,
 # the export, the new map packages) go to the trash afterwards (gio trash), never rm.
@@ -73,8 +75,17 @@ if [[ $BUILD == 1 ]]; then
   if [[ $MODE == lsan ]] && Newer "$EX_DIR/01_minimal/minimal"; then
     examples/build.sh lsan > /dev/null || { echo "leakcheck: examples/build.sh lsan failed" >&2; exit 1; }
   fi
+  # the profiling tool (./build.sh profile builds the real one): plain C, libc only
+  if [[ ! -x "$BIN_DIR/profile" || "$ROOT/tools/profile.c" -nt "$BIN_DIR/profile" ]]; then
+    SAN=leak; [[ $MODE == debug ]] && SAN=address,undefined
+    "${CC:-clang}" -std=c11 -Wall -Wextra -Wno-missing-field-initializers -g -O1 -fno-omit-frame-pointer \
+      -fsanitize=$SAN "$ROOT/tools/profile.c" -o "$BIN_DIR/profile" \
+      || { echo "leakcheck: building tools/profile.c failed" >&2; exit 1; }
+  fi
 fi
 [[ -x "$M" ]] || { echo "leakcheck: $M missing (run without --no-build)" >&2; exit 1; }
+PROFILE="$BIN_DIR/profile"
+[[ -x "$PROFILE" ]] || { echo "leakcheck: $PROFILE missing (run without --no-build)" >&2; exit 1; }
 
 # --- Output: build/leakcheck/<stamp>/ (logs stay; build/ is not committed), `latest` points
 # at it; tmp/ (shots, exports) goes to the trash at the end
@@ -225,6 +236,16 @@ Run classify 0          "$M" --classify 'make the pillar taller' --select 192
 IMPORTMAP="_leakcheck_import_$STAMP"
 Run import 0            env MONOLITH_REQUESTS_DIR="$REQ" MONOLITH_TERMINAL="$STUB" MONOLITH_STUB_LOG="$TMP/stub3.txt" MONOLITH_WORKSPACE= \
                             "$M" --import examples/04_import_source "$IMPORTMAP"
+
+# The profiling tool: its report on a cut-down real profile and bench report (tests/profile/),
+# a missing file, and a run it must refuse (it would open a window) before perf starts
+echo "leakcheck: running the profiling tool ..."
+Run profile-report 0      "$PROFILE" --report-only tests/profile/perf.txt
+Run profile-report-all 0  "$PROFILE" --report-only tests/profile/perf.txt --all --top 5
+Run profile-report-gpu 0  "$PROFILE" --report-only tests/profile/perf.txt --bench tests/profile/bench.md --finish-site Run+0x5c02
+Run profile-report-gpu-all 0 "$PROFILE" --report-only tests/profile/perf.txt --bench tests/profile/bench.md --all
+Run profile-missing 1     "$PROFILE" --report-only "$TMP/missing-perf.txt"
+Run profile-refuse 2      "$PROFILE" --bin "$M" refused -- --view 2
 
 if [[ $MODE == lsan ]]; then
   echo "leakcheck: running the examples ..."
