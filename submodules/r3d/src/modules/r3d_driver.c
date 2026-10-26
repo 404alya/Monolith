@@ -371,6 +371,13 @@ void r3d_driver_set_stencil_mask(uint8_t mask)
     }
 }
 
+bool r3d_driver_get_stencil_mask(uint8_t* mask)
+{
+    const pipeline_cache_t* pipe = &R3D_MOD_DRIVER.pipeCache;
+    *mask = pipe->stencilMask.vbyte;
+    return pipe->stencilMask.known;
+}
+
 bool r3d_driver_depth_stencil_writes_off(void)
 {
     const pipeline_cache_t* pipe = &R3D_MOD_DRIVER.pipeCache;

@@ -4756,3 +4756,91 @@ view from `maps/monolith/MAP.md`, and four yaws next to each map's shadowed poin
 43 files, 0 differ; `--dump-boxes` identical. Linux builds without warnings (the MinGW build was
 not run: no cross compiler on that machine); `tools/leakcheck.sh`: zero leaks of ours. VRAM
 figures are from the formats and sizes in the code, not measured.
+
+## Patch 22: clip-boxed lights were culled and scissored by their whole sphere (2026-10-26)
+
+**Symptom.** On an Intel HD Graphics 5500 (machine C of `.claude/skills/benchmarking/measurements.md`) the default map ran at ~5 fps looking at the tower from the terrace: the deferred lights pass took ~95 ms of a ~185 ms frame. The ~290 unshadowed flat lights (patch 16 clip boxes, one storey each) cost ~10 ns per pixel of their scissor rects, and those rects added up to ~4.7 screens.
+
+**Cause.** `light_omni_push` / `light_spot_push` cull a light by its range sphere and set the scissor rect to the sphere's projection. The clip box (patch 16) was only tested in the shaders, so every pixel of a 14–16 m sphere's rect ran the lighting shader, although a storey's box is 4 m tall and the shader returns 0 outside it.
+
+**Change.** After the clip box is set on a pushed point or spot light, `light_clip_bounds` intersects the sphere's AABB with the clip box, drops the light when that box is empty or outside the view frustum, and narrows the rect to the box's projected corners (intersected with the sphere's rect, padded by 0.01 NDC because `r3d_light_screen_rect` truncates; unchanged when a corner is behind the camera). The box is kept on the light data (`bounds`, `hasBounds`) for patch 23. Lights without a clip box and directional lights are untouched. The image can't change: outside the box and beyond `range` the deferred lighting, the forward pass and the fog march all give 0 (`r3d-pitfalls.md` notes it).
+
+Files: `src/modules/r3d_light.c`, `src/modules/r3d_light.h`.
+
+```diff
+--- src/modules/r3d_light.h  (r3d_light_data_t)
+     Vector3 clipMin, clipMax;   // World-space clip box, +-R3D_LIGHT_NO_CLIP without one (local patch 16)
++    BoundingBox bounds;         // Volume inside the clip box, if hasBounds (local patch 22)
++    bool hasBounds;
+--- src/modules/r3d_light.c  (new, before r3d_light_push)
++static bool light_clip_bounds(r3d_light_data_t* data)
++{
++    // box = sphere AABB ∩ clip box; false if empty or outside R3D.viewState.frustum
++    // project its 8 corners with R3D.viewState.viewProj (keep the sphere rect if a corner has w <= 1e-4)
++    // minNdc/maxNdc = sphere rect ∩ (corner rect ± 0.01); false if that is empty
++}
+--- src/modules/r3d_light.c  (r3d_light_push, after the clip box is set)
++        if (clip && light->type != R3D_LIGHT_DIR && !light_clip_bounds(data))
++        {
++            r3d_light_data_t culled;
++            R3D_LIST_POP(R3D_MOD_LIGHT.listLightData, &culled);
++        }
+```
+
+**Verification.** `maps/monolith`, `maps/pine_forest` and `tests/models` against the build before the change: every viewpoint, yaw sweeps (0–300°, pitch 0 and 25) from five positions around and inside the tower (terrace, beside it, inside a storey-1 flat, the lobby, high on the facade), a pine_forest yaw and `--reload-test`: 76 shots, 0 differ. Measured with patch 23 below.
+
+## Patch 23: lights behind walls ran the lighting shader on the wall's pixels (2026-10-26)
+
+**Symptom.** With patch 22 the terrace view of the tower still spent ~63 ms in the lights pass on machine C: from outside, most pixels of a storey light's rect are the facade in front of the room, which the shader rejects only after reading the G-buffer and writing zeros through the additive blend.
+
+**Cause.** `pass_deferred_lights` draws every light as a full-screen quad with depth test `GL_GREATER` against the far plane: it only rejects the sky, not surfaces in front of the light's volume.
+
+**Change.** When the camera is outside a light's patch-22 box (by more than 4 × the near plane, so the near plane can't clip its faces), `light_volume_mark` draws the box (the cube shape, `CUBEMAP_VERT` + `COLOR_FRAG`, new program `deferred.lightVolume`) with both faces, no colour writes and depth test `GL_LEQUAL`, setting stencil bit `GEOMETRY_PREPASS_STENCIL_BIT` (0x80, which the prepass leaves 0 between passes) where a face is not behind the scene: exactly the pixels whose surface is behind the box's front faces. The light's quad then runs with stencil `GL_EQUAL 0x80` and ops `KEEP / ZERO / ZERO` (write mask 0x80), so it shades only those pixels and clears the bit for the next light. Occluded pixels never start the lighting shader (early stencil). The box grows by 5 cm + 0.2 % of its distance so depth precision can't reject a surface lying on a face; the shader still decides exactly. Other lights draw as before (stencil off). The stencil write mask is restored after the pass (new `r3d_driver_get_stencil_mask`). Limitation: a material whose stencil `ref` sets bit 0x80 loses that bit under such a light's box (monolith's materials don't use stencil; the prepass already skips those materials).
+
+Files: `src/r3d_draw.c`, `src/modules/r3d_shader.c`, `src/modules/r3d_shader.h`, `src/modules/r3d_driver.c`, `src/modules/r3d_driver.h`.
+
+```diff
+--- src/r3d_draw.c  (new, before pass_deferred_lights)
++#define LIGHT_VOLUME_BIT GEOMETRY_PREPASS_STENCIL_BIT
++static bool light_volume_mark(const r3d_light_data_t* light)
++{
++    // false without bounds or when the camera is within 4 near planes of the grown box
++    // deferred.lightVolume: uMatProj = proj, uMatView = scale(size) * translate(center) * view
++    // colour mask off; stencil ALWAYS ref/mask 0x80, ops KEEP/KEEP/REPLACE; depth LEQUAL; R3D_RENDER_CUBE()
++    // colour mask on; depth GREATER; stencil EQUAL 0x80, ops KEEP/ZERO/ZERO; back to deferred.lighting
++}
+--- src/r3d_draw.c  (pass_deferred_lights)
++    uint8_t stencilMask;
++    bool stencilMaskKnown = r3d_driver_get_stencil_mask(&stencilMask);
+ ...
+-        // Accumulate this light!
++        // Accumulate this light! (only where its box marked the stencil, local patch 23)
++        if (!light_volume_mark(light)) r3d_driver_disable(GL_STENCIL_TEST);
+         R3D_RENDER_SCREEN();
+     }
++    r3d_driver_disable(GL_STENCIL_TEST);
++    if (stencilMaskKnown) r3d_driver_set_stencil_mask(stencilMask);
++    else r3d_driver_set_stencil_mask(0xFF);
+--- src/modules/r3d_shader.h / .c
++typedef struct { GLuint id; r3d_shader_uniform_mat4_t uMatProj, uMatView; } r3d_shader_deferred_light_volume_t;
++// deferred.lightVolume: struct member, loader-table entry, r3d_shader_load_deferred_light_volume
++// (LOAD_SHADER(lightVolume, CUBEMAP_VERT, COLOR_FRAG), uMatProj, uMatView), UNLOAD_SHADER in r3d_shader_quit
+--- src/modules/r3d_driver.h / .c
++bool r3d_driver_get_stencil_mask(uint8_t* mask);   // cached write mask; false when unknown
+```
+
+**Verification.** The 76 shots of patch 22 with both patches: 0 differ (the terrace and beside-the-tower views show lit flats through the windows, so the masked path runs; inside a flat it falls back). Linux build and `examples/build.sh` (+ `test`) without warnings; the MinGW build was not run (no cross compiler on machine C). `tools/leakcheck.sh`: zero leaks of ours in all 67 runs (`export-default` / `export-models` exit 1 before and after these patches: `runtime/export/` is missing from the checkout, see `.gitignore`'s `export/`).
+
+**Measured** (machine C, `--bench --headless`, the developer's settings file, a copy of `maps/monolith` with only the Terrace and Tower viewpoints, 100 frames, 3 interleaved rounds of base / patch 22 / patches 22 + 23; medians, paired differences agree within a few ms):
+
+| ms | base | + patch 22 | + patch 23 |
+|---|---|---|---|
+| lights, still, Terrace | 97.8 | 64.2 | 13.2 |
+| lights, still, Tower | 55.9 | 27.1 | 10.1 |
+| frame, still, Terrace | 204.9 | 169.1 | 117.8 |
+| frame, still, Tower | 150.7 | 120.6 | 104.5 |
+| lights, spinning, Terrace / Tower | 44.3 / 27.2 | | 7.8 / 6.6 |
+| frame, spinning, Terrace / Tower | 129.0 / 107.1 | | 92.7 / 86.5 |
+| CPU until finish, still | 16.1 | 14.8 | 26.6 |
+
+The cost: patch 23 adds ~10 ms of CPU per still frame on machine C (~4 ms spinning) for ~130 extra draws, two program switches and stencil state changes per marked light; the frame stays GPU-bound there. With the tower's lights removed the lights pass is ~5–6 ms, so little is left to gain on the GPU side.

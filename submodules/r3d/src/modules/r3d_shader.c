@@ -1481,6 +1481,20 @@ bool r3d_shader_load_deferred_lighting(r3d_shader_custom_t* custom)
     return true;
 }
 
+// Local patch 23: the cube shape transformed into a light's box; draws only into the stencil
+bool r3d_shader_load_deferred_light_volume(r3d_shader_custom_t* custom)
+{
+    R3D_UNUSED(custom);
+
+    DECL_SHADER(r3d_shader_deferred_light_volume_t, deferred, lightVolume);
+    LOAD_SHADER(lightVolume, CUBEMAP_VERT, COLOR_FRAG);
+
+    GET_LOCATION(lightVolume, uMatProj);
+    GET_LOCATION(lightVolume, uMatView);
+
+    return true;
+}
+
 bool r3d_shader_load_deferred_compose(r3d_shader_custom_t* custom)
 {
     R3D_UNUSED(custom);
@@ -1957,6 +1971,7 @@ void r3d_shader_quit(void)
 
     UNLOAD_SHADER(deferred.ambient);
     UNLOAD_SHADER(deferred.lighting);
+    UNLOAD_SHADER(deferred.lightVolume);
     UNLOAD_SHADER(deferred.compose);
     UNLOAD_SHADER(deferred.fog);
     UNLOAD_SHADER(deferred.vfogTransmittance);

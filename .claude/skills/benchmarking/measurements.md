@@ -10,6 +10,7 @@ Measurement history and the reasoning behind the engine's caches and trade-off k
 |---|---|---|
 | **A** | Laptop: NVIDIA GeForce RTX 4050 Laptop GPU, driver 615.71, AMD Ryzen 7 7435HS (CPU recorded 2026-10-24, same GPU and driver), CachyOS (Linux), picom compositor | everything up to 2026-10-13, editor UI font, CPU profile (2026-10-25) |
 | **B** | NVIDIA GeForce GTX 1660 Ti, Intel i5-10400F (desktop) | box culling, collider BVH (2026-10-20) |
+| **C** | Laptop (plugged in): Intel HD Graphics 5500 (Broadwell GT2, integrated, unified memory), Mesa 25.0.7, Intel i5-5300U, Ubuntu 24.04 (Linux 6.8), 1366 × 768 display | integrated-GPU diagnosis (2026-10-26) |
 
 When you add a section, start it with the machine: the bench report's *Setup* table (GPU, driver, CPU, system, resolution), or a new row in this table.
 
@@ -274,3 +275,27 @@ What each change brought, and the decision:
 5. **Keeping shaders and textures across a reload:** not done (needs the developer's approval of a content-keyed cache that survives a reload).
 
 Profiles: `benchmark/profile/2026-10-25_round4-base/` (spin, still, hud, still-pine) and `_round4-final/` (spin without the sort cache; still, hud and still-pine with it). In this round's frame profiles 26–30 % of the frame's driver samples have no monolith caller ("stack ends in the driver"; the round above had ~0 %): compare call trees between the two runs here, not with that round.
+
+## Integrated GPU: where the frame goes (2026-10-26, machine C)
+
+The developer saw 15–20 fps in the window (1366 × 768) on the default map, worst at the tower. Headless `--bench`, 1920 × 1006, spinning, **150-frame screening runs** (not full runs), the developer's settings file (`--settings`: custom on `low` with `ao off`, shadow 4096, volumetric fog on, fog step 2, FXAA, depth pre-pass); one run each, no A/B pairs (a diagnosis, nothing changed). Reports: `build/linux/benchmark/2026-10-26_134211_shadow-4096-100.md` (scale 1) and `_134358_` (scale 0.5).
+
+| ms/frame (ALL views) | render_scale 1 | render_scale 0.5 |
+|---|---|---|
+| geometry | 42.2 | 14.8 |
+| lights | 17.7 (Terrace 44.8, most views 8–9) | 3.4 (Terrace 7.9) |
+| vfog radiance | 9.3 (Tower 13.2) | 2.6 |
+| ambient + compose | 11.8 | 3.2 |
+| GPU total | 102.3 | 33.6 |
+| CPU until finish | 7.9 | 6.8 |
+| frame (fps) | 111.5 (9.0) | 41.5 (24.1) |
+
+- **GPU-bound and fill-bound:** a quarter of the pixels cuts GPU time to a third; lights scale ~5×. Fitting geometry = a + b·pixels gives a pixel-independent part of only ~6–7 ms (vertex work for ~470k drawn triangles plus the pre-pass); the rest is surface-shader fragment cost. The most expensive geometry view is Canyon (52.7 ms), which doesn't face the tower.
+- **The tower slowdown is the lights pass:** ~290 point lights (one or more per flat, with `clip` boxes) whose light volumes overlap on screen from the terrace (8 → 45 ms), plus fog in-scattering (vfog radiance).
+- **Triangles** (`--dump-boxes`, 12 per box before hidden faces): map 52 244 boxes / 626 928 triangles (469 018 drawn); tower + terrace zone (|x| ≤ 60, z −140…−70) 34 122 boxes / ~409k triangles (65%), ~310k of them above the terrace; the two 32 m cells holding the tower hold 47% of all triangles; 7 896 boxes in the zone are smaller than 10 cm.
+- **GPU memory** (peak `drm-total-system0` in `/proc/<pid>/fdinfo`, i915; system RAM, 7.6 GB total): developer settings 900 MiB at scale 1, ~713 MiB at 0.5; the map's own settings (shadow 8192, SSAO + SSIL) 1115 MiB at 5.3 fps (30-frame run).
+- Pitfall: `--settings-set` with `--settings <file>` saves into that file (as documented); point `--settings` at a scratch copy when testing knobs against a developer's settings.
+
+## Light culling by clip box (2026-10-26, machine C)
+
+R3D patches 22 (cull + scissor a clip-boxed light by its sphere ∩ clip box) and 23 (stencil mask of the pixels behind that box's front faces); numbers and method in `submodules/r3d/patches.md`. Still camera at the terrace: lights 97.8 → 64.2 → 13.2 ms, frame 204.9 → 117.8 ms; spinning: Terrace frame 129.0 → 92.7 ms, Tower 107.1 → 86.5 ms; pixel-identical. Cost: +~10 ms CPU per still frame (+~4 spinning) on this 2-core CPU for the extra draws and state changes. Screening tip for this machine: a map copy with only the viewpoints under test (here Terrace + Tower) makes a 3-round A/B fit in ~10 minutes.

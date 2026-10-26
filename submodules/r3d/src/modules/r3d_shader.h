@@ -1096,6 +1096,12 @@ typedef struct {
 
 typedef struct {
     GLuint id;
+    r3d_shader_uniform_mat4_t uMatProj;
+    r3d_shader_uniform_mat4_t uMatView;
+} r3d_shader_deferred_light_volume_t;    //< local patch 23: stencil mask of a light's box
+
+typedef struct {
+    GLuint id;
     r3d_shader_uniform_sampler_t uAlbedoTex;
     r3d_shader_uniform_sampler_t uRadianceTex;
     r3d_shader_uniform_sampler_t uSpecularTex;
@@ -1335,6 +1341,7 @@ extern struct r3d_mod_shader {
     struct {
         r3d_shader_deferred_ambient_t ambient;
         r3d_shader_deferred_lighting_t lighting;
+        r3d_shader_deferred_light_volume_t lightVolume;
         r3d_shader_deferred_compose_t compose;
         r3d_shader_deferred_fog_t fog;
         r3d_shader_deferred_vfog_transmittance_t vfogTransmittance;
@@ -1417,6 +1424,7 @@ bool r3d_shader_load_scene_probe_unlit(r3d_shader_custom_t* custom);
 bool r3d_shader_load_scene_decal(r3d_shader_custom_t* custom);
 bool r3d_shader_load_deferred_ambient(r3d_shader_custom_t* custom);
 bool r3d_shader_load_deferred_lighting(r3d_shader_custom_t* custom);
+bool r3d_shader_load_deferred_light_volume(r3d_shader_custom_t* custom);
 bool r3d_shader_load_deferred_compose(r3d_shader_custom_t* custom);
 bool r3d_shader_load_deferred_fog(r3d_shader_custom_t* custom);
 bool r3d_shader_load_deferred_vfog_transmittance(r3d_shader_custom_t* custom);
@@ -1496,6 +1504,7 @@ static const struct r3d_shader_loader {
     struct {
         r3d_shader_loader_func ambient;
         r3d_shader_loader_func lighting;
+        r3d_shader_loader_func lightVolume;
         r3d_shader_loader_func compose;
         r3d_shader_loader_func fog;
         r3d_shader_loader_func vfogTransmittance;
@@ -1580,6 +1589,7 @@ static const struct r3d_shader_loader {
     .deferred = {
         .ambient = r3d_shader_load_deferred_ambient,
         .lighting = r3d_shader_load_deferred_lighting,
+        .lightVolume = r3d_shader_load_deferred_light_volume,
         .compose = r3d_shader_load_deferred_compose,
         .fog = r3d_shader_load_deferred_fog,
         .vfogTransmittance = r3d_shader_load_deferred_vfog_transmittance,

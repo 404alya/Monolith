@@ -2606,6 +2606,57 @@ r3d_target_t pass_prepare_ssr(void)
     return R3D_TARGET_SSR;
 }
 
+// Local patch 23: a light the camera is well outside of (its volume inside the clip box, local
+// patch 22) lights only pixels whose surface lies behind that box's front faces. Its box, drawn
+// with both faces against the scene depth and no colour, sets the prepass's stencil bit (0
+// between passes unless a material's stencil ref sets it, which would lose it under such a
+// light's box; monolith's materials don't use stencil) there; the light's quad then runs
+// only on those pixels and clears the bit again. Pixels whose surface is in front of the box
+// (a facade in front of a room) never reach the lighting shader, which would give them 0.
+// The box is grown with the distance so depth precision can't reject a surface lying on it,
+// and skipped near the camera, where the near plane would clip its faces.
+#define LIGHT_VOLUME_BIT GEOMETRY_PREPASS_STENCIL_BIT
+
+static bool light_volume_mark(const r3d_light_data_t* light)
+{
+    if (!light->hasBounds) return false;
+
+    Vector3 cam = R3D.viewState.camera.position;
+    BoundingBox b = light->bounds;
+    Vector3 d = {
+        fmaxf(fmaxf(b.min.x - cam.x, cam.x - b.max.x), 0.0f),
+        fmaxf(fmaxf(b.min.y - cam.y, cam.y - b.max.y), 0.0f),
+        fmaxf(fmaxf(b.min.z - cam.z, cam.z - b.max.z), 0.0f),
+    };
+    float dist = Vector3Length(d);
+    float grow = 0.05f + 0.002f * dist;
+    if (dist - grow <= 4.0f * (float)R3D.viewState.camera.nearPlane) return false;
+
+    Vector3 size = Vector3Add(Vector3Subtract(b.max, b.min), (Vector3){ 2.0f * grow, 2.0f * grow, 2.0f * grow });
+    Vector3 center = Vector3Scale(Vector3Add(b.min, b.max), 0.5f);
+    Matrix model = MatrixMultiply(MatrixScale(size.x, size.y, size.z), MatrixTranslate(center.x, center.y, center.z));
+    Matrix modelView = MatrixMultiply(model, R3D.viewState.view);
+
+    R3D_SHADER_USE(deferred.lightVolume);
+    R3D_SHADER_SET_MAT4(deferred.lightVolume, uMatProj, R3D.viewState.proj);
+    R3D_SHADER_SET_MAT4(deferred.lightVolume, uMatView, modelView);
+
+    glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+    r3d_driver_enable(GL_STENCIL_TEST);
+    r3d_driver_set_stencil_mask(LIGHT_VOLUME_BIT);
+    r3d_driver_set_stencil_func(GL_ALWAYS, LIGHT_VOLUME_BIT, LIGHT_VOLUME_BIT);
+    r3d_driver_set_stencil_op(GL_KEEP, GL_KEEP, GL_REPLACE);
+    r3d_driver_set_depth_func(GL_LEQUAL);
+    R3D_RENDER_CUBE();
+
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    r3d_driver_set_depth_func(GL_GREATER);
+    r3d_driver_set_stencil_func(GL_EQUAL, LIGHT_VOLUME_BIT, LIGHT_VOLUME_BIT);
+    r3d_driver_set_stencil_op(GL_KEEP, GL_ZERO, GL_ZERO);
+    R3D_SHADER_USE(deferred.lighting);
+    return true;
+}
+
 void pass_deferred_lights(void)
 {
     /* --- Setup OpenGL pipeline --- */
@@ -2622,6 +2673,9 @@ void pass_deferred_lights(void)
     r3d_driver_set_depth_mask(GL_FALSE);
 
     /* --- Bind FBO and shader then setup constant stuff --- */
+
+    uint8_t stencilMask;
+    bool stencilMaskKnown = r3d_driver_get_stencil_mask(&stencilMask);
 
     R3D_TARGET_BIND_LOAD(0, true, R3D_TARGET_RADIANCE, R3D_TARGET_SPECULAR);
     R3D_SHADER_USE(deferred.lighting);
@@ -2664,9 +2718,14 @@ void pass_deferred_lights(void)
         };
         r3d_shader_set_uniform_block(R3D_SHADER_BLOCK_LIGHT, &data, true);
 
-        // Accumulate this light!
+        // Accumulate this light! (only where its box marked the stencil, local patch 23)
+        if (!light_volume_mark(light)) r3d_driver_disable(GL_STENCIL_TEST);
         R3D_RENDER_SCREEN();
     }
+
+    r3d_driver_disable(GL_STENCIL_TEST);
+    if (stencilMaskKnown) r3d_driver_set_stencil_mask(stencilMask);
+    else r3d_driver_set_stencil_mask(0xFF);
 
     /* --- Reset undesired states --- */
 

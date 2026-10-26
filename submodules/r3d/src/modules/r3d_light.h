@@ -60,6 +60,8 @@ typedef struct {
     int shadowLayer;            // Shadow map layer index, -1 if no shadow
     R3D_LightType type;
     Vector3 clipMin, clipMax;   // World-space clip box, +-R3D_LIGHT_NO_CLIP without one (local patch 16)
+    BoundingBox bounds;         // Volume inside the clip box, if hasBounds (local patch 22)
+    bool hasBounds;
 } r3d_light_data_t;
 
 // Clip box bound of a light without one (local patch 16): every point is inside

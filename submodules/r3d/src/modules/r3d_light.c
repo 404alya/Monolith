@@ -667,6 +667,47 @@ void r3d_light_quit(void)
     R3D_LIST_DESTROY(R3D_MOD_LIGHT.listLightData);
 }
 
+// Local patch 22: a point or spot light lights nothing outside its clip box or its volume
+// (lighting.frag, forward.frag and the fog march all return 0 there), so cull the light by
+// the part of its volume inside the box and shrink its scissor rect to that part's projection.
+// False when none of it is in view. The rect stays the sphere's when a corner is behind the
+// camera; it is padded so pixels at the box's edges stay inside the truncated scissor.
+static bool light_clip_bounds(r3d_light_data_t* data)
+{
+    Vector3 c = data->volume.center;
+    float r = data->volume.radius;
+    BoundingBox box = {
+        Vector3Max((Vector3){ c.x - r, c.y - r, c.z - r }, data->clipMin),
+        Vector3Min((Vector3){ c.x + r, c.y + r, c.z + r }, data->clipMax),
+    };
+    if (box.min.x >= box.max.x || box.min.y >= box.max.y || box.min.z >= box.max.z) return false;
+    if (!R3D_FrustumIntersectsBoundingBox(&R3D.viewState.frustum, box)) return false;
+    data->bounds = box;
+    data->hasBounds = true;
+
+    Vector2 lo = { FLT_MAX, FLT_MAX }, hi = { -FLT_MAX, -FLT_MAX };
+    for (int i = 0; i < 8; i++)
+    {
+        Vector4 p = {
+            (i & 1) ? box.max.x : box.min.x,
+            (i & 2) ? box.max.y : box.min.y,
+            (i & 4) ? box.max.z : box.min.z,
+            1.0f,
+        };
+        Vector4 q = r3d_vector4_transform(p, &R3D.viewState.viewProj);
+        if (q.w <= 1e-4f) return true;
+        lo.x = fminf(lo.x, q.x / q.w); lo.y = fminf(lo.y, q.y / q.w);
+        hi.x = fmaxf(hi.x, q.x / q.w); hi.y = fmaxf(hi.y, q.y / q.w);
+    }
+
+    const float pad = 0.01f;    // NDC: ~10 px at 1920
+    data->minNdc.x = fmaxf(data->minNdc.x, lo.x - pad);
+    data->minNdc.y = fmaxf(data->minNdc.y, lo.y - pad);
+    data->maxNdc.x = fminf(data->maxNdc.x, hi.x + pad);
+    data->maxNdc.y = fminf(data->maxNdc.y, hi.y + pad);
+    return data->minNdc.x < data->maxNdc.x && data->minNdc.y < data->maxNdc.y;
+}
+
 void r3d_light_push(const R3D_Light* light, const R3D_ShadowMap* map, bool updateShadow, const Matrix* fixedViewProj)
 {
     if (map && !light_check_shadow_validity(light, map))
@@ -701,6 +742,12 @@ void r3d_light_push(const R3D_Light* light, const R3D_ShadowMap* map, bool updat
         bool clip = light->clip;
         data->clipMin = clip ? light->clipMin : (Vector3){ -R3D_LIGHT_NO_CLIP, -R3D_LIGHT_NO_CLIP, -R3D_LIGHT_NO_CLIP };
         data->clipMax = clip ? light->clipMax : (Vector3){ R3D_LIGHT_NO_CLIP, R3D_LIGHT_NO_CLIP, R3D_LIGHT_NO_CLIP };
+
+        if (clip && light->type != R3D_LIGHT_DIR && !light_clip_bounds(data))
+        {
+            r3d_light_data_t culled;
+            R3D_LIST_POP(R3D_MOD_LIGHT.listLightData, &culled);
+        }
     }
 }
 
