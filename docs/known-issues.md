@@ -1,6 +1,6 @@
 # Known issues
 
-Open questions that need a decision, and what automated checks can't cover. Limitations by design are in [architecture.md](architecture.md) §6.
+Open questions that need a decision, and what automated checks can't cover. Limitations by design are in [architecture.md](architecture.md) §6, GPU memory costs in §7.
 
 ## Open decisions
 1. **R3D's contrast step clips dark values to black.** `color.contrast` is applied in linear space after tonemapping (`submodules/r3d/shaders/post/output.frag`, `Adjustments()`): everything below 0.5·(1−1/c) becomes pure black. Fixing it in R3D (contrast around mid-grey in a perceptual space) would change the default map's look, so maps keep contrast 1 where it matters instead.

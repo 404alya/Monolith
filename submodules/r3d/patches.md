@@ -4721,3 +4721,38 @@ and two runs of the patched build: 0 differ. Builds without warnings on Linux an
 **If R3D adds a path that sets a matrix uniform with `glUniformMatrix4fv` directly** (outside
 `R3D_SHADER__SET_MAT4_IMPL`), or reloads a program without zeroing its struct, the matrix cache
 must be reset there, as the other uniform caches would need.
+
+## Patch 21: the omni shadow array reserved four cube layers for one light (2026-10-26)
+
+**Symptom.** The first shadowed point light allocated 192 MiB of shadow maps: four cube layers
+(4 × 6 faces × 2048² × 16-bit depth) while it uses one (48 MiB). Every map in `maps/` has one
+shadowed point light, so 144 MiB sat unused.
+
+**Cause.** `shadow_array_acquire_layer` grows an array by `arr->growth` layers when its free
+list is empty, and upstream sets `SHADOW_OMNI_LAYER_GROWTH` to 4. For a 2D array (spot) a
+layer is one face; for the cube array a layer is six, so the same growth costs six times as
+much.
+
+**Change.** Omni growth 4 → 1. Each further shadowed point light now adds one cube layer
+(48 MiB at the default 2048) with one `shadow_array_expand` (new texture, copy of the existing
+layers, old texture deleted). Monolith acquires all shadow layers at load before anything is
+drawn, so the extra expansions happen once per load. A hot reload acquires the new map's layers
+before the old map frees its own (`runtime/monolith_scene.c`, the swap at the end of `LoadBytes`),
+so after a reload the array holds old + new layers (2 cubes, 96 MiB, for one light) and keeps
+that size: arrays never shrink. That is still half of what one light cost before. DIR (growth 2,
+used by the two sun tiles) and spot (growth 4, 8 MiB per layer) are unchanged.
+
+Files: `src/modules/r3d_light.c`.
+
+```diff
+--- src/modules/r3d_light.c  (constants)
+-#define SHADOW_OMNI_LAYER_GROWTH    4
++#define SHADOW_OMNI_LAYER_GROWTH    1   // local patch: one cube layer is 6 faces (48 MiB at 2048), so grow by one
+```
+
+**Verification.** Every map in `maps/` against the build before the change: all viewpoints,
+`--reload-test` (which takes the expansion path: 1 → 2 cube layers), the yaw sweeps and steep
+view from `maps/monolith/MAP.md`, and four yaws next to each map's shadowed point light:
+43 files, 0 differ; `--dump-boxes` identical. Linux builds without warnings (the MinGW build was
+not run: no cross compiler on that machine); `tools/leakcheck.sh`: zero leaks of ours. VRAM
+figures are from the formats and sizes in the code, not measured.

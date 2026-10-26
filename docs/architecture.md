@@ -205,3 +205,57 @@ How requests travel from the game to Claude Code (the queue on disk, the coordin
 - **Platform:** Linux + Windows cross-build (tested under wine). The strict-GLSL problems (R3D pitfall 4) were found on an AMD RX 9060 XT; the fixes are verified with `glslangValidator` but not yet re-tested on that card. No native Windows build script, no macOS, no Windows sanitizers.
 
 Open decisions and things only testable by hand: [known-issues.md](known-issues.md).
+
+## 7. GPU memory (VRAM)
+
+Where the game and R3D allocate GPU memory, from a read of the code (2026-10-26). The figures
+are arithmetic from the formats and sizes in the code, **not measurements**; "1080p" means a
+1920 × 1080 window, "S" the sun shadow size (`env shadow.size`, the panel's shadow size or
+`--shadow`; 8192 in the shipped maps). MiB = 2²⁰ bytes.
+
+### 7.1 What costs what
+
+| What | Where | Format and size | Lifetime |
+|---|---|---|---|
+| Sun shadow maps (2 static tiles) | `MS_Load` (`R3D_LoadShadowMap(R3D_LIGHT_DIR)` × 2); R3D `r3d_light.c` (DIR growth 2) | 2 layers × S² × 2 B (DEPTH16) + min/max tiles and mid map (RG32F): **~268 MiB at 8192**, ~67 MiB at 4096, ~1 GiB at 16384 | Scene lifetime; the size is an init hint, so changing it restarts the renderer (`RestartRenderer` in `main.c`) |
+| Shadowed point light | `UploadGpu` (`R3D_LoadShadowMap`); R3D omni cube array, growth 1 (patch 21) | 6 × 2048² × 2 B = **48 MiB per light** | Per load; the array never shrinks, and after a hot reload it holds the old and new layers (96 MiB for one light) |
+| Shadowed spot light | same; R3D spot array, growth 4 | 2048² × 2 B = 8 MiB per layer, **32 MiB on the first** | Per load; never shrinks |
+| Render targets (G-buffer, lighting, scene ping-pong, HW depth) | R3D `r3d_target.c` (table at the top) | ~109 MiB at 1080p; scales with the render resolution | Allocated on first use, resized with the resolution |
+| Effect targets (SSAO, SSIL, SSGI, SSR, DoF, bloom, volumetric fog, SMAA, exposure) | same | up to ~52 MiB at 1080p with everything on | Allocated when an effect first runs, **kept until exit** |
+| Procedural sky cubemap | `UploadGpu` (`R3D_GenProceduralSky`); R3D `r3d_cubemap.c` | RGB16F with mips: 48 × `sky.size`² B, **48 MiB at 1024** | Per load |
+| Panorama sky cubemap | `UploadGpu` (`R3D_LoadCubemap`, panorama layout) | face size = the image's height: 192 MiB at 2048, 768 MiB at 4096; `sky.size` is ignored | Per load |
+| Ambient / reflection (IBL) | `R3D_GenAmbientMap`; R3D `r3d_env.c` | 32² irradiance + 128² prefiltered layers, < 1 MiB each; arrays grow by 8 | Per load; arrays never shrink |
+| Sun fog visibility volume | `R3D_BakeFogSunVisibility`; R3D `r3d_light.c` | R8 3D texture, capped by `FOG_CACHE_BUDGET` (64 MiB) | Rebuilt when its dimensions change; freed only at `R3D_Close` |
+| Baked AO volume | `BakeOcclusionVolume` → `R3D_SetWorldOcclusion` | R8 3D texture, capped by `AO_VOLUME_BUDGET` (32 MiB) | Per load and AO setting; freed on clear |
+| Map textures | `GetTexture` → `R3D_LoadTextureEx` | the file's channels × w × h, + ⅓ for mips (trilinear) | Per load; cached within one load by (path, colour space, wrap) |
+| Model files | `LoadModelFiles` → `R3D_LoadModelEx` | 36 B per vertex, 4 B per index, plus **every** material texture in the file | Per load |
+| Merged box meshes | `BuildBoxMesh` | 168 B per visible face (4 vertices + 6 indices) | Per load |
+| Box and model instances | `R3D_LoadInstanceBuffer` | 24 B per box (position, scale), 40 B per model instance | Per load |
+| Global vertex / index buffers | R3D `r3d_render.c` | 2.25 MiB + 0.5 MiB at init, doubled when full | Never shrink |
+| Editor UI atlas | `ui.c` | one 1024-wide gray-alpha texture | Loaded on first UI use |
+| Frame-reuse cache | `LoadSceneCache` in `main.c` | RGBA8 + depth at window size (~8 MiB + depth at 1080p) | Created on first unchanged frame; kept until exit |
+| `--shot` / headless target, submit target | `main.c` | RGBA8 + depth at window size | `--shot`: run lifetime; submit: per request |
+
+A hot reload builds the new map's GPU state completely before freeing the old one (the swap at
+the end of `LoadBytes`; R3D caches instance buffer names), so during a reload the per-load rows
+above are held twice.
+
+### 7.2 Known excess
+
+What the code allocates beyond what it uses, largest first. None of these is fixed yet, except
+the omni growth (R3D patch 21: one shadowed point light used to reserve 192 MiB).
+
+- **Sun shadow maps with the sun shadow off.** `MS_Load` allocates both tiles unconditionally;
+  with `sun.shadow off` or the panel's sun shadow off they are never drawn. ~268 MiB at 8192.
+- **Model textures under map materials.** R3D uploads every texture of a model file; a slot
+  the map overrides with its own material (or `inherit albedo`, which keeps only the albedo)
+  leaves the file's other textures unused on the GPU. R3D has no import flag to skip them.
+- **Effect targets after the effect is turned off** stay allocated, and are resized with the
+  resolution (up to ~52 MiB at 1080p).
+- **Geometric normal target** (RG16, full resolution, ~8 MiB at 1080p) is written every frame
+  but read only by decals, which monolith doesn't use.
+- **Half-resolution mips** of the normal, radiance and specular targets (~8 MiB at 1080p) are
+  read only by SSAO, SSIL, SSGI and SSR.
+- **Shadow and IBL arrays never shrink**, and an expansion holds the old and new texture at once.
+- **Unreferenced materials** in a map still upload their textures and shaders.
+- **Panorama skies have no size cap**: the face size is the image's height.

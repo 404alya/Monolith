@@ -25,7 +25,7 @@
 
 #define SHADOW_DIR_LAYER_GROWTH     2
 #define SHADOW_SPOT_LAYER_GROWTH    4
-#define SHADOW_OMNI_LAYER_GROWTH    4
+#define SHADOW_OMNI_LAYER_GROWTH    1   // local patch: one cube layer is 6 faces (48 MiB at 2048), so grow by one
 
 // ========================================
 // MODULE STATE
