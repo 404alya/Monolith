@@ -327,3 +327,14 @@ Machine A (RTX 4050 Laptop GPU, driver 615.71.09, Ryzen 7 7435HS, Linux 7.2.5-1-
 - **Pick the baked slice by measurement.** Slow layers have few cells per tile (vein areas: 6 per 85 m), so the first slice baked had 1.9× the shader's average vein area on side faces (0.42 vs 0.22). Mean of the procedural shader over 10 plane slices: top vein area 0.27, crack gate 5.2%, lichen area 0.040; side 0.22 / 5.0% / 0.041. The slice 97 m out: top 0.33 / 6.2% / 0.048, side 0.32 / 5.3% / 0.047.
 - Rejected: fetching only the finest level at coarse texels (1-texel veins and cracks become dotted lines beyond ~27 m); edge cross-fades for tiling (they show).
 - **Landed in `maps/monolith` (2026-10-27)** after the developer's live test: the old procedural-only shader was replaced (no comparison copy kept). Next round, by the developer's choice: the other `u_px` shaders, `tower_ruin` first (0.19 ms).
+
+## tower_ruin: is it worth baking? (2026-10-27, machine A)
+
+Machine A as above, headless, after the concrete bake, the same binary; scratch copies of `maps/monolith` with `tower_ruin.glsl`'s `fragment()` made a flat colour (upper bound of any change) and with only its `valueNoise` made constant (upper bound of baking its noise). 3 interleaved full rounds (base, flat, no noise); reports `benchmark/2026-10-27_104441` … `_104733`. Round 3 was hit by a GPU clock-state change (frame +0.7 / +3.3 ms while the geometry pass moved −0.04 / −0.02 ms): left out of the frame figures.
+
+| | geometry pass (3 pairs) | frame (pairs 1–2) |
+|---|---:|---:|
+| flat colour | −0.068, −0.069, −0.042 ms | −0.014, −0.045 ms |
+| noise constant | −0.064, −0.064, −0.015 ms | −0.016, −0.058 ms |
+
+The whole shader is now ~0.07 ms of the 0.57 ms geometry pass (the nsys round's 0.19 ms was measured with the procedural concrete in the same pass), nearly all of it its value noise; a bake could save at most ~0.06 ms per frame, ~1.5%, at the noise level of a frame benchmark on this laptop. It doesn't fit the tile method either: most of its look is laid out on the building (storeys, panels, flats and their room states, soot above burnt windows, sill streaks), spalls follow each box's edges (`INSTANCE_SCALE`), and the file is at R3D's 16 KB source limit. **Not baked.**
