@@ -4844,3 +4844,59 @@ Files: `src/r3d_draw.c`, `src/modules/r3d_shader.c`, `src/modules/r3d_shader.h`,
 | CPU until finish, still | 16.1 | 14.8 | 26.6 |
 
 The cost: patch 23 adds ~10 ms of CPU per still frame on machine C (~4 ms spinning) for ~130 extra draws, two program switches and stencil state changes per marked light; the frame stays GPU-bound there. With the tower's lights removed the lights pass is ~5–6 ms, so little is left to gain on the GPU side.
+
+## Patch 24: three full-screen blends for the fogs and a depth copy nobody reads (2026-10-27)
+
+**Symptom.** On an integrated GPU (machine C of `.claude/skills/benchmarking/measurements.md`: HD Graphics 5500, single-channel DDR3) the post-lighting chain is bandwidth-bound: each full-screen pass costs its bytes per pixel at ~10–12 GB/s. Distance fog, vfog transmittance and vfog composition were three passes of ~3.4 ms each at 1920 × 1006, each a read + write of the RGBA16F scene; the FXAA pass that writes the final target (patch 10) also copied the scene depth there, ~1.9 ms with the HiZ resolve the depth texture needs, in frames where nothing reads it.
+
+**Cause.** `pass_deferred_fog`, the transmittance and the composition of `pass_deferred_volumetric_fog` each blend into the scene, one after the other, with nothing in between. `pass_post_fxaa_to_screen` always writes `gl_FragDepth`, like the copy blit it replaced, for applications that draw depth-tested content over the frame afterwards.
+
+**Change.**
+1. With the volumetric fog on, `vfog_compose.frag` computes all three terms (the code of `fog.frag` and `vfog_transmittance.frag`, unchanged, plus the upsampled radiance) and blends once with dual-source blending (GL 3.3 core): `FragColor = (fogColor f T + emission + radiance, f)`, `FragFactor = ((1 - f) T, 1 - f)`, blend `GL_ONE, GL_SRC1_COLOR` / `GL_ONE, GL_SRC1_ALPHA`, which is the three blends' result (alpha `f + a (1 - f)` as the fog blend gave). The radiance march now runs before it. Without volumetric fog the distance fog pass runs as before. `vfog_transmittance.frag` and the profiler slot "vfog transmit" are unused; the composition is reported as "fog + vfog compose" (and "fog" reads 0 with the volumetric fog on).
+2. `R3D_SetOutputDepth(bool)` / `R3D_GetOutputDepth()` (default true: as before). With false, `pass_post_fxaa_to_screen` disables the depth test, binds the blank texture instead of the depth buffer and `fxaa.frag` (`uWriteDepth`) reads no depth. Only that path honours it; the blit paths still copy depth. monolith passes false when no overlay is drawn over the frame (walk mode, `--bench`, `--shot` without `--shot-hud`), true for the frame-reuse cache and request images.
+
+Files: `shaders/deferred/vfog_compose.frag`, `shaders/post/fxaa.frag`, `src/r3d_draw.c`, `src/r3d_core.c`, `src/r3d_core_state.h`, `include/r3d/r3d_core.h`, `src/modules/r3d_shader.c`, `src/modules/r3d_shader.h`; monolith: `src/main.c` (`DrawScene(…, depth)`).
+
+```diff
+--- src/r3d_draw.c  (R3D_End)
+-    if (R3D.environment.fog.mode != R3D_FOG_DISABLED) PROF_PASS(R3D_PROFILER_FOG, pass_deferred_fog(sceneTarget));
+-    if (R3D.environment.volumetricFog.enabled) pass_deferred_volumetric_fog(sceneTarget);
++    if (R3D.environment.volumetricFog.enabled) pass_deferred_volumetric_fog(sceneTarget);
++    else if (R3D.environment.fog.mode != R3D_FOG_DISABLED) PROF_PASS(R3D_PROFILER_FOG, pass_deferred_fog(sceneTarget));
+--- src/r3d_draw.c  (pass_deferred_volumetric_fog)
+-    /* --- Apply transmittance --- */  (blend ONE, SRC_ALPHA / ZERO, ONE; deferred.vfogTransmittance; R3D_RENDER_SCREEN)
+ ...
+-    r3d_driver_set_blend_func_separate(GL_FUNC_ADD, GL_ONE, GL_ONE, GL_ZERO, GL_ONE);
++    r3d_driver_set_blend_func_separate(GL_FUNC_ADD, GL_ONE, GL_SRC1_COLOR, GL_ONE, GL_SRC1_ALPHA);
+--- src/r3d_draw.c  (pass_post_fxaa_to_screen)
++    if (R3D.outputDepth) { depth test on, ALWAYS, mask on } else { depth test off }
++    uDepthTex = R3D.outputDepth ? depth buffer : R3D_TEXTURE_BLANK;  uWriteDepth = R3D.outputDepth
+--- src/r3d_draw.c  (PROF_PASS_NAMES)
+-    [R3D_PROFILER_VFOG_COMPOSE]       = "vfog upsample",
++    [R3D_PROFILER_VFOG_COMPOSE]       = "fog + vfog compose",
+--- shaders/deferred/vfog_compose.frag
++    // fog factor f (fog.frag), transmittance T and emission (vfog_transmittance.frag), radiance (as before)
++    layout(location = 0, index = 0) out vec4 FragColor;   layout(location = 0, index = 1) out vec4 FragFactor;
+--- shaders/post/fxaa.frag
+-    gl_FragDepth = texelFetch(uDepthTex, ivec2(gl_FragCoord.xy), 0).r;
++    gl_FragDepth = uWriteDepth ? texelFetch(uDepthTex, ivec2(gl_FragCoord.xy), 0).r : gl_FragCoord.z;
+--- src/modules/r3d_shader.[ch]
++    vfogCompose: SET_UNIFORM_BUFFER ViewBlock, FxBlock;  fxaa: uWriteDepth (GET_LOCATION)
+--- src/r3d_core.c / r3d_core_state.h / include/r3d/r3d_core.h
++    bool outputDepth (true in R3D_Init); R3D_GetOutputDepth / R3D_SetOutputDepth
+```
+
+**Verification.** Not pixel-identical (1, rounding level): the three blends rounded the scene to half floats in between, the fused one doesn't. Shots of every viewpoint of both maps against the build before (machine C): 5.2–8.5 % of the pixels differ, all but 11–266 per image by 1/255, the rest by up to 29/255 where FXAA's edge test flips on a single bright pixel. With the volumetric fog off (`--off 1`, distance fog only): 0 pixels differ, which also shows that 2 leaves the colour alone (that shot runs without the depth copy). `--shot-hud --select` draws the depth-tested selection overlay as before. Linux build and `examples/build.sh` (+ `test`) without warnings; MinGW not run (no cross compiler on machine C). `tools/leakcheck.sh`: zero leaks of ours in all 70 runs (`export-default` / `export-models` exit 1 before and after, `runtime/export/` missing from the checkout). `glslangValidator` is not installed on machine C: the shaders were checked by Mesa's compiler only.
+
+**Measured.** Machine C (HD Graphics 5500, Mesa 25.0.7 iris, i5-5300U; the developer's settings file: FXAA, volumetric and distance fog on), `--bench --headless`, 1920 × 1006, 150 frames per view (screening runs), the build before vs this one. Balanced order with a cool-down below 70 °C before every run (after, before, before, after; reports `benchmark/2026-10-27_235953`, `2026-10-28_000244`, `_000545`, `_000834`):
+
+| ms, all views | before (2 runs) | after (2 runs) | change |
+|---|---|---|---|
+| fog + vfog transmit + vfog upsample | 10.60 / 10.78 | — | |
+| fog + vfog compose (fused) | — | 4.91 / 4.76 | **−5.9** |
+| FXAA (to the target) | 5.50 / 5.55 | 2.46 / 2.34 | **−3.1** |
+| other passes (same code) | | | within ±0.5, except vfog radiance (GPU clock, see below) |
+| GPU total | 66.66 / 68.98 | 57.61 / 56.78 | −10.6 |
+| frame | 75.40 / 79.33 | 66.57 / 67.71 | **−10.2 (−13%), 13.0 → 14.9 fps** |
+
+The two changed passes save ~9 ms; the rest of the GPU total's −10.6 is the GPU clock (750 MHz median in the "after" runs, 600–650 in the "before" runs, which moves the ALU-bound vfog radiance by ~0.7 ms; the bandwidth-bound passes don't move). A first run of 3 interleaved pairs with the cool-down only before each pair put every "after" run on a hotter chip (CPU throttled from 2.29 to 1.1 GHz, CPU in `R3D_End` +3 ms), frame −8.2 / −4.5 / −4.9 ms with GPU total −11.1 / −8.5 / −8.3: interleave with a cool-down before every run on this machine. With the volumetric fog off (2 alone, 60 frames): FXAA 5.43 → 2.49 ms. At the developer's window size (1366 × 768, 54 % of the pixels) expect about half.

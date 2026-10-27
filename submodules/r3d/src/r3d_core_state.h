@@ -69,6 +69,7 @@ extern struct r3d_core_state {
     R3D_DownscaleMode downscaleMode;    //< Downscaling mode used during the final blit
     R3D_OutputMode outputMode;          //< Defines which buffer we should output in R3D_End()
     bool depthPrepass;                  //< Depth-only pre-pass before the geometry pass (monolith patch)
+    bool outputDepth;                   //< R3D_End copies the scene depth into the target (local patch 24)
     TextureFilter textureFilter;        //< Default texture filter for model loading
     TextureWrap textureWrap;            //< Default texture wrap for material map loading
     Matrix matCubeViews[6];             //< Pre-computed view matrices for cubemap faces

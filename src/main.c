@@ -415,10 +415,12 @@ static bool DumpBoxes(const MS_Scene *s, const char *path)
 // Renders the scene into `target` (zero = the window), so the main view and the request
 // images (Submit) go through the same code. Returns whether a sun shadow map was
 // re-rendered. Extra renders (Submit) go through the same cache check with their own
-// target's aspect, so the cached map always matches what R3D last rendered.
+// target's aspect, so the cached map always matches what R3D last rendered. `depth`: the
+// scene depth goes into the target too, for overlays depth-tested against it (R3D patch 24:
+// the copy costs ~1.9 ms per frame on an integrated GPU).
 static double lastR3DEndTime;   // seconds, set by DrawScene
 
-static bool DrawScene(Camera3D camera, RenderTexture target)
+static bool DrawScene(Camera3D camera, RenderTexture target, bool depth)
 {
     float aspect = target.id ? (float)target.texture.width / target.texture.height
                              : (float)GetRenderWidth() / GetRenderHeight();
@@ -426,6 +428,7 @@ static bool DrawScene(Camera3D camera, RenderTexture target)
         bool update = MS_PushLights(scene, camera, aspect);
         MS_DrawGeometry(scene);     // (also bakes the --fog-cache volume once per map load)
     double r3dEndStart = GetTime();
+    R3D_SetOutputDepth(depth);
     R3D_End();
     lastR3DEndTime = GetTime() - r3dEndStart;   // CPU side of R3D_End, for the bench report
     return update;
@@ -636,7 +639,7 @@ static bool Submit(Designer *d, Camera3D cam, float yaw, float pitch, RenderText
     }
     bool own = rt.id == 0;
     if (own) rt = LoadRenderTexture(GetScreenWidth(), GetScreenHeight());
-    DrawScene(cam, rt);
+    DrawScene(cam, rt, true);
     Image view = ReadTarget(rt);
     BeginTextureMode(rt);
         DesignerDrawOverlay(d, cam, false);
@@ -1712,6 +1715,11 @@ static int Run(int argc, char **argv)
             ClearBackground(BLACK);
             if (emulateWindow) WindowEmuClear(&windowEmu);
 
+            // HUD and overlays: on the window, or with --shot-hud into the shot
+            bool drawUi = !shotPath || shotHud;
+            // (--shot-hud shows the designer UI in walk mode too: shots of arbitrary --pos views)
+            bool designerUi = (spec.active || shotPath) && (!bench || emulateWindow);
+
             // A hidden window has no visible pixels, so reading back the default
             // framebuffer is undefined: render --shot frames into a texture instead.
             bool shadowUpdated = false;
@@ -1722,7 +1730,7 @@ static int Run(int argc, char **argv)
                         if (reuse.rt.id) UnloadRenderTexture(reuse.rt);
                         reuse.rt = LoadSceneCache(GetScreenWidth(), GetScreenHeight());
                     }
-                    shadowUpdated = DrawScene(camera, reuse.rt);
+                    shadowUpdated = DrawScene(camera, reuse.rt, true);   // the cache keeps its depth for later frames
                     reuse.cacheValid = true;
                 } else {
                     reused = true;
@@ -1733,16 +1741,12 @@ static int Run(int argc, char **argv)
                 DrawSceneCache(&reuse);
                 if (shotTarget.id) EndTextureMode();
             } else {
-                shadowUpdated = DrawScene(camera, shotTarget);
+                shadowUpdated = DrawScene(camera, shotTarget, drawUi && designerUi);   // overlays depth-test
             }
             if (bench && shadowUpdated && benchFrame >= 0 && benchFrame < benchFrames) benchShadowUpdates[benchView]++;
 
-            // HUD and overlays: on the window, or with --shot-hud into the shot
-            bool drawUi = !shotPath || shotHud;
             bool uiToTarget = (drawUi && shotPath) || emulateWindow;
             if (uiToTarget) BeginTextureMode(shotTarget);
-            // (--shot-hud shows the designer UI in walk mode too: shots of arbitrary --pos views)
-            bool designerUi = (spec.active || shotPath) && (!bench || emulateWindow);
             if (drawUi && hud && designerUi) {
                 DesignerDrawOverlay(&designer, camera, true);
                 DesignerDrawVolumes(&designer, camera, GetScreenWidth(), GetScreenHeight(), false);

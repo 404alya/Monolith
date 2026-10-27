@@ -426,14 +426,15 @@ void R3D_End(void)
 
     PROF_PASS(R3D_PROFILER_BACKGROUND, pass_scene_background(sceneTarget));
 
-    if (R3D.environment.fog.mode != R3D_FOG_DISABLED)
-    {
-        PROF_PASS(R3D_PROFILER_FOG, pass_deferred_fog(sceneTarget));
-    }
-
+    // Local patch 24: with the volumetric fog on, its composition pass also applies the
+    // distance fog and the transmittance (one blend into the scene instead of three)
     if (R3D.environment.volumetricFog.enabled)
     {
         pass_deferred_volumetric_fog(sceneTarget);
+    }
+    else if (R3D.environment.fog.mode != R3D_FOG_DISABLED)
+    {
+        PROF_PASS(R3D_PROFILER_FOG, pass_deferred_fog(sceneTarget));
     }
 
     PROF_PASS(R3D_PROFILER_FORWARD, pass_scene_forward(sceneTarget));
@@ -2826,19 +2827,8 @@ void pass_deferred_volumetric_fog(r3d_target_t sceneTarget)
     r3d_driver_disable(GL_DEPTH_TEST);
     r3d_driver_disable(GL_CULL_FACE);
 
-    /* --- Apply transmittance --- */
-
-    r3d_driver_enable(GL_BLEND);
-    r3d_driver_set_blend_func_separate(GL_FUNC_ADD, GL_ONE, GL_SRC_ALPHA, GL_ZERO, GL_ONE);
-
-    R3D_TARGET_BIND_LOAD(0, true, sceneTarget);   // with depth: see pass_deferred_fog (local patch 20)
-
-    PROF_BEGIN(R3D_PROFILER_VFOG_TRANSMITTANCE);
-    R3D_SHADER_USE(deferred.vfogTransmittance);
-    R3D_SHADER_BIND_SAMPLER(deferred.vfogTransmittance, uDepthTex, r3d_target_get_level(R3D_TARGET_DEPTH, 0));
-
-    R3D_RENDER_SCREEN();
-    PROF_END();
+    // Local patch 24: no separate transmittance pass (vfog_transmittance.frag); the
+    // composition below applies it, together with the distance fog (pass_deferred_fog)
 
     /* --- Accumulate radiance in half resolution --- */
 
@@ -2911,8 +2901,10 @@ void pass_deferred_volumetric_fog(r3d_target_t sceneTarget)
     R3D_TARGET_BIND_LOAD(0, true, sceneTarget);   // with depth: see pass_deferred_fog (local patch 20)
     R3D_SHADER_USE(deferred.vfogCompose);
 
+    // Local patch 24: scene = added light + scene * factor, alpha = fog + alpha (1 - fog),
+    // with both factors from the second (dual-source) output, see vfog_compose.frag
     r3d_driver_enable(GL_BLEND);
-    r3d_driver_set_blend_func_separate(GL_FUNC_ADD, GL_ONE, GL_ONE, GL_ZERO, GL_ONE);
+    r3d_driver_set_blend_func_separate(GL_FUNC_ADD, GL_ONE, GL_SRC1_COLOR, GL_ONE, GL_SRC1_ALPHA);
 
     R3D_SHADER_BIND_SAMPLER(deferred.vfogCompose, uRadianceTex, r3d_target_get_level(R3D_TARGET_VFOG_RAD, 1));
     R3D_SHADER_BIND_SAMPLER(deferred.vfogCompose, uDepthTex, r3d_target_get_levels(R3D_TARGET_DEPTH, 0, 1));
@@ -3291,15 +3283,26 @@ void pass_post_fxaa_to_screen(r3d_target_t sceneTarget)
     glBindFramebuffer(GL_FRAMEBUFFER, R3D.screen.id);
     glViewport(0, 0, srcW, srcH);
 
-    r3d_driver_enable(GL_DEPTH_TEST);
     r3d_driver_disable(GL_BLEND);
 
-    r3d_driver_set_depth_func(GL_ALWAYS);
-    r3d_driver_set_depth_mask(GL_TRUE);
+    // Local patch 24: without R3D_SetOutputDepth the depth isn't copied, and the depth
+    // texture isn't bound (a bound depth texture costs a HiZ resolve on some GPUs)
+    if (R3D.outputDepth)
+    {
+        r3d_driver_enable(GL_DEPTH_TEST);
+        r3d_driver_set_depth_func(GL_ALWAYS);
+        r3d_driver_set_depth_mask(GL_TRUE);
+    }
+    else
+    {
+        r3d_driver_disable(GL_DEPTH_TEST);
+    }
 
     R3D_SHADER_USE(post.fxaa[R3D.aaPreset]);
     R3D_SHADER_BIND_SAMPLER(post.fxaa[R3D.aaPreset], uSceneTex, r3d_target_get(source));
-    R3D_SHADER_BIND_SAMPLER(post.fxaa[R3D.aaPreset], uDepthTex, r3d_target_get_depth_buffer());
+    R3D_SHADER_BIND_SAMPLER(post.fxaa[R3D.aaPreset], uDepthTex,
+        R3D.outputDepth ? r3d_target_get_depth_buffer() : r3d_texture_get(R3D_TEXTURE_BLANK));
+    R3D_SHADER_SET_INT(post.fxaa[R3D.aaPreset], uWriteDepth, R3D.outputDepth ? 1 : 0);
     R3D_RENDER_SCREEN();
 }
 
@@ -3606,7 +3609,7 @@ static const char* PROF_PASS_NAMES[R3D_PROFILER_PASS_COUNT] = {
     [R3D_PROFILER_FOG]                = "fog",
     [R3D_PROFILER_VFOG_TRANSMITTANCE] = "vfog transmit",
     [R3D_PROFILER_VFOG_RADIANCE]      = "vfog radiance",
-    [R3D_PROFILER_VFOG_COMPOSE]       = "vfog upsample",
+    [R3D_PROFILER_VFOG_COMPOSE]       = "fog + vfog compose",
     [R3D_PROFILER_FORWARD]            = "forward",
     [R3D_PROFILER_DOF]                = "DoF",
     [R3D_PROFILER_BLOOM]              = "bloom",

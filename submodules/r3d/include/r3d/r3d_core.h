@@ -290,6 +290,21 @@ R3DAPI bool R3D_GetDepthPrepass(void);
 R3DAPI void R3D_SetDepthPrepass(bool enabled);
 
 /**
+ * @brief Returns whether R3D_End() writes the scene depth into the final target.
+ */
+R3DAPI bool R3D_GetOutputDepth(void);
+
+/**
+ * @brief Sets whether R3D_End() writes the scene depth into the final target (local patch 24).
+ *
+ * The final pass copies the scene depth along with the colour, so that the application can
+ * draw depth-tested content over the frame afterwards. When nothing does, disabling it skips
+ * that copy where the final pass is FXAA rendering straight into the target (the target's depth
+ * buffer is then left as it was). The colour is unchanged. Enabled by default.
+ */
+R3DAPI void R3D_SetOutputDepth(bool enabled);
+
+/**
  * @brief Sets the default texture filtering mode.
  * 
  * This function defines the default texture filter that will be applied to all subsequently 

@@ -153,6 +153,7 @@ bool R3D_Init(int resWidth, int resHeight)
     R3D.upscaleMode   = R3D_UPSCALE_NEAREST;
     R3D.downscaleMode = R3D_DOWNSCALE_NEAREST;
     R3D.outputMode    = R3D_OUTPUT_SCENE;
+    R3D.outputDepth   = true;   // local patch 24
 
     R3D.textureFilter = TEXTURE_FILTER_TRILINEAR;
     R3D.textureWrap   = TEXTURE_WRAP_CLAMP;
@@ -321,6 +322,16 @@ bool R3D_GetDepthPrepass(void)
 void R3D_SetDepthPrepass(bool enabled)
 {
     R3D.depthPrepass = enabled;
+}
+
+bool R3D_GetOutputDepth(void)
+{
+    return R3D.outputDepth;
+}
+
+void R3D_SetOutputDepth(bool enabled)
+{
+    R3D.outputDepth = enabled;
 }
 
 void R3D_SetTextureFilter(TextureFilter filter)

@@ -73,6 +73,7 @@ out vec4 FragColor;
 
 uniform sampler2D uSceneTex;
 uniform sampler2D uDepthTex;    //< monolith patch 10, see main()
+uniform bool uWriteDepth;       //< local patch 24, see main()
 
 // ================================
 // Main Function
@@ -114,6 +115,7 @@ void main()
     // Monolith patch 10: when FXAA renders straight into the final target (instead of an
     // internal scene target followed by a copy blit), it also writes the scene depth there,
     // as the copy blit did. Into an internal target the depth test is off, so this has no
-    // effect there.
-    gl_FragDepth = texelFetch(uDepthTex, ivec2(gl_FragCoord.xy), 0).r;
+    // effect there. Local patch 24: without uWriteDepth no depth is read (no texture is
+    // bound; the depth test is off, so the value isn't written).
+    gl_FragDepth = uWriteDepth ? texelFetch(uDepthTex, ivec2(gl_FragCoord.xy), 0).r : gl_FragCoord.z;
 }

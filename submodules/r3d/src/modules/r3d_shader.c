@@ -1581,6 +1581,9 @@ bool r3d_shader_load_deferred_vfog_compose(r3d_shader_custom_t* custom)
     DECL_SHADER(r3d_shader_deferred_vfog_compose_t, deferred, vfogCompose);
     LOAD_SHADER(vfogCompose, SCREEN_VERT, VFOG_COMPOSE_FRAG);
 
+    SET_UNIFORM_BUFFER(vfogCompose, ViewBlock, R3D_SHADER_BLOCK_SLOT_VIEW);   // local patch 24
+    SET_UNIFORM_BUFFER(vfogCompose, FxBlock, R3D_SHADER_BLOCK_SLOT_FX);
+
     USE_SHADER(vfogCompose);
     SET_SAMPLER(vfogCompose, uRadianceTex, R3D_SHADER_SAMPLER_BUFFER_VFOG_RAD);
     SET_SAMPLER(vfogCompose, uDepthTex, R3D_SHADER_SAMPLER_BUFFER_DEPTH);
@@ -1710,6 +1713,7 @@ static bool load_post_fxaa(r3d_shader_custom_t* custom, int index)
     USE_SHADER(fxaa);
     SET_SAMPLER(fxaa, uSceneTex, R3D_SHADER_SAMPLER_BUFFER_SCENE);
     SET_SAMPLER(fxaa, uDepthTex, R3D_SHADER_SAMPLER_BUFFER_DEPTH);
+    GET_LOCATION(fxaa, uWriteDepth);
 
     return true;
 }

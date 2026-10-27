@@ -1176,6 +1176,7 @@ typedef struct {
     GLuint id;
     r3d_shader_uniform_sampler_t uSceneTex;
     r3d_shader_uniform_sampler_t uDepthTex;     //< monolith patch 10: FXAA writes the final target
+    r3d_shader_uniform_int_t uWriteDepth;       //< local patch 24: whether it copies the depth
 } r3d_shader_post_fxaa_t;
 
 typedef struct {
