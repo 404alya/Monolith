@@ -58,6 +58,23 @@ Options of a run: `--period N` (cycles per sample), `--spin` (no `__GL_YIELD=USL
 - **The driver has no symbols:** the report charges its time to the first function of ours on the stack. Driver time with no function of ours on the stack (its own threads) is one row of its own.
 - **Wall time:** the profile measures user cycles only. Load phases in ms come from the runtime's own log: every load and reload prints `monolith_scene: load|reload <total> ms: parse, models, collider BVH, surface shaders (n compiled), textures (n), hidden faces, box meshes, rest`, and the first two frames after it `first frames after the load a + b ms` (the frames compile the shader variants they draw with; pine_forest's reload compiles in the second). Report the median of 3 `--shot <file> --view 1 --reload-test <same map>` runs per binary, interleaved with the other binary, with `__GL_SYNC_TO_VBLANK=0`, with and without `__GL_SHADER_DISK_CACHE=0` (NVIDIA's shader disk cache hides most compile time; a driver update empties it). Finer splits: a scratch build (`GetTime()` around the calls, `getrusage` for user vs. sys) that is never committed.
 
+### GPU per draw: nsys
+
+Nsight Systems (`nsys`) traces every GL call with GPU times. A capture is a benchmark like any other (headless, one at a time, vsync off, a note). Captures go to `benchmark/nsys/<stamp>_<name>/` (gitignored, next to `benchmark/profile/`), never into the repo root:
+
+```bash
+D=benchmark/nsys/$(date +%Y-%m-%d_%H%M%S)_<name>; mkdir -p "$D"
+__GL_SYNC_TO_VBLANK=0 nsys profile --trace=opengl,osrt --sample=none --cpuctxsw=none -o "$D/capture" --export=sqlite \
+  ./build/linux/monolith --bench --headless --bench-frames 150 --note "nsys: what" > "$D/run.log" 2>&1
+sqlite3 -header -column "$D/capture.sqlite" < .claude/skills/benchmarking/nsys-segments.sql
+```
+
+Add a `notes.md` to the folder: the command, map, settings, binary (commit + changes), machine, the bench report of the same run and what the capture showed.
+
+- **An OpenGL "workload" row isn't one draw.** It runs from the call it is named after up to the next framebuffer call (`endCorrelationId`), so nsys's summary names a whole pass after its first call. On the default map the "2.1 ms `glDrawElementsInstancedBaseVertex`" was the geometry pass (~250–415 draws: the depth pre-pass and the shading pass). `nsys-segments.sql` lists each segment by its position in the frame and the number of calls in it; match the positions against the pass order in `R3D_End()` (`submodules/r3d/src/r3d_draw.c`), and check the result against the bench report's per-pass table of the same run.
+- **For single draws,** use GPU timestamps in a scratch build that is never committed (`glQueryCounter` after each draw of the pass, keyed by instance buffer, instance offset and mesh vertex offset; the runtime writes the same keys with each range's material and map line), or KHR_debug groups, which nsys reports as GPU ranges (`nsys stats --report opengl_khr_gpu_range_sum`). Then confirm the finding with A/B full runs (e.g. a scratch copy of the map with the suspect shader made trivial, `--map <copy>`).
+- **Windowed captures** include presentation and the compositor, and run at the window's size and the developer's settings file. Re-capture headless before quoting any share of the frame. Load-time work (`glCopyBufferSubData`, `glGenerateMipmap`, shader compiles) sits in the first frames: leave them out.
+
 ## 3. Reporting
 
 The machine (GPU, driver, CPU, and laptop or desktop), before/after tables from full runs with the relative change, the number of interleaved pairs and their paired differences, the bench report paths, and the look: every change is either pixel-identical (prove it with `--shot` diffs) or presented as a trade-off with before/after images (`CLAUDE.md`).

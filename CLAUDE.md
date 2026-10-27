@@ -20,6 +20,8 @@ The workflows are project skills in `.claude/skills/<name>/SKILL.md`. They load 
 | `map-editing` | any change to a map package, by hand or for a request: rules and verification |
 | `assets-and-licences` | a model or texture: sources, licences, download, Blender, `ASSETS.md`, restyling |
 | `engine-code` | code: C, the runtime, R3D, shaders outside a package, build, tools |
+| `shaders` | any GLSL: the kinds of shader, validating with `glslangValidator` (its checkers), variants, verifying a shader change |
+| `surface-shaders` | a map's `.glsl` surface shader: rules, portable GLSL, the per-pixel cost budget |
 | `lighting-fog-shadows` | lighting, shadows, fog, ambient, exposure, black surfaces (with `.claude/skills/lighting-fog-shadows/r3d-pitfalls.md`) |
 | `benchmarking` | any `--bench` run or performance claim |
 | `leak-check` | `tools/leakcheck.sh`, after every code change |
