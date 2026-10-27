@@ -1081,6 +1081,15 @@ typedef struct {
     r3d_shader_uniform_vec3_t uWorldAoInvExtent;
     r3d_shader_uniform_vec2_t uWorldAoDecode;
     r3d_shader_uniform_float_t uWorldAoIntensity;
+    r3d_shader_uniform_sampler_t uShadowDirTex;         //< local patch 25: the sun
+    r3d_shader_uniform_sampler_t uShadowSpotTex;
+    r3d_shader_uniform_sampler_t uShadowOmniTex;
+    r3d_shader_uniform_sampler_t uShadowDirMinMaxTex;
+    r3d_shader_uniform_int_t uSunEnabled;
+    r3d_shader_uniform_int_t uSunMinMax;
+    r3d_shader_uniform_sampler_t uRadianceTex;          //< local patch 26: compose fused
+    r3d_shader_uniform_sampler_t uSpecularTex;
+    r3d_shader_uniform_int_t uCompose;
 } r3d_shader_deferred_ambient_t;
 
 typedef struct {

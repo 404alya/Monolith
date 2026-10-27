@@ -1432,6 +1432,7 @@ bool r3d_shader_load_deferred_ambient(r3d_shader_custom_t* custom)
     SET_UNIFORM_BUFFER(ambient, ViewBlock, R3D_SHADER_BLOCK_SLOT_VIEW);
     SET_UNIFORM_BUFFER(ambient, EnvBlock, R3D_SHADER_BLOCK_SLOT_ENV);
     SET_UNIFORM_BUFFER(ambient, FxBlock, R3D_SHADER_BLOCK_SLOT_FX);
+    SET_UNIFORM_BUFFER(ambient, LightBlock, R3D_SHADER_BLOCK_SLOT_LIGHT);   // local patch 25
 
     USE_SHADER(ambient);
 
@@ -1448,6 +1449,19 @@ bool r3d_shader_load_deferred_ambient(r3d_shader_custom_t* custom)
     SET_SAMPLER(ambient, uBrdfLutTex, R3D_SHADER_SAMPLER_IBL_BRDF_LUT);
 
     SET_SAMPLER(ambient, uWorldAoTex, R3D_SHADER_SAMPLER_WORLD_AO);
+
+    // Local patch 25: the sun
+    SET_SAMPLER(ambient, uShadowDirTex, R3D_SHADER_SAMPLER_SHADOW_DIR);
+    SET_SAMPLER(ambient, uShadowSpotTex, R3D_SHADER_SAMPLER_SHADOW_SPOT);
+    SET_SAMPLER(ambient, uShadowOmniTex, R3D_SHADER_SAMPLER_SHADOW_OMNI);
+    SET_SAMPLER(ambient, uShadowDirMinMaxTex, R3D_SHADER_SAMPLER_SHADOW_DIR_MINMAX);
+    GET_LOCATION(ambient, uSunEnabled);
+    GET_LOCATION(ambient, uSunMinMax);
+
+    // Local patch 26: compose fused
+    SET_SAMPLER(ambient, uRadianceTex, R3D_SHADER_SAMPLER_BUFFER_RADIANCE);
+    SET_SAMPLER(ambient, uSpecularTex, R3D_SHADER_SAMPLER_BUFFER_SPECULAR);
+    GET_LOCATION(ambient, uCompose);
     GET_LOCATION(ambient, uWorldAoEnabled);
     GET_LOCATION(ambient, uWorldAoMin);
     GET_LOCATION(ambient, uWorldAoInvExtent);

@@ -246,7 +246,7 @@ static r3d_target_t pass_prepare_ssgi(void);
 static r3d_target_t pass_prepare_ssr(void);
 
 static void pass_deferred_lights(void);
-static void pass_deferred_ambient(r3d_target_t ssaoSource, r3d_target_t ssilSource, r3d_target_t ssgiSource);
+static void pass_deferred_ambient(r3d_target_t ssaoSource, r3d_target_t ssilSource, r3d_target_t ssgiSource, r3d_target_t composeTarget);
 static void pass_deferred_compose(r3d_target_t sceneTarget, r3d_target_t ssrSource);
 static void pass_deferred_fog(r3d_target_t sceneTarget);
 static void pass_deferred_volumetric_fog(r3d_target_t sceneTarget);
@@ -407,10 +407,15 @@ void R3D_End(void)
         if (ssao) PROF_PASS(R3D_PROFILER_SSAO, ssaoSource = pass_prepare_ssao());
         if (ssil) PROF_PASS(R3D_PROFILER_SSIL, ssilSource = pass_prepare_ssil());
         if (ssgi) PROF_PASS(R3D_PROFILER_SSGI, ssgiSource = pass_prepare_ssgi());
-        PROF_PASS(R3D_PROFILER_AMBIENT, pass_deferred_ambient(ssaoSource, ssilSource, ssgiSource));
+        // Local patch 26: without SSR (which reads the radiance after the ambient pass) and
+        // with the scene as output (the debug outputs show RADIANCE / SPECULAR), the ambient
+        // pass writes the composed scene itself; "compose" then reads 0 in the profiler
+        bool fuseCompose = !ssr && R3D.outputMode == R3D_OUTPUT_SCENE;
+        PROF_PASS(R3D_PROFILER_AMBIENT, pass_deferred_ambient(ssaoSource, ssilSource, ssgiSource,
+                                                              fuseCompose ? sceneTarget : R3D_TARGET_INVALID));
 
         if (ssr) PROF_PASS(R3D_PROFILER_SSR, ssrSource = pass_prepare_ssr());
-        PROF_PASS(R3D_PROFILER_COMPOSE, pass_deferred_compose(sceneTarget, ssrSource));
+        if (!fuseCompose) PROF_PASS(R3D_PROFILER_COMPOSE, pass_deferred_compose(sceneTarget, ssrSource));
     }
     else
     {
@@ -2658,6 +2663,46 @@ static bool light_volume_mark(const r3d_light_data_t* light)
     return true;
 }
 
+// Local patch 25: the light uniform block of one light (the lights pass, the volumetric fog
+// march and, for the sun, the ambient pass)
+static void upload_light_block(const r3d_light_data_t* light)
+{
+    r3d_shader_block_light_t data = {
+        .viewProj        = MatrixTranspose(light->viewProj),
+        .color           = light->color,
+        .position        = light->position,
+        .direction       = light->direction,
+        .energy          = light->energy,
+        .specular        = light->specular,
+        .range           = light->range,
+        .falloff         = light->falloff,
+        .innerCutOff     = light->innerCutOff,
+        .outerCutOff     = light->outerCutOff,
+        .fogEnergy       = light->fogEnergy,
+        .shadowSoftness  = light->shadowSoftness,
+        .shadowOpacity   = light->shadowOpacity,
+        .shadowDepthBias = light->shadowDepthBias,
+        .shadowSlopeBias = light->shadowSlopeBias,
+        .shadowFar       = light->shadowFar,
+        .shadowLayer     = light->shadowLayer,
+        .type            = light->type,
+        .clipMin         = light->clipMin,
+        .clipMax         = light->clipMax,
+    };
+    r3d_shader_set_uniform_block(R3D_SHADER_BLOCK_LIGHT, &data, true);
+}
+
+// Local patch 25: the light the ambient pass lights (the first visible directional light);
+// the lights pass skips it
+static const r3d_light_data_t* deferred_sun(void)
+{
+    R3D_LIGHT_FOR_EACH_VISIBLE(light)
+    {
+        if (light->type == R3D_LIGHT_DIR) return light;
+    }
+    return NULL;
+}
+
 void pass_deferred_lights(void)
 {
     /* --- Setup OpenGL pipeline --- */
@@ -2688,36 +2733,18 @@ void pass_deferred_lights(void)
 
     /* --- Calculate lighting contributions --- */
 
+    const r3d_light_data_t* sun = deferred_sun();
+
     R3D_LIGHT_FOR_EACH_VISIBLE(light)
     {
+        if (light == sun) continue;   // lit by the ambient pass (local patch 25)
+
         // Set scissors rect
         r3d_rect_t dst = r3d_light_screen_rect(light, R3D_TARGET_SIZE_W, R3D_TARGET_SIZE_H);
         r3d_driver_set_scissor(dst.x, dst.y, dst.w, dst.h);
 
         // Send light data to the GPU
-        r3d_shader_block_light_t data = {
-            .viewProj        = MatrixTranspose(light->viewProj),
-            .color           = light->color,
-            .position        = light->position,
-            .direction       = light->direction,
-            .energy          = light->energy,
-            .specular        = light->specular,
-            .range           = light->range,
-            .falloff         = light->falloff,
-            .innerCutOff     = light->innerCutOff,
-            .outerCutOff     = light->outerCutOff,
-            .fogEnergy       = light->fogEnergy,
-            .shadowSoftness  = light->shadowSoftness,
-            .shadowOpacity   = light->shadowOpacity,
-            .shadowDepthBias = light->shadowDepthBias,
-            .shadowSlopeBias = light->shadowSlopeBias,
-            .shadowFar       = light->shadowFar,
-            .shadowLayer     = light->shadowLayer,
-            .type            = light->type,
-            .clipMin         = light->clipMin,
-            .clipMax         = light->clipMax,
-        };
-        r3d_shader_set_uniform_block(R3D_SHADER_BLOCK_LIGHT, &data, true);
+        upload_light_block(light);   // (local patch 25: shared helper)
 
         // Accumulate this light! (only where its box marked the stencil, local patch 23)
         if (!light_volume_mark(light)) r3d_driver_disable(GL_STENCIL_TEST);
@@ -2734,7 +2761,7 @@ void pass_deferred_lights(void)
     r3d_driver_disable(GL_SCISSOR_TEST);
 }
 
-void pass_deferred_ambient(r3d_target_t ssaoSource, r3d_target_t ssilSource, r3d_target_t ssgiSource)
+void pass_deferred_ambient(r3d_target_t ssaoSource, r3d_target_t ssilSource, r3d_target_t ssgiSource, r3d_target_t composeTarget)
 {
     /* --- Setup OpenGL pipeline --- */
 
@@ -2742,17 +2769,36 @@ void pass_deferred_ambient(r3d_target_t ssaoSource, r3d_target_t ssilSource, r3d
     r3d_driver_disable(GL_CULL_FACE);
 
     r3d_driver_enable(GL_DEPTH_TEST);
-    r3d_driver_enable(GL_BLEND);
 
-    // Set additive blending to accumulate light contributions
-    r3d_driver_set_blend_func(GL_FUNC_ADD, GL_ONE, GL_ONE);
     r3d_driver_set_depth_func(GL_GREATER);
     r3d_driver_set_depth_mask(GL_FALSE);
 
     /* --- Calculation and composition of ambient/indirect lighting --- */
 
-    R3D_TARGET_BIND_LOAD(0, true, R3D_TARGET_RADIANCE, R3D_TARGET_SPECULAR);
+    // Local patch 26: with a compose target, write the composed scene there (as
+    // pass_deferred_compose does: no blending), reading the two light targets
+    bool compose = composeTarget != R3D_TARGET_INVALID;
+    if (compose)
+    {
+        r3d_driver_disable(GL_BLEND);
+        r3d_driver_set_stencil_mask(0x00);
+        R3D_TARGET_BIND_LOAD(0, true, composeTarget);
+    }
+    else
+    {
+        // Set additive blending to accumulate light contributions
+        r3d_driver_enable(GL_BLEND);
+        r3d_driver_set_blend_func(GL_FUNC_ADD, GL_ONE, GL_ONE);
+        R3D_TARGET_BIND_LOAD(0, true, R3D_TARGET_RADIANCE, R3D_TARGET_SPECULAR);
+    }
     R3D_SHADER_USE(deferred.ambient);
+
+    R3D_SHADER_SET_INT(deferred.ambient, uCompose, compose ? 1 : 0);
+    if (compose)
+    {
+        R3D_SHADER_BIND_SAMPLER(deferred.ambient, uRadianceTex, r3d_target_get_level(R3D_TARGET_RADIANCE, 0));
+        R3D_SHADER_BIND_SAMPLER(deferred.ambient, uSpecularTex, r3d_target_get_level(R3D_TARGET_SPECULAR, 0));
+    }
 
     R3D_SHADER_BIND_SAMPLER(deferred.ambient, uAlbedoTex, r3d_target_get_level(R3D_TARGET_ALBEDO, 0));
     R3D_SHADER_BIND_SAMPLER(deferred.ambient, uNormalTex, r3d_target_get_level(R3D_TARGET_NORMAL, 0));
@@ -2771,6 +2817,17 @@ void pass_deferred_ambient(r3d_target_t ssaoSource, r3d_target_t ssilSource, r3d
         R3D_SHADER_SET_VEC3(deferred.ambient, uWorldAoInvExtent, worldAo.invExtent);
         R3D_SHADER_SET_VEC2(deferred.ambient, uWorldAoDecode, worldAo.decode);
         R3D_SHADER_SET_FLOAT(deferred.ambient, uWorldAoIntensity, worldAo.intensity);
+    }
+
+    // Local patch 25: the sun, see deferred_sun()
+    const r3d_light_data_t* sun = deferred_sun();
+    R3D_SHADER_SET_INT(deferred.ambient, uSunEnabled, sun != NULL ? 1 : 0);
+    if (sun != NULL)
+    {
+        GLuint minMax = r3d_light_shadow_minmax_map();
+        upload_light_block(sun);
+        R3D_SHADER_SET_INT(deferred.ambient, uSunMinMax, minMax != 0 ? 1 : 0);
+        if (minMax != 0) R3D_SHADER_BIND_SAMPLER(deferred.ambient, uShadowDirMinMaxTex, minMax);
     }
 
     R3D_RENDER_SCREEN();
@@ -2864,29 +2921,7 @@ void pass_deferred_volumetric_fog(r3d_target_t sceneTarget)
         r3d_rect_t dst = r3d_light_screen_rect(light, R3D_TARGET_SIZE_W / 2, R3D_TARGET_SIZE_H / 2);
         r3d_driver_set_scissor(dst.x, dst.y, dst.w, dst.h);
 
-        r3d_shader_block_light_t data = {
-            .viewProj        = MatrixTranspose(light->viewProj),
-            .color           = light->color,
-            .position        = light->position,
-            .direction       = light->direction,
-            .energy          = light->energy,
-            .specular        = light->specular,
-            .range           = light->range,
-            .falloff         = light->falloff,
-            .innerCutOff     = light->innerCutOff,
-            .outerCutOff     = light->outerCutOff,
-            .fogEnergy       = light->fogEnergy,
-            .shadowSoftness  = light->shadowSoftness,
-            .shadowOpacity   = light->shadowOpacity,
-            .shadowDepthBias = light->shadowDepthBias,
-            .shadowSlopeBias = light->shadowSlopeBias,
-            .shadowFar       = light->shadowFar,
-            .shadowLayer     = light->shadowLayer,
-            .type            = light->type,
-            .clipMin         = light->clipMin,
-            .clipMax         = light->clipMax,
-        };
-        r3d_shader_set_uniform_block(R3D_SHADER_BLOCK_LIGHT, &data, true);
+        upload_light_block(light);   // (local patch 25: shared helper)
 
         R3D_RENDER_SCREEN();
     }

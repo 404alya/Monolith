@@ -4900,3 +4900,92 @@ Files: `shaders/deferred/vfog_compose.frag`, `shaders/post/fxaa.frag`, `src/r3d_
 | frame | 75.40 / 79.33 | 66.57 / 67.71 | **−10.2 (−13%), 13.0 → 14.9 fps** |
 
 The two changed passes save ~9 ms; the rest of the GPU total's −10.6 is the GPU clock (750 MHz median in the "after" runs, 600–650 in the "before" runs, which moves the ALU-bound vfog radiance by ~0.7 ms; the bandwidth-bound passes don't move). A first run of 3 interleaved pairs with the cool-down only before each pair put every "after" run on a hotter chip (CPU throttled from 2.29 to 1.1 GHz, CPU in `R3D_End` +3 ms), frame −8.2 / −4.5 / −4.9 ms with GPU total −11.1 / −8.5 / −8.3: interleave with a cool-down before every run on this machine. With the volumetric fog off (2 alone, 60 frames): FXAA 5.43 → 2.49 ms. At the developer's window size (1366 × 768, 54 % of the pixels) expect about half.
+
+## Patch 25: the sun is a full-screen light pass of its own (2026-10-28)
+
+**Symptom.** On machine C (`.claude/skills/benchmarking/measurements.md`, "Full-screen pass chain on an integrated GPU") the sun's draw in the lights pass costs 5.7 of the pass's 8.1 ms at 1920 × 1006. It reads the G-buffer (depth, normal, albedo, ORM) and blends into RADIANCE and SPECULAR, and the ambient pass right after reads the same G-buffer and blends into the same two targets: on a bandwidth-bound GPU the second read and the extra read-modify-write of two RGBA16F targets are most of the sun's cost.
+
+**Cause.** `pass_deferred_lights` draws every visible light, the directional ones as a full-screen quad, before `pass_deferred_ambient`; both add into the same targets with nothing in between.
+
+**Change.** The first visible directional light ("the sun", `deferred_sun()`) is lit in the ambient pass: `ambient.frag` gets `lighting.frag`'s directional path unchanged (`SunLight`: clip box, `NoL <= 0` early out, its own `NoV`, `L_Diffuse` / `L_Specular`, computed from the ORM before the ambient occlusion terms change `orm.x`) and adds it to its outputs; `pass_deferred_lights` skips that light. Its shadow lookup (`SunShadow`) is `L_SampleShadowDir` with the min/max-tile shortcut of `vfog_radiance.frag` (patch 3): where all 8 PCF taps must return exactly 1 or 0 they are skipped. Other directional lights stay in the lights pass. The light uniform block is filled by one helper now (`upload_light_block`, used by the lights pass, the fog march and the ambient pass).
+
+Files: `shaders/deferred/ambient.frag`, `src/r3d_draw.c`, `src/modules/r3d_shader.c`, `src/modules/r3d_shader.h`.
+
+```diff
+--- src/r3d_draw.c
++static void upload_light_block(const r3d_light_data_t* light);   // the r3d_shader_block_light_t fill, was inline twice
++static const r3d_light_data_t* deferred_sun(void);               // first visible R3D_LIGHT_DIR, or NULL
+ (pass_deferred_lights)
++    const r3d_light_data_t* sun = deferred_sun();
+     R3D_LIGHT_FOR_EACH_VISIBLE(light)
+     {
++        if (light == sun) continue;   // lit by the ambient pass (local patch 25)
+ (pass_deferred_ambient, before R3D_RENDER_SCREEN)
++    uSunEnabled = sun != NULL; if (sun) { upload_light_block(sun); uSunMinMax = minmax map != 0; bind uShadowDirMinMaxTex }
+--- shaders/deferred/ambient.frag
++uniform sampler2DArrayShadow uShadowDirTex; (+ spot / omni for wrap/light.glsl); uniform sampler2DArray uShadowDirMinMaxTex;
++uniform bool uSunEnabled, uSunMinMax;   #include <wrap/light.glsl>
++float SunShadow(...)  // L_SampleShadowDir + min/max shortcut
++void SunLight(...)    // lighting.frag, LIGHT_DIR path
++    if (uSunEnabled) SunLight(P, N, albedo, orm, sunDiff, sunSpec);   // before the AO changes orm
+-    FragRadiance = vec4(diff + io.rgb, 1.0);  FragSpecular = vec4(spec, 1.0);
++    FragRadiance = vec4(diff + io.rgb + sunDiff, 1.0);  FragSpecular = vec4(spec + sunSpec, 1.0);
+--- src/modules/r3d_shader.[ch]
++    ambient: LightBlock, uShadowDirTex / uShadowSpotTex / uShadowOmniTex / uShadowDirMinMaxTex, uSunEnabled, uSunMinMax
+```
+
+**Verification.** Not pixel-identical (rounding level): the sun is added to the ambient term in float and blended once, instead of being blended into the half-float targets on its own. Shots of every viewpoint of both maps against patch 24 (machine C): 0.007–3.8 % of the pixels differ, all but 0–101 per image by 1/255, the rest by up to 12/255 (FXAA edges). With the sun off (`--off 6`): 0 differ. The min/max shortcut alone is exact: a scratch build with it disabled against this one, 4 views of both maps, 0 pixels differ. Linux build and `examples/build.sh` (+ `test`) without warnings; MinGW not run (no cross compiler on machine C); `tools/leakcheck.sh`: zero leaks of ours in all 70 runs (`export-default` / `export-models` exit 1 as before, `runtime/export/` missing from the checkout). `glslangValidator` is not installed on machine C: checked by Mesa's compiler only.
+
+**Measured.** Machine C (HD Graphics 5500, Mesa 25.0.7 iris, i5-5300U; the developer's settings file), `--bench --headless`, 1920 × 1006, 150 frames per view (screening runs), patch 24 vs patch 25, balanced order with a cool-down below 70 °C before every run (after, before, before, after; reports `benchmark/2026-10-28_004035`, `_004325`, `_004609`, `_004848`; GPU 750 MHz median and CPU 2.29 GHz in all four):
+
+| ms, all views | patch 24 (2 runs) | patch 25 (2 runs) | change |
+|---|---|---|---|
+| lights | 7.91 / 7.79 | 1.65 / 1.73 | −6.16 |
+| ambient | 6.62 / 6.62 | 9.22 / 9.26 | +2.62 |
+| GPU total | 56.93 / 56.50 | 53.12 / 53.36 | −3.48 |
+| frame | 67.71 / 67.15 | 64.04 / 64.45 | **−3.19 (−4.7%), 14.8 → 15.6 fps** |
+
+The other passes moved by less than 0.05 ms. The sun's own work (BRDF, PCF) costs ~2.6 ms inside the ambient pass, against the 6.2 ms its separate pass took; the views where few pixels face the sun gain least (Terrace: lights 8.4 → 4.0, ambient 4.2 → 6.2). At the developer's window (1366 × 768) expect about half.
+
+## Patch 26: the compose pass re-reads what the ambient pass just wrote (2026-10-28)
+
+**Symptom.** On machine C the ambient pass (with patch 25) costs 9.1 ms, of which ~5.2 ms is its G-buffer read and its two RGBA16F writes (measured by switching its parts off, `measurements.md`), and the compose pass right after (5.3 ms) reads those two targets back, with albedo and ORM again, only to add them into the scene.
+
+**Cause.** `pass_deferred_ambient` adds into RADIANCE / SPECULAR so that SSR (`pass_prepare_ssr`) can read the lit radiance before `pass_deferred_compose` mixes the reflection in; without SSR the two passes are one sum split in two.
+
+**Change.** Without SSR, and with the scene as output (the debug outputs show RADIANCE / SPECULAR themselves), `pass_deferred_ambient` gets the scene as `composeTarget`: it binds the scene (with the depth, depth test `GL_GREATER`, no blending, stencil write mask 0, as compose did), reads RADIANCE and SPECULAR (emission and the lights pass) and writes `(radiance + ambient diffuse) + (specular + ambient specular)`, which is `compose.frag`'s output when its SSR texture is the blank one (alpha 0: the mix returns the specular). `pass_deferred_compose` is then skipped; the profiler's "compose" row reads 0 and "ambient" holds both. With SSR on, both passes run as before.
+
+Files: `shaders/deferred/ambient.frag`, `src/r3d_draw.c`, `src/modules/r3d_shader.c`, `src/modules/r3d_shader.h`.
+
+```diff
+--- src/r3d_draw.c  (R3D_End)
+-        PROF_PASS(R3D_PROFILER_AMBIENT, pass_deferred_ambient(ssaoSource, ssilSource, ssgiSource));
++        bool fuseCompose = !ssr && R3D.outputMode == R3D_OUTPUT_SCENE;
++        PROF_PASS(R3D_PROFILER_AMBIENT, pass_deferred_ambient(ssaoSource, ssilSource, ssgiSource,
++                                                              fuseCompose ? sceneTarget : R3D_TARGET_INVALID));
+         if (ssr) PROF_PASS(R3D_PROFILER_SSR, ssrSource = pass_prepare_ssr());
+-        PROF_PASS(R3D_PROFILER_COMPOSE, pass_deferred_compose(sceneTarget, ssrSource));
++        if (!fuseCompose) PROF_PASS(R3D_PROFILER_COMPOSE, pass_deferred_compose(sceneTarget, ssrSource));
+--- src/r3d_draw.c  (pass_deferred_ambient(…, r3d_target_t composeTarget))
++    compose: blend off, stencil mask 0, R3D_TARGET_BIND_LOAD(0, true, composeTarget), bind uRadianceTex / uSpecularTex
++    else:    blend ONE, ONE into RADIANCE + SPECULAR (as before);  uCompose = compose
+--- shaders/deferred/ambient.frag
++uniform sampler2D uRadianceTex, uSpecularTex; uniform bool uCompose;
++    if (uCompose) FragRadiance = vec4((texelFetch(uRadianceTex) + outDiff) + (texelFetch(uSpecularTex) + outSpec), 1.0);
++    else { FragRadiance = vec4(outDiff, 1.0); FragSpecular = vec4(outSpec, 1.0); }
+--- src/modules/r3d_shader.[ch]
++    ambient: uRadianceTex (BUFFER_RADIANCE), uSpecularTex (BUFFER_SPECULAR), uCompose
+```
+
+**Verification.** Not pixel-identical (rounding level): the ambient terms no longer go through the half-float targets before the sum. Shots of every viewpoint of both maps against patch 25 (machine C): 0.3–5.3 % of the pixels differ, all but 0–140 per image by 1/255, the rest by up to 12/255 (FXAA edges); with `ao = full` (SSAO + SSIL into the fused pass) the same (3.7 / 1.8 %, max 13). With `ssr = on` (the old two passes): 0 pixels differ. `--shot-hud --select` draws the overlay as before (the only large difference is the fps number). Linux build and `examples/build.sh` (+ `test`) without warnings; MinGW not run (no cross compiler on machine C); `tools/leakcheck.sh`: zero leaks of ours in all 70 runs (`export-default` / `export-models` exit 1 as before, `runtime/export/` missing from the checkout). `glslangValidator` is not installed on machine C: checked by Mesa's compiler only.
+
+**Measured.** Machine C (HD Graphics 5500, Mesa 25.0.7 iris, i5-5300U; the developer's settings file, SSR off), `--bench --headless`, 1920 × 1006, 150 frames per view (screening runs), patch 25 vs patch 26, balanced order with a cool-down below 70 °C before every run (after, before, before, after; reports `benchmark/2026-10-28_012306`, `_012542`, `_012818`, `_013050`; GPU 750–800 MHz median and CPU 2.29 GHz in all four):
+
+| ms, all views | patch 25 (2 runs) | patch 26 (2 runs) | change |
+|---|---|---|---|
+| ambient | 9.33 / 9.29 | 11.24 / 11.32 | +1.97 |
+| compose | 5.30 / 5.36 | — | −5.33 |
+| GPU total | 53.86 / 54.00 | 50.32 / 50.94 | −3.30 |
+| frame | 64.99 / 65.44 | 61.84 / 62.63 | **−2.97 (−4.6%), 15.3 → 16.1 fps** |
+
+The other passes moved by less than 0.15 ms. Less than the ~5 ms estimated from the bytes: reading RADIANCE and SPECULAR back (16 B per pixel) costs ~2 ms inside the fused pass. At the developer's window (1366 × 768) expect about half.
