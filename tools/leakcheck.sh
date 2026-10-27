@@ -17,7 +17,8 @@
 # live settings changes incl. the renderer restart, the settings panel), of tests/models (models, textured /
 # shader materials, shadowed lights), of examples/01_minimal/scene and maps/pine_forest
 # (textured ground, many restyled models), --reload-test both ways
-# and into a broken map, a broken map on the command line, --shot-hud with --select / --region / --volume,
+# and into a broken map, a broken map on the command line, --bake-surface (and a data_sampler reading
+# its tile), --shot-hud with --select / --region / --volume,
 # manual edits (--apply-edits on a copy of tests/models: move, turn, split, duplicate, add, id, undo, redo and
 # a failing command; --dump-entities; the edit-mode HUD),
 # --submit (tools/stub-terminal.sh instead of a terminal, MONOLITH_WORKSPACE=) on both maps, in
@@ -168,6 +169,16 @@ Run reload-to-default 0 "$M" --shot "$TMP/r2.png" --view 1 --map tests/models --
 printf 'monolith 2\nbox 0 0 0 1 1 1\nbogus statement here\n' > "$TMP/broken.map"
 Run reload-to-broken 0  "$M" --shot "$TMP/r3.png" --view 1 --map tests/models --reload-test "$TMP/broken.map"
 Run broken-map 1        "$M" --dump-boxes "$TMP/broken.txt" --map "$TMP/broken.map"
+# --bake-surface (bake.c): a shader with an MS_BAKE path, 3 levels into an atlas, then a map that
+# reads the tile through a data_sampler; and a material that doesn't exist (exit 1)
+mkdir -p "$TMP/bake/shaders"
+printf '#pragma usage opaque\nvoid fragment()\n{\n#ifdef MS_BAKE\n    ALBEDO = vec3(fract(POSITION.xy), float(MS_BAKE_LEVEL) / 8.0);\n#else\n    ALBEDO = vec3(0.5);\n#endif\n    ROUGHNESS = 0.5;\n}\n' > "$TMP/bake/shaders/s.glsl"
+printf 'monolith 2\nmaterial "s" shader "shaders/s.glsl" alpha_cutoff 0\nbox 0 0 0 1 1 1\n' > "$TMP/bake/bake.map"
+Run bake-surface 0      "$M" --map "$TMP/bake" --bake-surface s "$TMP/bake/tile" --bake-size 64 --bake-levels 3 --bake-face side
+printf '#pragma usage opaque\nuniform sampler2D u_tile;\nvoid fragment()\n{\n    ALBEDO = texelFetch(u_tile, ivec2(fract(POSITION.xz) * 64.0), 0).rgb;\n}\n' > "$TMP/bake/shaders/t.glsl"
+printf 'material "t" shader "shaders/t.glsl" data_sampler u_tile "tile.png" alpha_cutoff 0\nuse "t"\nbox 2 0 0 3 1 1\n' >> "$TMP/bake/bake.map"
+Run shot-data-sampler 0 "$M" --shot "$TMP/bake.png" --map "$TMP/bake"
+Run bake-no-material 1  "$M" --map "$TMP/bake" --bake-surface nope "$TMP/bake/x"
 # Manual edits (mapedit.c) on a copy; the last command fails on purpose (exit 1)
 cp -r tests/models "$TMP/edit-models"
 cat > "$TMP/edits.txt" <<'EDITS'

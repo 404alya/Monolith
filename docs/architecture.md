@@ -70,6 +70,7 @@ monolith/
 │   ├── atmosphere.c             # --ao / --bloom / --fx overrides on top of the map's environment
 │   ├── newmap.c, export.c, import.c, dirscan.c   # --new-map, --export / F9, --import, safe folder walk
 │   ├── inspect.c, dumpscene.c   # --inspect-model, --dump-scene, --dump-entities
+│   ├── bake.c                   # --bake-surface: a material's surface shader baked into a tile (R3D's G-buffer)
 │   ├── bench.c, windowemu.c     # --bench report; --bench-window stand-in
 │   ├── settings.c, settingspanel.c   # graphics settings + file; F2 panel
 │   ├── ui.c, font_outfit.h      # editor UI: embedded font, type scale, colour tokens, text / panel / key-hint helpers
@@ -109,7 +110,7 @@ The scene (loading, drawing, collision, picking, hot reload) is the **scene runt
    - **Windows**: `cmd /c start "<title>" /D <exe dir> cmd /k "<claude>" … "<prompt>"` via `_spawnvp` (the coordinator's with ` 9>"<lock>"`, tested with an exclusive `_sopen_s`); compile-tested only.
 7. **Atmosphere** (`atmosphere.c`): the environment is map data (`env` lines; defaults in `BuiltinEnvironment()`, applied by `MS_ApplyEnvironment`). Graphics settings (`MS_ApplyQuality`, incl. `--ao` / `--bloom`) go on top, then `--fx`; `main.c`'s `ApplyEnvironment()` re-applies environment → quality → `--fx` → toggle flips → `MS_ApplyRenderResolution` after every reload.
 8. **Graphics settings** (`settings.c`, `settingspanel.c`): `GfxSettings` = `MS_Quality` + window options (MSAA, vsync, fps cap, frame reuse).
-9. **New map, export, import, inspection, dumps** (`newmap.c`, `export.c`, `import.c`, `inspect.c`, `dumpscene.c`): §4.3, [command-line.md](command-line.md).
+9. **New map, export, import, inspection, dumps** (`newmap.c`, `export.c`, `import.c`, `inspect.c`, `dumpscene.c`), and tile bakes (`bake.c`): §4.3, [command-line.md](command-line.md).
 10. **Benchmark** (`bench.c`, `windowemu.c`): statistics, the Markdown report, the `--bench-window` stand-in.
 11. **Main** (`main.c`):
     - header comment, argument parsing, `InitDataPaths()`, the map's `noGpu` parse check **before any window**, and the windowless modes;

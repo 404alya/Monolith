@@ -31,7 +31,7 @@ Little-endian only, every field a fixed-width integer or an IEEE-754 `float`, ev
 | Offset | Type | Field |
 |---|---|---|
 | 0 | `u8[8]` | magic `89 4D 41 50 42 0D 0A 1A` (`\x89MAPB\r\n\x1a`: not text, and catches a file mangled by newline conversion) |
-| 8 | `u32` | binary-format version, `MS_COMPILED_VERSION` (1). Separate from the map format version `MS_FORMAT_VERSION`; bumped whenever a record or section changes |
+| 8 | `u32` | binary-format version, `MS_COMPILED_VERSION` (2; 1 had no sampler kind). Separate from the map format version `MS_FORMAT_VERSION`; bumped whenever a record or section changes |
 | 12 | `u32` | header size (64) |
 | 16 | `u32` | byte-order tag `0x01020304` (a big-endian reader sees `0x04030201` and refuses the file) |
 | 20 | `u32` | map format version of the source (1 or 2) |
@@ -54,7 +54,7 @@ Little-endian only, every field a fixed-width integer or an IEEE-754 `float`, ev
 | 3 | groups | `u32 name` | 4 |
 | 4 | materials | names and paths (`name`, `shader`, `maps[4]`: albedo, normal, orm, emission), `i32 line, shaderLine, mapLine[4]`, `u8 albedo[4], emission[4]` (RGBA), `f32 emissionEnergy, normalScale, occlusion, roughness, metalness, specular, uvScale[2], uvOffset[2], alphaCutoff`, `i32 cull, transparency, blend, priority, wrap`, `u32 inherit, unlit, instanced`, `u32 uniformFirst, uniformCount, samplerFirst, samplerCount` | 148 |
 | 5 | uniforms | `u32 name, count; f32 v[4]` | 24 |
-| 6 | samplers | `u32 name, path; i32 line` | 12 |
+| 6 | samplers | `u32 name, path; i32 line; u32 data` (1 = `data_sampler`) | 16 |
 | 7 | lights | `u32 type; f32 position[3], direction[3]; u8 color[4]; f32 energy, specular, range, falloff, inner, outer, fogEnergy; u32 shadow, clip; f32 clipMin[3], clipMax[3]; i32 ref[6]` | 116 |
 | 8 | viewpoints | `u32 name; f32 eye[3], target[3]` | 28 |
 | 9 | model files | `u32 path; i32 line` | 8 |

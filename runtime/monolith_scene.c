@@ -102,6 +102,8 @@
 //                                    with its own alias of it: its own uniforms and samplers)
 //         uniform <name> f [f f f] float / vec2 / vec3 / vec4 uniform of that shader
 //         sampler <name> "textures/x.png"   sampler2D uniform of that shader
+//         data_sampler <name> "textures/x.png"   the same for a texture of data, not colour (e.g.
+//                                    a baked tile read with texelFetch): linear, nearest, no mipmaps
 //         albedo R G B [A]  albedo_map "p"  normal_map "p"  normal_scale f  orm_map "p"
 //         occlusion f  roughness f  metalness f  specular f
 //         emission R G B  emission_energy f  emission_map "p"
@@ -234,7 +236,7 @@
 // only while a map loads; drawing, picking and collision never allocate.
 
 typedef struct { char *name; int count; float v[4]; } MatUniform;
-typedef struct { char *name; char *path; int line; } MatSampler;
+typedef struct { char *name; char *path; int line; bool data; } MatSampler;   // data: data_sampler (linear, nearest, no mipmaps)
 
 enum { MAP_ALBEDO, MAP_NORMAL, MAP_ORM, MAP_EMISSION, MAP_COUNT };
 enum { INHERIT_ALBEDO = 1, INHERIT_NORMAL = 2, INHERIT_ORM = 4, INHERIT_EMISSION = 8 };
@@ -283,7 +285,7 @@ typedef struct {
     BoundingBox fogRegion;
 } EnvDef;
 
-typedef struct { char *path; bool isColor; int wrap; Texture2D tex; } TexEntry;
+typedef struct { char *path; bool isColor, data; int wrap; Texture2D tex; } TexEntry;
 
 // A surface shader file of the map, compiled once: every material that uses it draws with an
 // alias of it (its own uniforms and samplers, the shared program and shader variants)
@@ -435,6 +437,9 @@ typedef struct {
     int modelGroupCount;
     DrawRange *modelRanges;
     int modelRangeCount, modelRangeCap;
+#ifdef MONOLITH_EDITOR
+    const char *shaderDefines, *shaderDefinesFile;  // MS_LoadOptions (not owned)
+#endif
 } SceneData;
 
 typedef struct {
@@ -1769,8 +1774,8 @@ static bool ParseMaterial(Parser *P, Token *tok, int n)
             for (int i = 0; i < nv; i++)
                 if (!NumF(P, tok[t + 2 + i], &u->v[i])) return false;
             used = 1 + nv;
-        } else if (strcmp(k, "sampler") == 0) {
-            if (t + 2 >= n || v[0].quoted) return Fail(P, "sampler takes a name and a path: sampler u_tex \"textures/x.png\"", NULL);
+        } else if (strcmp(k, "sampler") == 0 || strcmp(k, "data_sampler") == 0) {
+            if (t + 2 >= n || v[0].quoted) return Fail(P, "sampler / data_sampler take a name and a path: sampler u_tex \"textures/x.png\"", NULL);
             if (!PackagePath(P, v[1], full, sizeof(full))) return false;
             MatSampler *s = NULL;
             for (int i = 0; i < D->samplerCount; i++)
@@ -1784,6 +1789,7 @@ static bool ParseMaterial(Parser *P, Token *tok, int n)
             free(s->path);
             s->path = copy;
             s->line = P->line;
+            s->data = k[0] == 'd';
             used = 2;
         } else if (strcmp(k, "albedo") == 0) {
             if (!ColorArgs(P, v, nv, &m->albedo.color)) return false;
@@ -2561,7 +2567,7 @@ static bool ParseText(Parser *P, const char *text, int size)
 // fixed-width fields, every record a multiple of 4 bytes, sections at multiples of 8. The
 // reader checks the whole file before it uses any of it.
 
-#define CM_VERSION          1           // MS_COMPILED_VERSION: bump on any change to a record or section
+#define CM_VERSION          2           // MS_COMPILED_VERSION: bump on any change to a record or section
 #define CM_BYTE_ORDER       0x01020304u
 #define CM_NONE             0xFFFFFFFFu // a string field without a string
 #define CM_MAX_ENV          4096        // env records (the key tables have ~120 keys)
@@ -2586,7 +2592,7 @@ typedef struct {
     uint32_t uniformFirst, uniformCount, samplerFirst, samplerCount;
 } CmMaterial;
 typedef struct { uint32_t name, count; float v[4]; } CmUniform;
-typedef struct { uint32_t name, path; int32_t line; } CmSampler;
+typedef struct { uint32_t name, path; int32_t line; uint32_t data; } CmSampler;   // data: 1 = data_sampler
 typedef struct {
     uint32_t type;
     float position[3], direction[3];
@@ -2624,7 +2630,7 @@ _Static_assert(sizeof(CmMaterial) == 148 && offsetof(CmMaterial, line) == 24 && 
                offsetof(CmMaterial, emissionEnergy) == 56 && offsetof(CmMaterial, cull) == 100 &&
                offsetof(CmMaterial, inherit) == 120 && offsetof(CmMaterial, uniformFirst) == 132, "CmMaterial");
 _Static_assert(sizeof(CmUniform) == 24 && offsetof(CmUniform, v) == 8, "CmUniform");
-_Static_assert(sizeof(CmSampler) == 12, "CmSampler");
+_Static_assert(sizeof(CmSampler) == 16, "CmSampler");
 _Static_assert(sizeof(CmLight) == 116 && offsetof(CmLight, color) == 28 && offsetof(CmLight, energy) == 32 &&
                offsetof(CmLight, shadow) == 60 && offsetof(CmLight, clipMin) == 68 && offsetof(CmLight, ref) == 92, "CmLight");
 _Static_assert(sizeof(CmViewpoint) == 28, "CmViewpoint");
@@ -2875,8 +2881,9 @@ static bool CmReadMaterials(CmReader *R)
             CmRecord(R, CM_SAMPLERS, c.samplerFirst + k, &sm);
             MatSampler *S = &D->samplers[D->samplerCount++];
             if (!CmName(R, sm.name, "sampler", &S->name) || !CmPath(R, sm.path, false, "sampler", &S->path)) return false;
-            if (sm.line < 0) return CmFail(R, "material \"%s\": sampler line out of range", name);
+            if (sm.line < 0 || sm.data > 1) return CmFail(R, "material \"%s\": sampler line or kind out of range", name);
             S->line = sm.line;
+            S->data = sm.data == 1;
         }
     }
     if (uniformsUsed != R->sec[CM_UNIFORMS].count || samplersUsed != R->sec[CM_SAMPLERS].count)
@@ -3350,7 +3357,7 @@ static unsigned char *WriteCompiled(const SceneData *d, const char *srcName, uns
             CmPut(&W, CM_UNIFORMS, &u);
         }
         for (int k = 0; k < D->samplerCount; k++) {
-            CmSampler sm = { CmStr(&W, D->samplers[k].name), CmStr(&W, D->samplers[k].path), D->samplers[k].line };
+            CmSampler sm = { CmStr(&W, D->samplers[k].name), CmStr(&W, D->samplers[k].path), D->samplers[k].line, D->samplers[k].data };
             CmPut(&W, CM_SAMPLERS, &sm);
         }
     }
@@ -4139,12 +4146,13 @@ static bool ParseScene(SceneData *d, const char *text, int size, char *err, int 
 }
 #endif
 
-static Texture2D GetTexture(SceneData *d, const char *rel, bool isColor, int wrap, int line, char *err, int errSize)
+static Texture2D GetTexture(SceneData *d, const char *rel, bool isColor, bool data, int wrap, int line, char *err, int errSize)
 {
     char full[MS_PATH_MAX + MS_PATH_MAX];
     snprintf(full, sizeof(full), "%s%s", d->root, rel);
     for (int i = 0; i < d->textureCount; i++)
-        if (strcmp(d->textures[i].path, full) == 0 && d->textures[i].isColor == isColor && d->textures[i].wrap == wrap) return d->textures[i].tex;
+        if (strcmp(d->textures[i].path, full) == 0 && d->textures[i].isColor == isColor && d->textures[i].data == data &&
+            d->textures[i].wrap == wrap) return d->textures[i].tex;
     char *path = MS_StrDup(full);
     if (!path || !MS_RESERVE(d->textures, d->textureCap, d->textureCount + 1)) {
         free(path);
@@ -4153,9 +4161,11 @@ static Texture2D GetTexture(SceneData *d, const char *rel, bool isColor, int wra
     }
     // R3D's default wrap is clamp, which would make uv_scale > 1 useless; map materials repeat
     // unless `wrap clamp|mirror`. Filter: trilinear with generated mipmaps (R3D's default).
+    // A data_sampler's texture holds data, not colour (e.g. a tile baked by the editor's
+    // --bake-surface, read with texelFetch): linear (no sRGB decode), nearest, no mipmaps.
     static const TextureWrap WRAPS[] = { TEXTURE_WRAP_REPEAT, TEXTURE_WRAP_CLAMP, TEXTURE_WRAP_MIRROR_REPEAT };
     double t0 = GetTime();
-    Texture2D tex = R3D_LoadTextureEx(full, WRAPS[wrap % 3], TEXTURE_FILTER_TRILINEAR, isColor);
+    Texture2D tex = R3D_LoadTextureEx(full, WRAPS[wrap % 3], data ? TEXTURE_FILTER_POINT : TEXTURE_FILTER_TRILINEAR, isColor && !data);
     d->times.textures += (GetTime() - t0) * 1000.0;
     if (tex.id == 0) {
         free(path);
@@ -4165,6 +4175,7 @@ static Texture2D GetTexture(SceneData *d, const char *rel, bool isColor, int wra
     TexEntry *e = &d->textures[d->textureCount++];
     e->path = path;
     e->isColor = isColor;
+    e->data = data;
     e->wrap = wrap;
     e->tex = tex;
     return tex;
@@ -5088,6 +5099,23 @@ static ShaderFile *GetShaderFile(SceneData *d, const MS_Material *M, const MatDe
     char full[MS_PATH_MAX + MS_PATH_MAX];
     snprintf(full, sizeof(full), "%s%s", d->root, M->shader);
     double t0 = GetTime();
+#ifdef MONOLITH_EDITOR
+    if (d->shaderDefines && (!d->shaderDefinesFile || strcmp(d->shaderDefinesFile, M->shader) == 0)) {
+        // The defines go first, so the source's #ifdef blocks see them (R3D copies a
+        // #define like any other global code)
+        char *text = LoadFileText(full);
+        size_t a = strlen(d->shaderDefines), b = text ? strlen(text) : 0;
+        char *code = text ? malloc(a + b + 2) : NULL;
+        if (code) {
+            memcpy(code, d->shaderDefines, a);
+            code[a] = '\n';
+            memcpy(code + a + 1, text, b + 1);
+        }
+        *f = (ShaderFile){ .rel = M->shader, .shader = code ? R3D_LoadSurfaceShaderFromMemory(code) : NULL };
+        free(code);
+        UnloadFileText(text);
+    } else
+#endif
     *f = (ShaderFile){ .rel = M->shader, .shader = R3D_LoadSurfaceShader(full) };
     d->times.shaderLoads++;
     if (!f->shader) {
@@ -5138,7 +5166,7 @@ static bool UploadGpu(SceneData *d, char *err, int errSize)
             for (int u = 0; u < D->uniformCount; u++)
                 R3D_SetSurfaceShaderUniform(m->shader, D->uniforms[u].name, D->uniforms[u].v);
             for (int s = 0; s < D->samplerCount; s++) {
-                Texture2D tex = GetTexture(d, D->samplers[s].path, true, D->wrap, D->samplers[s].line, err, errSize);
+                Texture2D tex = GetTexture(d, D->samplers[s].path, true, D->samplers[s].data, D->wrap, D->samplers[s].line, err, errSize);
                 if (!tex.id) { FreeGpu(d); return false; }
                 R3D_SetSurfaceShaderSampler(m->shader, D->samplers[s].name, tex);
             }
@@ -5147,7 +5175,7 @@ static bool UploadGpu(SceneData *d, char *err, int errSize)
         Texture2D *slot[MAP_COUNT] = { &m->albedo.texture, &m->normal.texture, &m->orm.texture, &m->emission.texture };
         for (int k = 0; k < MAP_COUNT; k++) {
             if (!D->maps[k]) continue;
-            *slot[k] = GetTexture(d, D->maps[k], IS_COLOR[k], D->wrap, D->mapLine[k], err, errSize);
+            *slot[k] = GetTexture(d, D->maps[k], IS_COLOR[k], false, D->wrap, D->mapLine[k], err, errSize);
             if (!slot[k]->id) { FreeGpu(d); return false; }
         }
     }
@@ -5357,6 +5385,10 @@ static bool FinishLoad(SceneData *d, const MS_LoadOptions *opt, bool gpu, char *
         return false;
     }
     bool ok;
+#ifdef MONOLITH_EDITOR
+    d->shaderDefines = opt->shaderDefines;
+    d->shaderDefinesFile = opt->shaderDefinesFile;
+#endif
     double t0 = GetTime();
     if (gpu) {
         d->gpu = true;                  // (so FreeData unloads what LoadModelFiles loaded)

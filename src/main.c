@@ -245,6 +245,16 @@
 //                  the raylib + R3D project's scene into it (import.c, the import-request
 //                  skill); no window. Same queue / coordinator as edit requests
 //
+//   --bake-surface <material> <out-prefix>   bake a material of the map (--map or the default) into
+//                  a tile and exit (hidden window; src/bake.c): one square quad of it rendered with an
+//                  orthographic camera through R3D's albedo and ORM outputs into <out-prefix>.png
+//                  (RGBA: ALBEDO, ROUGHNESS in A). --bake-face top|side (default top: the quad at y 0,
+//                  u = x, v = z; side: z 0, u = x, v = y), --bake-size <px> (default 2048),
+//                  --bake-texels <per m> (default 24: the material's pixel grid; the tile repeats
+//                  every size / texels m), --bake-levels <n> (1..6, default 1: levels 0..n-1 of
+//                  the pixel grid in one atlas, layout in bake.c). The material's shader gets
+//                  #define MS_BAKE 1, MS_BAKE_FACE, MS_BAKE_LEVEL, MS_BAKE_PERIOD, MS_BAKE_TEXELS
+//                  in front of its source; a map reads the tile with data_sampler
 //   --dump-entities <file>   load the map (no window), write every entity (box, model, light)
 //                  with its stable id, source line, copy and transform (src/dumpscene.c) and exit
 //   --compile <out>   compile the map's text (--map or the default) into the compiled map <out>
@@ -342,6 +352,7 @@
 #include "export.h"
 #include "import.h"
 #include "inspect.h"
+#include "bake.h"
 #include "dumpscene.h"
 #include "mapedit.h"
 #include "editmode.h"
@@ -860,6 +871,7 @@ static int Run(int argc, char **argv)
 #define NUM(k, lo, hi, dst) do { double v_; if (!ArgNumber(argv[i], argv[i + (k)], (lo), (hi), &v_)) return 1; (dst) = v_; } while (0)
 #define INT(k, dst) do { long v_; if (!ArgInt(argv[i], argv[i + (k)], &v_)) return 1; (dst) = (int)v_; } while (0)
     const char *inspectPath = NULL;     // --inspect-model (runs after every flag is checked)
+    BakeArgs bake = { .size = 2048, .texels = 24.0f, .face = BAKE_FACE_TOP, .levels = 1 };   // --bake-surface (bake.c)
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         if (strcmp(a, "--shot") == 0) { NEED(1); shotPath = argv[++i]; }
@@ -949,6 +961,28 @@ static int Run(int argc, char **argv)
         else if (strcmp(a, "--dump-entities") == 0) { NEED(1); dumpEntitiesPath = argv[++i]; }
         else if (strcmp(a, "--apply-edits") == 0) { NEED(1); applyEditsPath = argv[++i]; }
         else if (strcmp(a, "--inspect-model") == 0) { NEED(1); inspectPath = argv[++i]; }
+        else if (strcmp(a, "--bake-surface") == 0) { NEED(2); bake.material = argv[i + 1]; bake.outPrefix = argv[i + 2]; i += 2; }
+        else if (strcmp(a, "--bake-size") == 0 || strcmp(a, "--bake-levels") == 0) {
+            NEED(1);
+            bool size = a[7] == 's';
+            int *dst = size ? &bake.size : &bake.levels, lo = size ? 16 : 1, hi = size ? 8192 : 6;
+            INT(1, *dst);
+            if (*dst < lo || *dst > hi) {
+                fprintf(stderr, "monolith: %s %d is out of range (%d..%d)\n", a, *dst, lo, hi);
+                return 1;
+            }
+            i++;
+        }
+        else if (strcmp(a, "--bake-texels") == 0) { NEED(1); NUM(1, 0.01, 10000, bake.texels); i++; }
+        else if (strcmp(a, "--bake-face") == 0) {
+            NEED(1);
+            const char *f = argv[++i];
+            if (strcmp(f, "top") != 0 && strcmp(f, "side") != 0) {
+                fprintf(stderr, "monolith: unknown --bake-face '%s' (top, side)\n", f);
+                return 1;
+            }
+            bake.face = f[0] == 't' ? BAKE_FACE_TOP : BAKE_FACE_SIDE;
+        }
         else if (strcmp(a, "--reload-test") == 0) { NEED(1); reloadTestPath = argv[++i]; }
         else if (strcmp(a, "--pick") == 0) pickFlag = true;
         else if (strcmp(a, "--pick-at") == 0) {
@@ -1083,11 +1117,11 @@ static int Run(int argc, char **argv)
     // Every mode below that isn't one of these opens the visible game window. An agent's shell
     // may not (a mistyped or forgotten flag would put the game on the developer's screen).
     bool windowless = shotPath || (bench && headless) || dumpPath || dumpScenePath || dumpEntitiesPath || applyEditsPath ||
-                      exportDir || compilePath || classifyText;
+                      exportDir || compilePath || classifyText || bake.material;
     if (!windowless && AgentShell()) {
         fprintf(stderr, "monolith: refusing to open the game window from an AI agent's shell (CLAUDECODE / AI_AGENT is set).\n"
                         "  Use --shot, --dump-boxes, --dump-scene(-diff), --dump-entities, --apply-edits, --inspect-model, --new-map,\n"
-                        "  --export, --compile, --classify or --bench --headless; a person who wants the window from this shell sets\n"
+                        "  --export, --compile, --classify, --bake-surface or --bench --headless; a person who wants the window from this shell sets\n"
                         "  MONOLITH_ALLOW_WINDOW=1.\n");
         return 1;
     }
@@ -1100,7 +1134,7 @@ static int Run(int argc, char **argv)
     // --quality, then the single flags: they apply to this run and are never saved.
     // Last --settings-set: a change "as if made in the panel" (applies, and is saved).
     bool automated = shotPath || bench || dumpPath || dumpScenePath || dumpEntitiesPath || applyEditsPath || exportDir ||
-                     compilePath || classifyText;
+                     compilePath || classifyText || bake.material;
     const char *settingsFile = noSettings ? NULL : settingsPath ? settingsPath : automated ? NULL : GfxDefaultPath();
     GfxSettings gfx = GfxDefaults();
     if (settingsFile) {
@@ -1145,6 +1179,10 @@ static int Run(int argc, char **argv)
         return 1;
     }
     if (!mapPath) mapPath = defaultMap;
+    if (bake.material) {
+        bake.mapPath = mapPath;
+        return BakeSurface(&bake);
+    }
     if (compilePath) {
         char err[512];
         bool ok = MS_Compile(mapPath, compilePath, err, sizeof(err));

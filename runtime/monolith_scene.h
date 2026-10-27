@@ -247,6 +247,12 @@ typedef struct {
                             // origin bottom/center shifts are not final.
     int shadowSizeOverride; // > 0: overrides env shadow.size
     float shadowRangeOverride;  // > 0: overrides sun.range
+#ifdef MONOLITH_EDITOR
+    const char *shaderDefines;  // editor: put before the source of a surface shader (e.g. the
+                                // "#define MS_BAKE ..." lines of --bake-surface); NULL = none
+    const char *shaderDefinesFile;  // only this shader file (package-relative, as the map names
+                                // it); NULL = every surface shader
+#endif
 } MS_LoadOptions;
 
 // Loads a compiled map (<name>.mapb: the map's text compiled by monolith, read without parsing) or

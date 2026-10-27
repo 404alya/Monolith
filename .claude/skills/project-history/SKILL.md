@@ -112,6 +112,17 @@ The candidates of the profiling round, each kept only if measured to help and pi
 - **A PNG writer of our own** (`src/png.c`, zlib level 1) instead of stb's compression level: stb never goes below its level 5 and searches 5 filters per row, so its best was −30 %; zlib level 1 on one fixed filter is −75 % and gives smaller files. It uses assimp's zlib, which every build links already.
 - **The R3D sort-key cache was dropped** although pixel-identical: −0.01 ms per frame in the profile and nothing measurable in benches. The bar for an R3D patch is a measured gain of ~0.02 ms or more.
 
+## Baked surface tiles (2026-10-27)
+
+The concrete shader was 66% of the geometry pass (`measurements.md`, "nsys: the geometry pass and the concrete shader"), and the pre-pass had already removed overdraw, so only cheaper shading per pixel could help. The choices:
+- **A game flag that renders through R3D** (`--bake-surface`, `src/bake.c`), not a CPU reimplementation of the GLSL (it would drift from the shader; numpy isn't installed either): the tile comes from the same file the game compiles, via R3D's existing G-buffer outputs (`R3D_OUTPUT_ALBEDO` / `ORM`), so R3D needed no patch. The defines go only to the baked material's shader, because others sit at R3D's 16 KB source limit.
+- **One shader file with a `MS_BAKE` path**, not a separate bake shader: the procedural code and the tiled code live together, so a change to the stone is made in one place and re-baked.
+- **`data_sampler`**, a new material key, because samplers load as sRGB colour (trilinear, mipmaps): packed data channels need the raw bytes. The compiled format went to version 2 for it.
+- **Every pixel-grid level baked (an atlas), not just the finest:** fetching level 0 at a coarse texel turned the 1-texel veins and cracks into dotted lines, which the grid design forbids.
+- **Periodic noise by rounding each lattice to whole cells per period** (the veins' rotated lattice: wrapped modulo two lattice vectors), not cross-faded edges.
+- **A baked slice chosen by measurement:** the first slice had 1.9× the shader's average vein area on side faces; the slice 97 m out matches the average cover of veins, cracks and lichen over many planes.
+- **Kept procedural:** the per-plane hash, the slow tone and hue noises (continuous across box corners, they hide the tile's repetition) and the height terms (ground grime, lichen below 3 m).
+
 ## The instruction files
 
 Superseded layouts, for reading old bundles, commits and notes; the current layout is `CLAUDE.md` + `.claude/skills/` + `docs/`.
