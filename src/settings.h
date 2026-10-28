@@ -1,6 +1,7 @@
 // Graphics settings of the editor: the runtime's MS_Quality (presets, what the scene renders)
-// plus the window-only parts (vsync, fps cap, frame reuse, window MSAA), the settings file
-// and the row table the in-game panel (settingspanel.c) and the file share.
+// plus the window-only parts (vsync, fps cap, frame reuse, window MSAA) and the editor's own
+// settings (the edit save mode), the settings file and the row table the in-game panel
+// (settingspanel.c) and the file share.
 #ifndef MONOLITH_SETTINGS_H
 #define MONOLITH_SETTINGS_H
 
@@ -13,6 +14,8 @@ typedef struct {
     bool vsync;
     int fpsCap;                 // 0 = uncapped, -1 = the monitor's refresh rate, else frames per second
     bool frameReuse;            // interactive frame reuse (main.c "Frame reuse")
+    // Editor (not graphics, but the same file and panel; never part of MS_Quality or the runtime)
+    int editSave;               // 0 manual (CTRL+S writes the map), 1 auto (every edit is written at once)
 } GfxSettings;
 
 // Ultra (= the map exactly), no vsync, uncapped, frame reuse on, single-sampled window:
@@ -28,6 +31,10 @@ const char *GfxDefaultPath(void);
 // (logged), the rest still loads.
 bool GfxLoad(GfxSettings *s, const char *path, char *err, int errSize);
 bool GfxSave(const GfxSettings *s, const char *path);       // creates the folder
+// Where the working copy of map `mapPath` goes when the game closes with unsaved edits: the
+// settings file's folder (GfxDefaultPath), unsaved/<map name>-<YYYYMMDD-HHMMSS>.map (the folder is
+// created). False when it can't be made.
+bool GfxUnsavedPath(const char *mapPath, char *out, int outSize);
 // One "key=value" (the file's keys), e.g. for --settings-set. False on unknown key / bad value
 bool GfxSetKey(GfxSettings *s, const char *keyValue);
 const char *GfxKeyHelp(void);
@@ -37,7 +44,7 @@ const char *GfxKeyHelp(void);
 // ======================================================================================
 
 typedef enum { GFX_GROUP_DISPLAY, GFX_GROUP_SHADOWS, GFX_GROUP_AO, GFX_GROUP_FOG, GFX_GROUP_POST,
-               GFX_GROUP_PERF, GFX_GROUP_COUNT } GfxGroup;
+               GFX_GROUP_PERF, GFX_GROUP_EDITOR, GFX_GROUP_COUNT } GfxGroup;
 
 typedef enum {
     GFX_ROW_VALUE = 0,          // a setting

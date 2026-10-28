@@ -19,8 +19,17 @@
 # (textured ground, many restyled models), --reload-test both ways
 # and into a broken map, a broken map on the command line, --bake-surface (and a data_sampler reading
 # its tile), --shot-hud with --select / --region / --volume,
-# manual edits (--apply-edits on a copy of tests/models: move, turn, split, duplicate, add, id, undo, redo and
-# a failing command; --dump-entities; the edit-mode HUD),
+# the render inspector (outline modes, labels, its panel, buffer views, the draw filter with a live
+# edit, a preview and a reload), manual edits (--apply-edits on a copy of tests/models: move, turn, split, duplicate, add, id, undo, redo and
+# a failing command; `id` / `id remove` with a failing one; --dump-entities; the edit-mode HUD), the id panel
+# (--id-panel unfiltered, filtered, and with live id edits and the number field), live edits (--edit-script with --shot and
+# --dump-entities: moves, undo / redo, duplicate, add, a preview, save, and a rebase after `disk`
+# with a failing step; with the fog cache and the AO volume; refused without --shot / a dump),
+# the transform ops (turn with pitch / roll / local / pivot, scale, size: --apply-edits with a failing
+# command, --edit-script with turn / scale previews) and the transform modal (--edit-modal: open with
+# the HUD, committed, cancelled; --input-script: mouse and keys through the input shim, a no-op turn),
+# the model picker (--model-picker: thumbnails of the scene's files and of one loaded for the render,
+# a filter, freed and rendered again across a reload and a renderer restart, ENTER and ESC),
 # --submit (tools/stub-terminal.sh instead of a terminal, MONOLITH_WORKSPACE=) on both maps, in
 # coordinator mode (queue + coordinator start, a cancel with no coordinator) and per-request mode,
 # --export, --compile and compiled maps (dumps, a shot with a reload, a damaged file, a stale one
@@ -208,9 +217,164 @@ select line 9999
 remove
 EDITS
 Run apply-edits 1       "$M" --apply-edits "$TMP/edits.txt" --map "$TMP/edit-models"
+# Live edits (--edit-script: the working copy, MS_EditSetText, the caches redrawn in part, the
+# preview, save, and the rebase after an outside change with a step that no longer applies)
+cp -r tests/models "$TMP/live-models"
+grep -v '^repeat 3 4 0 0 model "models/tree_oak.glb"' tests/models/models.map > "$TMP/live-changed.map"
+printf 'group "added on disk"\nid 1 box 8 0 8 9 1 9\n' >> "$TMP/live-changed.map"
+cat > "$TMP/live.txt" <<EDITS
+select line 30 copy 1
+also line 36 copy 1
+also line 45
+preview move 0 1 0
+preview move 1 1 0
+preview end
+preview move 0.5 0 0
+move 0.5 0 0
+undo
+redo
+select line 34
+duplicate 0 0 3
+turn 90
+select line 26
+add "models/rock_largeA.glb" 2 0 5
+save
+select line 44
+move 0 0 1
+select id 1
+move 0 1 0
+select line 49
+remove
+print
+disk $TMP/live-changed.map
+print
+select line 30
+EDITS
+Run edit-script-shot 0  "$M" --shot "$TMP/live.png" --view 1 --map "$TMP/live-models" --edit-script "$TMP/live.txt" \
+                            --fog-cache 1 2 --ao-volume 0.5 0.6 --shot-hud --edit-mode
+cp -r tests/models "$TMP/live-models2"
+Run edit-script-dump 0  "$M" --dump-entities "$TMP/live-entities.txt" --map "$TMP/live-models2" --edit-script "$TMP/live.txt"
+Run edit-script-alone 1 "$M" --map "$TMP/live-models2" --edit-script "$TMP/live.txt"
+# A step undone past the save point, then a new edit (the undone step moves to lost[]), then a
+# change on disk: the lost step is reported failed
+cp -r tests/models "$TMP/lost-models"
+{ cat tests/models/models.map; echo "# changed on disk"; } > "$TMP/lost-changed.map"
+printf 'select line 40\nturn 0 25 15\nsave\nundo\nselect line 30\nduplicate 0 0 -3\nprint\ndisk %s\nprint\n' \
+       "$TMP/lost-changed.map" > "$TMP/lost.txt"
+Run edit-script-lost 0  "$M" --dump-boxes "$TMP/lost-boxes.txt" --map "$TMP/lost-models" --edit-script "$TMP/lost.txt"
 Run dump-entities 0     "$M" --dump-entities "$TMP/entities.txt" --map tests/models
 Run edit-mode-hud 0     "$M" --shot "$TMP/edit.png" --view 1 --map tests/models --shot-hud --edit-mode --select 36
 Run edit-id-panel 0     "$M" --shot "$TMP/edit-id.png" --view 1 --map tests/models --shot-hud --edit-mode --select 30 --edit-id 57
+# `id` and `id remove` (the last command fails on purpose: line 30 has no id any more); the id panel
+# (F5) open on the default map, filtered, and after live edits that give and remove ids (its rows
+# rebuilt) with the edit mode's number field open beside it
+cp -r tests/models "$TMP/id-models"
+printf 'select line 30\nid\nalso line 36\nid\nid remove\nundo\nredo\nselect line 30\nid remove\n' > "$TMP/id.txt"
+Run apply-id-remove 1   "$M" --apply-edits "$TMP/id.txt" --map "$TMP/id-models"
+Run id-panel 0          "$M" --shot "$TMP/idpanel.png" --view 1 --shot-hud --id-panel
+Run keys-panel 0        "$M" --shot "$TMP/keys.png" --view 1 --shot-hud --keys-panel grab
+Run id-panel-filter 0   "$M" --shot "$TMP/idpanel2.png" --view 1 --shot-hud --id-panel block
+cp -r tests/models "$TMP/id-models2"
+printf 'select line 30\nid 5\nselect line 36\nalso line 40\nid\nselect id 5\nid remove\n' > "$TMP/id-live.txt"
+Run id-panel-live 0     "$M" --shot "$TMP/idpanel3.png" --view 1 --map "$TMP/id-models2" --shot-hud --id-panel tree \
+                            --edit-script "$TMP/id-live.txt" --edit-mode --select 45 --edit-id 9
+# The transform ops (mapedit.c) on a copy, the last command fails on purpose (a light can't be
+# scaled); live with turn / scale previews; the transform modal (transform.c) open, committed, cancelled
+cp -r tests/models "$TMP/xform-models"
+cat > "$TMP/xform.txt" <<'EDITS'
+select line 41
+turn 0 30 0
+scale 1.25
+select line 40
+turn 0 0 15 local
+turn 10 20 30 pivot 1 0 1
+scale 1 2 1
+select line 36 copy 1
+turn 37.5 pivot 0 0 -2
+select line 32
+size 0 0.5 3
+turn 90 pivot 0 0 -8
+select line 30 copy 2
+scale 1.25 1 2
+select line 30
+turn -90 pivot 0 0 -8
+undo
+redo
+select line 49
+scale 2
+EDITS
+Run apply-xform 1       "$M" --apply-edits "$TMP/xform.txt" --map "$TMP/xform-models"
+cp -r tests/models "$TMP/xform-live"
+{ printf 'select line 30\nalso line 36\nalso line 40\nalso line 45\npreview turn 90 pivot 0 0 0\npreview scale 1.5 pivot 0 0 0\npreview end\n'
+  head -n 18 "$TMP/xform.txt"; } > "$TMP/xform-live.txt"
+Run edit-script-xform 0 "$M" --shot "$TMP/xform.png" --view 1 --map "$TMP/xform-live" --edit-script "$TMP/xform-live.txt" \
+                            --fog-cache 1 2 --ao-volume 0.5 0.6
+Run edit-modal-hud 0    "$M" --shot "$TMP/modal.png" --view 1 --map tests/models --shot-hud --select 30 --select 36 --select 40 \
+                            --edit-modal "r xx 30"
+cp -r tests/models "$TMP/modal-models"
+Run edit-modal-commit 0 "$M" --shot "$TMP/modal-commit.png" --view 1 --map "$TMP/modal-models" --select 30 --select 40 \
+                            --edit-modal "s Y 1.5 commit"
+Run edit-modal-cancel 0 "$M" --shot "$TMP/modal-cancel.png" --view 1 --map tests/models --select 30 --select 40 --select 45 \
+                            --edit-modal "g x 1.25 cancel"
+# The modal through the input shim (--input-script): a click selects a repeat copy, R / G / S with
+# the mouse, a lock, typed digits, LMB / ENTER / RMB, the cursor hidden and shown again, CTRL+S
+cp -r tests/models "$TMP/input-models"
+cat > "$TMP/input.txt" <<'INPUT'
+at 1180 440
+click left
+wait 2
+press R
+move 140 0 10
+click left
+wait 2
+press G
+press X
+move 60 0 5
+press ENTER
+press S
+move 80 0 5
+click right
+press R
+press Y
+press 4
+press 5
+press ENTER
+wait 2
+down CTRL
+press S
+up CTRL
+INPUT
+Run input-script 0      "$M" --shot "$TMP/input.png" --view 2 --map "$TMP/input-models" --shot-hud --edit-mode --frame-reuse \
+                            --input-script "$TMP/input.txt"
+printf 'select line 32\nsize 2 0 2\n' > "$TMP/input-square.txt"
+cp -r tests/models "$TMP/input-square"
+Run input-square-prep 0 "$M" --apply-edits "$TMP/input-square.txt" --map "$TMP/input-square"
+printf 'at 860 352\npress R\nmove 200 0 20\nclick left\n' > "$TMP/input-noop.txt"
+Run input-noop 0        "$M" --shot "$TMP/input-noop.png" --view 1 --map "$TMP/input-square" --shot-hud --select 32 --edit-mode \
+                            --input-script "$TMP/input-noop.txt"
+printf 'press NOKEY\n' > "$TMP/input-bad.txt"
+Run input-bad 1         "$M" --shot "$TMP/input-bad.png" --input-script "$TMP/input-bad.txt"
+# The render inspector: outline modes, labels, its panel, buffer views, the draw filter (also
+# with a live edit, a preview and a reload while it hides something)
+Run inspect-material 0  "$M" --shot "$TMP/insp1.png" --view 2 --shot-hud --inspect material --output-mode normal
+Run inspect-shader-panel 0 "$M" --shot "$TMP/insp2.png" --view 1 --map tests/models --shot-hud --inspect shader \
+                            --inspector-panel --inspect-hide leaves --output-mode ssao
+Run inspect-draw-isolate 0 "$M" --shot "$TMP/insp3.png" --view 1 --map maps/pine_forest --inspect draw --inspect-isolate needles
+cp -r tests/models "$TMP/insp-models"
+Run inspect-filter-edit 0 "$M" --shot "$TMP/insp4.png" --view 1 --map "$TMP/insp-models" --edit-script "$TMP/live.txt" \
+                            --inspect material --inspect-hide bark --fog-cache 1 2
+Run inspect-filter-reload 0 "$M" --shot "$TMP/insp6.png" --view 1 --map tests/models --inspect-hide rock --reload-test maps/pine_forest
+Run inspect-bad-mode 1  "$M" --shot "$TMP/insp5.png" --inspect nothing
+# The model picker: thumbnails (the scene's files and one loaded for the render), filtered, freed and
+# rendered again by a reload, a renderer restart, ENTER (a live edit) and ESC
+Run picker-hud 0        "$M" --shot "$TMP/pick1.png" --view 1 --map maps/pine_forest --shot-hud --model-picker
+Run picker-loaded 0     "$M" --shot "$TMP/pick2.png" --view 2 --shot-hud --model-picker sedan
+Run picker-reload 0     "$M" --shot "$TMP/pick3.png" --view 1 --map tests/models --model-picker --reload-test tests/models
+Run picker-restart 0    "$M" --shot "$TMP/pick4.png" --view 1 --map tests/models --model-picker rock --settings-change shadow_size=2048
+cp -r tests/models "$TMP/pick-models"
+Run picker-enter 0      "$M" --shot "$TMP/pick5.png" --view 1 --map "$TMP/pick-models" --model-picker oak --model-picker-key enter
+Run picker-close 0      "$M" --shot "$TMP/pick6.png" --view 1 --map tests/models --model-picker --model-picker-key close
+Run picker-bad-key 1    "$M" --shot "$TMP/pick7.png" --model-picker --model-picker-key maybe
 Run shot-hud 0          "$M" --shot "$TMP/hud.png" --view 2 --shot-hud --select 192 --select 198 \
                             --region 100 100 300 200 --region 800 300 200 200 --volume -11 0 -34 -7 20 34 \
                             --volume 3 4 12 -4 0 4 --type 'make it\ntaller' --pick --pick-at 10 10 --pick-at 1590 890

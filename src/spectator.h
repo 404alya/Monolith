@@ -28,6 +28,8 @@ typedef struct {
     float messageTime;
     bool holdMove;          // WASD don't move the camera (set per frame: edit mode with CTRL down,
                             // where CTRL+D duplicates)
+    bool rmbFly;            // edit mode (set per frame): mouse look, WASD / E / Q / SPACE and the wheel
+                            // only while RMB is held; G (move the player here) is the mode's grab
 } Spectator;
 
 void LookAngles(Vector3 eye, Vector3 target, float *yaw, float *pitch);

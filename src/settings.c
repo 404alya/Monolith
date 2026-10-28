@@ -6,6 +6,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <math.h>
+#include <time.h>
 
 GfxSettings GfxDefaults(void)
 {
@@ -17,6 +18,7 @@ GfxSettings GfxDefaults(void)
     s.vsync = false;
     s.fpsCap = 0;
     s.frameReuse = true;
+    s.editSave = 0;
     return s;
 }
 
@@ -145,6 +147,9 @@ static const Row ROWS[] = {
       V_BOOL, OFF(vsync) },
     { GFX_GROUP_PERF, 0, "Depth pre-pass", "depth_prepass", "same image; off only for A/B tests (slower)",
       V_BOOL, OFF(q.depthPrepass) },
+    // --- Editor
+    { GFX_GROUP_EDITOR, 0, "Save edits", "edit_save", "manual: CTRL+S writes the map; auto: every edit, undo and redo at once",
+      V_ENUM, OFF(editSave), .names = NAMES("manual", "auto") },
 };
 #define ROW_COUNT ((int)(sizeof(ROWS) / sizeof(ROWS[0])))
 
@@ -153,7 +158,7 @@ _Static_assert(sizeof(MS_AoMode) == sizeof(int) && sizeof(R3D_UpscaleMode) == si
                sizeof(R3D_AntiAliasingMode) == sizeof(int) && sizeof(MS_ShadowMode) == sizeof(int), "enum size");
 
 static const char *const GROUP_NAMES[GFX_GROUP_COUNT] = {
-    "Display", "Shadows", "Ambient occlusion", "Fog", "Post", "Performance" };
+    "Display", "Shadows", "Ambient occlusion", "Fog", "Post", "Performance", "Editor" };
 
 int GfxRowCount(void) { return ROW_COUNT; }
 static bool RowOk(int r) { return r >= 0 && r < ROW_COUNT; }
@@ -425,6 +430,24 @@ bool GfxLoad(GfxSettings *s, const char *path, char *err, int errSize)
     fclose(f);
     if (bad && errSize > 0) snprintf(err, errSize, "%s: %d line%s ignored", path, bad, bad == 1 ? "" : "s");
     return true;
+}
+
+bool GfxUnsavedPath(const char *mapPath, char *out, int outSize)
+{
+    char parent[1200], dir[1300];
+    snprintf(parent, sizeof(parent), "%s", GetDirectoryPath(GfxDefaultPath()));    // (a static buffer)
+    snprintf(dir, sizeof(dir), "%s/unsaved", parent);
+    if (!DirectoryExists(parent)) MakeDirectory(parent);
+    if (!DirectoryExists(dir)) MakeDirectory(dir);
+    if (!DirectoryExists(dir)) return false;
+    char name[256];
+    snprintf(name, sizeof(name), "%s", GetFileNameWithoutExt(mapPath));
+    time_t now = time(NULL);
+    struct tm *tmv = localtime(&now);
+    char stamp[32] = "00000000-000000";
+    if (tmv) strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", tmv);
+    int len = snprintf(out, outSize, "%s/%s-%s.map", dir, name, stamp);
+    return len > 0 && len < outSize;
 }
 
 bool GfxSave(const GfxSettings *s, const char *path)

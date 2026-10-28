@@ -66,4 +66,36 @@ int UiHintsWidth(const char *markup, int size);
 void UiHudText(const char *text, int x, int y, int h, int size, Color c);
 void UiHudHints(const char *markup, int x, int y, int h, int size, Color ink);
 
+// A filterable list in the settings panel's look (the id panel, the model picker, the
+// inspector panel; docs/live-editing.md 8.4). The panel owns its items; the list holds the
+// selection, the scroll position, the typed filter and the items that pass it.
+typedef struct {
+    int sel, scroll;                // selected row (index into rows[]), first visible row
+    char *filter;                   // typed text (heap; NULL = empty)
+    int filterLen, filterCap;
+    int *rows;                      // the items that pass the filter, in item order (heap)
+    int rowCount, rowCap;
+    bool dirty;                     // the filter changed: UiListRefilter before reading rows[]
+} UiList;
+
+// Does item i pass the filter (never empty: an empty filter passes everything)?
+typedef bool (*UiListMatch)(int item, const char *filter, void *user);
+// Draws item i's columns into `row` (the selection highlight is drawn already)
+typedef void (*UiListDrawRow)(int item, Rectangle row, bool selected, void *user);
+
+// UP / DOWN / PGUP / PGDN / HOME / END, typed characters, BACKSPACE (CTRL: the whole filter).
+// ENTER, ESC, DELETE and every other key are the panel's. visibleRows: what one page scrolls.
+void UiListKeys(UiList *l, int visibleRows);
+// rows[] = the items 0..itemCount-1 that match (keeps the selected item selected when it still
+// passes); call after UiListKeys set dirty and whenever the items change
+bool UiListRefilter(UiList *l, int itemCount, UiListMatch match, void *user);
+// The selected item, -1 when no row passes
+int UiListSelected(const UiList *l);
+// The panel at r: title, filter field, rows of rowH px (UI_M text; 24 = the settings panel's
+// rows), scroll bar and the hints footer (UiHints markup). Returns the rows that fit.
+int UiListDraw(UiList *l, Rectangle r, const char *title, int rowH, UiListDrawRow drawRow, void *user,
+               const char *hints);
+void UiListClear(UiList *l);        // empty filter, first row
+void UiListFree(UiList *l);
+
 #endif

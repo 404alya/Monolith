@@ -165,9 +165,13 @@ typedef struct {
     int activeVolume;       // index into volumes[] (edited by the arrows), -1 = none
     float volumeSnap;       // metres; 0 = VOLUME_SNAP_DEFAULT
     Vector3 eye, viewFwd;   // the camera of the last DesignerPickCamera (arrow directions)
-    bool pickValid;         // hit is the crosshair pick of pickPos/pickTarget at pickVersion
-    unsigned int pickVersion;
+    bool pickValid;         // hit is the pick of pickPos/pickTarget at pickVersion (the crosshair's,
+    unsigned int pickVersion;   // or with pickCursor the cursor's at pickPx)
     Vector3 pickPos, pickTarget;
+    bool pickCursor;
+    Vector2 pickPx;
+    bool editMode;          // edit mode (set by the caller every frame): the hit follows the cursor and
+                            // an RMB press doesn't clear the selection (the caller does that on an RMB click)
 
     // Prompt box
     bool promptOpen;
@@ -202,6 +206,11 @@ void DesignerSync(Designer *d);
 
 // d->hit = what the camera's centre ray hits. Call after the camera moved, before drawing.
 void DesignerPickCamera(Designer *d, Camera3D cam);
+// d->hit = what the ray through pixel px of a w x h frame hits (the edit mode's free cursor)
+void DesignerPickCursor(Designer *d, Camera3D cam, int w, int h, Vector2 px);
+// The scene changed without a reload and its object indices are the same (a transform preview
+// step): the selection keeps its indices instead of being remapped by geometry
+void DesignerAdoptVersion(Designer *d);
 // What the ray through pixel (x, y) of a w x h frame of `cam` hits (top-left origin, pixel
 // centres at i + 0.5; the frame centre is the crosshair ray): --pick-at
 DesignerHit DesignerPickAt(Camera3D cam, int w, int h, float x, float y);

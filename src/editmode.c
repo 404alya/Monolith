@@ -1,29 +1,41 @@
 // Edit mode -- M in spectator mode: move, turn, remove, duplicate and add objects by hand
 //
-// The edits act on the designer's selection (LMB, SHIFT+LMB, CTRL+LMB for a group) and are
-// written straight into the map file as minimal text edits (mapedit.c), which the game then
-// reloads; the selection follows the edited objects through their entity ids. No request is
-// made. Keys in the mode:
+// The edits act on the designer's selection (LMB, SHIFT+LMB, CTRL+LMB for a group, under the
+// cursor: in the mode the camera flies only while RMB is held, main.c). Each one is
+// a minimal text edit (mapedit.c) of the working copy, the map text the scene shows, and goes
+// live at once (MS_EditSetText: only what changed is rebuilt, nothing is read from disk); the
+// selection follows the edited objects through their entity ids. CTRL+S writes the working copy
+// to the map file; in auto save mode (settings: Editor, edit_save = auto) every edit, undo and
+// redo is written at once. The HUD shows "N unsaved edits" in every spectator mode. When the
+// file changes on disk meanwhile (a request finished, another editor), the unsaved edits are
+// applied again on top of it (EditModeSync); those that no longer apply are listed in red until
+// CTRL+SHIFT+DELETE. No request is made. Keys in the mode:
 //   arrows / PGUP / PGDN   move one snap step along the world axis nearest to the view (as
 //                          volume mode); the first selected object lands on the snap grid,
 //                          the others keep their offsets. CTRL: exactly one step, no grid
 //   N                      snap step 0.1 / 0.25 / 0.5 / 1 / 2 m (shared with volume mode)
-//   R / SHIFT+R            turn: models +-15 degrees of yaw (CTRL: 1), boxes +-90 (box and block
-//                          lines: the footprint turns about its centre; stairs and waffles can't)
+//   G / R / S              the transform modal (transform.c): grab, rotate, scale the selection with
+//                          the mouse or a typed value, X / Y / Z (SHIFT: plane) locks, LMB / ENTER
+//                          commit one edit, RMB / ESC cancel
+//   ALT+R / ALT+SHIFT+R    turn one step: models +-15 degrees of yaw (CTRL: 1), boxes +-90 (box and
+//                          block lines: the footprint turns about its centre; stairs and waffles can't)
 //   DELETE                 remove
 //   CTRL+D                 duplicate, the copies one footprint further along the view's right
-//   [ ]                    pick the model to add (the package's models/ files listed in ASSETS.md)
-//   I                      add it at the crosshair (origin bottom), after the line of the object
-//                          under it, in its group
+//   I                      the model picker (modelpicker.c, opened by main.c): the package's models/
+//                          files listed in ASSETS.md; ENTER adds the chosen one at the point under the
+//                          cursor (origin bottom, EditModeAddModel), after the line of the object
+//                          there, in its group
 //   CTRL+I                 give the selection's line an id: with objects of one line selected, the
 //                          id panel (a number field, prefilled with the line's id or the next free
 //                          one; digits, BACKSPACE, ENTER sets it, ESC cancels; empty = the next
 //                          free id); with objects of several lines, each line without an id gets
 //                          the next free one at once. Only the `id n` prefix changes (mapedit.c)
-//   M / ESC                leave the mode (V and C leave it too)
-// CTRL+Z / CTRL+SHIFT+Z (or CTRL+Y) undo / redo manual edits anywhere in spectator mode. When
-// a request of this game run is queued or running on the map, an edit first warns; the same
-// key again within 3 s edits anyway (until another request is sent).
+//   M / ESC                leave the mode (V and C leave it too); with unsaved edits the first
+//                          press only says so (again within 3 s leaves; the edits stay live)
+// CTRL+Z / CTRL+SHIFT+Z (or CTRL+Y) undo / redo manual edits anywhere in spectator mode, CTRL+S
+// saves. When a request of this game run is queued or running on the map, the first edit after
+// the last save (and a save) first warns; the same key again within 3 s goes ahead (until
+// another request is sent).
 #include "editmode.h"
 #include "launcher.h"
 #include "dirscan.h"
@@ -39,6 +51,7 @@
 static bool KeyRepeat(int key) { return IsKeyPressed(key) || IsKeyPressedRepeat(key); }
 static bool Ctrl(void) { return IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL); }
 static bool Shift(void) { return IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT); }
+static bool Alt(void) { return IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT); }
 
 static void Say(EditMode *m, bool error, const char *text)
 {
@@ -88,10 +101,8 @@ static void FreeModels(EditMode *m)
     m->modelCount = 0;
 }
 
-static void ScanModels(EditMode *m)
+void EditModeScanModels(EditMode *m)
 {
-    const char *keep = m->modelPick < m->modelCount ? m->models[m->modelPick] : NULL;
-    char *kept = keep ? MS_StrDup(keep) : NULL;
     FreeModels(m);
     char path[MS_PATH_MAX + 16];
     snprintf(path, sizeof(path), "%sASSETS.md", scene->root);
@@ -102,9 +113,6 @@ static void ScanModels(EditMode *m)
     if (DirectoryExists(path)) DirScan(path, true, ScanModel, &s, &stats);
     if (assets) UnloadFileText(assets);
     qsort(m->models, (size_t)m->modelCount, sizeof(char *), CompareStrings);
-    m->modelPick = 0;
-    for (int i = 0; kept && i < m->modelCount; i++) if (!strcmp(m->models[i], kept)) m->modelPick = i;
-    free(kept);
 }
 
 // #endregion
@@ -113,9 +121,11 @@ static void ScanModels(EditMode *m)
 // #region Edits
 // ======================================================================================
 
-// A request on this map: the first press warns, the same key again within WARN_TIME edits
+// A request on this map: the first press warns, the same key again within WARN_TIME edits.
+// Unsaved edits don't touch the file: only the first edit after the last save warns (and a save)
 static bool Confirmed(EditMode *m, int key)
 {
+    if (key != KEY_S && !m->ed.autoSave && MapEditUnsaved(&m->ed) > 0) return true;
     int newest, open = LauncherOpenOnMap(scene->path, &newest);
     if (open == 0 || (open == m->ackCount && newest == m->ackNewest)) return true;
     if (m->warnTime > 0.0f && m->warnKey == key) {
@@ -127,8 +137,15 @@ static bool Confirmed(EditMode *m, int key)
     m->warnKey = key;
     m->warnTime = WARN_TIME;
     Say(m, true, TextFormat("request [%d]%s is queued or running on this map: its session may change the same lines. "
-                            "Press again to edit anyway", newest, open > 1 ? TextFormat(" (+%d more)", open - 1) : ""));
+                            "Press again to %s anyway", newest, open > 1 ? TextFormat(" (+%d more)", open - 1) : "",
+                            key == KEY_S ? "save" : "edit"));
     return false;
+}
+
+// The working copy starts at the first edit (the map as loaded); false for a compiled map
+static bool EnsureWork(EditMode *m)
+{
+    return m->ed.work || MapEditBegin(&m->ed);
 }
 
 // After an edit / undo / redo: the selection becomes the edited objects
@@ -147,22 +164,31 @@ static EditModeResult Done(EditMode *m, Designer *d, EditResult r, MS_EntityId *
     }
     free(ids);
     Say(m, false, msg);
+    char stats[400];
+    MapEditStatsText(&m->ed.lastStats, stats, sizeof(stats));
     TraceLog(LOG_INFO, "monolith: edit: %s", msg);
+    TraceLog(LOG_INFO, "monolith: live edit %s", stats);
     return EDITMODE_RELOADED;
 }
 
-static EditModeResult Apply(EditMode *m, Designer *d, int key, const EditOp *op)
+static EditModeResult ApplyTo(EditMode *m, Designer *d, int key, const MS_ObjRef *sel, int selCount, const EditOp *op)
 {
-    if (op->kind != EDIT_ADD && d->selectedCount == 0) {
+    if (op->kind != EDIT_ADD && selCount == 0) {
         Say(m, true, "nothing selected (LMB selects, SHIFT+LMB adds, CTRL+LMB a group)");
         return EDITMODE_NONE;
     }
     if (!Confirmed(m, key)) return EDITMODE_NONE;
+    EnsureWork(m);      // (a compiled map has none: MapEditApply says why)
     MS_EntityId *ids;
     int count;
     char msg[512];
-    EditResult r = MapEditApply(&m->ed, d->selected, d->selectedCount, op, &ids, &count, msg, sizeof(msg));
+    EditResult r = MapEditApply(&m->ed, sel, selCount, op, &ids, &count, msg, sizeof(msg));
     return Done(m, d, r, ids, count, msg);
+}
+
+static EditModeResult Apply(EditMode *m, Designer *d, int key, const EditOp *op)
+{
+    return ApplyTo(m, d, key, d->selected, d->selectedCount, op);
 }
 
 // The world axis nearest to the view's forward (horizontal), and its right
@@ -219,14 +245,14 @@ static EditModeResult Duplicate(EditMode *m, Designer *d, int key)
     return Apply(m, d, key, &op);
 }
 
-static EditModeResult AddModel(EditMode *m, Designer *d, int key)
+EditModeResult EditModeAddModel(EditMode *m, Designer *d, const char *modelPath)
 {
-    if (m->modelCount == 0) {
+    if (!modelPath) {
         Say(m, true, "no model to add: the package's models/ has no file listed in ASSETS.md (new assets: a request)");
         return EDITMODE_NONE;
     }
     if (ObjIsNone(d->hit.obj)) {
-        Say(m, true, "no surface under the crosshair");
+        Say(m, true, "no surface under the cursor");
         return EDITMODE_NONE;
     }
     // Snapped on the axes along the hit face (as volume mode), CTRL: exact
@@ -237,9 +263,9 @@ static EditModeResult AddModel(EditMode *m, Designer *d, int key)
         if (fabsf(n.y) < 0.9f) p.y = roundf(p.y / s) * s;
         if (fabsf(n.z) < 0.9f) p.z = roundf(p.z / s) * s;
     }
-    EditOp op = { .kind = EDIT_ADD, .modelPath = m->models[m->modelPick], .anchor = d->hit.obj,
+    EditOp op = { .kind = EDIT_ADD, .modelPath = modelPath, .anchor = d->hit.obj,
                   .pos = { round(p.x * 1e4) / 1e4, round(p.y * 1e4) / 1e4, round(p.z * 1e4) / 1e4 } };
-    return Apply(m, d, key, &op);
+    return Apply(m, d, KEY_ENTER, &op);
 }
 
 // CTRL+I: the panel for one line; several lines get the next free ids at once
@@ -289,14 +315,91 @@ static EditModeResult IdPanel(EditMode *m, Designer *d)
     return r;
 }
 
+EditModeResult EditModeApplyTo(EditMode *m, Designer *d, int key, const MS_ObjRef *sel, int selCount, const EditOp *op)
+{
+    return ApplyTo(m, d, key, sel, selCount, op);
+}
+
+EditModeResult EditModeIdKey(EditMode *m, Designer *d) { return IdKey(m, d); }
+
+EditModeResult EditModeIdFieldUpdate(EditMode *m, Designer *d) { return m->idOpen ? IdPanel(m, d) : EDITMODE_NONE; }
+
 static EditModeResult History(EditMode *m, Designer *d, bool undo)
 {
     if (!Confirmed(m, undo ? KEY_Z : KEY_Y)) return EDITMODE_NONE;
+    EnsureWork(m);
     MS_EntityId *ids;
     int count;
     char msg[512];
     EditResult r = undo ? MapEditUndo(&m->ed, &ids, &count, msg, sizeof(msg)) : MapEditRedo(&m->ed, &ids, &count, msg, sizeof(msg));
     return Done(m, d, r, ids, count, msg);
+}
+
+// The transform modal's commit: one edit of the objects that follow, then the modal ends (a
+// refused edit puts the preview back). A request open on the map: the modal stays open until
+// LMB / ENTER comes again within 3 s (or it is cancelled)
+static EditModeResult ModalCommit(EditMode *m, Designer *d, const EditOp *op)
+{
+    if (!Confirmed(m, KEY_ENTER)) return EDITMODE_NONE;
+    const MS_ObjRef *sel;
+    int n = TransformCommitObjects(&m->modal, &sel);
+    EditModeResult r = ApplyTo(m, d, KEY_ENTER, sel, n, op);
+    TransformEnd(&m->modal, d);
+    if (r != EDITMODE_RELOADED) DesignerSync(d);
+    return r;
+}
+
+static EditModeResult ModalUpdate(EditMode *m, Designer *d, Camera3D cam)
+{
+    EditOp op;
+    TransformResult r = TransformUpdate(&m->modal, d, cam, &op);
+    if (r == TRANSFORM_CANCELLED) {
+        // (LMB / ENTER at a value that changes nothing, e.g. a square box turned 90 deg: say so)
+        const char *note = TransformCancelNote(&m->modal);
+        Say(m, note != NULL, note ? note : "transform cancelled: everything is back");
+        return EDITMODE_NONE;
+    }
+    if (r == TRANSFORM_COMMIT) return ModalCommit(m, d, &op);
+    return EDITMODE_NONE;
+}
+
+static EditModeResult ModalStart(EditMode *m, Designer *d, TransformKind kind)
+{
+    char msg[256];
+    if (!TransformBegin(&m->modal, d, kind, msg, sizeof(msg))) Say(m, true, msg);
+    return EDITMODE_NONE;
+}
+
+bool EditModeModalRunning(const EditMode *m) { return TransformRunning(&m->modal); }
+
+bool EditModeOpenModal(EditMode *m, Designer *d, Camera3D cam, const char *spec)
+{
+    char msg[256];
+    if (!m->active) EditModeOpen(m, d);
+    if (TransformOpenScripted(&m->modal, d, cam, spec, msg, sizeof(msg))) return true;
+    Say(m, true, msg);
+    TraceLog(LOG_WARNING, "monolith: --edit-modal: %s", msg);
+    return false;
+}
+
+EditModeResult EditModeFinishModal(EditMode *m, Designer *d, bool commit)
+{
+    EditOp op;
+    TransformResult r = TransformFinish(&m->modal, d, commit, &op);
+    if (r != TRANSFORM_COMMIT) {
+        const char *note = TransformCancelNote(&m->modal);
+        if (note) Say(m, true, note);
+        TraceLog(LOG_INFO, "monolith: --edit-modal: cancelled (everything back)%s%s", note ? ": " : "", note ? note : "");
+        return EDITMODE_NONE;
+    }
+    EditModeResult res = ModalCommit(m, d, &op);
+    TraceLog(LOG_INFO, "monolith: --edit-modal: %s%s", res == EDITMODE_RELOADED ? "" : "FAILED: ", m->message);
+    return res;
+}
+
+void EditModeDrawGuides(const EditMode *m, Camera3D cam)
+{
+    TransformDrawGuides(&m->modal, cam);
 }
 
 // #endregion
@@ -309,23 +412,76 @@ void EditModeOpen(EditMode *m, Designer *d)
 {
     if (d->volumeMode) DesignerVolumeModeEnd(d);
     m->active = true;
-    ScanModels(m);
+    EditModeScanModels(m);
 }
 
 bool EditModeTakesArrows(const EditMode *m) { return m->active; }
 
 bool EditModeCapturesInput(const EditMode *m) { return m->idOpen; }
 
-void EditModeSync(EditMode *m)
+int EditModeUnsaved(const EditMode *m)
 {
-    char msg[256];
-    if (MapEditSync(&m->ed, msg, sizeof(msg))) Say(m, true, msg);
+    return MapEditUnsaved(&m->ed);      // (auto save: 0 unless a write failed)
 }
 
-EditModeResult EditModeUpdate(EditMode *m, Designer *d, float dt)
+bool EditModeSave(EditMode *m, char *msg, int msgSize)
+{
+    bool ok = MapEditSave(&m->ed, msg, msgSize);
+    Say(m, !ok, msg);
+    TraceLog(ok ? LOG_INFO : LOG_WARNING, "monolith: %s", msg);
+    return ok;
+}
+
+void EditModeSync(EditMode *m, Designer *d, bool newScene)
+{
+    MapEditor *E = &m->ed;
+    // A reload (from disk, or a renderer restart) ended the preview and renumbered the objects:
+    // the modal stops
+    if (TransformRunning(&m->modal)) {
+        m->modal.previewing = false;
+        TransformEnd(&m->modal, d);
+        Say(m, true, "the map was reloaded: the transform was cancelled");
+    }
+    if (!E->work || (!newScene && scene->loadVersion == E->loadVersion)) return;
+    char msg[512];
+    if (newScene && scene->hash == E->diskHash) {
+        // The renderer restarted and loaded the same file: the working copy goes live again
+        E->loadVersion = scene->loadVersion;
+        if (E->workHash != scene->hash) {
+            char err[512];
+            if (MS_EditSetText(scene, E->work, E->workSize, &E->lastStats, err, sizeof(err)) != MS_RELOADED)
+                Say(m, true, TextFormat("the unsaved edits could not be shown again: %s", err));
+            DesignerSync(d);
+        }
+        return;
+    }
+    if (MapEditUnsaved(E) == 0) {
+        bool had = E->undoCount + E->redoCount > 0;
+        MapEditBegin(E);
+        if (had) Say(m, true, "the map changed on disk (not by a manual edit): undo history cleared");
+        return;
+    }
+    MS_EntityId *ids;
+    int count;
+    int failed = MapEditRebase(E, &ids, &count, msg, sizeof(msg));
+    DesignerClearSelection(d);
+    DesignerSync(d);
+    for (int i = 0; i < count; i++) {
+        int e = MS_FindEntity(scene, ids[i]);
+        if (e >= 0) DesignerSelectObject(d, scene->entityObjects[e]);
+    }
+    free(ids);
+    Say(m, failed > 0, msg);
+    TraceLog(failed > 0 ? LOG_WARNING : LOG_INFO, "monolith: %s", msg);
+    for (int i = 0; i < E->failedCount; i++) TraceLog(LOG_WARNING, "monolith:   %s", E->failed[i].what);
+}
+
+EditModeResult EditModeUpdate(EditMode *m, Designer *d, Camera3D cam, float dt)
 {
     if (m->messageTime > 0.0f) m->messageTime -= dt;
     if (m->warnTime > 0.0f) m->warnTime -= dt;
+    if (m->leaveWarnTime > 0.0f) m->leaveWarnTime -= dt;
+    if (TransformRunning(&m->modal)) return ModalUpdate(m, d, cam);     // (it takes every key)
     if (m->active && (d->volumeMode || d->snipping)) m->active = false;    // V / C took over
     if (!m->active) m->idOpen = false;
     if (m->idOpen) return IdPanel(m, d);
@@ -333,8 +489,27 @@ EditModeResult EditModeUpdate(EditMode *m, Designer *d, float dt)
     bool ctrl = Ctrl(), shift = Shift();
     if (ctrl && IsKeyPressed(KEY_Z)) return History(m, d, !shift);
     if (ctrl && IsKeyPressed(KEY_Y)) return History(m, d, false);
+    if (ctrl && IsKeyPressed(KEY_S)) {
+        char msg[512];
+        if (MapEditUnsaved(&m->ed) == 0) Say(m, false, "nothing to save");
+        else if (Confirmed(m, KEY_S)) EditModeSave(m, msg, sizeof(msg));
+        return EDITMODE_NONE;
+    }
+    if (ctrl && shift && IsKeyPressed(KEY_DELETE) && m->ed.failedCount > 0) {
+        MapEditClearFailed(&m->ed);
+        Say(m, false, "list of edits that could not be re-applied cleared");
+        return EDITMODE_NONE;
+    }
 
     if (IsKeyPressed(KEY_M) || (m->active && IsKeyPressed(KEY_ESCAPE))) {
+        int unsaved = EditModeUnsaved(m);
+        if (m->active && unsaved > 0 && m->leaveWarnTime <= 0.0f) {
+            m->leaveWarnTime = WARN_TIME;
+            Say(m, true, TextFormat("%d unsaved edit%s: CTRL+S saves, M again leaves them unsaved (still live)", unsaved,
+                                    unsaved == 1 ? "" : "s"));
+            return EDITMODE_NONE;
+        }
+        m->leaveWarnTime = 0.0f;
         if (m->active) m->active = false;
         else EditModeOpen(m, d);
         return EDITMODE_NONE;
@@ -342,8 +517,6 @@ EditModeResult EditModeUpdate(EditMode *m, Designer *d, float dt)
     if (!m->active) return EDITMODE_NONE;
 
     if (IsKeyPressed(KEY_N)) Say(m, false, TextFormat("snap %g m", DesignerCycleSnap(d)));
-    if (m->modelCount > 0 && IsKeyPressed(KEY_LEFT_BRACKET)) m->modelPick = (m->modelPick + m->modelCount - 1) % m->modelCount;
-    if (m->modelCount > 0 && IsKeyPressed(KEY_RIGHT_BRACKET)) m->modelPick = (m->modelPick + 1) % m->modelCount;
 
     Vector3 fwd, right;
     ViewAxes(d, &fwd, &right);
@@ -351,11 +524,18 @@ EditModeResult EditModeUpdate(EditMode *m, Designer *d, float dt)
     const Vector3 dirs[6] = { fwd, Vector3Negate(fwd), right, Vector3Negate(right), { 0, 1, 0 }, { 0, -1, 0 } };
     for (int k = 0; k < 6; k++)
         if (KeyRepeat(KEYS[k])) return MoveStep(m, d, KEYS[k], dirs[k]);
-    if (IsKeyPressed(KEY_R)) return Turn(m, d, KEY_R);
-    if (IsKeyPressed(KEY_DELETE)) return Apply(m, d, KEY_DELETE, &(EditOp){ .kind = EDIT_REMOVE });
+    // RMB held flies the camera (main.c): the letter keys are the mode's only without it
+    bool flying = IsMouseButtonDown(MOUSE_BUTTON_RIGHT);
+    if (IsKeyPressed(KEY_R) && Alt()) return Turn(m, d, KEY_R);
+    if (!flying && !ctrl && !Alt()) {
+        if (IsKeyPressed(KEY_G)) return ModalStart(m, d, TRANSFORM_GRAB);
+        if (IsKeyPressed(KEY_R)) return ModalStart(m, d, TRANSFORM_ROTATE);
+        if (IsKeyPressed(KEY_S)) return ModalStart(m, d, TRANSFORM_SCALE);
+    }
+    if (IsKeyPressed(KEY_DELETE) && !(ctrl && shift)) return Apply(m, d, KEY_DELETE, &(EditOp){ .kind = EDIT_REMOVE });
     if (ctrl && IsKeyPressed(KEY_D)) return Duplicate(m, d, KEY_D);
     if (ctrl && IsKeyPressed(KEY_I)) return IdKey(m, d);
-    if (IsKeyPressed(KEY_I)) return AddModel(m, d, KEY_I);
+    // (plain I opens the model picker: main.c)
     return EDITMODE_NONE;
 }
 
@@ -369,9 +549,9 @@ int EditModeDrawHud(const EditMode *m, const Designer *d, int x, int y)
     int y0 = y;
     Color dim = UI_DIM;
     if (m->active) {
-        UiHudHints(TextFormat("EDIT MODE {M}|snap %g m ({N}, {CTRL} none)|arrows / {PGUP} / {PGDN} move|{R} / {SHIFT+R} turn "
-                              "(models 15 deg, {CTRL} 1; boxes 90)|{DEL} remove|{CTRL+D} duplicate|{[} {]} {I} add model|{CTRL+I} id",
-                              DesignerSnap(d)), x, y, UI_HUD_LINE, UI_S, Fade(EDIT_COLOR, 0.95f));
+        y += TransformDrawHud(&m->modal, x, y);
+        // (state only: the keys are in the keybindings panel, ESC)
+        UiHudText(TextFormat("EDIT MODE  |  snap %g m", DesignerSnap(d)), x, y, UI_HUD_LINE, UI_S, Fade(EDIT_COLOR, 0.95f));
         y += UI_HUD_LINE;
         char sel[160] = "nothing selected";
         if (d->selectedCount > 0) {
@@ -380,10 +560,23 @@ int EditModeDrawHud(const EditMode *m, const Designer *d, int x, int y)
             snprintf(sel, sizeof(sel), "%d selected, first: %s %s", d->selectedCount,
                      d->selected[0].kind == MS_OBJ_MODEL ? "model" : d->selected[0].kind == MS_OBJ_LIGHT ? "light" : "box", where);
         }
-        HudText(TextFormat("%s  |  add: %s%s  |  CTRL+Z undo (%d)  CTRL+SHIFT+Z redo (%d)", sel,
-                           m->modelCount ? m->models[m->modelPick] : "(no models in ASSETS.md)",
-                           m->modelCount ? TextFormat(" (%d of %d)", m->modelPick + 1, m->modelCount) : "",
-                           m->ed.undoCount, m->ed.redoCount), x, y, dim);
+        HudText(TextFormat("%s  |  undo %d, redo %d  |  %s", sel,
+                           m->ed.undoCount, m->ed.redoCount, m->ed.autoSave ? "auto save" : "manual save"), x, y, dim);
+        y += UI_HUD_LINE;
+    }
+    // Unsaved edits and the ones a rebase could not apply: in every spectator mode
+    int unsaved = EditModeUnsaved(m);
+    if (unsaved > 0) {
+        UiHudHints(TextFormat("%d unsaved edit%s|{CTRL+S} save", unsaved, unsaved == 1 ? "" : "s"), x, y, UI_HUD_LINE, UI_S,
+                   Fade(EDIT_COLOR, 0.95f));
+        y += UI_HUD_LINE;
+    }
+    for (int i = 0; i < m->ed.failedCount; i++) {
+        HudText(m->ed.failed[i].what, x, y, (Color){ 255, 110, 90, 255 });
+        y += UI_HUD_LINE;
+    }
+    if (m->ed.failedCount > 0) {
+        UiHudHints("{CTRL+SHIFT+DEL} clear this list", x, y, UI_HUD_LINE, UI_S, UI_DIM);
         y += UI_HUD_LINE;
     }
     if (m->idOpen) {
@@ -411,6 +604,7 @@ int EditModeDrawHud(const EditMode *m, const Designer *d, int x, int y)
 
 void EditModeFree(EditMode *m)
 {
+    TransformFree(&m->modal);
     FreeModels(m);
     free(m->models);
     MapEditFree(&m->ed);

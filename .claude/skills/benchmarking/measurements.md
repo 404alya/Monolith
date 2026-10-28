@@ -381,3 +381,45 @@ Diagnosis, nothing changed. Developer settings (FXAA, vfog step ×2, AO off, blo
 - **Done: R3D patch 25** (the sun lit in the ambient pass, its PCF with the min/max shortcut): lights 7.85 → 1.69 ms, ambient 6.62 → 9.24, frame 67.4 → 64.2 ms (−3.2, −4.7%), balanced-order A/B against patch 24 (`submodules/r3d/patches.md`, patch 25). Look: rounding level (0.01–3.8 % of pixels ±1/255). With patches 24 and 25 the frame went 77.4 → ~64 ms on machine C (−17%).
 - **What the ambient pass costs (patch 25, machine C):** a scratch build (never committed) with parts switched off by an environment variable, 60-frame runs, all views, cool-down before each: full 9.10 ms; without the IBL lookups (irradiance, prefilter, BRDF LUT) 7.24 (IBL ~1.9); without the sun 7.34 (sun ~1.8); without the blend (overwrite instead of read-add-write of RADIANCE / SPECULAR) 8.34 (~0.8); without IBL and sun 5.87; without all three 5.21 ms. That 5.2 ms floor is the G-buffer read and the two RGBA16F writes over the geometry pixels: a separate ambient pass can't go far below it. The lever is removing the pass boundary (ambient + compose in one pass: compose's 5.3 ms of re-reads and ambient's target writes), not the shader's arithmetic. World AO and probes are off in these settings.
 - **Done: R3D patch 26** (without SSR the ambient pass writes the composed scene; no compose pass): ambient + compose 14.66 → 11.28 ms, frame 65.2 → 62.2 ms (−3.0, −4.6%), balanced-order A/B against patch 25 (`submodules/r3d/patches.md`, patch 26). Look: rounding level. Patches 24–26 together on machine C: frame 77.4 → ~62 ms (~−20%, 12.9 → ~16 fps; measured in three sessions, each against the previous patch).
+
+## Live edits: edit latency (2026-10-28, machine A)
+
+`MS_EditSetText` per manual edit (the `monolith: live edit` lines of `--edit-script` runs; CPU wall time
+of the call, the caches redraw in the next frame), against the map's load from disk (`monolith_scene:
+load` line). Machine A: RTX 4050 Laptop (driver 615.71.09), Ryzen 7 7435HS. Three `--shot` runs per map,
+one script each: moves (whole lines, single `repeat` copies, a 2-D copy), turns, removes, duplicates,
+an add, an id, undo / redo (scripts in the round's scratch folder). No benchmark.
+
+| Map | Load | Live edit (min / median / max) | Of which |
+|---|---|---|---|
+| `maps/monolith` (52 243 boxes) | 526–530 ms | 41.8 / 42.6 / 49.5 ms (39 edits) | parse 25.4–26.4, collider BVH 7.6–8.2, entities 0.6–2.0, hidden faces 1.4–2.0 (partial), meshes 0.3–0.5 (0–1 of 324 ranges rebuilt), upload 3.0–3.7 (cell sort of every box); an add or redo of a model file the scene doesn't hold: + 4.7–6.5 (the file is loaded). With `--ao-volume 0.5 0.6`: + 3.1–12.3 for the voxels near the change (the full bake: 150 ms) |
+| `maps/pine_forest` (25 boxes, 719 models) | 80.6–81.2 ms | 3.6 / 3.7 / 4.0 ms (42 edits) | parse 2.4 |
+| `tests/models` | 7.3–9.8 ms | 0.1 / 0.1 / 0.4 ms (48 edits) | |
+| `maps/test1` | 4.9–5.4 ms | 0.0 / 0.1 / 0.1 ms (24 edits) | |
+
+The parse (~60 % on the largest map) and the collider BVH are the floor of this design (the text is
+parsed again; [docs/live-editing.md](../../../docs/live-editing.md) §2). Before the grid restriction the
+partial hidden-face search cost 7–11 ms on the largest map (an occluder grid over all boxes); with the
+grid holding only the occluders that touch an affected box it is 1.4–2.0 ms. A fog-cache rebake after an
+edit that reaches the bake's light-space box (`--fog-cache 0.5 2` on the largest map, 290 × 202 × 510
+voxels) costs 19.0–20.5 ms of GPU time in the next frame (R3D's log line; the same as the bake after the
+load, plus the bake's shadow map): R3D bakes the whole region, it has no sub-region bake. That is at the
+~20 ms threshold of docs/live-editing.md §3.3; no R3D patch was made.
+
+## Render inspector off: frame time (2026-10-28, machine A)
+
+The render inspector (phase 3c of the live-editing round: draw ranges, the draw filter's branch in
+`MS_DrawGeometry`, `InspectorApply` per frame, two more `FrameKey` fields) with the inspector **off**,
+against the build just before it. Machine A: RTX 4050 Laptop (driver 615.71.09), Ryzen 7 7435HS,
+plugged in. Full runs (600 frames), `--bench --headless`, `__GL_SYNC_TO_VBLANK=0`, interleaved A, B pairs.
+Shots of every map with it off are pixel-identical to the base build.
+
+| Map | Pairs | A (before) ms | B (with 3c) ms | Paired B − A (ms) | Mean |
+|---|---:|---:|---:|---|---:|
+| `maps/monolith` | 7 | 3.578 | 3.562 | +0.017, +0.033, +0.102, −0.200, −0.032, −0.016, −0.020 | −0.017 (−0.5 %) |
+| `maps/pine_forest` | 3 | 3.296 | 3.242 | −0.054, −0.157, +0.048 | −0.054 (−1.6 %) |
+| `maps/test1` | 2 | 1.974 | 1.934 | −0.077, −0.002 | −0.039 (−2.0 %) |
+| `tests/models` | 2 | 1.668 | 1.679 | +0.006, +0.015 | +0.011 (+0.6 %) |
+
+No measurable change (every mean inside the pairs' spread; the first three monolith pairs alone looked
+like +0.05 ms, the next four the opposite). CPU until finish moved the same way (monolith mean −0.011 ms).

@@ -439,6 +439,13 @@ typedef struct {
     int modelRangeCount, modelRangeCap;
 #ifdef MONOLITH_EDITOR
     const char *shaderDefines, *shaderDefinesFile;  // MS_LoadOptions (not owned)
+    // Live edits (MS_EditSetText): what the next edit compares with and keeps
+    unsigned long long lookHash;        // the statements that are no objects (materials, env, format)
+    unsigned char *hidden;              // per box: its hidden faces (UploadBoxes), NULL = none merged
+    int *boxOrder;                      // the boxes in draw order (material, cell; UploadBoxes)
+    int boxOrderCount;
+    int *boxRangeOf;                    // per box: its range in boxRanges[], -1 = none
+    int *modelSlotOf, *modelRangeOf;    // per model instance: its slot in its group's buffer, its range
 #endif
 } SceneData;
 
@@ -468,6 +475,37 @@ typedef struct {
     unsigned int version;
 } SunShadowCache;
 
+#ifdef MONOLITH_EDITOR
+// A transform preview (MS_EditPreviewBegin .. End): the objects, what they were at Begin, and how
+// the selected boxes are drawn meanwhile (out of their merged meshes and instanced buffers, as
+// instanced cubes from buf)
+struct EditPreview {
+    MS_ObjRef *objs;
+    int count;
+    BoundingBox *boxOrig;               // per object: boxes' bounds at Begin
+    MS_ModelInstance *modelOrig;        // models
+    int *localFirst;                    // models: first of their `collide box` boxes in localColliders
+    BoundingBox *colliderOrig;          // models' world colliders, objs[i]'s at colliderAt[i]
+    int *colliderAt;
+    MS_LightDef *lightOrig;             // lights
+    MS_Transform *entityOrig;
+    BoundingBox *reach;                 // per object: everything it covered since Begin
+    unsigned char *boxSel;              // per box: selected
+    unsigned char *hiddenOrig;          // d->hidden at Begin (NULL: none)
+    int *ranges, rangeCount;            // merged ranges drawn without the selected boxes
+    R3D_Mesh *meshOrig;                 //   and their meshes at Begin
+    int *instMat, *instSlot, instCount; // selected boxes of instanced materials: material, slot
+    Vector3 *instScaleOrig;
+    BoundingBox *modelRangeOrig;        // model range bounds at Begin (grown while models move)
+    R3D_InstanceBuffer buf;             // the selected boxes as cubes, by material
+    int *bufBox, bufCount;              //   box of each slot
+    int *drawMat, *drawFirst, *drawCount, drawRanges;
+    BoundingBox *drawBounds;
+    long long trisDrawn;                // d->boxTrisDrawn, d->boxMeshCount at Begin
+    int meshCount;
+};
+#endif
+
 struct MS_Private {
     SceneData *d;
     MS_LoadOptions opt;
@@ -482,6 +520,31 @@ struct MS_Private {
     int watchCount, watchCap, watchMtimeCap;
     float pollTimer, settleTime;
     unsigned long long triedHash;
+
+    // Live edits (MS_EditSetText): the world bounds of what the last edit changed, the occlusion
+    // volume's bytes as last uploaded (an edit recomputes only the voxels near a change), the
+    // preview of a transform (MS_EditPreviewBegin .. End; NULL = none)
+    BoundingBox *dirty;
+    int dirtyCount, dirtyCap;
+    unsigned char *aoGrid;
+    int aoDim[3];
+    BoundingBox aoRegion;
+    float aoVoxel, aoIntensity;
+    struct EditPreview *pv;
+
+    // The render inspector (region "Draw ranges"): per draw range the objects it draws, built on
+    // the first query after a version change (rangeObj: box indices of the box ranges, then model
+    // instance indices; range r's start at rangeAt[r]), and the draw filter (drawHidden per range,
+    // filterOn: any range hidden) with the objects it hides (boxes, then models)
+    int *rangeObj, *rangeAt, *rangeMatAt;
+    int rangeObjCap, rangeAtCap, rangeMatAtCap;
+    unsigned int rangeVersion;
+    const SceneData *rangeData;
+    bool *drawHidden;
+    int drawHiddenCount, drawHiddenCap;
+    bool filterOn;
+    unsigned char *filterObj, *filterObjNew;
+    int filterObjCount, filterObjCap, filterObjNewCap;
 #endif
 
     // GPU state that lives as long as the scene (not per load)
@@ -2414,12 +2477,26 @@ static bool AddStatement(Parser *P, const Placement *pl, const Token *tok, int n
     return true;
 }
 
+// A statement that is not an object, group, use, spawn or viewpoint (format, material, env): its
+// tokens go into d->lookHash, so a live edit knows whether the text changed anything but objects
+static void HashLook(SceneData *d, const Token *tok, int n)
+{
+    unsigned long long h = d->lookHash;
+    for (int i = 0; i < n; i++) {
+        unsigned char q = tok[i].quoted ? 1 : 2;
+        h = Fnv1a64Update(h, &q, 1);
+        h = Fnv1a64Update(h, tok[i].s, strlen(tok[i].s) + 1);
+    }
+    d->lookHash = h;
+}
+
 // One statement (already tokenized, at least one token)
 static bool ParseStatement(Parser *P, Token *tok, int n)
 {
     SceneData *d = P->d;
     bool v2 = d->formatVersion >= 2;
     const char *kw = tok[0].quoted ? "" : tok[0].s;
+    if (strcmp(kw, "monolith") == 0 || strcmp(kw, "material") == 0 || strcmp(kw, "env") == 0) HashLook(d, tok, n);
 
     if (strcmp(kw, "monolith") == 0) {
         if (P->sawStatement) return Fail(P, "the format line 'monolith N' must be the first statement", NULL);
@@ -3579,16 +3656,76 @@ static BoundingBox FogCacheRegion(const SceneData *d, float voxel)
 // stored in a byte. Built on the CPU: every box only visits the voxels within AO_DIST_MAX of
 // it (its grown bounds), so the cost follows the boxes' volume, not boxes x voxels (default
 // map, 0.5 m: ~0.1 s). Models are not in it (their bounds are no stand-in for their shape).
-static bool BakeOcclusionVolume(const SceneData *d, float voxel, float intensity)
+
+// The volume's region and size in voxels
+static BoundingBox AoLayout(const SceneData *d, float voxel, int dim[3])
 {
     BoundingBox region = BudgetRegion(d, voxel, AO_VOLUME_BUDGET, "occlusion volume");
-    int dim[3], max3D = Max3DTextureSize();
+    int max3D = Max3DTextureSize();
     for (int a = 0; a < 3; a++) {
         float size = ((const float *)&region.max)[a] - ((const float *)&region.min)[a];
         dim[a] = (int)ceilf(size / voxel);
         if (dim[a] < 2) dim[a] = 2;
         if (max3D > 2 && dim[a] > max3D) dim[a] = max3D;    // (float rounding; the region is cut already)
     }
+    return region;
+}
+
+// One box into dist[], the voxels [wlo, wlo + wdim) of the volume (x fastest): each of them within
+// AO_DIST_MAX of the box keeps the minimum of its value and its distance to the box (outside:
+// the distance, inside: minus the depth). axis: scratch of wdim[0] + wdim[1] + wdim[2] floats.
+// A voxel's value is the minimum over the boxes, whatever their order or the window.
+static void AoSplatBox(const BoundingBox *box, const float *rmin, float voxel, const int wlo[3], const int wdim[3],
+                       float *dist, float *axis)
+{
+    const float *bmin = (const float *)&box->min, *bmax = (const float *)&box->max;
+    int lo[3], hi[3];
+    float *ax[3] = { axis, axis + wdim[0], axis + wdim[0] + wdim[1] };
+    for (int a = 0; a < 3; a++) {
+        // voxel centres c = rmin + (i + 0.5) * voxel within AO_DIST_MAX of the box
+        lo[a] = CellKey((bmin[a] - AO_DIST_MAX - rmin[a]) / voxel - 0.5f);
+        hi[a] = -CellKey(-((bmax[a] + AO_DIST_MAX - rmin[a]) / voxel - 0.5f));  // = ceil
+        if (lo[a] < wlo[a]) lo[a] = wlo[a];
+        if (hi[a] > wlo[a] + wdim[a] - 1) hi[a] = wlo[a] + wdim[a] - 1;
+        if (lo[a] > hi[a]) return;
+        // per axis: outside distance (> 0), or minus the distance to the nearer face (<= 0)
+        for (int i = lo[a]; i <= hi[a]; i++) {
+            float c = rmin[a] + ((float)i + 0.5f) * voxel;
+            ax[a][i - wlo[a]] = c < bmin[a] ? bmin[a] - c : c > bmax[a] ? c - bmax[a] : -fminf(c - bmin[a], bmax[a] - c);
+        }
+    }
+    for (int z = lo[2]; z <= hi[2]; z++) {
+        float dz = ax[2][z - wlo[2]];
+        for (int y = lo[1]; y <= hi[1]; y++) {
+            float dy = ax[1][y - wlo[1]];
+            float oz = fmaxf(dz, 0.0f), oy = fmaxf(dy, 0.0f), syz = oy * oy + oz * oz;
+            if (syz >= AO_DIST_MAX * AO_DIST_MAX) continue;
+            float iyz = fmaxf(dy, dz);     // <= 0 only when inside on both axes
+            float *row = dist + ((size_t)(z - wlo[2]) * wdim[1] + (y - wlo[1])) * wdim[0];
+            for (int x = lo[0]; x <= hi[0]; x++) {
+                float dx = ax[0][x - wlo[0]], e;
+                if (dx <= 0.0f && iyz <= 0.0f) e = fmaxf(dx, iyz);     // inside: minus the depth
+                else {
+                    float ox = fmaxf(dx, 0.0f);
+                    e = sqrtf(ox * ox + syz);
+                }
+                // union of boxes: the minimum (outside: the nearest box, inside: the deepest)
+                if (e < row[x - wlo[0]]) row[x - wlo[0]] = e;
+            }
+        }
+    }
+}
+
+static unsigned char AoByte(float dist)
+{
+    float v = (Clamp(dist, AO_DIST_MIN, AO_DIST_MAX) - AO_DIST_MIN) / (AO_DIST_MAX - AO_DIST_MIN);
+    return (unsigned char)(v * 255.0f + 0.5f);
+}
+
+// The volume's bytes (malloc'd; NULL when out of memory, logged), its region and size
+static unsigned char *AoBake(const SceneData *d, float voxel, BoundingBox *regionOut, int dim[3])
+{
+    BoundingBox region = AoLayout(d, voxel, dim);
     size_t count = (size_t)dim[0] * dim[1] * dim[2];
     unsigned char *grid = malloc(count);
     float *dist = malloc(count * sizeof(float));
@@ -3596,62 +3733,53 @@ static bool BakeOcclusionVolume(const SceneData *d, float voxel, float intensity
     if (!grid || !dist || !axis) {
         free(grid); free(dist); free(axis);
         TraceLog(LOG_WARNING, "monolith_scene: occlusion volume: out of memory (%d x %d x %d)", dim[0], dim[1], dim[2]);
-        return false;
+        return NULL;
     }
-    double t0 = GetTime();
     // dist > 0: distance to the nearest box outside all boxes; <= 0: minus the depth inside
     for (size_t i = 0; i < count; i++) dist[i] = AO_DIST_MAX;
-    const float *rmin = (const float *)&region.min;
-    for (int b = 0; b < d->boxCount; b++) {
-        const float *bmin = (const float *)&d->boxes[b].min, *bmax = (const float *)&d->boxes[b].max;
-        int lo[3], hi[3];
-        bool empty = false;
-        float *ax[3] = { axis, axis + dim[0], axis + dim[0] + dim[1] };
-        for (int a = 0; a < 3 && !empty; a++) {
-            // voxel centres c = rmin + (i + 0.5) * voxel within AO_DIST_MAX of the box
-            lo[a] = CellKey((bmin[a] - AO_DIST_MAX - rmin[a]) / voxel - 0.5f);
-            hi[a] = -CellKey(-((bmax[a] + AO_DIST_MAX - rmin[a]) / voxel - 0.5f));  // = ceil
-            if (lo[a] < 0) lo[a] = 0;
-            if (hi[a] > dim[a] - 1) hi[a] = dim[a] - 1;
-            empty = lo[a] > hi[a];
-            // per axis: outside distance (> 0), or minus the distance to the nearer face (<= 0)
-            for (int i = lo[a]; i <= hi[a]; i++) {
-                float c = rmin[a] + ((float)i + 0.5f) * voxel;
-                ax[a][i] = c < bmin[a] ? bmin[a] - c : c > bmax[a] ? c - bmax[a] : -fminf(c - bmin[a], bmax[a] - c);
-            }
-        }
-        if (empty) continue;
-        for (int z = lo[2]; z <= hi[2]; z++) {
-            float dz = ax[2][z];
-            for (int y = lo[1]; y <= hi[1]; y++) {
-                float dy = ax[1][y];
-                float oz = fmaxf(dz, 0.0f), oy = fmaxf(dy, 0.0f), syz = oy * oy + oz * oz;
-                if (syz >= AO_DIST_MAX * AO_DIST_MAX) continue;
-                float iyz = fmaxf(dy, dz);     // <= 0 only when inside on both axes
-                float *row = dist + ((size_t)z * dim[1] + y) * dim[0];
-                for (int x = lo[0]; x <= hi[0]; x++) {
-                    float dx = ax[0][x], e;
-                    if (dx <= 0.0f && iyz <= 0.0f) e = fmaxf(dx, iyz);     // inside: minus the depth
-                    else {
-                        float ox = fmaxf(dx, 0.0f);
-                        e = sqrtf(ox * ox + syz);
-                    }
-                    // union of boxes: the minimum (outside: the nearest box, inside: the deepest)
-                    if (e < row[x]) row[x] = e;
-                }
-            }
-        }
-    }
-    for (size_t i = 0; i < count; i++) {
-        float v = (Clamp(dist[i], AO_DIST_MIN, AO_DIST_MAX) - AO_DIST_MIN) / (AO_DIST_MAX - AO_DIST_MIN);
-        grid[i] = (unsigned char)(v * 255.0f + 0.5f);
-    }
+    static const int ZERO[3] = { 0, 0, 0 };
+    for (int b = 0; b < d->boxCount; b++) AoSplatBox(&d->boxes[b], (const float *)&region.min, voxel, ZERO, dim, dist, axis);
+    for (size_t i = 0; i < count; i++) grid[i] = AoByte(dist[i]);
+    free(dist); free(axis);
+    *regionOut = region;
+    return grid;
+}
+
+#ifndef MONOLITH_EDITOR
+static bool BakeOcclusionVolume(const SceneData *d, float voxel, float intensity)
+{
+    double t0 = GetTime();
+    BoundingBox region;
+    int dim[3];
+    unsigned char *grid = AoBake(d, voxel, &region, dim);
+    if (!grid) return false;
     R3D_SetWorldOcclusion(grid, dim[0], dim[1], dim[2], region.min, voxel, AO_DIST_MIN, AO_DIST_MAX, intensity);
     TraceLog(LOG_INFO, "monolith_scene: occlusion volume %d x %d x %d (%.1f MB, %.2f m voxels) baked in %.0f ms",
-             dim[0], dim[1], dim[2], count / (1024.0 * 1024.0), voxel, (GetTime() - t0) * 1000.0);
-    free(grid); free(dist); free(axis);
+             dim[0], dim[1], dim[2], (size_t)dim[0] * dim[1] * dim[2] / (1024.0 * 1024.0), voxel, (GetTime() - t0) * 1000.0);
+    free(grid);
     return true;
 }
+#else
+// The same, and the editor keeps the bytes (MS_EditSetText recomputes the voxels near a change)
+static bool BakeOcclusionVolume(MS_Private *p, const SceneData *d, float voxel, float intensity)
+{
+    double t0 = GetTime();
+    BoundingBox region;
+    int dim[3];
+    unsigned char *grid = AoBake(d, voxel, &region, dim);
+    free(p->aoGrid);
+    p->aoGrid = grid;
+    if (!grid) return false;
+    R3D_SetWorldOcclusion(grid, dim[0], dim[1], dim[2], region.min, voxel, AO_DIST_MIN, AO_DIST_MAX, intensity);
+    TraceLog(LOG_INFO, "monolith_scene: occlusion volume %d x %d x %d (%.1f MB, %.2f m voxels) baked in %.0f ms",
+             dim[0], dim[1], dim[2], (size_t)dim[0] * dim[1] * dim[2] / (1024.0 * 1024.0), voxel, (GetTime() - t0) * 1000.0);
+    memcpy(p->aoDim, dim, sizeof(p->aoDim));
+    p->aoRegion = region;
+    p->aoVoxel = voxel;
+    p->aoIntensity = intensity;
+    return true;
+}
+#endif
 #endif
 
 // #endregion
@@ -4291,27 +4419,33 @@ static void BuildModelPick(MS_ModelFile *F, ModelPick *mp)
 #define MODEL_LOAD_ERROR "%s:%d: cannot load the model \"%s\" (unsupported or broken file; see the log)"
 #endif
 
+// Loads model file i of `d` (GPU). On failure: "map:line: message"
+static bool LoadModelFile(SceneData *d, int i, char *err, int errSize)
+{
+    MS_ModelFile *F = &d->modelFiles[i];
+    char full[MS_PATH_MAX + MS_PATH_MAX];
+    snprintf(full, sizeof(full), "%s%s", d->root, F->path);
+    F->model = R3D_LoadModelEx(full, R3D_IMPORT_RETAIN_MESH_DATA);
+    if (F->model.meshCount <= 0 || !F->model.meshes) {
+        snprintf(err, errSize, MODEL_LOAD_ERROR, d->srcPath, F->line, F->path);
+        return false;
+    }
+    F->loaded = true;
+    F->bounds = F->model.aabb;
+    F->meshCount = F->model.meshCount;
+    F->materialCount = F->model.materialCount;
+    BuildModelPick(F, &d->modelPick[i]);
+    TraceLog(LOG_INFO, "monolith_scene: model %s: %d meshes, %d triangles, %d materials, size %.3f x %.3f x %.3f",
+             F->path, F->meshCount, F->triangleCount, F->materialCount, F->bounds.max.x - F->bounds.min.x,
+             F->bounds.max.y - F->bounds.min.y, F->bounds.max.z - F->bounds.min.z);
+    return true;
+}
+
 // Loads every model file of `d` (GPU). On failure: "map:line: message"
 static bool LoadModelFiles(SceneData *d, char *err, int errSize)
 {
-    for (int i = 0; i < d->modelFileCount; i++) {
-        MS_ModelFile *F = &d->modelFiles[i];
-        char full[MS_PATH_MAX + MS_PATH_MAX];
-        snprintf(full, sizeof(full), "%s%s", d->root, F->path);
-        F->model = R3D_LoadModelEx(full, R3D_IMPORT_RETAIN_MESH_DATA);
-        if (F->model.meshCount <= 0 || !F->model.meshes) {
-            snprintf(err, errSize, MODEL_LOAD_ERROR, d->srcPath, F->line, F->path);
-            return false;
-        }
-        F->loaded = true;
-        F->bounds = F->model.aabb;
-        F->meshCount = F->model.meshCount;
-        F->materialCount = F->model.materialCount;
-        BuildModelPick(F, &d->modelPick[i]);
-        TraceLog(LOG_INFO, "monolith_scene: model %s: %d meshes, %d triangles, %d materials, size %.3f x %.3f x %.3f",
-                 F->path, F->meshCount, F->triangleCount, F->materialCount, F->bounds.max.x - F->bounds.min.x,
-                 F->bounds.max.y - F->bounds.min.y, F->bounds.max.z - F->bounds.min.z);
-    }
+    for (int i = 0; i < d->modelFileCount; i++)
+        if (!LoadModelFile(d, i, err, errSize)) return false;
     return true;
 }
 
@@ -4507,6 +4641,11 @@ static void FreeModelGroups(SceneData *d)
     free(d->modelRanges);
     d->modelRanges = NULL;
     d->modelRangeCount = d->modelRangeCap = 0;
+#ifdef MONOLITH_EDITOR
+    free(d->modelSlotOf);
+    free(d->modelRangeOf);
+    d->modelSlotOf = d->modelRangeOf = NULL;
+#endif
 }
 
 // The material of slot s for instance M: material.N, then the instance's override, else -1
@@ -4570,6 +4709,11 @@ static bool BuildModelGroups(SceneData *d, char *err, int errSize)
     }
     for (int i = 0; i < d->modelCount; i++) items[i] = MakeCellItem(groupOf[i], i, d->models[i].bounds, MS_MODEL_CELL_SIZE);
     qsort(items, d->modelCount, sizeof(CellItem), CompareCellItems);
+#ifdef MONOLITH_EDITOR
+    // (the preview moves single instances: where each one sits; out of memory: no preview)
+    d->modelSlotOf = malloc(sizeof(int) * d->modelCount);
+    d->modelRangeOf = malloc(sizeof(int) * d->modelCount);
+#endif
 
     bool ok = true;
     for (int g = 0, at = 0; g < d->modelGroupCount && ok; at += d->modelGroups[g++].count) {
@@ -4614,7 +4758,18 @@ static bool BuildModelGroups(SceneData *d, char *err, int errSize)
             scl[k] = M->scale;
         }
         R3D_UnmapInstances(G->inst, (pos ? R3D_INSTANCE_POSITION : 0) | (rot ? R3D_INSTANCE_ROTATION : 0) | (scl ? R3D_INSTANCE_SCALE : 0));
+#ifdef MONOLITH_EDITOR
+        int rangesBefore = d->modelRangeCount;
+#endif
         if (ok && !AddRanges(&d->modelRanges, &d->modelRangeCount, &d->modelRangeCap, g, items + at, count)) ok = false;
+#ifdef MONOLITH_EDITOR
+        for (int r = rangesBefore; ok && d->modelSlotOf && d->modelRangeOf && r < d->modelRangeCount; r++)
+            for (int k = 0; k < d->modelRanges[r].count; k++) {
+                int i = items[at + d->modelRanges[r].first + k].index;
+                d->modelSlotOf[i] = d->modelRanges[r].first + k;
+                d->modelRangeOf[i] = r;
+            }
+#endif
     }
     free(items);
     free(groupOf);
@@ -4668,6 +4823,14 @@ static void FreeGpu(SceneData *d)
     free(d->lightShadowDrawn);
     d->lightShadow = NULL;
     d->lightShadowDrawn = NULL;
+#ifdef MONOLITH_EDITOR
+    free(d->hidden);
+    free(d->boxOrder);
+    free(d->boxRangeOf);
+    d->hidden = NULL;
+    d->boxOrder = d->boxRangeOf = NULL;
+    d->boxOrderCount = 0;
+#endif
     d->gpu = false;
 }
 
@@ -4855,27 +5018,44 @@ static void *HideThread(void *job)
     return NULL;
 }
 
-// hidden[b] bit f: face f of box b (R3D's cube face order) is hidden; only for boxes of merged
-// materials. Each box's faces depend only on the boxes, so threads take boxes in chunks and the
-// result is the same as one thread's. False when out of memory.
-static bool FindHiddenFaces(const SceneData *d, const R3D_MeshData *cube, unsigned char *hidden)
+// The occluder grid of FindHiddenFaces: the boxes as Box6, the big ones, and per occupied cell its
+// occluders. slots is NULL when there are more than HIDE_ENTRIES_MAX entries (then nothing is hidden)
+typedef struct {
+    Box6 *bx;
+    int *big, bigCount;
+    HideSlot *slots;
+    unsigned int slotMask;
+    int *ids;
+    Box6 *gbox;
+} HideGrid;
+
+static void HideGridFree(HideGrid *g)
 {
+    free(g->gbox);
+    free(g->ids);
+    free(g->slots);
+    free(g->big);
+    free(g->bx);
+    memset(g, 0, sizeof(*g));
+}
+
+// Builds the grid of d's occluders (skip, may be NULL: boxes left out as occluders). False when
+// out of memory (g freed)
+static bool HideGridBuild(const SceneData *d, const unsigned char *skip, HideGrid *g)
+{
+    memset(g, 0, sizeof(*g));
     int count = d->boxCount;
     size_t cap = count > 0 ? (size_t)count : 1;
-    Box6 *bx = malloc(sizeof(Box6) * cap);
-    int *big = malloc(sizeof(int) * cap), *ids = NULL;
-    HideSlot *slots = NULL;
-    Box6 *gbox = NULL;
-    int bigCount = 0;
-    unsigned int slotMask = 0;
-    bool ok = bx && big;
+    g->bx = malloc(sizeof(Box6) * cap);
+    g->big = malloc(sizeof(int) * cap);
+    bool ok = g->bx && g->big;
     long long total = 0;
     for (int i = 0; i < count && ok; i++) {
         const BoundingBox *B = &d->boxes[i];
-        bx[i] = (Box6){ { B->min.x, B->min.y, B->min.z }, { B->max.x, B->max.y, B->max.z } };
+        g->bx[i] = (Box6){ { B->min.x, B->min.y, B->min.z }, { B->max.x, B->max.y, B->max.z } };
         int m = d->boxRefs[i].material, lo[3], hi[3];
-        if (m < 0 || m >= d->materialCount || !d->matDefs[m].occluder) continue;
-        if (!HideCells(&bx[i], lo, hi)) big[bigCount++] = i;
+        if (m < 0 || m >= d->materialCount || !d->matDefs[m].occluder || (skip && skip[i])) continue;
+        if (!HideCells(&g->bx[i], lo, hi)) g->big[g->bigCount++] = i;
         else total += (long long)(hi[0] - lo[0] + 1) * (hi[1] - lo[1] + 1) * (hi[2] - lo[2] + 1);
     }
     if (ok && total <= HIDE_ENTRIES_MAX) {
@@ -4883,11 +5063,12 @@ static bool FindHiddenFaces(const SceneData *d, const R3D_MeshData *cube, unsign
         // cell's earlier ones (ascending box order within a cell)
         unsigned int nslots = 2;
         while (nslots < 2 * (unsigned long long)total) nslots <<= 1;
-        slotMask = nslots - 1;
-        slots = calloc(nslots, sizeof(HideSlot));
-        ids = malloc(sizeof(int) * (total > 0 ? (size_t)total : 1));
-        gbox = malloc(sizeof(Box6) * (total > 0 ? (size_t)total : 1));
-        ok = slots && ids && gbox;
+        g->slotMask = nslots - 1;
+        g->slots = calloc(nslots, sizeof(HideSlot));
+        g->ids = malloc(sizeof(int) * (total > 0 ? (size_t)total : 1));
+        g->gbox = malloc(sizeof(Box6) * (total > 0 ? (size_t)total : 1));
+        ok = g->slots && g->ids && g->gbox;
+        HideSlot *slots = g->slots;
         for (int pass = 0; pass < 2 && ok; pass++) {
             for (unsigned int h = 0, at = 0; pass == 1 && h < nslots; h++) {
                 slots[h].first = (int)at;           // (advanced while filling, set back below)
@@ -4895,35 +5076,63 @@ static bool FindHiddenFaces(const SceneData *d, const R3D_MeshData *cube, unsign
             }
             for (int i = 0; i < count; i++) {
                 int m = d->boxRefs[i].material, lo[3], hi[3], cell[3];
-                if (m < 0 || m >= d->materialCount || !d->matDefs[m].occluder || !HideCells(&bx[i], lo, hi)) continue;
+                if (m < 0 || m >= d->materialCount || !d->matDefs[m].occluder || (skip && skip[i]) || !HideCells(&g->bx[i], lo, hi))
+                    continue;
                 for (cell[0] = lo[0]; cell[0] <= hi[0]; cell[0]++)
                     for (cell[1] = lo[1]; cell[1] <= hi[1]; cell[1]++)
                         for (cell[2] = lo[2]; cell[2] <= hi[2]; cell[2]++) {
                             unsigned long long key = HideKey(cell);
-                            unsigned int h = HideHash(key, slotMask);
-                            while (slots[h].count && slots[h].key != key) h = (h + 1) & slotMask;
+                            unsigned int h = HideHash(key, g->slotMask);
+                            while (slots[h].count && slots[h].key != key) h = (h + 1) & g->slotMask;
                             if (pass == 0) {
                                 slots[h].key = key;
                                 slots[h].count++;
                             } else {
                                 int e = slots[h].first++;
-                                ids[e] = i;
-                                gbox[e] = bx[i];
+                                g->ids[e] = i;
+                                g->gbox[e] = g->bx[i];
                             }
                         }
             }
         }
         for (unsigned int h = 0; ok && h < nslots; h++) slots[h].first -= slots[h].count;
     }
-    if (ok && slots) {
-        HideJob J = { .d = d, .bx = bx, .big = big, .bigCount = bigCount, .slots = slots, .slotMask = slotMask,
-                      .ids = ids, .gbox = gbox, .hidden = hidden };
-        atomic_init(&J.next, 0);
-        for (int f = 0; f < 6; f++) {
-            Vector3 nrm = R3D_UnpackNormal(cube->vertices[f * 4].normal);
-            J.axis[f] = fabsf(nrm.x) > 0.5f ? 0 : fabsf(nrm.y) > 0.5f ? 1 : 2;
-            J.dir[f] = (J.axis[f] == 0 ? nrm.x : J.axis[f] == 1 ? nrm.y : nrm.z) > 0.0f ? 1 : -1;
-        }
+    if (!ok) HideGridFree(g);
+    return ok;
+}
+
+// The job over grid g: the face axes and directions from R3D's cube (its face order)
+static void HideJobInit(HideJob *J, const SceneData *d, const HideGrid *g, const R3D_MeshData *cube, unsigned char *hidden)
+{
+    memset(J, 0, sizeof(*J));
+    J->d = d;
+    J->bx = g->bx;
+    J->big = g->big;
+    J->bigCount = g->bigCount;
+    J->slots = g->slots;
+    J->slotMask = g->slotMask;
+    J->ids = g->ids;
+    J->gbox = g->gbox;
+    J->hidden = hidden;
+    atomic_init(&J->next, 0);
+    for (int f = 0; f < 6; f++) {
+        Vector3 nrm = R3D_UnpackNormal(cube->vertices[f * 4].normal);
+        J->axis[f] = fabsf(nrm.x) > 0.5f ? 0 : fabsf(nrm.y) > 0.5f ? 1 : 2;
+        J->dir[f] = (J->axis[f] == 0 ? nrm.x : J->axis[f] == 1 ? nrm.y : nrm.z) > 0.0f ? 1 : -1;
+    }
+}
+
+// hidden[b] bit f: face f of box b (R3D's cube face order) is hidden; only for boxes of merged
+// materials. Each box's faces depend only on the boxes, so threads take boxes in chunks and the
+// result is the same as one thread's. False when out of memory.
+static bool FindHiddenFaces(const SceneData *d, const R3D_MeshData *cube, unsigned char *hidden)
+{
+    int count = d->boxCount;
+    HideGrid g;
+    bool ok = HideGridBuild(d, NULL, &g);
+    if (ok && g.slots) {
+        HideJob J;
+        HideJobInit(&J, d, &g, cube, hidden);
         pthread_t thread[HIDE_THREADS - 1];
         int threads = 0;
         while (threads < HIDE_THREADS - 1 && count > (threads + 1) * HIDE_CHUNK &&
@@ -4934,11 +5143,7 @@ static bool FindHiddenFaces(const SceneData *d, const R3D_MeshData *cube, unsign
         // of memory takes none
         ok = atomic_load(&J.next) >= count;
     }
-    free(gbox);
-    free(ids);
-    free(slots);
-    free(big);
-    free(bx);
+    HideGridFree(&g);
     return ok;
 }
 
@@ -4976,6 +5181,34 @@ static bool BuildBoxMesh(SceneData *d, DrawRange *R, const CellItem *items, cons
     d->boxMeshCount += R->mesh.vertexCount > 0;
     return R->mesh.vertexCount > 0;
 }
+
+#ifdef MONOLITH_EDITOR
+// What the next live edit compares with: the hidden faces (taken over from *hidden), the boxes in
+// draw order (items[0..n), sorted) and each box's range. Out of memory: left NULL (the edit then
+// rebuilds every box draw)
+static void KeepBoxIndex(SceneData *d, const CellItem *items, int n, unsigned char **hidden)
+{
+    d->hidden = *hidden;
+    *hidden = NULL;
+    d->boxOrder = malloc(sizeof(int) * (n > 0 ? (size_t)n : 1));
+    d->boxRangeOf = malloc(sizeof(int) * (d->boxCount > 0 ? (size_t)d->boxCount : 1));
+    if (!d->boxOrder || !d->boxRangeOf) {
+        free(d->boxOrder);
+        free(d->boxRangeOf);
+        d->boxOrder = d->boxRangeOf = NULL;
+        return;
+    }
+    d->boxOrderCount = n;
+    for (int k = 0; k < n; k++) d->boxOrder[k] = items[k].index;
+    for (int b = 0; b < d->boxCount; b++) d->boxRangeOf[b] = -1;
+    int at = 0, m = 0;          // items of material m start at the sum of the counts before it
+    for (int r = 0; r < d->boxRangeCount; r++) {
+        const DrawRange *R = &d->boxRanges[r];
+        while (m < R->group) at += d->instCount[m++];
+        for (int k = 0; k < R->count; k++) d->boxRangeOf[items[at + R->first + k].index] = r;
+    }
+}
+#endif
 
 // Boxes -> draws per material and 32 m cell (boxRanges: one cluster each). A material that is
 // `merge` gets, per range, one mesh of its boxes' visible faces (BuildBoxMesh): fewer triangles,
@@ -5049,6 +5282,9 @@ static bool UploadBoxes(SceneData *d, char *err, int errSize)
         }
     }
     R3D_UnloadMeshData(cube);
+#ifdef MONOLITH_EDITOR
+    if (ok) KeepBoxIndex(d, items, n, &hidden);
+#endif
     free(hidden);
     free(items);
     if (!ok) snprintf(err, errSize, "%s: out of memory (box meshes)", d->path);
@@ -5503,9 +5739,15 @@ static bool LoadBytes(MS_Scene *s, const char *mapPath, char *bytes, int size, c
     // caches the instance buffer names it last bound (instances_enable in r3d_render.c) and
     // skips re-binding when they match; freeing first let GL hand out the same names again,
     // so the new map was drawn with the old boxes.
+#ifdef MONOLITH_EDITOR
+    if (p->pv) MS_EditPreviewEnd(s);    // (puts the old scene back together before it goes)
+#endif
     SceneData *old = p->d;
     p->d = d;
     s->version++;
+#ifdef MONOLITH_EDITOR
+    s->loadVersion++;
+#endif
     Publish(s, d);
     FreeData(old);
     if (p->gpu) LogLoadTimes(d, old != NULL, (GetTime() - tLoad) * 1000.0);
@@ -5581,6 +5823,17 @@ void MS_Unload(MS_Scene *s)
     if (!s) return;
     MS_Private *p = s->priv;
     if (p) {
+#ifdef MONOLITH_EDITOR
+        if (p->pv) MS_EditPreviewEnd(s);
+        free(p->dirty);
+        free(p->aoGrid);
+        free(p->rangeObj);
+        free(p->rangeAt);
+        free(p->rangeMatAt);
+        free(p->drawHidden);
+        free(p->filterObj);
+        free(p->filterObjNew);
+#endif
         FreeData(p->d);
 #ifdef MS_PATCHED_R3D
         // The fog bake is R3D-global: without this, the next scene drawn in this R3D context
@@ -5792,6 +6045,1417 @@ void MS_SetInitHints(const MS_Scene *s)
 }
 
 // #endregion
+
+#ifdef MONOLITH_EDITOR
+// ======================================================================================
+// #region Live edits (editor; docs/live-editing.md)
+// ======================================================================================
+// MS_EditSetText parses a new map text on the CPU and swaps it in like a load, but keeps every GPU
+// resource whose input did not change: model files, textures, shaders, materials, sky, ambient
+// map, the merged box meshes and instance buffers whose boxes are the same, the light shadow maps
+// of identical lights. Objects are matched by content (not by entity id: the pieces of a split
+// `repeat` line get new ids although their boxes stay). What changed (the bounds of every object
+// without an identical one on the other side) goes into p->dirty, and the static caches redraw
+// only where it reaches: sun shadow tiles and the camera-fitted map by their light-space square,
+// light shadows by their range, the fog cache by its bake box, the occlusion volume voxel by voxel.
+// Everything kept or redrawn is what a load of the same text would make (the --edit-script tests).
+
+#define LIVE_HIDE_PARTIAL_MAX   256     // more changed boxes: the hidden faces are searched again in full
+#define LIVE_AO_WINDOWS_MAX     16      // more changed boxes: one window around all of them
+
+// --- Matching objects by content: old objects in a hash table of chains (map order), each new
+// object takes the first unused old one with the same content
+
+typedef bool (*LiveSame)(const SceneData *a, int i, const SceneData *b, int j);
+
+typedef struct {
+    unsigned long long *key;    // per slot: content hash
+    int *head, *tail;           // per slot: first / last old object + 1 (0 = empty slot)
+    int *next;                  // per old object: the next one with the same hash, -1
+    bool *used;
+    unsigned int mask;
+} LiveMatch;
+
+static void LiveMatchFree(LiveMatch *m)
+{
+    free(m->key); free(m->head); free(m->tail); free(m->next); free(m->used);
+    memset(m, 0, sizeof(*m));
+}
+
+static bool LiveMatchInit(LiveMatch *m, int count)
+{
+    memset(m, 0, sizeof(*m));
+    unsigned int cap = 16;
+    while (cap < 2u * (unsigned int)(count > 0 ? count : 1)) cap *= 2;
+    m->mask = cap - 1;
+    m->key = calloc(cap, sizeof(*m->key));
+    m->head = calloc(cap, sizeof(int));
+    m->tail = calloc(cap, sizeof(int));
+    m->next = malloc(sizeof(int) * (count > 0 ? (size_t)count : 1));
+    m->used = calloc(count > 0 ? (size_t)count : 1, sizeof(bool));
+    if (m->key && m->head && m->tail && m->next && m->used) return true;
+    LiveMatchFree(m);
+    return false;
+}
+
+static unsigned int LiveSlot(const LiveMatch *m, unsigned long long key)
+{
+    unsigned int h = (unsigned int)((key * 0x9E3779B97F4A7C15ull) >> 32) & m->mask;
+    while (m->head[h] && m->key[h] != key) h = (h + 1) & m->mask;
+    return h;
+}
+
+static void LiveMatchAdd(LiveMatch *m, int i, unsigned long long key)
+{
+    unsigned int h = LiveSlot(m, key);
+    m->next[i] = -1;
+    if (!m->head[h]) { m->key[h] = key; m->head[h] = i + 1; }
+    else m->next[m->tail[h] - 1] = i;
+    m->tail[h] = i + 1;
+}
+
+// The first unused old object with this content, -1 = none
+static int LiveMatchTake(LiveMatch *m, unsigned long long key, LiveSame same, const SceneData *old, const SceneData *d, int j)
+{
+    unsigned int h = LiveSlot(m, key);
+    for (int i = m->head[h] - 1; i >= 0 && m->head[h]; i = m->next[i])
+        if (!m->used[i] && same(old, i, d, j)) { m->used[i] = true; return i; }
+    return -1;
+}
+
+static unsigned long long BoxKey(const SceneData *d, int i)
+{
+    unsigned long long h = Fnv1a64Update(FNV_OFFSET, &d->boxes[i], sizeof(BoundingBox));
+    return Fnv1a64Update(h, &d->boxRefs[i].material, sizeof(int));
+}
+
+static bool BoxSame(const SceneData *a, int i, const SceneData *b, int j)
+{
+    return memcmp(&a->boxes[i], &b->boxes[j], sizeof(BoundingBox)) == 0 && a->boxRefs[i].material == b->boxRefs[j].material;
+}
+
+// A model instance: file, placement, materials, shadow, colliders (what its draw and its cache
+// contributions depend on)
+static unsigned long long ModelKey(const SceneData *d, int i)
+{
+    const MS_ModelInstance *M = &d->models[i];
+    unsigned long long h = Fnv1a64Update(FNV_OFFSET, d->modelFiles[M->file].path, strlen(d->modelFiles[M->file].path));
+    h = Fnv1a64Update(h, &M->transform, sizeof(Matrix));
+    h = Fnv1a64Update(h, &M->bounds, sizeof(BoundingBox));
+    return Fnv1a64Update(h, &M->castShadow, sizeof(bool));
+}
+
+static bool ModelSame(const SceneData *a, int i, const SceneData *b, int j)
+{
+    const MS_ModelInstance *A = &a->models[i], *B = &b->models[j];
+    if (strcmp(a->modelFiles[A->file].path, b->modelFiles[B->file].path) != 0 || A->castShadow != B->castShadow ||
+        A->ref.material != B->ref.material || A->collide != B->collide || A->slotCount != B->slotCount ||
+        A->colliderCount != B->colliderCount || A->origin != B->origin ||
+        memcmp(&A->transform, &B->transform, sizeof(Matrix)) != 0 || memcmp(&A->bounds, &B->bounds, sizeof(BoundingBox)) != 0 ||
+        memcmp(&A->position, &B->position, sizeof(Vector3)) != 0 || memcmp(&A->rotationDeg, &B->rotationDeg, sizeof(Vector3)) != 0 ||
+        memcmp(&A->scale, &B->scale, sizeof(Vector3)) != 0)
+        return false;
+    for (int k = 0; k < A->slotCount; k++)
+        if (a->modelSlots[A->slotFirst + k].slot != b->modelSlots[B->slotFirst + k].slot ||
+            a->modelSlots[A->slotFirst + k].material != b->modelSlots[B->slotFirst + k].material) return false;
+    for (int k = 0; k < A->colliderCount; k++)
+        if (memcmp(&a->colliders[A->colliderFirst + k], &b->colliders[B->colliderFirst + k], sizeof(BoundingBox)) != 0) return false;
+    return true;
+}
+
+// A light by the fields that make it (R3D_Light field by field: its padding is not set)
+static unsigned long long LightKey(const SceneData *d, int i)
+{
+    const R3D_Light *L = &d->lights[i].light;
+    unsigned long long h = Fnv1a64Update(FNV_OFFSET, &L->position, sizeof(Vector3));
+    h = Fnv1a64Update(h, &L->direction, sizeof(Vector3));
+    h = Fnv1a64Update(h, &L->range, sizeof(float));
+    return Fnv1a64Update(h, &L->type, sizeof(L->type));
+}
+
+static bool LightSame(const SceneData *a, int i, const SceneData *b, int j)
+{
+    const MS_LightDef *A = &a->lights[i], *B = &b->lights[j];
+    const R3D_Light *x = &A->light, *y = &B->light;
+    return memcmp(&x->position, &y->position, sizeof(Vector3)) == 0 && memcmp(&x->direction, &y->direction, sizeof(Vector3)) == 0 &&
+           memcmp(&x->color, &y->color, sizeof(Color)) == 0 && x->energy == y->energy && x->specular == y->specular &&
+           x->range == y->range && x->falloff == y->falloff && x->innerCutOff == y->innerCutOff &&
+           x->outerCutOff == y->outerCutOff && x->fogEnergy == y->fogEnergy && x->type == y->type &&
+           A->shadow == B->shadow && A->clip == B->clip && (!A->clip || memcmp(&A->clipBox, &B->clipBox, sizeof(BoundingBox)) == 0);
+}
+
+// Matches every new object of one kind to an old one: from[j] = old index or -1; *changed counts
+// the objects on both sides without a partner. False when out of memory.
+static bool LiveMatchAll(const SceneData *old, int oldCount, const SceneData *d, int count,
+                         unsigned long long (*key)(const SceneData *, int), LiveSame same, int *from, bool **oldUsed, int *changed)
+{
+    LiveMatch m;
+    if (!LiveMatchInit(&m, oldCount)) return false;
+    for (int i = 0; i < oldCount; i++) LiveMatchAdd(&m, i, key(old, i));
+    int matched = 0;
+    for (int j = 0; j < count; j++) {
+        from[j] = LiveMatchTake(&m, key(d, j), same, old, d, j);
+        matched += from[j] >= 0;
+    }
+    *changed = (count - matched) + (oldCount - matched);
+    *oldUsed = m.used;
+    m.used = NULL;
+    LiveMatchFree(&m);
+    return true;
+}
+
+// --- Dirty regions
+
+static void DirtyAdd(MS_Private *p, BoundingBox b)
+{
+    if (p->dirtyCount < 0) return;
+    BoundingBox *slot = MS_PUSH(p->dirty, p->dirtyCount, p->dirtyCap);
+    if (slot) *slot = b;
+    else p->dirtyCount = -1;    // out of memory: everything is dirty (see DirtyAll)
+}
+
+static bool DirtyAll(const MS_Private *p) { return p->dirtyCount < 0; }
+
+static inline bool BoxesTouch(BoundingBox a, BoundingBox b)
+{
+    return a.min.x <= b.max.x && a.max.x >= b.min.x && a.min.y <= b.max.y && a.max.y >= b.min.y && a.min.z <= b.max.z &&
+           a.max.z >= b.min.z;
+}
+
+// Does a dirty box reach the light-space square of an orthographic shadow map (its viewProj; depth
+// ignored: casters toward the light are pancaked onto the near plane)?
+static bool DirtyHitsMap(const MS_Private *p, int from, int to, Matrix viewProj)
+{
+    if (DirtyAll(p)) return true;
+    const float m = 1.01f;      // a little margin for float rounding
+    for (int i = from; i < to; i++) {
+        const BoundingBox *b = &p->dirty[i];
+        float x0 = INFINITY, x1 = -INFINITY, y0 = INFINITY, y1 = -INFINITY;
+        for (int c = 0; c < 8; c++) {
+            Vector3 q = { (c & 1) ? b->max.x : b->min.x, (c & 2) ? b->max.y : b->min.y, (c & 4) ? b->max.z : b->min.z };
+            Vector3 n = Vector3Transform(q, viewProj);
+            x0 = fminf(x0, n.x); x1 = fmaxf(x1, n.x);
+            y0 = fminf(y0, n.y); y1 = fmaxf(y1, n.y);
+        }
+        if (x1 >= -m && x0 <= m && y1 >= -m && y0 <= m) return true;
+    }
+    return false;
+}
+
+static bool DirtyHitsSphere(const MS_Private *p, int from, int to, Vector3 c, float r)
+{
+    if (DirtyAll(p)) return true;
+    for (int i = from; i < to; i++) {
+        const BoundingBox *b = &p->dirty[i];
+        float dx = fmaxf(fmaxf(b->min.x - c.x, 0.0f), c.x - b->max.x);
+        float dy = fmaxf(fmaxf(b->min.y - c.y, 0.0f), c.y - b->max.y);
+        float dz = fmaxf(fmaxf(b->min.z - c.z, 0.0f), c.z - b->max.z);
+        if (dx * dx + dy * dy + dz * dz <= r * r * 1.0001f + 1e-4f) return true;
+    }
+    return false;
+}
+
+// --- What d borrowed from old: given back to old when the edit fails, taken from old (its handles
+// zeroed, so freeing old leaves them) when it succeeds
+
+typedef struct {
+    int *fileFrom;              // per model file of d: the old file it took, -1 = loaded anew
+    int *lightFrom;             // per light of d: the old light whose shadow map it took, -1
+    int *meshFrom;              // per box range of d: the old range whose mesh it took, -1
+    int meshFromCap;
+    bool *instFrom;             // per material: d took old's instance buffer
+    bool materials, unit;       // d took old's material GPU state (shaders, textures, sky) / unit buffer
+} LiveBorrow;
+
+static void LiveBorrowFree(LiveBorrow *B)
+{
+    free(B->fileFrom); free(B->lightFrom); free(B->meshFrom); free(B->instFrom);
+    memset(B, 0, sizeof(*B));
+}
+
+// Zeroes in x what it shares with the other side (x = d after a failure, x = old after a success)
+static void LiveRelease(SceneData *x, bool isNew, const SceneData *d, const LiveBorrow *B)
+{
+    for (int i = 0; B->fileFrom && i < d->modelFileCount; i++) {
+        if (B->fileFrom[i] < 0) continue;
+        int k = isNew ? i : B->fileFrom[i];
+        memset(&x->modelFiles[k].model, 0, sizeof(R3D_Model));
+        x->modelFiles[k].loaded = false;
+        memset(&x->modelPick[k], 0, sizeof(ModelPick));
+    }
+    for (int j = 0; B->lightFrom && j < d->lightCount; j++)
+        if (B->lightFrom[j] >= 0 && x->lightShadow) x->lightShadow[isNew ? j : B->lightFrom[j]] = (R3D_ShadowMap){ 0 };
+    for (int r = 0; B->meshFrom && r < d->boxRangeCount && r < B->meshFromCap; r++)
+        if (B->meshFrom[r] >= 0) x->boxRanges[isNew ? r : B->meshFrom[r]].mesh = (R3D_Mesh){ 0 };
+    for (int m = 0; B->instFrom && x->inst && m < x->materialCount; m++)
+        if (B->instFrom[m]) x->inst[m] = (R3D_InstanceBuffer){ 0 };
+    if (B->materials) {
+        for (int i = 0; i < x->materialCount; i++) x->materials[i].material.shader = NULL;
+        // (the shader file list: d has its own copy of the array, the shaders are old's)
+        free(x->shaderFiles);
+        x->shaderFiles = NULL;
+        x->shaderFileCount = x->shaderFileCap = 0;
+        x->textures = NULL;             // (one array: the TexEntry list moved, not copied)
+        x->textureCount = x->textureCap = 0;
+        x->sky = (R3D_Cubemap){ 0 };
+        x->ambientMap = (R3D_AmbientMap){ 0 };
+    }
+    if (B->unit) x->unit = (R3D_InstanceBuffer){ 0 };
+}
+
+// --- Boxes: the draws of d, keeping old's meshes and instance buffers where nothing changed
+
+// The entries FindHiddenFaces' occluder grid would have (HideGridBuild's count)
+static long long HideTotal(const SceneData *d)
+{
+    long long total = 0;
+    for (int b = 0; b < d->boxCount; b++) {
+        int m = d->boxRefs[b].material, lo[3], hi[3];
+        if (m < 0 || m >= d->materialCount || !d->matDefs[m].occluder) continue;
+        Box6 bx = { { d->boxes[b].min.x, d->boxes[b].min.y, d->boxes[b].min.z }, { d->boxes[b].max.x, d->boxes[b].max.y, d->boxes[b].max.z } };
+        if (HideCells(&bx, lo, hi)) total += (long long)(hi[0] - lo[0] + 1) * (hi[1] - lo[1] + 1) * (hi[2] - lo[2] + 1);
+    }
+    return total;
+}
+
+// Old ranges of material m: [first[m], end[m]) in old->boxRanges; items of m start at at[m]
+typedef struct { int *first, *end, *at, *oldAt; } RangeIndex;
+
+static bool UploadBoxesLive(MS_Private *p, SceneData *old, SceneData *d, const int *boxFrom, int dirtyBoxes, LiveBorrow *B,
+                            MS_EditStats *st, char *err, int errSize)
+{
+    int mc = d->materialCount;
+    CellItem *items = malloc(sizeof(CellItem) * (d->boxCount > 0 ? d->boxCount : 1));
+    RangeIndex ri = { calloc(mc + 1, sizeof(int)), calloc(mc + 1, sizeof(int)), calloc(mc + 1, sizeof(int)),
+                      calloc(mc + 1, sizeof(int)) };
+    B->instFrom = calloc(mc > 0 ? mc : 1, sizeof(bool));
+    if (!items || !ri.first || !ri.end || !ri.at || !ri.oldAt || !B->instFrom) {
+        free(items); free(ri.first); free(ri.end); free(ri.at); free(ri.oldAt);
+        snprintf(err, errSize, "%s: out of memory", d->path);
+        return false;
+    }
+    bool anyMerge = false;
+    int n = 0;
+    for (int b = 0; b < d->boxCount; b++) {
+        int m = d->boxRefs[b].material;
+        if (m < 0 || m >= mc) continue;
+        items[n++] = MakeCellItem(m, b, d->boxes[b], MS_CELL_SIZE);
+        d->instCount[m]++;
+        anyMerge |= d->matDefs[m].merge;
+    }
+    qsort(items, n, sizeof(CellItem), CompareCellItems);
+    // what old drew: per material its ranges and where its items start
+    bool canKeep = old->boxOrder && old->instCount && old->boxOrderCount > 0;
+    for (int m = 0, at = 0, oat = 0; m < mc; m++) {
+        ri.at[m] = at;
+        ri.oldAt[m] = oat;
+        at += d->instCount[m];
+        oat += old->instCount ? old->instCount[m] : 0;
+        ri.first[m] = ri.end[m] = 0;
+    }
+    for (int r = old->boxRangeCount - 1; r >= 0; r--) ri.first[old->boxRanges[r].group] = r;
+    for (int r = 0; r < old->boxRangeCount; r++) ri.end[old->boxRanges[r].group] = r + 1;
+
+    double t0 = GetTime();
+    R3D_MeshData cube = { 0 };
+    unsigned char *hidden = NULL;
+    bool ok = true;
+    if (anyMerge) {
+        cube = R3D_GenMeshDataCube(1.0f, 1.0f, 1.0f);
+        hidden = calloc(d->boxCount > 0 ? d->boxCount : 1, 1);
+        ok = cube.vertexCount == 24 && cube.indexCount == 36 && hidden;
+        // (over HIDE_ENTRIES_MAX a full search hides nothing: as it, or the copied faces would not be a search's)
+        long long total = ok ? HideTotal(d) : 0, oldTotal = ok && old->hidden ? HideTotal(old) : 0;
+        bool partial = ok && old->hidden && dirtyBoxes <= LIVE_HIDE_PARTIAL_MAX && !DirtyAll(p) && oldTotal <= HIDE_ENTRIES_MAX;
+        if (ok && total > HIDE_ENTRIES_MAX) memset(hidden, 0, (size_t)d->boxCount);
+        else if (partial) {
+            // A box's faces depend only on the boxes that touch it: copied for an unchanged box
+            // that touches no changed one, searched again for the rest (in the same grid, so with
+            // the same neighbour order as a full search)
+            int *affected = NULL, affectedCount = 0, affectedCap = 0;
+            for (int b = 0; b < d->boxCount && ok; b++) {
+                int m = d->boxRefs[b].material;
+                if (m < 0 || m >= mc || !d->matDefs[m].merge) continue;
+                bool redo = boxFrom[b] < 0;
+                for (int k = 0; k < dirtyBoxes && !redo; k++) redo = BoxesTouch(d->boxes[b], p->dirty[k]);
+                if (!redo) hidden[b] = old->hidden[boxFrom[b]];
+                else {
+                    int *slot = MS_PUSH(affected, affectedCount, affectedCap);
+                    if (slot) *slot = b;
+                    else ok = false;
+                }
+            }
+            // The grid holds only the occluders that touch an affected box: a cell's list keeps the
+            // same boxes in the same order for every box the search visits (the others are never
+            // its neighbours)
+            unsigned char *far = ok && affectedCount > 0 ? malloc((size_t)d->boxCount) : NULL;
+            BoundingBox reach = { { INFINITY, INFINITY, INFINITY }, { -INFINITY, -INFINITY, -INFINITY } };
+            for (int k = 0; k < affectedCount; k++) reach = (BoundingBox){ Vector3Min(reach.min, d->boxes[affected[k]].min),
+                                                                          Vector3Max(reach.max, d->boxes[affected[k]].max) };
+            for (int b = 0; far && b < d->boxCount; b++) {
+                int m = d->boxRefs[b].material;
+                far[b] = 1;
+                if (m < 0 || m >= mc || !d->matDefs[m].occluder || !BoxesTouch(d->boxes[b], reach)) continue;
+                for (int k = 0; k < affectedCount && far[b]; k++) far[b] = !BoxesTouch(d->boxes[b], d->boxes[affected[k]]);
+            }
+            if (ok && affectedCount > 0 && !far) ok = false;
+            HideGrid g;
+            if (ok && affectedCount > 0 && (ok = HideGridBuild(d, far, &g))) {
+                if (!g.slots) memset(hidden, 0, (size_t)d->boxCount);
+                else {
+                    HideJob J;
+                    HideJobInit(&J, d, &g, &cube, hidden);
+                    int *nb = malloc(sizeof(int) * (size_t)d->boxCount), *stamp = malloc(sizeof(int) * (size_t)d->boxCount);
+                    Rect *piece = malloc(sizeof(Rect) * HIDE_PIECES);
+                    ok = nb && stamp && piece;
+                    for (int i = 0; ok && i < d->boxCount; i++) stamp[i] = -1;
+                    for (int k = 0; ok && k < affectedCount; k++) {
+                        hidden[affected[k]] = 0;
+                        HideRange(&J, affected[k], affected[k] + 1, nb, stamp, piece);
+                    }
+                    free(nb); free(stamp); free(piece);
+                }
+                HideGridFree(&g);
+            }
+            free(far);
+            free(affected);
+        } else if (ok) ok = FindHiddenFaces(d, &cube, hidden);
+        st->hiddenMs = (GetTime() - t0) * 1000.0;
+        // A box whose faces changed is part of the change too (its cells' meshes are rebuilt below anyway)
+        for (int b = 0; ok && b < d->boxCount; b++)
+            if (boxFrom[b] >= 0 && old->hidden && hidden[b] != old->hidden[boxFrom[b]]) DirtyAdd(p, d->boxes[b]);
+        if (ok && old->unit.capacity > 0) {
+            d->unit = old->unit;
+            B->unit = true;
+        } else if (ok) {
+            d->unit = R3D_LoadInstanceBuffer(1, R3D_INSTANCE_POSITION | R3D_INSTANCE_SCALE);
+            Vector3 *pos = R3D_MapInstances(d->unit, R3D_INSTANCE_POSITION, false);
+            Vector3 *scl = R3D_MapInstances(d->unit, R3D_INSTANCE_SCALE, false);
+            if (pos && scl) {
+                pos[0] = Vector3Zero();
+                scl[0] = Vector3One();
+            } else ok = false;
+            R3D_UnmapInstances(d->unit, (pos ? R3D_INSTANCE_POSITION : 0) | (scl ? R3D_INSTANCE_SCALE : 0));
+        }
+    }
+    double tMeshes = GetTime();
+    for (int m = 0; m < mc && ok; m++) {
+        int count = d->instCount[m], at = ri.at[m], oat = ri.oldAt[m];
+        if (count == 0) continue;
+        // The same boxes in the same order as old's draws of m (and, merged, the same faces)
+        bool sameList = canKeep && old->instCount[m] == count;
+        for (int k = 0; sameList && k < count; k++) sameList = boxFrom[items[at + k].index] == old->boxOrder[oat + k];
+        int first = d->boxRangeCount;
+        if (!d->matDefs[m].merge) {
+            if (sameList && old->inst[m].capacity >= count) {
+                d->inst[m] = old->inst[m];
+                B->instFrom[m] = true;
+            } else {
+                d->inst[m] = R3D_LoadInstanceBuffer(count, R3D_INSTANCE_POSITION | R3D_INSTANCE_SCALE);
+                if (d->inst[m].capacity < count) { ok = false; break; }
+                Vector3 *pos = R3D_MapInstances(d->inst[m], R3D_INSTANCE_POSITION, false);
+                Vector3 *scl = R3D_MapInstances(d->inst[m], R3D_INSTANCE_SCALE, false);
+                if (!pos || !scl) ok = false;
+                for (int k = 0; k < count && ok; k++) {
+                    const BoundingBox *Bx = &d->boxes[items[at + k].index];
+                    pos[k] = Vector3Scale(Vector3Add(Bx->min, Bx->max), 0.5f);
+                    scl[k] = Vector3Subtract(Bx->max, Bx->min);
+                }
+                R3D_UnmapInstances(d->inst[m], (pos ? R3D_INSTANCE_POSITION : 0) | (scl ? R3D_INSTANCE_SCALE : 0));
+            }
+            d->boxTrisDrawn += 12LL * count;
+        }
+        if (ok && !AddRanges(&d->boxRanges, &d->boxRangeCount, &d->boxRangeCap, m, items + at, count)) ok = false;
+        if (ok && !MS_RESERVE(B->meshFrom, B->meshFromCap, d->boxRangeCount)) ok = false;
+        for (int r = first; ok && r < d->boxRangeCount; r++) B->meshFrom[r] = -1;
+        if (!ok || !d->matDefs[m].merge) continue;
+        // Merged: walk old's ranges of m alongside (both sorted by big, cell)
+        int o = canKeep ? ri.first[m] : 0, oEnd = canKeep ? ri.end[m] : 0;
+        for (int r = first; ok && r < d->boxRangeCount; r++) {
+            DrawRange *R = &d->boxRanges[r];
+            const CellItem *it = &items[at + R->first];
+            int keep = -1;
+            while (o < oEnd) {
+                const DrawRange *O = &old->boxRanges[o];
+                int oi = old->boxOrder[oat + O->first];
+                CellItem oc = MakeCellItem(m, oi, old->boxes[oi], MS_CELL_SIZE);
+                int c = oc.big != it->big ? (oc.big < it->big ? -1 : 1) : oc.cx != it->cx ? (oc.cx < it->cx ? -1 : 1)
+                      : oc.cz != it->cz ? (oc.cz < it->cz ? -1 : 1) : 0;
+                if (c < 0) { o++; continue; }
+                if (c == 0 && O->count == R->count) {
+                    bool same = true;
+                    for (int k = 0; same && k < R->count; k++) {
+                        int nb = items[at + R->first + k].index, ob = old->boxOrder[oat + O->first + k];
+                        same = boxFrom[nb] == ob && old->hidden && hidden[nb] == old->hidden[ob];
+                    }
+                    if (same) keep = o;
+                }
+                break;
+            }
+            if (keep >= 0) {
+                R->mesh = old->boxRanges[keep].mesh;
+                B->meshFrom[r] = keep;
+                int visible = 0;
+                for (int k = 0; k < R->count; k++)
+                    for (int f = 0; f < 6; f++) visible += !(hidden[items[at + R->first + k].index] >> f & 1);
+                d->boxTrisDrawn += 2LL * visible;
+                d->boxMeshCount += R->mesh.vertexCount > 0;
+                st->rangesKept++;
+            } else {
+                ok = BuildBoxMesh(d, R, items + at + R->first, hidden, &cube);
+                st->rangesRebuilt++;
+            }
+        }
+    }
+    st->meshesMs = (GetTime() - tMeshes) * 1000.0;
+    R3D_UnloadMeshData(cube);
+    if (ok) KeepBoxIndex(d, items, n, &hidden);
+    free(hidden);
+    free(items);
+    free(ri.first); free(ri.end); free(ri.at); free(ri.oldAt);
+    if (!ok) snprintf(err, errSize, "%s: out of memory (box meshes)", d->path);
+    return ok;
+}
+
+// --- The occlusion volume: the voxels near the changed boxes again
+#ifdef MS_PATCHED_R3D
+
+// The voxels within AO_DIST_MAX of box b (AoSplatBox's range), clipped to the volume; false if none
+static bool AoWindow(const MS_Private *p, BoundingBox b, int lo[3], int hi[3])
+{
+    const float *rmin = (const float *)&p->aoRegion.min, *bmin = (const float *)&b.min, *bmax = (const float *)&b.max;
+    for (int a = 0; a < 3; a++) {
+        lo[a] = CellKey((bmin[a] - AO_DIST_MAX - rmin[a]) / p->aoVoxel - 0.5f);
+        hi[a] = -CellKey(-((bmax[a] + AO_DIST_MAX - rmin[a]) / p->aoVoxel - 0.5f));
+        if (lo[a] < 0) lo[a] = 0;
+        if (hi[a] > p->aoDim[a] - 1) hi[a] = p->aoDim[a] - 1;
+        if (lo[a] > hi[a]) return false;
+    }
+    return true;
+}
+
+// Recomputes the voxels near p->dirty[0..count) from every box of d (each voxel the same minimum
+// over the same boxes as a full bake: identical bytes) and uploads the volume. False when out of memory.
+static bool AoUpdate(MS_Private *p, const SceneData *d, int count)
+{
+    int wins = count <= LIVE_AO_WINDOWS_MAX ? count : 1;
+    for (int w = 0; w < wins; w++) {
+        int lo[3], hi[3], wdim[3];
+        bool any = false;
+        if (wins == count) any = AoWindow(p, p->dirty[w], lo, hi);
+        else {
+            // one window around every changed box
+            for (int k = 0; k < count; k++) {
+                int l[3], h[3];
+                if (!AoWindow(p, p->dirty[k], l, h)) continue;
+                for (int a = 0; a < 3; a++) {
+                    lo[a] = any && lo[a] < l[a] ? lo[a] : l[a];
+                    hi[a] = any && hi[a] > h[a] ? hi[a] : h[a];
+                }
+                any = true;
+            }
+        }
+        if (!any) continue;
+        for (int a = 0; a < 3; a++) wdim[a] = hi[a] - lo[a] + 1;
+        size_t vol = (size_t)wdim[0] * wdim[1] * wdim[2];
+        float *dist = malloc(vol * sizeof(float)), *axis = malloc(sizeof(float) * (wdim[0] + wdim[1] + wdim[2]));
+        if (!dist || !axis) { free(dist); free(axis); return false; }
+        for (size_t i = 0; i < vol; i++) dist[i] = AO_DIST_MAX;
+        for (int b = 0; b < d->boxCount; b++)
+            AoSplatBox(&d->boxes[b], (const float *)&p->aoRegion.min, p->aoVoxel, lo, wdim, dist, axis);
+        for (int z = 0; z < wdim[2]; z++)
+            for (int y = 0; y < wdim[1]; y++) {
+                unsigned char *row = p->aoGrid + ((size_t)(z + lo[2]) * p->aoDim[1] + (y + lo[1])) * p->aoDim[0] + lo[0];
+                const float *src = dist + ((size_t)z * wdim[1] + y) * wdim[0];
+                for (int x = 0; x < wdim[0]; x++) row[x] = AoByte(src[x]);
+            }
+        free(dist);
+        free(axis);
+    }
+    R3D_SetWorldOcclusion(p->aoGrid, p->aoDim[0], p->aoDim[1], p->aoDim[2], p->aoRegion.min, p->aoVoxel, AO_DIST_MIN,
+                          AO_DIST_MAX, p->aoIntensity);
+    return true;
+}
+#endif
+
+// --- The caches after a change: what the dirty regions reach is drawn again, the rest is stamped
+// with the new version (as if drawn for it). dirtyBoxes: p->dirty[0..dirtyBoxes) are boxes (the
+// occlusion volume holds boxes only). fogAo false: the fog cache and the occlusion volume keep what
+// they have (a preview step: they catch up when the edit is confirmed)
+static void Restamp(MS_Scene *s, unsigned int oldVersion, const SceneData *old, int dirtyBoxes, bool fogAo, MS_EditStats *st)
+{
+    MS_Private *p = s->priv;
+    SceneData *d = p->d;
+    int nd = DirtyAll(p) ? 0 : p->dirtyCount;
+    if (p->frameVersion == oldVersion) p->frameVersion = s->version;   // (not a load: no first-frame log)
+#ifdef MS_PATCHED_R3D
+    if (p->tiles.version == oldVersion) {
+        for (int i = 0; i < SUN_TILE_COUNT; i++)
+            if (p->tiles.tile[i].valid && DirtyHitsMap(p, 0, nd, p->tiles.tile[i].viewProj)) {
+                p->tiles.tile[i].valid = false;
+                st->tilesDirty++;
+            }
+        p->tiles.version = s->version;
+    }
+#endif
+    if (p->camCache.valid && p->camCache.version == oldVersion) {
+        if (DirtyHitsMap(p, 0, nd, p->camCache.viewProj)) { p->camCache.valid = false; st->tilesDirty++; }
+        else p->camCache.version = s->version;
+    }
+    for (int i = 0; d->lightShadowDrawn && i < d->lightCount; i++) {
+        const R3D_Light *L = &d->lights[i].light;
+        if (!d->lights[i].shadow || !d->lightShadowDrawn[i] || L->type == R3D_LIGHT_DIR) continue;
+        if (DirtyHitsSphere(p, 0, nd, L->position, L->range)) {
+            d->lightShadowDrawn[i] = false;
+            st->lightShadowsDirty++;
+        }
+    }
+#ifdef MS_PATCHED_R3D
+    if (p->fogCacheVersion && p->fogCacheVersion == oldVersion) {
+        bool keep = !fogAo;
+        if (fogAo) {
+            BoundingBox ro = FogCacheRegion(old, p->rs.fogCacheVoxel), rn = FogCacheRegion(d, p->rs.fogCacheVoxel);
+            keep = memcmp(&ro, &rn, sizeof(BoundingBox)) == 0 &&
+                   !DirtyHitsMap(p, 0, nd, SunShadowBoxMatrix(d->sunLight.direction, rn, 2.0f));
+        }
+        if (keep) p->fogCacheVersion = s->version;
+        else st->fogDirty = true;           // baked again by the next MS_DrawGeometry
+    }
+    if (p->aoVersion && p->aoVersion == oldVersion) {
+        bool keep = !fogAo || (!DirtyAll(p) && dirtyBoxes == 0);
+        if (!keep && p->aoGrid && p->rs.aoVolumeVoxel == p->aoVoxel && p->rs.aoVolumeIntensity == p->aoIntensity && !DirtyAll(p)) {
+            int dim[3];
+            BoundingBox region = AoLayout(d, p->aoVoxel, dim);
+            if (memcmp(&region, &p->aoRegion, sizeof(BoundingBox)) == 0 && memcmp(dim, p->aoDim, sizeof(dim)) == 0) {
+                double t0 = GetTime();
+                keep = AoUpdate(p, d, dirtyBoxes);
+                st->aoMs = (GetTime() - t0) * 1000.0;
+            }
+        }
+        if (!keep || dirtyBoxes > 0 || DirtyAll(p)) st->aoDirty = true;
+        if (keep) p->aoVersion = s->version;     // else baked in full by the next MS_DrawGeometry
+    }
+#else
+    (void)old;
+    (void)dirtyBoxes;
+    (void)fogAo;
+#endif
+}
+
+// --- MS_EditSetText
+
+MS_ReloadResult MS_EditSetText(MS_Scene *s, const char *text, int size, MS_EditStats *stats, char *err, int errSize)
+{
+    MS_Private *p = s->priv;
+    SceneData *old = p->d;
+    MS_EditStats st = { 0 };
+    double t0 = GetTime();
+    if (errSize > 0) err[0] = '\0';
+    if (p->pv) MS_EditPreviewEnd(s);
+    if (!old || size < 0 || size > MS_FILE_MAX) {
+        snprintf(err, errSize, "%s: no map loaded, or the text is larger than 4 MB", old ? old->path : "map");
+        return MS_RELOAD_FAILED;
+    }
+    char *bytes = malloc((size_t)size + 1);
+    SceneData *d = bytes ? calloc(1, sizeof(*d)) : NULL;
+    LiveBorrow B = { 0 };
+    int *boxFrom = NULL, *modelFrom = NULL;
+    bool *oldBoxUsed = NULL, *oldModelUsed = NULL, *oldLightUsed = NULL;
+    bool ok = d && InitData(d, old->path);
+    if (!ok) snprintf(err, errSize, "%s: out of memory", old->path);
+    if (ok) {
+        memcpy(bytes, text, (size_t)size);
+        bytes[size] = '\0';
+        ok = ParseScene(d, bytes, size, err, errSize);
+        d->text = bytes;
+        d->textSize = size;
+        bytes = NULL;
+        IndexLines(d);
+        d->hash = Fnv1a64Update(FNV_OFFSET, d->text, (size_t)size);
+        d->mtime = old->mtime;
+        d->shaderDefines = p->opt.shaderDefines;
+        d->shaderDefinesFile = p->opt.shaderDefinesFile;
+        st.parseMs = d->times.parse = (GetTime() - t0) * 1000.0;
+    }
+    if (ok && !FinishParse(d, &p->opt)) {
+        snprintf(err, errSize, "%s: out of memory", d->path);
+        ok = false;
+    }
+    // Anything but objects changed (a material, env, the format): uploaded in full, from memory
+    bool full = !old->gpu || old->compiled || old->lookHash != d->lookHash || old->materialCount != d->materialCount;
+    st.full = full;
+    if (ok && !p->gpu) ok = CheckModelFiles(d, err, errSize);
+    else if (ok) {
+        // Model files: the ones old has are taken over, new paths are loaded
+        double tm = GetTime();
+        d->gpu = true;
+        B.fileFrom = malloc(sizeof(int) * (d->modelFileCount > 0 ? (size_t)d->modelFileCount : 1));
+        ok = B.fileFrom != NULL;
+        if (!ok) snprintf(err, errSize, "%s: out of memory", d->path);
+        for (int i = 0; ok && i < d->modelFileCount; i++) B.fileFrom[i] = -1;
+        for (int i = 0; ok && i < d->modelFileCount; i++) {
+            for (int k = 0; !full && k < old->modelFileCount && B.fileFrom[i] < 0; k++)
+                if (old->modelFiles[k].loaded && strcmp(old->modelFiles[k].path, d->modelFiles[i].path) == 0) B.fileFrom[i] = k;
+            if (B.fileFrom[i] >= 0) {
+                MS_ModelFile *F = &d->modelFiles[i];
+                const MS_ModelFile *O = &old->modelFiles[B.fileFrom[i]];
+                F->model = O->model;
+                F->loaded = true;
+                F->bounds = O->bounds;
+                F->meshCount = O->meshCount;
+                F->triangleCount = O->triangleCount;
+                F->materialCount = O->materialCount;
+                d->modelPick[i] = old->modelPick[B.fileFrom[i]];
+            } else ok = LoadModelFile(d, i, err, errSize);
+        }
+        st.modelsMs = (GetTime() - tm) * 1000.0;
+    }
+    if (ok) ok = ResolveModels(d, err, errSize);
+    if (ok) {
+        FinishGeometry(d);
+        double tb = GetTime();
+        ok = BuildColliderBvh(d, err, errSize);
+        st.bvhMs = (GetTime() - tb) * 1000.0;
+    }
+    if (ok) {
+        double te = GetTime();
+        if (!BuildEntities(d)) {
+            snprintf(err, errSize, "%s: out of memory", d->path);
+            ok = false;
+        }
+        st.entitiesMs = (GetTime() - te) * 1000.0;
+    }
+
+    // What changed: objects without an identical partner, boxes first (the occlusion volume and
+    // the hidden faces look at boxes only), then models
+    int dirtyBoxes = 0;
+    p->dirtyCount = 0;
+    if (ok) {
+        int lightsChanged = 0;
+        int *lightFrom = malloc(sizeof(int) * (d->lightCount > 0 ? (size_t)d->lightCount : 1));
+        for (int j = 0; lightFrom && j < d->lightCount; j++) lightFrom[j] = -1;
+        boxFrom = malloc(sizeof(int) * (d->boxCount > 0 ? (size_t)d->boxCount : 1));
+        modelFrom = malloc(sizeof(int) * (d->modelCount > 0 ? (size_t)d->modelCount : 1));
+        ok = lightFrom && boxFrom && modelFrom &&
+             LiveMatchAll(old, old->boxCount, d, d->boxCount, BoxKey, BoxSame, boxFrom, &oldBoxUsed, &st.boxesChanged) &&
+             LiveMatchAll(old, old->modelCount, d, d->modelCount, ModelKey, ModelSame, modelFrom, &oldModelUsed, &st.modelsChanged) &&
+             LiveMatchAll(old, old->lightCount, d, d->lightCount, LightKey, LightSame, lightFrom, &oldLightUsed, &lightsChanged);
+        st.lightsChanged = lightsChanged;
+        B.lightFrom = lightFrom;
+        if (!ok) snprintf(err, errSize, "%s: out of memory", d->path);
+        for (int i = 0; ok && i < old->boxCount; i++) if (!oldBoxUsed[i]) DirtyAdd(p, old->boxes[i]);
+        for (int j = 0; ok && j < d->boxCount; j++) if (boxFrom[j] < 0) DirtyAdd(p, d->boxes[j]);
+        dirtyBoxes = p->dirtyCount;
+        for (int i = 0; ok && i < old->modelCount; i++) if (!oldModelUsed[i]) DirtyAdd(p, old->models[i].bounds);
+        for (int j = 0; ok && j < d->modelCount; j++) if (modelFrom[j] < 0) DirtyAdd(p, d->models[j].bounds);
+        if (DirtyAll(p)) dirtyBoxes = 0;
+    }
+
+    double tu = GetTime();
+    if (ok && p->gpu && full) {
+        ok = UploadGpu(d, err, errSize);        // (frees what it made on failure)
+        if (ok) for (int j = 0; j < d->lightCount; j++) B.lightFrom[j] = -1;
+    } else if (ok && p->gpu) {
+        d->gpu = true;
+        d->inst = calloc(d->materialCount, sizeof(R3D_InstanceBuffer));
+        d->instCount = calloc(d->materialCount, sizeof(int));
+        d->lightShadow = calloc(d->lightCount > 0 ? d->lightCount : 1, sizeof(R3D_ShadowMap));
+        d->lightShadowDrawn = calloc(d->lightCount > 0 ? d->lightCount : 1, sizeof(bool));
+        d->shaderFiles = malloc(sizeof(ShaderFile) * (old->shaderFileCount > 0 ? (size_t)old->shaderFileCount : 1));
+        ok = d->inst && d->instCount && d->lightShadow && d->lightShadowDrawn && d->shaderFiles;
+        if (!ok) snprintf(err, errSize, "%s: out of memory", d->path);
+        if (ok) {
+            // Materials, shaders, textures, sky: the same statements, so old's GPU state as it is
+            for (int i = 0; i < d->materialCount; i++) {
+                d->materials[i].material = old->materials[i].material;
+                d->matDefs[i].merge = old->matDefs[i].merge;
+                d->matDefs[i].occluder = old->matDefs[i].occluder;
+            }
+            d->shaderFileCount = d->shaderFileCap = old->shaderFileCount;
+            for (int f = 0; f < old->shaderFileCount; f++) {
+                ShaderFile *F = &d->shaderFiles[f];
+                *F = old->shaderFiles[f];
+                for (int i = 0; i < d->materialCount; i++)       // (rel points into the materials' strings)
+                    if (d->materials[i].shader && strcmp(d->materials[i].shader, F->rel) == 0) { F->rel = d->materials[i].shader; break; }
+            }
+            d->textures = old->textures;
+            d->textureCount = old->textureCount;
+            d->textureCap = old->textureCap;
+            d->sky = old->sky;
+            d->ambientMap = old->ambientMap;
+            B.materials = true;
+            ok = UploadBoxesLive(p, old, d, boxFrom, dirtyBoxes, &B, &st, err, errSize);
+        }
+        // Lights: an identical light keeps its shadow map (drawn again below if a change reaches it)
+        for (int j = 0; ok && j < d->lightCount; j++) {
+            int i = B.lightFrom[j];
+            d->lightShadowDrawn[j] = false;
+            if (i >= 0 && (!old->lights[i].shadow || !old->lightShadow[i].handle)) i = B.lightFrom[j] = -1;
+            if (i >= 0) {
+                d->lightShadow[j] = old->lightShadow[i];
+                d->lightShadowDrawn[j] = old->lightShadowDrawn[i];
+            } else if (d->lights[j].shadow) {
+                d->lightShadow[j] = R3D_LoadShadowMap(d->lights[j].light.type);
+                st.lightShadowsDirty++;
+            }
+        }
+        if (ok) ok = BuildModelGroups(d, err, errSize);
+    }
+    st.uploadMs = (GetTime() - tu) * 1000.0 - st.hiddenMs - st.meshesMs;
+    free(boxFrom);
+    free(modelFrom);
+    free(oldBoxUsed);
+    free(oldModelUsed);
+    free(oldLightUsed);
+    free(bytes);
+    if (!ok) {
+        if (d) LiveRelease(d, true, d, &B);
+        FreeData(d);
+        LiveBorrowFree(&B);
+        p->dirtyCount = 0;
+        return MS_RELOAD_FAILED;
+    }
+
+    // Swap (new before old, as a load), then the caches
+    unsigned int oldVersion = s->version;
+    p->d = d;
+    s->version++;
+    Publish(s, d);
+    if (p->gpu) {
+        LiveRelease(old, false, d, &B);
+        if (full) {
+            // a reload from memory: every cache is drawn again (they key on the version)
+        } else Restamp(s, oldVersion, old, dirtyBoxes, true, &st);
+    }
+    FreeData(old);
+    LiveBorrowFree(&B);
+    st.ms = (GetTime() - t0) * 1000.0;
+    if (stats) *stats = st;
+    return MS_RELOADED;
+}
+
+void MS_EditMarkSaved(MS_Scene *s)
+{
+    MS_Private *p = s->priv;
+    SceneData *d = p->d;
+    if (!d || !d->text) return;
+    // As if the package had been loaded from disk now: watched files, their mtimes, the hash
+    // MS_Poll compares with (the written bytes are the text the scene shows)
+    SetWatch(p, d);
+    p->triedHash = CombinedHash(d->text, d->textSize, p->watch, p->watchCount);
+    p->settleTime = 0.0f;
+    d->mtime = GetFileModTime(d->path);
+    s->mtime = d->mtime;
+}
+
+// --- Preview: objects follow a transform without a new text
+
+static void PreviewFree(struct EditPreview *v)
+{
+    if (!v) return;
+    if (v->buf.capacity > 0) R3D_UnloadInstanceBuffer(v->buf);
+    free(v->objs); free(v->boxOrig); free(v->modelOrig); free(v->localFirst); free(v->colliderOrig); free(v->colliderAt);
+    free(v->lightOrig); free(v->entityOrig); free(v->reach); free(v->boxSel); free(v->hiddenOrig); free(v->ranges);
+    free(v->meshOrig); free(v->instMat); free(v->instSlot); free(v->instScaleOrig); free(v->modelRangeOrig);
+    free(v->bufBox); free(v->drawMat); free(v->drawFirst); free(v->drawCount); free(v->drawBounds);
+    free(v);
+}
+
+static BoundingBox BoundsUnion(BoundingBox a, BoundingBox b)
+{
+    return (BoundingBox){ Vector3Min(a.min, b.min), Vector3Max(a.max, b.max) };
+}
+
+// The collider BVH's node bounds after colliders moved (nodes come after their parent)
+static void RefitColliderBvh(SceneData *d)
+{
+    int n;
+    const BoundingBox *c = PublishedColliders(d, &n);
+    for (int ni = d->colliderNodeCount - 1; ni >= 0; ni--) {
+        BvhNode *nd = &d->colliderNodes[ni];
+        if (nd->left < 0) {
+            nd->mn = (Vector3){ INFINITY, INFINITY, INFINITY };
+            nd->mx = (Vector3){ -INFINITY, -INFINITY, -INFINITY };
+            for (int k = nd->first; k < nd->first + nd->count; k++) {
+                nd->mn = Vector3Min(nd->mn, c[d->colliderOrder[k]].min);
+                nd->mx = Vector3Max(nd->mx, c[d->colliderOrder[k]].max);
+            }
+        } else {
+            nd->mn = Vector3Min(d->colliderNodes[nd->left].mn, d->colliderNodes[nd->left + 1].mn);
+            nd->mx = Vector3Max(d->colliderNodes[nd->left].mx, d->colliderNodes[nd->left + 1].mx);
+        }
+    }
+}
+
+// Model instance i placed again (ResolveModels for one instance) with its colliders
+static void ResolveOneModel(SceneData *d, int i, int localFirst)
+{
+    MS_ModelInstance *M = &d->models[i];
+    RotBoundsCache cache = { 0 };
+    const MS_ModelFile *F = &d->modelFiles[M->file];
+    BoundingBox fb = F->loaded ? F->bounds : (BoundingBox){ 0 };
+    Quaternion qy = QuaternionFromAxisAngle((Vector3){ 0, 1, 0 }, M->rotationDeg.x * DEG2RAD);
+    Quaternion qx = QuaternionFromAxisAngle((Vector3){ 1, 0, 0 }, M->rotationDeg.y * DEG2RAD);
+    Quaternion qz = QuaternionFromAxisAngle((Vector3){ 0, 0, 1 }, M->rotationDeg.z * DEG2RAD);
+    M->rotation = QuaternionNormalize(QuaternionMultiply(QuaternionMultiply(qy, qx), qz));
+    Matrix m = QuaternionToMatrix(M->rotation);
+    m.m0 *= M->scale.x; m.m1 *= M->scale.x; m.m2 *= M->scale.x;
+    m.m4 *= M->scale.y; m.m5 *= M->scale.y; m.m6 *= M->scale.y;
+    m.m8 *= M->scale.z; m.m9 *= M->scale.z; m.m10 *= M->scale.z;
+    BoundingBox lb = RotatedFileBounds(d, M, m, &cache);
+    BoundingBox ob = TransformBox(fb, m);
+    Vector3 shift = { 0 };
+    if (M->origin == MS_ORIGIN_BOTTOM)
+        shift = (Vector3){ -(ob.min.x + ob.max.x) * 0.5f, -lb.min.y, -(ob.min.z + ob.max.z) * 0.5f };
+    else if (M->origin == MS_ORIGIN_CENTER)
+        shift = (Vector3){ -(ob.min.x + ob.max.x) * 0.5f, -(lb.min.y + lb.max.y) * 0.5f, -(ob.min.z + ob.max.z) * 0.5f };
+    M->translation = Vector3Add(M->position, shift);
+    m.m12 = M->translation.x; m.m13 = M->translation.y; m.m14 = M->translation.z;
+    M->transform = m;
+    M->bounds = (BoundingBox){ Vector3Add(lb.min, M->translation), Vector3Add(lb.max, M->translation) };
+    if (M->collide == MS_COLLIDE_AABB && M->colliderCount > 0) d->colliders[M->colliderFirst] = M->bounds;
+    else if (M->collide == MS_COLLIDE_BOXES)
+        for (int k = 0; k < M->colliderCount; k++) d->colliders[M->colliderFirst + k] = TransformBox(d->localColliders[localFirst + k], m);
+    free(cache.e);
+}
+
+// Writes model instance i into its group's instance buffer
+static void PreviewModelInstance(SceneData *d, int i)
+{
+    if (!d->modelSlotOf || !d->modelRangeOf) return;
+    const MS_ModelInstance *M = &d->models[i];
+    DrawRange *R = &d->modelRanges[d->modelRangeOf[i]];
+    ModelGroup *G = &d->modelGroups[R->group];
+    int k = d->modelSlotOf[i];
+    Vector3 *pos = R3D_MapInstances(G->inst, R3D_INSTANCE_POSITION, false);
+    Quaternion *rot = R3D_MapInstances(G->inst, R3D_INSTANCE_ROTATION, false);
+    Vector3 *scl = R3D_MapInstances(G->inst, R3D_INSTANCE_SCALE, false);
+    if (pos) pos[k] = M->translation;
+    if (rot) rot[k] = M->rotation;
+    if (scl) scl[k] = M->scale;
+    R3D_UnmapInstances(G->inst, (pos ? R3D_INSTANCE_POSITION : 0) | (rot ? R3D_INSTANCE_ROTATION : 0) | (scl ? R3D_INSTANCE_SCALE : 0));
+    R->bounds = BoundsUnion(R->bounds, M->bounds);
+}
+
+// The preview buffer slots of the selected boxes, and the draw ranges' bounds
+static void PreviewBoxBuffer(SceneData *d, struct EditPreview *v)
+{
+    if (v->bufCount == 0) return;
+    Vector3 *pos = R3D_MapInstances(v->buf, R3D_INSTANCE_POSITION, false);
+    Vector3 *scl = R3D_MapInstances(v->buf, R3D_INSTANCE_SCALE, false);
+    for (int k = 0; pos && scl && k < v->bufCount; k++) {
+        const BoundingBox *B = &d->boxes[v->bufBox[k]];
+        pos[k] = Vector3Scale(Vector3Add(B->min, B->max), 0.5f);
+        scl[k] = Vector3Subtract(B->max, B->min);
+    }
+    R3D_UnmapInstances(v->buf, (pos ? R3D_INSTANCE_POSITION : 0) | (scl ? R3D_INSTANCE_SCALE : 0));
+    for (int r = 0; r < v->drawRanges; r++) {
+        BoundingBox b = d->boxes[v->bufBox[v->drawFirst[r]]];
+        for (int k = 1; k < v->drawCount[r]; k++) b = BoundsUnion(b, d->boxes[v->bufBox[v->drawFirst[r] + k]]);
+        v->drawBounds[r] = b;
+    }
+}
+
+// The merged meshes of the ranges in v->ranges built again from their boxes minus the selected
+// ones (hidden faces as they are in d->hidden); the meshes they had stay in v->meshOrig
+static bool PreviewRebuildRanges(SceneData *d, struct EditPreview *v, const R3D_MeshData *cube)
+{
+    int at = 0, m = 0;
+    bool ok = true;
+    CellItem *tmp = malloc(sizeof(CellItem) * (d->boxCount > 0 ? (size_t)d->boxCount : 1));
+    if (!tmp) return false;
+    for (int k = 0; k < v->rangeCount && ok; k++) {
+        DrawRange *R = &d->boxRanges[v->ranges[k]];
+        at = 0;
+        for (m = 0; m < R->group; m++) at += d->instCount[m];
+        DrawRange t = *R;
+        t.mesh = (R3D_Mesh){ 0 };
+        t.count = 0;
+        for (int j = 0; j < R->count; j++) {
+            int b = d->boxOrder[at + R->first + j];
+            if (!v->boxSel[b]) tmp[t.count++] = (CellItem){ .group = R->group, .index = b, .bounds = d->boxes[b] };
+        }
+        ok = t.count == 0 || BuildBoxMesh(d, &t, tmp, d->hidden, cube);
+        R->mesh = t.mesh;
+    }
+    free(tmp);
+    return ok;
+}
+
+// The box draws as they were at Begin: merged meshes, hidden faces, instanced slots
+static void PreviewUndoDraws(SceneData *d, struct EditPreview *v)
+{
+    for (int k = 0; v->ranges && v->meshOrig && k < v->rangeCount; k++) {
+        R3D_Mesh *cur = &d->boxRanges[v->ranges[k]].mesh;
+        if (memcmp(cur, &v->meshOrig[k], sizeof(R3D_Mesh)) != 0) R3D_UnloadMesh(*cur);     // (not rebuilt: it is the original)
+        *cur = v->meshOrig[k];
+    }
+    if (v->hiddenOrig && d->hidden) memcpy(d->hidden, v->hiddenOrig, (size_t)d->boxCount);
+    for (int k = 0; k < v->instCount; k++) {
+        Vector3 *scl = R3D_MapInstances(d->inst[v->instMat[k]], R3D_INSTANCE_SCALE, false);
+        if (scl) {
+            scl[v->instSlot[k]] = v->instScaleOrig[k];
+            R3D_UnmapInstances(d->inst[v->instMat[k]], R3D_INSTANCE_SCALE);
+        }
+    }
+    d->boxTrisDrawn = v->trisDrawn;
+    d->boxMeshCount = v->meshCount;
+}
+
+bool MS_EditPreviewBegin(MS_Scene *s, const MS_ObjRef *objs, int count)
+{
+    MS_Private *p = s->priv;
+    SceneData *d = p->d;
+    if (p->pv || !p->gpu || !d || !d->gpu || count <= 0) return false;
+    for (int i = 0; i < count; i++) {
+        int n = objs[i].kind == MS_OBJ_BOX ? d->boxCount : objs[i].kind == MS_OBJ_MODEL ? d->modelCount
+              : objs[i].kind == MS_OBJ_LIGHT ? d->lightCount : 0;
+        if (objs[i].index < 0 || objs[i].index >= n) return false;
+        if (objs[i].kind == MS_OBJ_BOX && (!d->boxOrder || !d->boxRangeOf)) return false;
+        if (objs[i].kind == MS_OBJ_MODEL && (!d->modelSlotOf || !d->modelRangeOf)) return false;
+    }
+    struct EditPreview *v = calloc(1, sizeof(*v));
+    if (!v) return false;
+    size_t nc = (size_t)count;
+    v->count = count;
+    v->objs = malloc(sizeof(MS_ObjRef) * nc);
+    v->boxOrig = calloc(nc, sizeof(BoundingBox));
+    v->modelOrig = calloc(nc, sizeof(MS_ModelInstance));
+    v->localFirst = calloc(nc, sizeof(int));
+    v->colliderAt = calloc(nc, sizeof(int));
+    v->lightOrig = calloc(nc, sizeof(MS_LightDef));
+    v->entityOrig = calloc(nc, sizeof(MS_Transform));
+    v->reach = calloc(nc, sizeof(BoundingBox));
+    v->boxSel = calloc(d->boxCount > 0 ? (size_t)d->boxCount : 1, 1);
+    v->modelRangeOrig = malloc(sizeof(BoundingBox) * (d->modelRangeCount > 0 ? (size_t)d->modelRangeCount : 1));
+    v->bufBox = malloc(sizeof(int) * nc);
+    v->drawMat = malloc(sizeof(int) * nc);
+    v->drawFirst = malloc(sizeof(int) * nc);
+    v->drawCount = malloc(sizeof(int) * nc);
+    v->drawBounds = malloc(sizeof(BoundingBox) * nc);
+    v->instMat = malloc(sizeof(int) * nc);
+    v->instSlot = malloc(sizeof(int) * nc);
+    v->instScaleOrig = malloc(sizeof(Vector3) * nc);
+    v->trisDrawn = d->boxTrisDrawn;
+    v->meshCount = d->boxMeshCount;
+    bool ok = v->objs && v->boxOrig && v->modelOrig && v->localFirst && v->colliderAt && v->lightOrig && v->entityOrig && v->reach &&
+              v->boxSel && v->modelRangeOrig && v->bufBox && v->drawMat && v->drawFirst && v->drawCount && v->drawBounds &&
+              v->instMat && v->instSlot && v->instScaleOrig;
+    // What everything was at Begin
+    int colliders = 0;
+    for (int i = 0; ok && i < count; i++) {
+        MS_ObjRef o = objs[i];
+        v->objs[i] = o;
+        int e = d->objEntities[o.kind == MS_OBJ_BOX ? o.index : o.kind == MS_OBJ_MODEL ? d->boxCount + o.index
+                               : d->boxCount + d->modelCount + o.index];
+        v->entityOrig[i] = d->entityTransforms[e];
+        if (o.kind == MS_OBJ_BOX) {
+            v->boxOrig[i] = v->reach[i] = d->boxes[o.index];
+            v->boxSel[o.index] = 1;
+        } else if (o.kind == MS_OBJ_MODEL) {
+            v->modelOrig[i] = d->models[o.index];
+            v->reach[i] = d->models[o.index].bounds;
+            v->colliderAt[i] = colliders;
+            colliders += d->models[o.index].colliderCount;
+            int lf = 0;     // its `collide box` boxes: after those of the instances before it
+            for (int k = 0; k < o.index; k++) if (d->models[k].collide == MS_COLLIDE_BOXES) lf += d->models[k].colliderCount;
+            v->localFirst[i] = lf;
+        } else {
+            v->lightOrig[i] = d->lights[o.index];
+            v->reach[i] = (BoundingBox){ d->lights[o.index].light.position, d->lights[o.index].light.position };
+        }
+    }
+    v->colliderOrig = malloc(sizeof(BoundingBox) * (colliders > 0 ? (size_t)colliders : 1));
+    ok = ok && v->colliderOrig;
+    for (int i = 0; ok && i < count; i++)
+        if (objs[i].kind == MS_OBJ_MODEL && d->models[objs[i].index].colliderCount > 0)
+            memcpy(&v->colliderOrig[v->colliderAt[i]], &d->colliders[d->models[objs[i].index].colliderFirst],
+                   sizeof(BoundingBox) * d->models[objs[i].index].colliderCount);
+    for (int r = 0; ok && r < d->modelRangeCount; r++) v->modelRangeOrig[r] = d->modelRanges[r].bounds;
+
+    // The selected boxes leave their draws: merged ranges are built again without them (with the
+    // faces they hid shown again), instanced ones get a zero scale in their buffer
+    R3D_MeshData cube = { 0 };
+    if (ok) {
+        int at = 0;
+        int *matAt = calloc(d->materialCount + 1, sizeof(int));
+        ok = matAt != NULL;
+        for (int m = 0; ok && m < d->materialCount; m++) { matAt[m] = at; at += d->instCount[m]; }
+        // boxes that touch a selected merged box: their faces are searched again without it
+        int *touch = NULL, touchCount = 0, touchCap = 0;
+        bool anyMerged = false;
+        for (int i = 0; ok && i < count; i++) {
+            if (objs[i].kind != MS_OBJ_BOX) continue;
+            int b = objs[i].index, m = d->boxRefs[b].material;
+            if (m < 0 || m >= d->materialCount) continue;
+            if (d->matDefs[m].merge) { anyMerged = true; continue; }
+            // instanced: its slot in the material's buffer
+            int slot = -1;
+            for (int k = 0; k < d->instCount[m] && slot < 0; k++) if (d->boxOrder[matAt[m] + k] == b) slot = k;
+            if (slot < 0) continue;
+            Vector3 *scl = R3D_MapInstances(d->inst[m], R3D_INSTANCE_SCALE, false);
+            if (scl) {
+                v->instMat[v->instCount] = m;
+                v->instSlot[v->instCount] = slot;
+                v->instScaleOrig[v->instCount++] = scl[slot];
+                scl[slot] = Vector3Zero();
+                R3D_UnmapInstances(d->inst[m], R3D_INSTANCE_SCALE);
+            }
+        }
+        if (ok && anyMerged && d->hidden) {
+            cube = R3D_GenMeshDataCube(1.0f, 1.0f, 1.0f);
+            v->hiddenOrig = malloc((size_t)d->boxCount);
+            ok = v->hiddenOrig && cube.vertexCount == 24;
+            if (ok) memcpy(v->hiddenOrig, d->hidden, (size_t)d->boxCount);
+            for (int b = 0; ok && b < d->boxCount; b++) {
+                int m = d->boxRefs[b].material;
+                if (v->boxSel[b] || m < 0 || m >= d->materialCount || !d->matDefs[m].merge) continue;
+                bool near = false;
+                for (int i = 0; i < count && !near; i++)
+                    near = objs[i].kind == MS_OBJ_BOX && BoxesTouch(d->boxes[b], d->boxes[objs[i].index]);
+                if (!near) continue;
+                int *slot = MS_PUSH(touch, touchCount, touchCap);
+                if (slot) *slot = b;
+                else ok = false;
+            }
+            HideGrid g;
+            if (ok && touchCount > 0 && (ok = HideGridBuild(d, v->boxSel, &g))) {
+                if (g.slots) {
+                    HideJob J;
+                    HideJobInit(&J, d, &g, &cube, d->hidden);
+                    int *nb = malloc(sizeof(int) * (size_t)d->boxCount), *stamp = malloc(sizeof(int) * (size_t)d->boxCount);
+                    Rect *piece = malloc(sizeof(Rect) * HIDE_PIECES);
+                    ok = nb && stamp && piece;
+                    for (int i = 0; ok && i < d->boxCount; i++) stamp[i] = -1;
+                    for (int k = 0; ok && k < touchCount; k++) {
+                        d->hidden[touch[k]] = 0;
+                        HideRange(&J, touch[k], touch[k] + 1, nb, stamp, piece);
+                    }
+                    free(nb); free(stamp); free(piece);
+                }
+                HideGridFree(&g);
+            }
+            // the ranges of the selected merged boxes and of every box whose faces changed
+            v->ranges = malloc(sizeof(int) * (size_t)(count + touchCount));
+            v->meshOrig = malloc(sizeof(R3D_Mesh) * (size_t)(count + touchCount));
+            ok = ok && v->ranges && v->meshOrig;
+            for (int k = 0; ok && k < count + touchCount; k++) {
+                int b = k < count ? (objs[k].kind == MS_OBJ_BOX ? objs[k].index : -1) : touch[k - count];
+                if (b < 0 || d->boxRangeOf[b] < 0 || !d->matDefs[d->boxRefs[b].material].merge) continue;
+                if (k >= count && d->hidden[b] == v->hiddenOrig[b]) continue;
+                int r = d->boxRangeOf[b];
+                bool seen = false;
+                for (int j = 0; j < v->rangeCount && !seen; j++) seen = v->ranges[j] == r;
+                if (seen) continue;
+                v->meshOrig[v->rangeCount] = d->boxRanges[r].mesh;
+                v->ranges[v->rangeCount++] = r;
+            }
+            if (ok) ok = PreviewRebuildRanges(d, v, &cube);
+        }
+        free(touch);
+        free(matAt);
+    }
+    R3D_UnloadMeshData(cube);
+
+    // The preview draw: the selected boxes as cubes, one range per material
+    for (int i = 0; ok && i < count; i++)
+        if (objs[i].kind == MS_OBJ_BOX && d->boxRefs[objs[i].index].material >= 0) v->bufBox[v->bufCount++] = objs[i].index;
+    if (ok && v->bufCount > 0) {
+        // (insertion sort by material, then box: a selection is small)
+        for (int a = 1; a < v->bufCount; a++)
+            for (int b = a; b > 0; b--) {
+                int x = v->bufBox[b - 1], y = v->bufBox[b];
+                int mx = d->boxRefs[x].material, my = d->boxRefs[y].material;
+                if (mx < my || (mx == my && x < y)) break;
+                v->bufBox[b - 1] = y;
+                v->bufBox[b] = x;
+            }
+        for (int k = 0; k < v->bufCount; k++) {
+            int m = d->boxRefs[v->bufBox[k]].material;
+            if (v->drawRanges == 0 || v->drawMat[v->drawRanges - 1] != m) {
+                v->drawMat[v->drawRanges] = m;
+                v->drawFirst[v->drawRanges] = k;
+                v->drawCount[v->drawRanges++] = 0;
+            }
+            v->drawCount[v->drawRanges - 1]++;
+        }
+        v->buf = R3D_LoadInstanceBuffer(v->bufCount, R3D_INSTANCE_POSITION | R3D_INSTANCE_SCALE);
+        ok = v->buf.capacity >= v->bufCount;
+        if (ok) PreviewBoxBuffer(d, v);
+    }
+    if (!ok) {
+        PreviewUndoDraws(d, v);
+        PreviewFree(v);
+        return false;
+    }
+    p->pv = v;
+    unsigned int oldVersion = s->version++;
+    p->dirtyCount = 0;
+    MS_EditStats st = { 0 };
+    Restamp(s, oldVersion, d, 0, false, &st);
+    return true;
+}
+
+bool MS_EditPreviewSet(MS_Scene *s, const MS_Transform *tr)
+{
+    MS_Private *p = s->priv;
+    SceneData *d = p->d;
+    struct EditPreview *v = p->pv;
+    if (!v) return false;
+    p->dirtyCount = 0;
+    bool boxes = false, colliders = false;
+    for (int i = 0; i < v->count; i++) {
+        MS_ObjRef o = v->objs[i];
+        BoundingBox before, after;
+        int e;
+        if (o.kind == MS_OBJ_BOX) {
+            e = d->objEntities[o.index];
+            before = d->boxes[o.index];
+            Vector3 h = Vector3Scale(tr[i].scale, 0.5f);
+            after = (BoundingBox){ Vector3Subtract(tr[i].position, h), Vector3Add(tr[i].position, h) };
+            d->boxes[o.index] = after;
+            if (d->modelCount > 0) d->colliders[o.index] = after;
+            d->entityTransforms[e].position = tr[i].position;
+            d->entityTransforms[e].scale = tr[i].scale;
+            boxes = colliders = true;
+        } else if (o.kind == MS_OBJ_MODEL) {
+            MS_ModelInstance *M = &d->models[o.index];
+            e = d->objEntities[d->boxCount + o.index];
+            before = M->bounds;
+            M->position = tr[i].position;
+            M->rotationDeg = tr[i].rotationDeg;
+            M->scale = tr[i].scale;
+            ResolveOneModel(d, o.index, v->localFirst[i]);
+            PreviewModelInstance(d, o.index);
+            after = M->bounds;
+            d->entityTransforms[e] = (MS_Transform){ M->position, M->rotationDeg, M->scale };
+            colliders = colliders || M->colliderCount > 0;
+        } else {
+            MS_LightDef *L = &d->lights[o.index];
+            e = d->objEntities[d->boxCount + d->modelCount + o.index];
+            Vector3 delta = Vector3Subtract(tr[i].position, L->light.position);
+            before = (BoundingBox){ L->light.position, L->light.position };
+            L->light.position = tr[i].position;
+            if (L->clip) L->clipBox = (BoundingBox){ Vector3Add(L->clipBox.min, delta), Vector3Add(L->clipBox.max, delta) };
+            after = (BoundingBox){ L->light.position, L->light.position };
+            if (d->lightShadowDrawn) d->lightShadowDrawn[o.index] = false;
+            d->entityTransforms[e].position = tr[i].position;
+            v->reach[i] = BoundsUnion(v->reach[i], after);
+            continue;       // (a light is in no static cache but its own shadow)
+        }
+        DirtyAdd(p, before);
+        DirtyAdd(p, after);
+        v->reach[i] = BoundsUnion(v->reach[i], after);
+    }
+    if (boxes) PreviewBoxBuffer(d, v);
+    if (colliders) RefitColliderBvh(d);
+    FinishGeometry(d);
+    s->bounds = d->bounds;
+    unsigned int oldVersion = s->version++;
+    MS_EditStats st = { 0 };
+    Restamp(s, oldVersion, d, 0, false, &st);
+    return true;
+}
+
+void MS_EditPreviewEnd(MS_Scene *s)
+{
+    MS_Private *p = s->priv;
+    SceneData *d = p->d;
+    struct EditPreview *v = p->pv;
+    if (!v) return;
+    p->pv = NULL;
+    p->dirtyCount = 0;
+    bool colliders = false;
+    for (int i = 0; i < v->count; i++) {
+        MS_ObjRef o = v->objs[i];
+        if (o.kind == MS_OBJ_BOX) {
+            d->boxes[o.index] = v->boxOrig[i];
+            if (d->modelCount > 0) d->colliders[o.index] = v->boxOrig[i];
+            d->entityTransforms[d->objEntities[o.index]] = v->entityOrig[i];
+            colliders = true;
+        } else if (o.kind == MS_OBJ_MODEL) {
+            MS_ModelInstance *M = &d->models[o.index];
+            *M = v->modelOrig[i];
+            if (M->colliderCount > 0 && v->colliderOrig)
+                memcpy(&d->colliders[M->colliderFirst], &v->colliderOrig[v->colliderAt[i]], sizeof(BoundingBox) * M->colliderCount);
+            colliders = colliders || M->colliderCount > 0;
+            PreviewModelInstance(d, o.index);
+            d->entityTransforms[d->objEntities[d->boxCount + o.index]] = v->entityOrig[i];
+        } else if (o.kind == MS_OBJ_LIGHT) {
+            d->lights[o.index] = v->lightOrig[i];
+            if (d->lightShadowDrawn) d->lightShadowDrawn[o.index] = false;
+            d->entityTransforms[d->objEntities[d->boxCount + d->modelCount + o.index]] = v->entityOrig[i];
+            continue;
+        }
+        DirtyAdd(p, v->reach[i]);
+    }
+    for (int r = 0; v->modelRangeOrig && r < d->modelRangeCount; r++) d->modelRanges[r].bounds = v->modelRangeOrig[r];
+    PreviewUndoDraws(d, v);
+    if (colliders) RefitColliderBvh(d);
+    FinishGeometry(d);
+    s->bounds = d->bounds;
+    PreviewFree(v);
+    // The caches drawn during the preview showed the objects elsewhere: drawn again there
+    unsigned int oldVersion = s->version++;
+    MS_EditStats st = { 0 };
+    Restamp(s, oldVersion, d, 0, false, &st);
+}
+
+// The preview's boxes (MS_DrawGeometry)
+static void PreviewDraw(MS_Private *p)
+{
+    const struct EditPreview *v = p->pv;
+    const SceneData *d = p->d;
+    for (int r = 0; v && r < v->drawRanges; r++) {
+        R3D_BeginCluster(v->drawBounds[r]);
+        R3D_DrawMeshInstancedEx(p->cube, d->materials[v->drawMat[r]].material, v->buf, v->drawFirst[r], v->drawCount[r]);
+        R3D_EndCluster();
+    }
+}
+
+// #endregion
+
+// ======================================================================================
+// #region Draw ranges and the draw filter (editor: the render inspector; docs/live-editing.md 3.6)
+// ======================================================================================
+// Ranges are MS_DrawGeometry's draws: d->boxRanges[], then d->modelRanges[]. Their object lists
+// come from the draw order the live edits keep anyway (d->boxOrder: the boxes sorted by material
+// and cell; d->modelSlotOf / modelRangeOf: each model instance's place), built on the first query
+// after a version change into arrays that only grow, so a preview step (a new version every
+// frame, the same draws) allocates nothing.
+
+// Per range its objects (p->rangeObj from p->rangeAt[r]); false when out of memory or the draw
+// order is unknown (an earlier out of memory)
+static bool DrawRangeObjects(const MS_Scene *s)
+{
+    MS_Private *p = s->priv;
+    const SceneData *d = p->d;
+    if (p->rangeData == d && p->rangeVersion == s->version) return true;
+    p->rangeData = NULL;
+    int nr = d->boxRangeCount + d->modelRangeCount;
+    int no = d->boxOrderCount + d->modelCount;
+    if (!MS_RESERVE(p->rangeAt, p->rangeAtCap, nr + 1) || !MS_RESERVE(p->rangeObj, p->rangeObjCap, no > 0 ? no : 1) ||
+        !MS_RESERVE(p->rangeMatAt, p->rangeMatAtCap, d->materialCount + 1)) return false;
+    if (d->boxRangeCount > 0 && (!d->boxOrder || !d->instCount)) return false;
+    if (d->modelRangeCount > 0 && (!d->modelSlotOf || !d->modelRangeOf)) return false;
+    // Boxes: a range's boxes are items [first, first + count) of its material's run in boxOrder
+    for (int m = 0, at = 0; m < d->materialCount; m++) { p->rangeMatAt[m] = at; at += d->instCount ? d->instCount[m] : 0; }
+    int at = 0;
+    for (int r = 0; r < d->boxRangeCount; r++) {
+        const DrawRange *R = &d->boxRanges[r];
+        p->rangeAt[r] = at;
+        memcpy(p->rangeObj + at, d->boxOrder + p->rangeMatAt[R->group] + R->first, sizeof(int) * (size_t)R->count);
+        at += R->count;
+    }
+    // Models: slot k of a range is instance slot first + k of its group's buffer
+    for (int r = 0; r < d->modelRangeCount; r++) {
+        p->rangeAt[d->boxRangeCount + r] = at;
+        at += d->modelRanges[r].count;
+    }
+    p->rangeAt[nr] = at;
+    for (int i = 0; i < d->modelCount; i++) {
+        int r = d->modelRangeOf[i];
+        p->rangeObj[p->rangeAt[d->boxRangeCount + r] + d->modelSlotOf[i] - d->modelRanges[r].first] = i;
+    }
+    p->rangeData = d;
+    p->rangeVersion = s->version;
+    return true;
+}
+
+int MS_DrawRangeCount(const MS_Scene *s)
+{
+    const SceneData *d = s->priv->d;
+    return d->gpu ? d->boxRangeCount + d->modelRangeCount : 0;
+}
+
+bool MS_GetDrawRange(const MS_Scene *s, int range, MS_DrawRangeInfo *out)
+{
+    MS_Private *p = s->priv;
+    const SceneData *d = p->d;
+    if (range < 0 || range >= MS_DrawRangeCount(s) || !DrawRangeObjects(s)) return false;
+    *out = (MS_DrawRangeInfo){ .material = -1, .modelFile = -1, .castShadow = true };
+    out->objects = p->rangeObj + p->rangeAt[range];
+    out->objectCount = p->rangeAt[range + 1] - p->rangeAt[range];
+    if (range < d->boxRangeCount) {
+        const DrawRange *R = &d->boxRanges[range];
+        bool merged = d->matDefs[R->group].merge;
+        out->kind = merged ? MS_DRAW_BOXES_MERGED : MS_DRAW_BOXES_INSTANCED;
+        out->material = R->group;
+        out->shader = d->materials[R->group].shader;
+        out->bounds = R->bounds;
+        // (a merged range drawn by a transform preview lacks the selected boxes' faces)
+        out->triangles = merged ? R->mesh.indexCount / 3 : 12LL * R->count;
+        return true;
+    }
+    const DrawRange *R = &d->modelRanges[range - d->boxRangeCount];
+    const ModelGroup *G = &d->modelGroups[R->group];
+    const MS_ModelFile *F = &d->modelFiles[G->file];
+    out->kind = MS_DRAW_MODELS;
+    out->modelFile = G->file;
+    out->slotMaterials = G->slotMat;
+    out->slotCount = F->materialCount;
+    out->bounds = R->bounds;
+    out->triangles = (long long)F->triangleCount * R->count;
+    out->castShadow = G->castShadow;
+    return true;
+}
+
+// Everything a shadow map holds is drawn again: the sun's tiles or camera-fitted map, every
+// point / spot shadow (the fog cache and the occlusion volume keep the whole scene)
+static void FilterInvalidate(MS_Private *p)
+{
+    for (int i = 0; i < SUN_TILE_COUNT; i++) p->tiles.tile[i].valid = false;
+    p->tiles.current = -1;
+    p->camCache.valid = false;
+    for (int i = 0; p->d->lightShadowDrawn && i < p->d->lightCount; i++) p->d->lightShadowDrawn[i] = false;
+}
+
+void MS_SetDrawFilter(MS_Scene *s, const bool *hidden, int count)
+{
+    MS_Private *p = s->priv;
+    const SceneData *d = p->d;
+    int nr = MS_DrawRangeCount(s);
+    if (!hidden || count < 0) count = 0;
+    if (count > nr) count = nr;
+    bool any = false;
+    for (int r = 0; r < count && !any; r++) any = hidden[r];
+    if (any && !MS_RESERVE(p->drawHidden, p->drawHiddenCap, count)) any = false;   // (out of memory: off)
+    // The objects it hides decide whether the shadows change: the same objects after a live
+    // edit (other range indices) or a preview step (a new version) keep every shadow map.
+    // filterObjCount: the objects filterObj describes, 0 = none hidden, -1 = unknown
+    int no = d->boxCount + d->modelCount;
+    bool changed;
+    if (!any) changed = p->filterOn;
+    else if (!DrawRangeObjects(s) || !MS_RESERVE(p->filterObjNew, p->filterObjNewCap, no > 0 ? no : 1)) {
+        changed = true;
+        p->filterObjCount = -1;
+    } else {
+        memset(p->filterObjNew, 0, (size_t)no);
+        for (int r = 0; r < count; r++) {
+            if (!hidden[r]) continue;
+            int base = r < d->boxRangeCount ? 0 : d->boxCount;
+            for (int k = p->rangeAt[r]; k < p->rangeAt[r + 1]; k++) p->filterObjNew[base + p->rangeObj[k]] = 1;
+        }
+        changed = !p->filterOn || p->filterObjCount != no || memcmp(p->filterObj, p->filterObjNew, (size_t)no) != 0;
+        // keep what it hides for the next call (swap the buffers)
+        unsigned char *t = p->filterObj;
+        int tc = p->filterObjCap;
+        p->filterObj = p->filterObjNew;
+        p->filterObjCap = p->filterObjNewCap;
+        p->filterObjNew = t;
+        p->filterObjNewCap = tc;
+        p->filterObjCount = no;
+    }
+    if (!any) p->filterObjCount = 0;
+    if (any) memcpy(p->drawHidden, hidden, sizeof(bool) * (size_t)count);
+    p->drawHiddenCount = any ? count : 0;
+    if (changed) FilterInvalidate(p);
+    p->filterOn = any;
+}
+
+// #endregion
+#endif
+
 
 // ======================================================================================
 // #region Public API: environment and drawing
@@ -6129,44 +7793,80 @@ bool MS_PushLights(MS_Scene *s, Camera3D camera, float aspect)
     return update;
 }
 
+// One draw per cell and material. Instanced ones are clusters: R3D tests a cluster against
+// each view's frustum (the camera, the shadow maps) and skips its draw when outside
+static inline void DrawBoxRange(const MS_Private *p, const SceneData *d, const DrawRange *R)
+{
+    const R3D_Material mat = d->materials[R->group].material;
+    if (!d->matDefs[R->group].merge) {
+        R3D_BeginCluster(R->bounds);
+        R3D_DrawMeshInstancedEx(p->cube, mat, d->inst[R->group], R->first, R->count);
+        R3D_EndCluster();
+    } else if (R->mesh.vertexCount > 0) {
+        // A merged range is its mesh drawn as one instance at the origin: it stays in R3D's
+        // instanced draw list, sorted like the cubes were (where boxes overlap exactly, the
+        // draw order decides which one shows), and the cluster culls it the same way
+        R3D_BeginCluster(R->bounds);
+        R3D_DrawMeshInstancedEx(R->mesh, mat, d->unit, 0, 1);
+        R3D_EndCluster();
+    }
+}
+
+// Models: the same per (file, materials, shadow) group; they go into the sun's shadow tiles
+// too, which are drawn once per map load like for the boxes
+static inline void DrawModelRange(const SceneData *d, const DrawRange *R)
+{
+    const ModelGroup *G = &d->modelGroups[R->group];
+    R3D_BeginCluster(R->bounds);
+    R3D_DrawModelInstancedEx(G->model, G->inst, R->first, R->count);
+    R3D_EndCluster();
+}
+
+#ifdef MONOLITH_EDITOR
+// MS_DrawGeometry's draws without the ranges the draw filter hides (MS_SetDrawFilter)
+static void DrawFiltered(MS_Private *p, const SceneData *d)
+{
+    int n = p->drawHiddenCount;
+    for (int r = 0; r < d->boxRangeCount; r++)
+        if (r >= n || !p->drawHidden[r]) DrawBoxRange(p, d, &d->boxRanges[r]);
+    if (p->pv) PreviewDraw(p);
+    for (int r = 0; r < d->modelRangeCount; r++)
+        if (d->boxRangeCount + r >= n || !p->drawHidden[d->boxRangeCount + r]) DrawModelRange(d, &d->modelRanges[r]);
+}
+#endif
+
 void MS_DrawGeometry(MS_Scene *s)
 {
     MS_Private *p = s->priv;
     SceneData *d = p->d;
-    // One draw per cell and material. Instanced ones are clusters: R3D tests a cluster against
-    // each view's frustum (the camera, the shadow maps) and skips its draw when outside
-    for (int r = 0; r < d->boxRangeCount; r++) {
-        const DrawRange *R = &d->boxRanges[r];
-        const R3D_Material mat = d->materials[R->group].material;
-        if (!d->matDefs[R->group].merge) {
-            R3D_BeginCluster(R->bounds);
-            R3D_DrawMeshInstancedEx(p->cube, mat, d->inst[R->group], R->first, R->count);
-            R3D_EndCluster();
-        } else if (R->mesh.vertexCount > 0) {
-            // A merged range is its mesh drawn as one instance at the origin: it stays in R3D's
-            // instanced draw list, sorted like the cubes were (where boxes overlap exactly, the
-            // draw order decides which one shows), and the cluster culls it the same way
-            R3D_BeginCluster(R->bounds);
-            R3D_DrawMeshInstancedEx(R->mesh, mat, d->unit, 0, 1);
-            R3D_EndCluster();
-        }
+#ifdef MONOLITH_EDITOR
+    if (p->filterOn) DrawFiltered(p, d);    // the render inspector's draw filter
+    else {
+#endif
+    for (int r = 0; r < d->boxRangeCount; r++) DrawBoxRange(p, d, &d->boxRanges[r]);
+#ifdef MONOLITH_EDITOR
+    if (p->pv) PreviewDraw(p);      // the boxes of a transform preview
+#endif
+    for (int r = 0; r < d->modelRangeCount; r++) DrawModelRange(d, &d->modelRanges[r]);
+#ifdef MONOLITH_EDITOR
     }
-    // Models: the same per (file, materials, shadow) group; they go into the sun's
-    // shadow tiles too, which are drawn once per map load like for the boxes
-    for (int r = 0; r < d->modelRangeCount; r++) {
-        const DrawRange *R = &d->modelRanges[r];
-        const ModelGroup *G = &d->modelGroups[R->group];
-        R3D_BeginCluster(R->bounds);
-        R3D_DrawModelInstancedEx(G->model, G->inst, R->first, R->count);
-        R3D_EndCluster();
-    }
+#endif
 #ifdef MS_PATCHED_R3D
     // Occlusion volume: once per map load (CPU bake + upload; not a pass of this frame)
     if (p->rs.aoVolumeVoxel > 0.0f && p->aoVersion != s->version) {
+#ifdef MONOLITH_EDITOR
+        if (!BakeOcclusionVolume(p, d, p->rs.aoVolumeVoxel, p->rs.aoVolumeIntensity)) R3D_ClearWorldOcclusion();
+#else
         if (!BakeOcclusionVolume(d, p->rs.aoVolumeVoxel, p->rs.aoVolumeIntensity)) R3D_ClearWorldOcclusion();
+#endif
         p->aoVersion = s->version;
     }
-    if (SunOn(p) && d->env.sun.shadow && p->rs.sunShadow && p->rs.fogCacheVoxel > 0.0f && p->fogCacheVersion != s->version) {
+    bool fogBake = SunOn(p) && d->env.sun.shadow && p->rs.sunShadow && p->rs.fogCacheVoxel > 0.0f && p->fogCacheVersion != s->version;
+#ifdef MONOLITH_EDITOR
+    // (the fog cache keeps every object: its bake waits while the draw filter hides some)
+    if (p->filterOn) fogBake = false;
+#endif
+    if (fogBake) {
         // Fog sun visibility, baked once per map load into the shadow layer this frame
         // doesn't sample (that tile slot is forgotten: it holds the bake map now)
         bool tiles = p->rs.shadowMode == MS_SHADOW_TILES;

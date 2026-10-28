@@ -183,7 +183,9 @@ typedef struct {
     const char *root;               // package root (folder of the map file), trailing '/'
     unsigned int version;           // 1 after MS_Load (the runtime's caches key on it)
 #ifdef MONOLITH_EDITOR
-    // editor: version is +1 on every successful reload
+    // editor: version is +1 on every successful reload, live edit (MS_EditSetText) and preview
+    // step (MS_EditPreviewSet); loadVersion only on a load or reload from disk
+    unsigned int loadVersion;
     const char *brief;              // root + "MAP.md" if it exists, else "" (never NULL)
     unsigned long long hash;        // FNV-1a 64 of the map file bytes
     long mtime;
@@ -340,6 +342,74 @@ typedef enum {
 } MS_SourceState;
 // sourcePath (may be NULL): the map text's path (for a text load, scene->path)
 MS_SourceState MS_CompiledSource(const MS_Scene *scene, const char **sourcePath);
+
+// ======================================================================================
+// Live edits (editor; docs/live-editing.md)
+// ======================================================================================
+// The editor's working copy is map text. MS_EditSetText swaps in a new text without reading
+// the package again: model files, textures, shaders, materials and the sky carry over, only
+// the draws whose objects changed are rebuilt, and the static caches (sun shadow tiles, light
+// shadows, fog cache, AO volume) redraw only where the changed objects reach. The result is
+// what a load of the same text would give (pixel- and box-identical). Nothing is written.
+
+typedef struct {
+    bool full;                  // non-object statements changed: uploaded in full (a reload from memory)
+    int boxesChanged, modelsChanged, lightsChanged;     // objects without an identical one before / after
+    int rangesRebuilt, rangesKept;                      // merged box meshes
+    int tilesDirty, lightShadowsDirty;                  // sun shadow tiles / light shadow maps to draw again
+    bool fogDirty, aoDirty;                             // fog cache / AO volume to bake again (part or all)
+    double ms;                  // the whole call
+    double parseMs, modelsMs, bvhMs, entitiesMs, hiddenMs, meshesMs, uploadMs, aoMs;
+} MS_EditStats;
+
+// The scene becomes the parse of text[0..size) (copied). scene->hash = its hash, version + 1;
+// loadVersion and the hot-reload state are unchanged (the files on disk are). MS_RELOADED on
+// success (stats filled when not NULL), MS_RELOAD_FAILED with "file:line: message" in err and
+// the scene unchanged otherwise. Ends a preview (MS_EditPreviewBegin) if one is running.
+MS_ReloadResult MS_EditSetText(MS_Scene *scene, const char *text, int size, MS_EditStats *stats,
+                               char *err, int errSize);
+
+// The editor wrote the scene's current text (MS_MapText) to the map file: hot reload takes the
+// files on disk as loaded, so MS_Poll does not reload them for that write
+void MS_EditMarkSaved(MS_Scene *scene);
+
+// Preview of a transform that follows the mouse (no text): Begin takes the objects out of the
+// merged draws (they are drawn as instanced cubes / their own instances meanwhile), Set gives
+// each one an absolute transform (MS_Transform as the entity components describe it: boxes
+// centre + size, models position / rotation / scale, lights position; version + 1, sun tiles
+// and light shadows follow, fog cache and AO volume wait), End puts everything back as it was
+// at Begin. Begin returns false when out of memory or a preview runs already.
+bool MS_EditPreviewBegin(MS_Scene *scene, const MS_ObjRef *objs, int count);
+bool MS_EditPreviewSet(MS_Scene *scene, const MS_Transform *transforms);
+void MS_EditPreviewEnd(MS_Scene *scene);
+
+// ======================================================================================
+// Draw ranges and the draw filter (editor: the render inspector)
+// ======================================================================================
+
+typedef enum { MS_DRAW_BOXES_MERGED = 0, MS_DRAW_BOXES_INSTANCED, MS_DRAW_MODELS } MS_DrawKind;
+
+typedef struct {
+    MS_DrawKind kind;
+    int material;               // boxes: index into materials[]; models: -1 (see slotMaterials)
+    const char *shader;         // boxes: the material's shader path, NULL = none
+    int modelFile;              // models: index into modelFiles[], else -1
+    const int *slotMaterials;   // models: per material slot of the file, materials[] index or -1 (own)
+    int slotCount;
+    const int *objects;         // box indices (boxes) or model instance indices (models), draw order
+    int objectCount;
+    BoundingBox bounds;
+    long long triangles;        // per pass (a merged mesh: its visible faces)
+    bool castShadow;
+} MS_DrawRangeInfo;
+
+// The runtime's draws in MS_DrawGeometry order: box ranges, then model ranges. Valid until the
+// next version change.
+int MS_DrawRangeCount(const MS_Scene *scene);
+bool MS_GetDrawRange(const MS_Scene *scene, int range, MS_DrawRangeInfo *out);
+// hidden[r] true: range r is not drawn (camera and shadow passes). Copied; NULL / count 0 = off.
+// A change redraws the sun shadow tiles and light shadows; fog cache and AO volume keep everything.
+void MS_SetDrawFilter(MS_Scene *scene, const bool *hidden, int count);
 #endif
 
 // ======================================================================================

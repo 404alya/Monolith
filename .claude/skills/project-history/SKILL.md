@@ -123,6 +123,16 @@ The concrete shader was 66% of the geometry pass (`measurements.md`, "nsys: the 
 - **A baked slice chosen by measurement:** the first slice had 1.9× the shader's average vein area on side faces; the slice 97 m out matches the average cover of veins, cracks and lichen over many planes.
 - **Kept procedural:** the per-plane hash, the slow tone and hue noises (continuous across box corners, they hide the tile's repetition) and the height terms (ground grime, lichen below 3 m).
 
+## Live editing (2026-10-28)
+
+Edit mode used to write every key press into the map file and run a full `MS_Reload` (~520 ms plus a cache redraw on the largest map), which made fine placement and any drag unusable. The round (design: `docs/live-editing.md`) made edits live in memory, added the G / R / S transform modal, the id panel, the render inspector and the model picker. The choices:
+- **The working copy is map text, not a list of ops applied to the scene arrays.** Each edit is still `mapedit.c`'s minimal text patch, against an in-memory text; `MS_EditSetText` parses it again on the CPU and swaps in only what changed. Save + reload is then identical to the live scene by construction (it *is* the parse of the bytes CTRL+S writes), object order stays the map order (draw order, hidden faces and raycast ties depend on it), and requests, hot reload and the AI keep reading text. The cost is the re-parse (~26 ms of the ~43 ms per edit on the largest map); drags therefore use a preview (`MS_EditPreview*`) that moves objects without text and commit one op at the end. Steps keep their op and selection ids so they can be applied again to a changed file (the rebase).
+- **The diff is by content, not by entity id:** the pieces of a split `repeat` line get new implicit ids although their boxes didn't move.
+- **Dirty regions instead of a version bump for the caches:** `scene->version` still changes with every edit (frame reuse, the selection, bundles need that), but a live edit re-stamps the caches after invalidating only the sun tiles, light shadows, fog bake and AO voxels its changed objects reach, so the game build's cache code stayed as it was. A cache whose *region* depends on the content (fog / AO region, tile home) is redone in full when that region moves, as a reload would.
+- **Both save modes** (the developer's call): manual CTRL+S by default, `edit_save = auto` writes each edit at once; a request needs the file saved first, because the bundle's lines and hash describe the working copy.
+- **RMB-held flying in edit mode** (the developer's call) frees the letter keys for Blender's G / R / S / X / Y / Z.
+- **The inspector's filter hides ranges from every pass and redraws the shadow caches**, so a hidden object drops its shadow; the fog bake waits while something is hidden (R3D bakes from the frame's draw list).
+
 ## The instruction files
 
 Superseded layouts, for reading old bundles, commits and notes; the current layout is `CLAUDE.md` + `.claude/skills/` + `docs/`.

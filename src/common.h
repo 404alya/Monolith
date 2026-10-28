@@ -10,6 +10,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include "monolith_scene.h"
+// (raylib's keyboard / mouse calls go through the input shim: --input-script)
+#include "input.h"
 
 // The loaded map package (runtime/monolith_scene.h). Set by main() before the window
 // opens; its contents change on hot reload (scene->version tells which load).

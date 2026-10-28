@@ -450,3 +450,161 @@ void UiHudHints(const char *markup, int x, int y, int h, int size, Color ink)
     DrawRectangle(x - BACKDROP_PAD, y, UiHintsWidth(markup, size) + 2 * BACKDROP_PAD, h, UI_BACKDROP);
     UiHints(markup, x, y + (h - PixelSize(size)) / 2, size, ink);
 }
+
+// #region The list widget (UiList; docs/live-editing.md 8.4)
+// A panel's filterable list: the panel owns its items (any count; item i is just an index) and
+// two callbacks, one that says whether item i passes the typed filter and one that draws its
+// row. The widget keeps the selection, the scroll position, the filter text and the rows that
+// pass it (heap arrays that only grow), and draws the settings panel's look around the rows.
+// Use: UiListKeys each frame while the panel is open (then UiListRefilter if l->dirty or the
+// items changed), UiListSelected for the item the panel's own keys act on, UiListDraw to draw,
+// UiListFree when the panel goes away.
+
+#define LIST_PAD        16      // panel edge to content
+#define LIST_TITLE_H    42      // title line (UI_L bold)
+#define LIST_FIELD_H    30      // the filter field
+#define LIST_FOOTER_H   34      // the hints footer
+
+static bool IsDown2(int a, int b) { return IsKeyDown(a) || IsKeyDown(b); }
+static bool Pressed(int key) { return IsKeyPressed(key) || IsKeyPressedRepeat(key); }
+
+void UiListKeys(UiList *l, int visibleRows)
+{
+    int page = visibleRows > 1 ? visibleRows - 1 : 1;
+    int n = l->rowCount;
+    if (n > 0) {
+        if (Pressed(KEY_DOWN)) l->sel++;
+        if (Pressed(KEY_UP)) l->sel--;
+        if (Pressed(KEY_PAGE_DOWN)) l->sel += page;
+        if (Pressed(KEY_PAGE_UP)) l->sel -= page;
+        if (IsKeyPressed(KEY_HOME)) l->sel = 0;
+        if (IsKeyPressed(KEY_END)) l->sel = n - 1;
+        if (l->sel >= n) l->sel = n - 1;
+        if (l->sel < 0) l->sel = 0;
+    }
+    // Typed characters (UTF-8) and BACKSPACE edit the filter
+    for (int c = GetCharPressed(); c > 0; c = GetCharPressed()) {
+        if (c < 32 || c == 127) continue;
+        int len = 0;
+        const char *u = CodepointToUTF8(c, &len);
+        if (len <= 0 || !MS_RESERVE(l->filter, l->filterCap, l->filterLen + len + 1)) continue;
+        memcpy(l->filter + l->filterLen, u, (size_t)len);
+        l->filterLen += len;
+        l->filter[l->filterLen] = 0;
+        l->dirty = true;
+    }
+    if (Pressed(KEY_BACKSPACE) && l->filterLen > 0) {
+        if (IsDown2(KEY_LEFT_CONTROL, KEY_RIGHT_CONTROL)) l->filterLen = 0;
+        else {
+            l->filterLen--;     // back to the start of the last UTF-8 sequence
+            while (l->filterLen > 0 && ((unsigned char)l->filter[l->filterLen] & 0xC0) == 0x80) l->filterLen--;
+        }
+        l->filter[l->filterLen] = 0;
+        l->dirty = true;
+    }
+}
+
+bool UiListRefilter(UiList *l, int itemCount, UiListMatch match, void *user)
+{
+    int keep = UiListSelected(l);
+    l->dirty = false;
+    if (!MS_RESERVE(l->rows, l->rowCap, itemCount > 0 ? itemCount : 1)) {
+        l->rowCount = l->sel = l->scroll = 0;
+        return false;
+    }
+    bool filtering = l->filterLen > 0;
+    int n = 0, sel = -1;
+    for (int i = 0; i < itemCount; i++) {
+        if (filtering && !match(i, l->filter, user)) continue;
+        if (i == keep) sel = n;
+        l->rows[n++] = i;
+    }
+    l->rowCount = n;
+    if (sel >= 0) l->sel = sel;
+    else if (l->sel >= n) l->sel = n > 0 ? n - 1 : 0;
+    if (l->sel < 0) l->sel = 0;
+    if (l->scroll > l->sel) l->scroll = l->sel;
+    return true;
+}
+
+int UiListSelected(const UiList *l)
+{
+    return l->rows && l->sel >= 0 && l->sel < l->rowCount ? l->rows[l->sel] : -1;
+}
+
+int UiListDraw(UiList *l, Rectangle r, const char *title, int rowH, UiListDrawRow drawRow, void *user, const char *hints)
+{
+    if (rowH < 1) rowH = 24;
+    int x = (int)r.x, y = (int)r.y, w = (int)r.width, h = (int)r.height;
+    UiPanel(r, UI_PANEL, UI_LINE);
+    int tx = x + LIST_PAD, inner = w - 2 * LIST_PAD;
+    UiTextBold(title, tx, y + (LIST_TITLE_H - UiLineHeight(UI_L)) / 2 + 4, UI_L, UI_ACCENT);
+    const char *count = TextFormat("%d", l->rowCount);
+    UiText(count, x + w - LIST_PAD - UiMeasure(count, UI_S), y + (LIST_TITLE_H - UiLineHeight(UI_S)) / 2 + 5, UI_S, UI_DIM);
+
+    // The filter field: the typed text and a cursor, or the placeholder
+    Rectangle field = { (float)tx, (float)(y + LIST_TITLE_H), (float)inner, LIST_FIELD_H };
+    UiPanel(field, UI_RAISED, UI_LINE);
+    int fy = (int)field.y + (LIST_FIELD_H - UiLineHeight(UI_M)) / 2;
+    int fw = 0;
+    if (l->filterLen > 0) {
+        UiText(l->filter, tx + 10, fy, UI_M, UI_INK);
+        fw = UiMeasure(l->filter, UI_M);
+    } else UiText("type to filter", tx + 10, fy, UI_M, UI_FAINT);
+    if (fmod(GetTime(), 1.0) < 0.6) DrawRectangle(tx + 10 + fw + 1, fy + 2, 2, UiLineHeight(UI_M) - 4, UI_CURSOR);
+
+    // Rows: keep the selection visible
+    int top = (int)field.y + LIST_FIELD_H + 10, bottom = y + h - LIST_FOOTER_H - 6;
+    int visible = (bottom - top) / rowH;
+    if (visible < 1) visible = 1;
+    if (l->sel < l->scroll) l->scroll = l->sel;
+    if (l->sel >= l->scroll + visible) l->scroll = l->sel - visible + 1;
+    if (l->scroll > l->rowCount - visible) l->scroll = l->rowCount - visible;
+    if (l->scroll < 0) l->scroll = 0;
+    bool bar = l->rowCount > visible;
+    int rowW = inner - (bar ? 10 : 0);
+    for (int k = 0; k < visible && l->scroll + k < l->rowCount; k++) {
+        int i = l->scroll + k;
+        Rectangle row = { (float)tx, (float)(top + k * rowH), (float)rowW, (float)rowH };
+        bool sel = i == l->sel;
+        if (sel) {
+            UiPanel(row, UI_RAISED, BLANK);
+            DrawRectangle(tx, (int)row.y + 3, 3, rowH - 6, UI_ACCENT);
+        }
+        drawRow(l->rows[i], row, sel, user);
+    }
+    if (l->rowCount == 0)
+        UiText(l->filterLen > 0 ? "nothing matches the filter" : "nothing to list", tx + 10, top + (rowH - UiLineHeight(UI_M)) / 2,
+               UI_M, UI_DIM);
+    if (bar) {
+        // a thin track and a thumb of the visible share
+        int trackH = visible * rowH;
+        int thumbH = trackH * visible / l->rowCount;
+        if (thumbH < 12) thumbH = 12;
+        int thumbY = top + (trackH - thumbH) * l->scroll / (l->rowCount - visible);
+        DrawRectangle(tx + inner - 4, top, 2, trackH, UI_LINE);
+        DrawRectangle(tx + inner - 5, thumbY, 4, thumbH, UI_DIM);
+    }
+
+    int footY = y + h - LIST_FOOTER_H;
+    DrawRectangle(tx, footY, inner, 1, UI_LINE);
+    if (hints) UiHints(hints, tx, footY + (LIST_FOOTER_H - UiLineHeight(UI_XS)) / 2, UI_XS, UI_DIM);
+    return visible;
+}
+
+void UiListClear(UiList *l)
+{
+    l->filterLen = 0;
+    if (l->filter) l->filter[0] = 0;
+    l->sel = l->scroll = 0;
+    l->dirty = true;
+}
+
+void UiListFree(UiList *l)
+{
+    free(l->filter);
+    free(l->rows);
+    memset(l, 0, sizeof(*l));
+}
+
+// #endregion

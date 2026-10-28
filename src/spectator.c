@@ -64,8 +64,11 @@ void UpdateSpectator(Spectator *s, Player *player, float dt, bool arrows)
     if (arrows && IsKeyPressed(KEY_RIGHT)) SpectatorFlyTo(s, (s->view + 1) % scene->viewpointCount);
     if (arrows && IsKeyPressed(KEY_LEFT))  SpectatorFlyTo(s, (s->view <= 0 ? scene->viewpointCount : s->view) - 1);
 
+    // Edit mode: the camera flies only while RMB is held (the cursor is free otherwise)
+    bool fly = !s->rmbFly || IsMouseButtonDown(MOUSE_BUTTON_RIGHT);
+
     // Speed: mouse wheel, exponential so it is equally quick at 2 m/s and 200 m/s
-    float wheel = GetMouseWheelMove();
+    float wheel = fly ? GetMouseWheelMove() : 0.0f;
     if (wheel != 0.0f) {
         s->speed = Clamp(s->speed * powf(1.25f, wheel), SPEC_MIN_SPEED, SPEC_MAX_SPEED);
         SpectatorMessage(s, TextFormat("speed %.1f m/s", s->speed));
@@ -83,7 +86,7 @@ void UpdateSpectator(Spectator *s, Player *player, float dt, bool arrows)
     }
 
     // Drop the player at the current spot
-    if (IsKeyPressed(KEY_G)) {
+    if (IsKeyPressed(KEY_G) && !s->rmbFly) {
         player->feet = (Vector3){ s->pos.x, s->pos.y - EYE_HEIGHT, s->pos.z };
         player->vel = Vector3Zero();
         player->yaw = s->yaw;
@@ -91,10 +94,10 @@ void UpdateSpectator(Spectator *s, Player *player, float dt, bool arrows)
         SpectatorMessage(s, "player moved here (TAB to walk)");
     }
 
-    Vector2 md = GetMouseDelta();
-    bool input = md.x != 0.0f || md.y != 0.0f ||
-                 IsKeyDown(KEY_W) || IsKeyDown(KEY_A) || IsKeyDown(KEY_S) || IsKeyDown(KEY_D) ||
-                 IsKeyDown(KEY_E) || IsKeyDown(KEY_Q) || IsKeyDown(KEY_SPACE);
+    Vector2 md = fly ? GetMouseDelta() : (Vector2){ 0, 0 };
+    bool input = fly && (md.x != 0.0f || md.y != 0.0f ||
+                         IsKeyDown(KEY_W) || IsKeyDown(KEY_A) || IsKeyDown(KEY_S) || IsKeyDown(KEY_D) ||
+                         IsKeyDown(KEY_E) || IsKeyDown(KEY_Q) || IsKeyDown(KEY_SPACE));
 
     if (s->flying) {
         // Any manual input cancels the flight
@@ -125,15 +128,15 @@ void UpdateSpectator(Spectator *s, Player *player, float dt, bool arrows)
     Vector3 right = { -cosf(s->yaw), 0, sinf(s->yaw) };
 
     Vector3 wish = Vector3Zero();
-    if (!s->holdMove) {
+    if (!s->holdMove && fly) {
         if (IsKeyDown(KEY_W)) wish = Vector3Add(wish, fwd);
         if (IsKeyDown(KEY_S)) wish = Vector3Subtract(wish, fwd);
         if (IsKeyDown(KEY_D)) wish = Vector3Add(wish, right);
         if (IsKeyDown(KEY_A)) wish = Vector3Subtract(wish, right);
     }
-    if (IsKeyDown(KEY_E) || IsKeyDown(KEY_SPACE))        wish.y += 1.0f;
+    if (fly && (IsKeyDown(KEY_E) || IsKeyDown(KEY_SPACE))) wish.y += 1.0f;
     // Not Ctrl: Ctrl+click selects a whole group, and the camera must not sink meanwhile
-    if (IsKeyDown(KEY_Q)) wish.y -= 1.0f;
+    if (fly && IsKeyDown(KEY_Q)) wish.y -= 1.0f;
     wish = Vector3Normalize(wish);
 
     float speed = s->speed;

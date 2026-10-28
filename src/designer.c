@@ -1485,9 +1485,10 @@ void DesignerPickCamera(Designer *d, Camera3D cam)
     // A still camera over the same scene hits the same thing (the ray cast is most of a reused
     // frame's CPU time on a map with many model triangles). Bitwise compares: -0 and +0 give
     // different ray slopes. DesignerSync invalidates it whenever the scene changes.
-    if (d->pickValid && d->pickVersion == scene->version && memcmp(&d->pickPos, &cam.position, sizeof(Vector3)) == 0 &&
+    if (d->pickValid && !d->pickCursor && d->pickVersion == scene->version && memcmp(&d->pickPos, &cam.position, sizeof(Vector3)) == 0 &&
         memcmp(&d->pickTarget, &cam.target, sizeof(Vector3)) == 0) return;
     d->pickValid = true;
+    d->pickCursor = false;
     d->pickVersion = scene->version;
     d->pickPos = cam.position;
     d->pickTarget = cam.target;
@@ -1500,6 +1501,27 @@ DesignerHit DesignerPickAt(Camera3D cam, int w, int h, float x, float y)
 {
     RayFrame f = MakeRayFrame(cam, w > 0 ? w : 1, h > 0 ? h : 1);
     return DesignerPick(cam.position, RayThrough(&f, x, y));
+}
+
+void DesignerPickCursor(Designer *d, Camera3D cam, int w, int h, Vector2 px)
+{
+    if (d->pickValid && d->pickCursor && d->pickVersion == scene->version && memcmp(&d->pickPos, &cam.position, sizeof(Vector3)) == 0 &&
+        memcmp(&d->pickTarget, &cam.target, sizeof(Vector3)) == 0 && memcmp(&d->pickPx, &px, sizeof(Vector2)) == 0) return;
+    d->pickValid = true;
+    d->pickCursor = true;
+    d->pickPx = px;
+    d->pickVersion = scene->version;
+    d->pickPos = cam.position;
+    d->pickTarget = cam.target;
+    d->eye = cam.position;
+    d->viewFwd = Vector3Normalize(Vector3Subtract(cam.target, cam.position));
+    d->hit = DesignerPickAt(cam, w, h, px.x, px.y);
+}
+
+void DesignerAdoptVersion(Designer *d)
+{
+    d->version = scene->version;
+    d->pickValid = false;
 }
 
 DesignerAction DesignerUpdate(Designer *d, float dt)
@@ -1541,7 +1563,7 @@ DesignerAction DesignerUpdate(Designer *d, float dt)
 
     bool ctrl = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
     bool shift = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
-    if (IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) DesignerClearSelection(d);
+    if (IsMouseButtonPressed(MOUSE_BUTTON_RIGHT) && !d->editMode) DesignerClearSelection(d);
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !ObjIsNone(d->hit.obj)) {
         MS_ObjRef box = d->hit.obj;
         if (ctrl) {
