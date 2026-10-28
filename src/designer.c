@@ -20,15 +20,32 @@
 static DesignerHit PickBoxes(Vector3 origin, Vector3 dir, const int *list, const float *minDist, int n)
 {
     DesignerHit best = { .obj = { MS_OBJ_NONE, -1 }, .dist = INFINITY };
-    const float o[3] = { origin.x, origin.y, origin.z };
-    const float d[3] = { dir.x, dir.y, dir.z };
+    const float wo[3] = { origin.x, origin.y, origin.z };
+    const float wd[3] = { dir.x, dir.y, dir.z };
 
     for (int k = 0; k < n; k++) {
         if (minDist && minDist[k] > best.dist) break;
         int i = list ? list[k] : k;
         const BoundingBox *b = &scene->boxes[i];
-        const float mn[3] = { b->min.x, b->min.y, b->min.z };
-        const float mx[3] = { b->max.x, b->max.y, b->max.z };
+        float mn[3] = { b->min.x, b->min.y, b->min.z };
+        float mx[3] = { b->max.x, b->max.y, b->max.z };
+        // A turned box (docs/live-editing.md 11.5): the slab test in its own frame (the ray's
+        // origin and direction dotted with its axes), the box at its centre +- size / 2
+        const MS_TurnedBox *tb = scene->boxTurned && scene->boxTurned[i] >= 0 ? &scene->turnedBoxes[scene->boxTurned[i]] : NULL;
+        float to[3], td[3];
+        const float *o = wo, *d = wd;
+        if (tb) {
+            Vector3 rel = Vector3Subtract(origin, tb->center);
+            const float half[3] = { tb->size.x * 0.5f, tb->size.y * 0.5f, tb->size.z * 0.5f };
+            for (int a = 0; a < 3; a++) {
+                to[a] = Vector3DotProduct(rel, tb->axis[a]);
+                td[a] = Vector3DotProduct(dir, tb->axis[a]);
+                mn[a] = -half[a];
+                mx[a] = half[a];
+            }
+            o = to;
+            d = td;
+        }
         float tNear = -INFINITY, tFar = INFINITY;
         int axis = -1;
         bool miss = false;
@@ -54,7 +71,7 @@ static DesignerHit PickBoxes(Vector3 origin, Vector3 dir, const int *list, const
         best.point = Vector3Add(origin, Vector3Scale(dir, tNear));
         float n[3] = { 0, 0, 0 };
         n[axis] = d[axis] > 0.0f ? -1.0f : 1.0f;
-        best.normal = (Vector3){ n[0], n[1], n[2] };
+        best.normal = tb ? Vector3Scale(tb->axis[axis], n[axis]) : (Vector3){ n[0], n[1], n[2] };
     }
     if (best.obj.kind == MS_OBJ_NONE) best.dist = 0.0f;
     return best;
@@ -150,7 +167,7 @@ void DesignerPrintHit(DesignerHit hit)
                m->translation.y, m->translation.z, b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z);
     } else {
         printf("pick: box %d  group \"%s\"  material \"%s\"  line %d: %.*s\n"
-               "pick: point %.3f %.3f %.3f  normal %.0f %.0f %.0f  dist %.3f\n"
+               "pick: point %.3f %.3f %.3f  normal %g %g %g  dist %.3f\n"   // (%g: -1 0 0 as before, a turned face in full)
                "pick: box min %.3f %.3f %.3f  max %.3f %.3f %.3f\n",
                hit.obj.index, r.group >= 0 ? scene->groups[r.group] : "", DesignerMaterialLabel(hit.obj), r.line, textLen, text,
                hit.point.x, hit.point.y, hit.point.z, hit.normal.x, hit.normal.y, hit.normal.z, hit.dist,
@@ -1193,6 +1210,20 @@ float DesignerCycleSnap(Designer *d)
     return d->volumeSnap = VOLUME_SNAPS[(k + 1) % n];
 }
 
+static const float ANGLE_SNAPS[] = { 1.0f, 5.0f, 15.0f, 45.0f, 90.0f };
+
+float DesignerAngleSnap(const Designer *d) { return d->angleSnap > 0.0f ? d->angleSnap : ANGLE_SNAP_DEFAULT; }
+
+float DesignerCycleAngleSnap(Designer *d)
+{
+    float s = DesignerAngleSnap(d);
+    int n = (int)(sizeof(ANGLE_SNAPS) / sizeof(ANGLE_SNAPS[0])), k = 0;
+    while (k < n && ANGLE_SNAPS[k] != s) k++;
+    return d->angleSnap = ANGLE_SNAPS[(k + 1) % n];
+}
+
+void DesignerSetAngleSnap(Designer *d, float deg) { if (deg > 0.0f && isfinite(deg)) d->angleSnap = deg; }
+
 static float SnapTo(float x, float step) { return roundf(x / step) * step; }
 
 // The crosshair hit point, snapped on the axes along the hit face (none with Ctrl)
@@ -1715,12 +1746,39 @@ static void ModelCorners(const MS_ModelInstance *m, Vector3 eye, Vector3 *out)
     }
 }
 
-// Outline of an object: a box's (inflated) AABB, a model's oriented box
-static void DrawObjWires(MS_ObjRef o, Vector3 eye, Color col)
+// The 8 corners of a turned box (docs/live-editing.md 11.2), pushed out like ModelCorners;
+// false for an axis-aligned box (scene->boxes[i] is then the box)
+static bool TurnedBoxCorners(int i, Vector3 eye, Vector3 *out)
+{
+    if (!scene->boxTurned || scene->boxTurned[i] < 0) return false;
+    const MS_TurnedBox *t = &scene->turnedBoxes[scene->boxTurned[i]];
+    float e = fminf(0.004f + 0.0015f * BoxDistance(scene->boxes[i], eye), 0.1f);
+    for (int k = 0; k < 8; k++) {
+        Vector3 dir = { 0 };
+        dir = Vector3Add(dir, Vector3Scale(t->axis[0], (k & 1) ? t->size.x * 0.5f : -t->size.x * 0.5f));
+        dir = Vector3Add(dir, Vector3Scale(t->axis[1], (k & 2) ? t->size.y * 0.5f : -t->size.y * 0.5f));
+        dir = Vector3Add(dir, Vector3Scale(t->axis[2], (k & 4) ? t->size.z * 0.5f : -t->size.z * 0.5f));
+        float len = Vector3Length(dir);
+        out[k] = Vector3Add(t->center, len > 0.0f ? Vector3Scale(dir, (len + e) / len) : dir);
+    }
+    return true;
+}
+
+// The oriented corners of a model or a turned box (false: an axis-aligned box)
+static bool ObjCorners(MS_ObjRef o, Vector3 eye, Vector3 *q)
 {
     if (o.kind == MS_OBJ_MODEL) {
-        Vector3 q[8];
         ModelCorners(&scene->models[o.index], eye, q);
+        return true;
+    }
+    return TurnedBoxCorners(o.index, eye, q);
+}
+
+// Outline of an object: a box's (inflated) AABB, a model's or a turned box's oriented box
+static void DrawObjWires(MS_ObjRef o, Vector3 eye, Color col)
+{
+    Vector3 q[8];
+    if (ObjCorners(o, eye, q)) {
         for (int i = 0; i < 8; i++)
             for (int b = 1; b < 8; b <<= 1)
                 if (!(i & b)) DrawLine3D(q[i], q[i | b], col);
@@ -1734,10 +1792,9 @@ static void DrawObjWires(MS_ObjRef o, Vector3 eye, Color col)
 // Translucent faces of an object
 static void DrawObjTint(MS_ObjRef o, Vector3 eye, Color col)
 {
-    if (o.kind == MS_OBJ_MODEL) {
+    Vector3 q[8];
+    if (ObjCorners(o, eye, q)) {
         static const int FACES[6][4] = { { 0, 2, 6, 4 }, { 1, 5, 7, 3 }, { 0, 4, 5, 1 }, { 2, 3, 7, 6 }, { 0, 1, 3, 2 }, { 4, 6, 7, 5 } };
-        Vector3 q[8];
-        ModelCorners(&scene->models[o.index], eye, q);
         rlDisableBackfaceCulling();
         for (int f = 0; f < 6; f++) {
             DrawTriangle3D(q[FACES[f][0]], q[FACES[f][1]], q[FACES[f][2]], col);

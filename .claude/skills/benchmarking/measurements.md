@@ -423,3 +423,15 @@ Shots of every map with it off are pixel-identical to the base build.
 
 No measurable change (every mean inside the pairs' spread; the first three monolith pairs alone looked
 like +0.05 ms, the next four the opposite). CPU until finish moved the same way (monolith mean −0.011 ms).
+
+## Free rotation round: no-regression check (2026-10-28, machine A)
+
+Turned boxes (`box … rot`) and the rotate gizmo (`docs/live-editing.md` §11); no map in `maps/` has a turned box, so every new path should be a branch not taken. Setup: RTX 4050 Laptop, driver 615.71.09, Ryzen 7 7435HS, Linux 7.2.5-1-cachyos, 1920 × 1006 headless, ultra, R3D Release. Base: the tree before the round (phase-0 headers only, behaviour unchanged); new: the merged round. `--bench --headless` full runs (600 frames per viewpoint), 3 interleaved base / new pairs per map; the mean over the map's viewpoints, ms.
+
+| Map | Base (3 runs) | New (3 runs) | Paired differences | Mean change |
+|---|---|---|---|---|
+| monolith | 4.082 / 3.711 / 3.775 | 3.882 / 3.720 / 3.812 | −0.200 / +0.009 / +0.037 | −0.051 ms (−1.3 %) |
+| pine_forest | 3.318 / 3.487 / 3.572 | 3.314 / 3.520 / 3.577 | −0.004 / +0.033 / +0.005 | +0.011 ms (+0.3 %) |
+| test1 | 2.165 / 2.170 / 2.167 | 2.165 / 2.193 / 2.183 | 0.000 / +0.023 / +0.016 | +0.013 ms (+0.6 %) |
+
+Within noise on every map (the first monolith base run is a clock-state outlier, §"Run-to-run noise"). *CPU until finish*: monolith 0.712 → 0.736, pine_forest 0.365 → 0.344, test1 0.231 → 0.241 ms (noise level). Shots and dumps of every map: 0 changed pixels, identical. Reports: `benchmark/2026-10-28_23*` on machine A.

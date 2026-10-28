@@ -14,13 +14,22 @@
 //              cx y0 cz, stairs: cx baseY startZ, waffle: x0 x1 y0 y1 z, model: x y z, light:
 //              x y z and its clip box); one copy of a `repeat` line: split, the moved copy
 //              gets its own plain line with its world coordinates
-//   turn       models: the yaw of `rot` (added when the line has none); boxes: 90 degree yaw
-//              turns about the box's own centre (box: the x / z extents swap, block: sx and
-//              sz swap); stairs and waffles can't turn. The transform modal's turns (G / R / S,
-//              transform.c) also take pitch / roll or any axis, local axes and a pivot the objects
-//              orbit (boxes: 90 degree yaw steps, the footprint turned about the pivot)
+//   turn       any angle about any axis (yaw / pitch / roll or an axis), global or local (the
+//              object's own axes), each object about its own centre / origin or orbiting a pivot.
+//              Models: `rot` composed with the turn (added when the line has none). Box and block
+//              lines (docs/live-editing.md 11.9): the box's rotation R' = M R0 (local: R0 M); when
+//              R' is axis-aligned (a signed permutation) the box is written as plain corners again
+//              (box: the extents permuted, block: the sizes permuted and y0 from the centre) and a
+//              `rot` it had is removed, else its centre moves and `rot` is written / changed.
+//              A yaw (world Y) adds to the yaw and a local roll to the roll, exactly; any other
+//              turn is decomposed to yaw / pitch / roll with 6 decimals. Stairs, waffles and
+//              lights can't turn
+//   rotation   sets the rotation (yaw pitch roll, absolute) about each object's own centre /
+//              origin: boxes by the same rule (0 0 0 or an axis-aligned pose: plain corners, no
+//              `rot`), models get `rot` (0 0 0 removes it)
 //   scale      factors per axis about a pivot: box corners, block centre and sizes, model
-//              position and `scale`; stairs and waffles can't
+//              position and `scale` (a turned box's extents, like a model's axes: each by the factor
+//              of the world axis nearest to it); stairs and waffles can't
 //   size       a box's / block's size about its centre
 //   duplicate  a new line after each source line: the copy, shifted
 //   add        `id N model "models/x.glb" x y z origin bottom` after the line of the object it
@@ -66,14 +75,17 @@
 //   select none
 //   also ...                       like select, but adds to the selection
 //   move <dx> <dy> <dz>            metres
-//   turn <degrees>                 yaw about each object's own centre / origin (boxes: multiples of 90)
+//   turn <degrees>                 yaw about each object's own centre / origin (any angle)
 //   turn <yaw> [<pitch> <roll>] [local] [pivot <x> <y> <z>]
-//                                  models: R = Ry Rx Rz of the three angles composed on the left
-//                                  (global) or on the right (local: the model's own axes); with a
-//                                  pivot the objects orbit it (a whole `repeat` line: its steps turn
-//                                  too). Boxes: yaw only, multiples of 90 (box, block lines). A yaw
-//                                  alone adds to a model's yaw, a local roll alone to its roll,
-//                                  exactly; other turns are written with 6 decimals
+//                                  R = Ry Rx Rz of the three angles composed on the left (global)
+//                                  or on the right (local: the object's own axes) of a model's or
+//                                  box's rotation; with a pivot the objects orbit it (a whole
+//                                  `repeat` line: its steps turn too; local: each about its own
+//                                  centre / origin). A yaw alone adds to the yaw, a local roll alone
+//                                  to the roll, exactly; other turns are written with 6 decimals. A
+//                                  box that ends up axis-aligned is written as corners, without rot
+//   rotation <yaw> <pitch> <roll>  the rotation itself, about each object's own centre / origin
+//                                  (0 0 0: a box's plain corners, a model without rot)
 //   scale <f> | <fx> <fy> <fz> [local] [pivot <x> <y> <z>]
 //                                  factors (> 0) per world axis about the pivot (default: each
 //                                  object's own centre / origin): box corners, block centre and
@@ -98,8 +110,8 @@
 //   preview move <dx> <dy> <dz>    the selection follows a transform without a text
 //                                  (MS_EditPreviewBegin / Set: shifted from where it was when the
 //                                  preview began); the next edit ends it
-//   preview turn ... / preview scale ...   the same with a turn / scale (the arguments of turn and
-//                                  scale), as the transform modal (G / R / S) previews it
+//   preview turn ... / preview scale ... / preview rotation ...   the same with a turn / scale /
+//                                  rotation (their arguments), as the transform modal previews it
 //   preview end                    everything back as before the preview (MS_EditPreviewEnd)
 // Each command prints one "edits: ..." line; the first failing one stops the script (exit 1).
 #include "mapedit.h"
@@ -227,7 +239,7 @@ typedef struct {
     int kind;               // ST_*
     char prim[16];
     int posTok[POS_MAX], posAxis[POS_MAX], posCount;
-    int rotTok;             // model: the `rot` key, -1
+    int rotTok;             // model, box, block: the `rot` key, -1
     int scaleTok, scaleN;   // model: the `scale` key (-1) and its 1 or 3 numbers
     int zTok;               // model: the z of the position
 } Stmt;
@@ -380,6 +392,11 @@ static bool Analyze(Stmt *st, const char *text, int len, char *why, int whySize)
                 st->posTok[st->posCount] = t + 1 + a;
                 st->posAxis[st->posCount++] = axes[a] - MS_AXIS_X;
             }
+        if (argc == 6 && TokIs(st, t + 7, "rot")) {     // box / block ... rot yaw pitch roll
+            for (int a = 0; a < 3; a++)
+                if (!TokNum(st, t + 8 + a, NULL, NULL)) { snprintf(why, whySize, "bad rot"); return false; }
+            st->rotTok = t + 7;
+        }
     }
     for (int k = 0; k < st->posCount; k++)
         if (!TokNum(st, st->posTok[k], NULL, NULL)) { snprintf(why, whySize, "unexpected line layout"); return false; }
@@ -648,49 +665,6 @@ static double NormalizeYaw(double y)
     return y;
 }
 
-// Turns of 90 degrees in op (0..3)
-static int QuarterTurns(double deg) { return (((int)lround(deg / 90.0)) % 4 + 4) % 4; }
-
-// The turn of the values vals[] (positional numbers in order) of a box / block / model line:
-// the splices that do it. vals: the line's own numbers (whole line) or world numbers.
-static bool RwTurn(Ctx *C, const Stmt *st, const double *vals, const int *decs)
-{
-    Rewrite *w = &C->rw;
-    double deg = C->op->degrees;
-    if (st->kind == ST_MODEL) {
-        char buf[NUMBER_MAX + 16];
-        if (st->rotTok >= 0) {
-            double yaw;
-            if (!TokNum(st, st->rotTok + 1, &yaw, NULL)) return false;
-            FormatNum(NormalizeYaw(yaw + deg), 6, buf, sizeof(buf));
-            RwStr(w, st->tok[st->rotTok + 1].s, st->tok[st->rotTok + 1].e, buf);
-        } else {
-            char num[NUMBER_MAX];
-            FormatNum(NormalizeYaw(deg), 6, num, sizeof(num));
-            snprintf(buf, sizeof(buf), " rot %s 0 0", num);
-            int at = st->tok[st->zTok].e;
-            RwStr(w, at, at, buf);
-        }
-        return true;
-    }
-    if (st->kind != ST_BOX) return false;
-    if (QuarterTurns(deg) % 2 == 0) return true;    // 180: the same box
-    if (strcmp(st->prim, "box") == 0) {
-        double cx = (vals[0] + vals[3]) * 0.5, cz = (vals[2] + vals[5]) * 0.5;
-        double hx = fabs(vals[3] - vals[0]) * 0.5, hz = fabs(vals[5] - vals[2]) * 0.5;
-        double nv[6] = { cx - hz, vals[1], cz - hx, cx + hz, vals[4], cz + hx };
-        for (int k = 0; k < 6; k++) RwNumber(w, st, st->posTok[k], nv[k], decs[k]);
-        return true;
-    }
-    if (strcmp(st->prim, "block") == 0) {     // cx y0 cz sx sy sz: swap sx and sz
-        int sx = st->kw + 4, sz = st->kw + 6;
-        RwSet(w, st->tok[sx].s, st->tok[sx].e, st->text + st->tok[sz].s, st->tok[sz].e - st->tok[sz].s);
-        RwSet(w, st->tok[sz].s, st->tok[sz].e, st->text + st->tok[sx].s, st->tok[sx].e - st->tok[sx].s);
-        return true;
-    }
-    return false;
-}
-
 // ---- Turns about any axis or a pivot, scales and sizes (the transform modal's ops) ----
 //
 // Each op maps the line's positional numbers (a whole line: its own numbers, the copies'
@@ -783,16 +757,17 @@ static void MatToYpr(const Mat3 *m, double *yaw, double *pitch, double *roll)
     }
 }
 
-// The old `turn <yaw>`: each object about its own centre / origin, by yaw only (RwTurn)
+// The plain `turn <yaw>`: each object about its own centre / origin, by yaw only
 static bool IsPlainTurn(const EditOp *op)
 {
     return op->kind == EDIT_ROTATE && !op->hasPivot && !op->local && op->pitch == 0.0 && op->roll == 0.0 &&
            op->axis[0] == 0.0 && op->axis[1] == 0.0 && op->axis[2] == 0.0;
 }
 
+// The ops RwTransform writes (the rest: moves, shifted copies, removals)
 static bool IsTransform(const EditOp *op)
 {
-    return (op->kind == EDIT_ROTATE && !IsPlainTurn(op)) || op->kind == EDIT_SCALE || op->kind == EDIT_SIZE;
+    return op->kind == EDIT_ROTATE || op->kind == EDIT_SET_ROTATION || op->kind == EDIT_SCALE || op->kind == EDIT_SIZE;
 }
 
 static Mat3 OpRotation(const EditOp *op)
@@ -886,6 +861,9 @@ static Mat3 ModelRot(const Stmt *st, double ypr[3])
     return MatYpr(ypr[0], ypr[1], ypr[2]);
 }
 
+// A value as it is written (at most 6 decimals): what the map will read back
+static double Written(double v) { return round(v * 1e6) / 1e6; }
+
 // A model's `rot` after the turn R: a world-Y turn adds to the yaw and a local-Z turn to the
 // roll exactly; any other turn is composed (global on the left, local on the right) and
 // decomposed back to yaw / pitch / roll, written with 6 decimals
@@ -903,11 +881,23 @@ static void ModelTurn(const double ypr[3], const EditOp *op, const Mat3 *R, doub
     }
 }
 
-static void RwModelRot(Rewrite *w, const Stmt *st, const EditOp *op, const Mat3 *R)
+// The rotation (yaw, pitch, roll) an object with rotation ypr[] gets from op: EDIT_SET_ROTATION's
+// own (each angle in (-180, 180]), or the turn R as ModelTurn writes it
+static void TurnYpr(const double ypr[3], const EditOp *op, const Mat3 *R, double nv[3])
 {
-    double ypr[3], nv[3];
-    ModelRot(st, ypr);
-    ModelTurn(ypr, op, R, nv);
+    if (op->kind == EDIT_SET_ROTATION)
+        for (int i = 0; i < 3; i++) nv[i] = NormalizeYaw(Written(op->ypr[i]));
+    else ModelTurn(ypr, op, R, nv);
+}
+
+// A line's `rot` (model, box, block) becomes nv[]: the numbers that change, a new `rot` after
+// token `after` when the line has none, or (drop) no `rot` at all
+static void RwRot(Rewrite *w, const Stmt *st, const double ypr[3], const double nv[3], bool drop, int after)
+{
+    if (drop) {
+        if (st->rotTok >= 0) RwStr(w, st->tok[st->rotTok - 1].e, st->tok[st->rotTok + 3].e, "");
+        return;
+    }
     if (st->rotTok >= 0) {
         for (int i = 0; i < 3; i++)
             if (nv[i] != ypr[i]) RwNumber(w, st, st->rotTok + 1 + i, nv[i], 6);
@@ -916,8 +906,17 @@ static void RwModelRot(Rewrite *w, const Stmt *st, const EditOp *op, const Mat3 
     char text[3 * NUMBER_MAX + 8], tri[3 * NUMBER_MAX];
     FormatTriple(nv, (const int[3]){ 6, 6, 6 }, false, tri, sizeof(tri));
     snprintf(text, sizeof(text), " rot %s", tri);
-    int at = st->tok[st->zTok].e;
+    int at = st->tok[after].e;
     RwStr(w, at, at, text);
+}
+
+static void RwModelRot(Rewrite *w, const Stmt *st, const EditOp *op, const Mat3 *R)
+{
+    double ypr[3], nv[3];
+    ModelRot(st, ypr);
+    TurnYpr(ypr, op, R, nv);
+    bool none = op->kind == EDIT_SET_ROTATION && nv[0] == 0.0 && nv[1] == 0.0 && nv[2] == 0.0;   // (removes `rot`)
+    RwRot(w, st, ypr, nv, none, st->zTok);
 }
 
 // A model's `scale` after the factors F: each model axis takes the factor of the world axis
@@ -935,9 +934,6 @@ static void ModelAxisFactors(const double ypr[3], const EditOp *op, double f[3])
         f[j] = op->factor[k];
     }
 }
-
-// A value as it is written (at most 6 decimals): what the map will read back
-static double Written(double v) { return round(v * 1e6) / 1e6; }
 
 // False when a new scale would be written as 0 (a factor below 1e-6 of it)
 static bool RwModelScale(Rewrite *w, const Stmt *st, const EditOp *op)
@@ -965,15 +961,104 @@ static bool RwModelScale(Rewrite *w, const Stmt *st, const EditOp *op)
     return true;
 }
 
-// EDIT_ROTATE (not the plain yaw turn), EDIT_SCALE, EDIT_SIZE on a box / block / model line:
-// vals[] (positional numbers: the line's own (whole) or one copy's world numbers) become the
-// new ones (the caller writes them); everything else is spliced into C->rw. False with C->why.
+// A rotation matrix that is a signed permutation (every entry exactly 0 or +-1: the exact sin /
+// cos of multiples of 90 degrees give them): src[i] = the column whose entry in row i is +-1
+static bool SignedPermutation(const Mat3 *m, int src[3])
+{
+    for (int i = 0; i < 3; i++) {
+        int ones = 0;
+        for (int j = 0; j < 3; j++) {
+            double v = fabs(m->m[i][j]);
+            if (v == 1.0) { ones++; src[i] = j; }
+            else if (v != 0.0) return false;
+        }
+        if (ones != 1) return false;
+    }
+    return true;
+}
+
+// The written extents e[] (along the box's own axes: |x1 - x0|.. or a block's sizes) and centre
+// of a box / block line, from its positional numbers vals[]
+static void BoxShape(const Stmt *st, const double *vals, double e[3], double c[3])
+{
+    bool box = strcmp(st->prim, "box") == 0;
+    int sz = st->kw + 4;
+    for (int a = 0; a < 3; a++) {
+        e[a] = box ? fabs(vals[a + 3] - vals[a]) : TokValue(st, sz + a);
+        c[a] = box ? (vals[a] + vals[a + 3]) * 0.5 : vals[a];
+    }
+    if (!box) c[1] = vals[1] + e[1] * 0.5;
+}
+
+// The pose of a box after a turn (EDIT_ROTATE: M about P, global or local; EDIT_SET_ROTATION: its
+// rotation set, about its own centre), as it is written (docs/live-editing.md 11.9): the centre
+// c[] moves, the rotation becomes nv[]; when that is axis-aligned (a signed permutation) the box
+// is a plain box again: true, with the world extents ne[i] = e[src[i]] (the written ones
+// permuted). Else false and ne[] = e[] (the extents stay along its own axes).
+static bool BoxTurn(const EditOp *op, const double ypr[3], const double e[3], const double P[3], double c[3],
+                    double nv[3], double ne[3], int src[3])
+{
+    Mat3 M = op->kind == EDIT_ROTATE ? OpRotation(op) : MatYpr(0, 0, 0);
+    if (op->kind == EDIT_ROTATE && !op->local) {     // (without a pivot P is the centre: it stays)
+        double d[3] = { c[0] - P[0], c[1] - P[1], c[2] - P[2] };
+        MatVec(&M, d, d);
+        for (int a = 0; a < 3; a++) c[a] = d[a] + P[a];
+    }
+    TurnYpr(ypr, op, &M, nv);
+    Mat3 R = MatYpr(nv[0], nv[1], nv[2]);
+    for (int i = 0; i < 3; i++) src[i] = i;
+    bool plain = SignedPermutation(&R, src);
+    if (!plain)
+        for (int i = 0; i < 3; i++) src[i] = i;
+    for (int i = 0; i < 3; i++) ne[i] = e[src[i]];
+    return plain;
+}
+
+// EDIT_ROTATE / EDIT_SET_ROTATION of a box / block line (BoxTurn): vals[] become the new
+// corners (box) or centre and floor (block); the sizes, the steps of a whole line turned about a
+// pivot and the `rot` are spliced into C->rw
+static void RwBoxTurn(Ctx *C, const Stmt *st, double *vals, const double P[3], bool steps)
+{
+    const EditOp *op = C->op;
+    Rewrite *w = &C->rw;
+    bool box = strcmp(st->prim, "box") == 0;
+    int sz = st->kw + 4;
+    double e[3], c[3], ypr[3], nv[3], ne[3];
+    int src[3];
+    BoxShape(st, vals, e, c);
+    ModelRot(st, ypr);
+    bool plain = BoxTurn(op, ypr, e, P, c, nv, ne, src);
+    if (box)    // two opposite corners, the smaller first
+        for (int a = 0; a < 3; a++) {
+            vals[a] = c[a] - ne[a] * 0.5;
+            vals[a + 3] = c[a] + ne[a] * 0.5;
+        }
+    else {
+        vals[0] = c[0];
+        vals[1] = c[1] - ne[1] * 0.5;
+        vals[2] = c[2];
+        for (int a = 0; plain && a < 3; a++) {      // the permuted sizes, as written
+            int from = src[a];
+            if (from != a) RwSet(w, st->tok[sz + a].s, st->tok[sz + a].e, st->text + st->tok[sz + from].s, st->tok[sz + from].e - st->tok[sz + from].s);
+        }
+    }
+    if (steps && op->kind == EDIT_ROTATE && !op->local) {
+        Mat3 M = OpRotation(op);
+        RwSteps(w, st, &M);
+    }
+    RwRot(w, st, ypr, nv, plain, st->kw + 6);
+}
+
+// EDIT_ROTATE, EDIT_SET_ROTATION, EDIT_SCALE, EDIT_SIZE on a box / block / model line: vals[]
+// (positional numbers: the line's own (whole) or one copy's world numbers) become the new ones
+// (the caller writes them); everything else is spliced into C->rw. False with C->why.
 static bool RwTransform(Ctx *C, const Stmt *st, double *vals, bool whole)
 {
     const EditOp *op = C->op;
     Rewrite *w = &C->rw;
     bool box = st->kind == ST_BOX && strcmp(st->prim, "box") == 0, block = st->kind == ST_BOX && strcmp(st->prim, "block") == 0;
-    const char *what = op->kind == EDIT_ROTATE ? "turn" : op->kind == EDIT_SCALE ? "scale" : "resize";
+    bool turn = op->kind == EDIT_ROTATE || op->kind == EDIT_SET_ROTATION;
+    const char *what = turn ? "turn" : op->kind == EDIT_SCALE ? "scale" : "resize";
     if (st->kind == ST_LIGHT) { snprintf(C->why, sizeof(C->why), "lights can't %s (only their position moves)", what); return false; }
     if (st->kind == ST_BOX && !box && !block) {
         snprintf(C->why, sizeof(C->why), "%s lines can't %s (only box and block lines)", st->prim, what);
@@ -988,37 +1073,23 @@ static bool RwTransform(Ctx *C, const Stmt *st, double *vals, bool whole)
     else memcpy(own, vals, sizeof(own));
     double P[3];
     memcpy(P, op->hasPivot ? op->pivot : own, sizeof(P));
-    bool steps = whole && op->hasPivot;     // the line's layout turns / scales with it
-    int triples = box ? 2 : 1;
+    bool steps = whole && op->hasPivot && op->kind != EDIT_SET_ROTATION;  // the line's layout turns / scales with it
 
-    if (op->kind == EDIT_ROTATE) {
-        Mat3 R;
-        int q = 0;
+    if (turn) {
         if (st->kind == ST_BOX) {
-            double yaw;
-            if (!OpYawOnly(op, &yaw) || fmod(fabs(yaw), 90.0) != 0.0) {
-                snprintf(C->why, sizeof(C->why), "boxes turn only about the vertical, in 90 degree steps");
-                return false;
-            }
-            q = QuarterTurns(yaw);
-            R = MatAxis(1, q * 90.0);   // (exact)
-        } else R = OpRotation(op);
-        bool orbit = st->kind == ST_BOX || !op->local;   // local: each model about its own origin
-        if (orbit)
-            for (int t = 0; t < triples; t++) {
-                double d[3] = { vals[3 * t] - P[0], vals[3 * t + 1] - P[1], vals[3 * t + 2] - P[2] };
-                MatVec(&R, d, d);
-                for (int a = 0; a < 3; a++) vals[3 * t + a] = d[a] + P[a];
-            }
-        if (box)    // (two opposite corners again: the smaller first)
-            for (int a = 0; a < 3; a++)
-                if (vals[a] > vals[a + 3]) { double x = vals[a]; vals[a] = vals[a + 3]; vals[a + 3] = x; }
-        if (block && q % 2) {   // the footprint turns: sx and sz swap
-            RwSet(w, st->tok[sz].s, st->tok[sz].e, st->text + st->tok[sz + 2].s, st->tok[sz + 2].e - st->tok[sz + 2].s);
-            RwSet(w, st->tok[sz + 2].s, st->tok[sz + 2].e, st->text + st->tok[sz].s, st->tok[sz].e - st->tok[sz].s);
+            RwBoxTurn(C, st, vals, P, steps);
+            return true;
+        }
+        // a model: its position orbits the pivot (global), its `rot` composes with the turn
+        Mat3 R = op->kind == EDIT_ROTATE ? OpRotation(op) : MatYpr(0, 0, 0);
+        bool orbit = op->kind == EDIT_ROTATE && !op->local;   // local: each model about its own origin
+        if (orbit) {
+            double d[3] = { vals[0] - P[0], vals[1] - P[1], vals[2] - P[2] };
+            MatVec(&R, d, d);
+            for (int a = 0; a < 3; a++) vals[a] = d[a] + P[a];
         }
         if (steps && orbit) RwSteps(w, st, &R);
-        if (st->kind == ST_MODEL) RwModelRot(w, st, op, &R);
+        RwModelRot(w, st, op, &R);
         return true;
     }
 
@@ -1026,6 +1097,32 @@ static bool RwTransform(Ctx *C, const Stmt *st, double *vals, bool whole)
         const double *F = op->factor;
         if (!(F[0] > 0.0 && F[1] > 0.0 && F[2] > 0.0)) { snprintf(C->why, sizeof(C->why), "a scale factor must be > 0"); return false; }
         bool about = st->kind == ST_BOX || !op->local;      // local: each model about its own origin
+        double ypr[3];
+        ModelRot(st, ypr);
+        if (st->kind == ST_BOX && (ypr[0] != 0.0 || ypr[1] != 0.0 || ypr[2] != 0.0)) {
+            // A turned box: its centre scales about the pivot, its extents (along its own axes)
+            // each by the factor of the world axis nearest to that axis (local: factor i, axis i)
+            double e[3], c[3], f[3];
+            BoxShape(st, vals, e, c);
+            ModelAxisFactors(ypr, op, f);
+            for (int a = 0; a < 3; a++) {
+                c[a] = P[a] + F[a] * (c[a] - P[a]);
+                double ne = e[a] * f[a];
+                if (e[a] != 0.0 && fabs(Written(ne)) < 1e-6) {
+                    snprintf(C->why, sizeof(C->why), "the box would be thinner than 0.000001 m along its %c axis", "xyz"[a]);
+                    return false;
+                }
+                if (box) { vals[a] = c[a] - ne * 0.5; vals[a + 3] = c[a] + ne * 0.5; }
+                else if (f[a] != 1.0) RwNumber(w, st, sz + a, ne, NumDecimals(st, sz + a));
+                if (block && a == 1) vals[1] = c[1] - ne * 0.5;
+                else if (block) vals[a] = c[a];
+            }
+            if (steps) {
+                Mat3 D = { { { F[0], 0, 0 }, { 0, F[1], 0 }, { 0, 0, F[2] } } };
+                RwSteps(w, st, &D);
+            }
+            return true;
+        }
         if (about)
             for (int k = 0; k < st->posCount; k++) {
                 int a = st->posAxis[k];
@@ -1087,26 +1184,26 @@ bool MapEditPreviewTransform(const EditOp *op, int cls, const MS_Transform *in, 
         out->position = (Vector3){ (float)(p[0] + op->delta[0]), (float)(p[1] + op->delta[1]), (float)(p[2] + op->delta[2]) };
         return true;
     }
-    if (op->kind == EDIT_ROTATE && (box || model)) {
-        Mat3 R;
-        int q = 0;
-        if (box) {
-            double yaw;
-            if (!OpYawOnly(op, &yaw) || fmod(fabs(yaw), 90.0) != 0.0) return false;
-            q = QuarterTurns(yaw);
-            R = MatAxis(1, q * 90.0);
-        } else R = OpRotation(op);
-        if (box || !op->local) {
+    double ypr[3] = { in->rotationDeg.x, in->rotationDeg.y, in->rotationDeg.z }, nv[3];
+    if ((op->kind == EDIT_ROTATE || op->kind == EDIT_SET_ROTATION) && box) {
+        // as RwBoxTurn writes it: the centre, the new rotation, or an axis-aligned box again
+        double e[3] = { in->scale.x, in->scale.y, in->scale.z }, ne[3];
+        int src[3];
+        bool plain = BoxTurn(op, ypr, e, P, p, nv, ne, src);
+        out->position = (Vector3){ (float)p[0], (float)p[1], (float)p[2] };
+        out->scale = (Vector3){ (float)ne[0], (float)ne[1], (float)ne[2] };
+        out->rotationDeg = plain ? (Vector3){ 0 } : (Vector3){ (float)nv[0], (float)nv[1], (float)nv[2] };
+        return true;
+    }
+    if ((op->kind == EDIT_ROTATE || op->kind == EDIT_SET_ROTATION) && model) {
+        Mat3 R = op->kind == EDIT_ROTATE ? OpRotation(op) : MatYpr(0, 0, 0);
+        if (op->kind == EDIT_ROTATE && !op->local) {
             double d[3] = { p[0] - P[0], p[1] - P[1], p[2] - P[2] };
             MatVec(&R, d, d);
             out->position = (Vector3){ (float)(d[0] + P[0]), (float)(d[1] + P[1]), (float)(d[2] + P[2]) };
         }
-        if (box && q % 2) { out->scale.x = in->scale.z; out->scale.z = in->scale.x; }
-        if (model) {
-            double ypr[3] = { in->rotationDeg.x, in->rotationDeg.y, in->rotationDeg.z }, nv[3];
-            ModelTurn(ypr, op, &R, nv);
-            out->rotationDeg = (Vector3){ (float)nv[0], (float)nv[1], (float)nv[2] };
-        }
+        TurnYpr(ypr, op, &R, nv);
+        out->rotationDeg = (Vector3){ (float)nv[0], (float)nv[1], (float)nv[2] };
         return true;
     }
     if (op->kind == EDIT_SCALE && (box || model)) {
@@ -1116,10 +1213,8 @@ bool MapEditPreviewTransform(const EditOp *op, int cls, const MS_Transform *in, 
             out->position = (Vector3){ (float)(P[0] + F[0] * (p[0] - P[0])), (float)(P[1] + F[1] * (p[1] - P[1])),
                                        (float)(P[2] + F[2] * (p[2] - P[2])) };
         double f[3] = { F[0], F[1], F[2] };
-        if (model) {
-            double ypr[3] = { in->rotationDeg.x, in->rotationDeg.y, in->rotationDeg.z };
-            ModelAxisFactors(ypr, op, f);
-        }
+        // (a turned box's extents, like a model's axes, take the factor of the nearest world axis)
+        if (model || ypr[0] != 0.0 || ypr[1] != 0.0 || ypr[2] != 0.0) ModelAxisFactors(ypr, op, f);
         out->scale = (Vector3){ (float)(in->scale.x * f[0]), (float)(in->scale.y * f[1]), (float)(in->scale.z * f[2]) };
         return true;
     }
@@ -1144,16 +1239,8 @@ static bool CopyLine(Ctx *C, const Stmt *st, int c, StrBuf *out)
         decs[k] = ValueDecimals(st, k);
         if (C->op->kind == EDIT_MOVE || C->op->kind == EDIT_DUPLICATE) vals[k] += C->op->delta[st->posAxis[k]];
     }
-    if (IsTransform(C->op)) {
-        if (!RwTransform(C, st, vals, false)) return false;
-        for (int k = 0; k < st->posCount; k++) RwNumber(w, st, st->posTok[k], vals[k], decs[k]);
-    } else if (C->op->kind == EDIT_ROTATE) {
-        if (!RwTurn(C, st, vals, decs)) return false;
-        // (a box turn rewrote the corners; the other numbers still need their world values)
-        if (!(st->kind == ST_BOX && strcmp(st->prim, "box") == 0 && QuarterTurns(C->op->degrees) % 2))
-            for (int k = 0; k < st->posCount; k++) RwNumber(w, st, st->posTok[k], vals[k], decs[k]);
-    } else
-        for (int k = 0; k < st->posCount; k++) RwNumber(w, st, st->posTok[k], vals[k], decs[k]);
+    if (IsTransform(C->op) && !RwTransform(C, st, vals, false)) return false;
+    for (int k = 0; k < st->posCount; k++) RwNumber(w, st, st->posTok[k], vals[k], decs[k]);
     RwId(w, st, C->nextId++);
     RwBuild(w, st, out);
     return !w->oom;
@@ -1177,8 +1264,6 @@ static bool WholeLine(Ctx *C, const Stmt *st, int *idOut, StrBuf *out)
         if (!RwTransform(C, st, vals, true)) return false;
         for (int k = 0; k < st->posCount; k++)
             if (!SameNumber(vals[k], was[k], decs[k])) RwNumber(w, st, st->posTok[k], vals[k], decs[k]);
-    } else if (C->op->kind == EDIT_ROTATE) {
-        if (!RwTurn(C, st, vals, decs)) return false;
     } else {
         for (int k = 0; k < st->posCount; k++)
             RwNumber(w, st, st->posTok[k], vals[k] + C->op->delta[st->posAxis[k]], decs[k]);
@@ -1553,6 +1638,11 @@ static void AmountText(const EditOp *op, char *out, int outSize)
         snprintf(piv, sizeof(piv), " around %s %s %s", p[0], p[1], p[2]);
     }
     const char *loc = op->local ? " (local)" : "";
+    if (op->kind == EDIT_SET_ROTATION) {
+        for (int i = 0; i < 3; i++) FormatNum(op->ypr[i], 4, a[i], sizeof(a[i]));
+        snprintf(out, outSize, " to yaw %s pitch %s roll %s", a[0], a[1], a[2]);
+        return;
+    }
     if (op->kind == EDIT_ROTATE) {
         bool noAxis = op->axis[0] == 0.0 && op->axis[1] == 0.0 && op->axis[2] == 0.0;
         if (noAxis) {
@@ -1611,12 +1701,12 @@ static bool BuildPatch(Ctx *C, Patch *P, const MS_ObjRef *sel, int selCount)
     // Group the selection by statement
     StmtSel *ss = NULL;
     int ssCount = 0, ssCap = 0;
-    int boxes = 0, models = 0, lights = 0;
+    int models = 0, lights = 0, turnedBoxes = 0;
     for (int i = 0; i < selCount; i++) {
         int e = MS_ObjectEntity(scene, sel[i]);
         if (e < 0) continue;
         const MS_Source *src = &scene->entitySources[e];
-        boxes += sel[i].kind == MS_OBJ_BOX;
+        turnedBoxes += sel[i].kind == MS_OBJ_BOX && scene->boxTurned && scene->boxTurned[sel[i].index] >= 0;
         models += sel[i].kind == MS_OBJ_MODEL;
         lights += sel[i].kind == MS_OBJ_LIGHT;
         StmtSel *S = NULL;
@@ -1636,14 +1726,13 @@ static bool BuildPatch(Ctx *C, Patch *P, const MS_ObjRef *sel, int selCount)
         if (!S->copySel[src->copy]) { S->copySel[src->copy] = true; S->selCopies++; }
     }
     if (ssCount == 0) { snprintf(C->why, sizeof(C->why), "nothing selected"); goto doneSel; }
-    if (op->kind == EDIT_ROTATE && lights > 0) { snprintf(C->why, sizeof(C->why), "lights can't be turned (edit a spot light's direction on its line)"); goto doneSel; }
+    if ((op->kind == EDIT_ROTATE || op->kind == EDIT_SET_ROTATION) && lights > 0) {
+        snprintf(C->why, sizeof(C->why), "lights can't be turned (edit a spot light's direction on its line)");
+        goto doneSel;
+    }
     bool plain = IsPlainTurn(op);
-    if (plain && boxes > 0 && models > 0) { snprintf(C->why, sizeof(C->why), "turn boxes and models separately (boxes turn in 90 degree steps)"); goto doneSel; }
-    if (plain && boxes > 0 && fmod(fabs(op->degrees), 90.0) != 0.0) { snprintf(C->why, sizeof(C->why), "boxes turn only in 90 degree steps"); goto doneSel; }
-    if (plain && boxes > 0 && QuarterTurns(op->degrees) % 2 == 0) { snprintf(C->why, sizeof(C->why), "a box turned by 180 degrees is the same box"); goto doneSel; }
-    double yaw;
-    if (op->kind == EDIT_ROTATE && !plain && boxes > 0 && (!OpYawOnly(op, &yaw) || fmod(fabs(yaw), 90.0) != 0.0)) {
-        snprintf(C->why, sizeof(C->why), "boxes turn only about the vertical, in 90 degree steps (turn models separately)");
+    if (plain && models == 0 && turnedBoxes == 0 && fmod(fabs(op->degrees), 180.0) == 0.0) {
+        snprintf(C->why, sizeof(C->why), "a box turned by 180 degrees is the same box");
         goto doneSel;
     }
     if ((op->kind == EDIT_SCALE || op->kind == EDIT_SIZE) && lights > 0) {
@@ -1677,10 +1766,9 @@ static bool BuildPatch(Ctx *C, Patch *P, const MS_ObjRef *sel, int selCount)
         const LineSpan *ls = &P->lines[S->line - 1];
         if (!Analyze(&st, P->text + ls->start, ls->contentEnd - ls->start, C->why, sizeof(C->why))) goto doneSel;
         if (CopyCount(&st) != S->copies) { snprintf(C->why, sizeof(C->why), "line %d: the copies don't match the loaded map", S->line); goto doneSel; }
-        if ((op->kind == EDIT_ROTATE || op->kind == EDIT_SCALE || op->kind == EDIT_SIZE) && st.kind == ST_BOX &&
-            strcmp(st.prim, "box") != 0 && strcmp(st.prim, "block") != 0) {
+        if (IsTransform(op) && st.kind == ST_BOX && strcmp(st.prim, "box") != 0 && strcmp(st.prim, "block") != 0) {
             snprintf(C->why, sizeof(C->why), "line %d: %s can't %s (only box and block lines)", S->line, st.prim,
-                     op->kind == EDIT_ROTATE ? "turn" : op->kind == EDIT_SCALE ? "be scaled" : "be resized");
+                     op->kind == EDIT_ROTATE || op->kind == EDIT_SET_ROTATION ? "turn" : op->kind == EDIT_SCALE ? "be scaled" : "be resized");
             goto doneSel;
         }
         if ((op->kind == EDIT_MOVE || op->kind == EDIT_DUPLICATE) && st.posCount == 0) {
@@ -1701,7 +1789,8 @@ static bool BuildPatch(Ctx *C, Patch *P, const MS_ObjRef *sel, int selCount)
     {
         int objs = 0;
         for (int k = 0; k < ssCount; k++) objs += ss[k].selCopies;
-        const char *verb = op->kind == EDIT_MOVE ? "moved" : op->kind == EDIT_ROTATE ? "turned" : op->kind == EDIT_REMOVE ? "removed" :
+        const char *verb = op->kind == EDIT_MOVE ? "moved" : op->kind == EDIT_ROTATE || op->kind == EDIT_SET_ROTATION ? "turned" :
+                           op->kind == EDIT_REMOVE ? "removed" :
                            op->kind == EDIT_SCALE ? "scaled" : op->kind == EDIT_SIZE ? "resized" : "duplicated";
         char amount[8 * NUMBER_MAX + 64] = "";
         if (op->kind == EDIT_MOVE || op->kind == EDIT_DUPLICATE) {
@@ -1712,7 +1801,7 @@ static bool BuildPatch(Ctx *C, Patch *P, const MS_ObjRef *sel, int selCount)
             char a[NUMBER_MAX];
             FormatNum(op->degrees, 4, a, sizeof(a));
             snprintf(amount, sizeof(amount), " by %s deg", a);
-        } else if (op->kind == EDIT_ROTATE || op->kind == EDIT_SCALE || op->kind == EDIT_SIZE) {
+        } else if (IsTransform(op)) {
             AmountText(op, amount, sizeof(amount));
         }
         char where[64];
@@ -2477,7 +2566,8 @@ static int RunScript(MapEditor *E, const char *scriptPath, bool live)
         EditOp op = { 0 };
         bool isEdit = false;
         // `preview turn ...` / `preview scale ...`: the op as the transform modal previews it
-        bool previewOp = live && n >= 3 && strcmp(w[0], "preview") == 0 && (strcmp(w[1], "turn") == 0 || strcmp(w[1], "scale") == 0);
+        bool previewOp = live && n >= 3 && strcmp(w[0], "preview") == 0 &&
+                         (strcmp(w[1], "turn") == 0 || strcmp(w[1], "scale") == 0 || strcmp(w[1], "rotation") == 0);
         if (previewOp) memmove(w, w + 1, sizeof(char *) * (size_t)--n);
         if (n < 0) snprintf(msg, sizeof(msg), "unterminated string");
         else if (strcmp(w[0], "select") == 0 || strcmp(w[0], "also") == 0) {
@@ -2533,6 +2623,10 @@ static int RunScript(MapEditor *E, const char *scriptPath, bool live)
             if (!isEdit)
                 snprintf(msg, sizeof(msg), turn ? "turn <yaw> [<pitch> <roll>] [local] [pivot <x> <y> <z>] (degrees)"
                                                 : "scale <f> | <fx> <fy> <fz> [local] [pivot <x> <y> <z>]");
+        } else if (strcmp(w[0], "rotation") == 0) {
+            op.kind = EDIT_SET_ROTATION;
+            isEdit = n == 4 && ScriptNum(w[1], &op.ypr[0]) && ScriptNum(w[2], &op.ypr[1]) && ScriptNum(w[3], &op.ypr[2]);
+            if (!isEdit) snprintf(msg, sizeof(msg), "rotation <yaw> <pitch> <roll> (degrees, each object about its own centre / origin; 0 0 0 resets)");
         } else if (strcmp(w[0], "size") == 0) {
             op.kind = EDIT_SIZE;
             isEdit = n == 4 && ScriptNum(w[1], &op.size[0]) && ScriptNum(w[2], &op.size[1]) && ScriptNum(w[3], &op.size[2]);
@@ -2614,13 +2708,14 @@ static int RunScript(MapEditor *E, const char *scriptPath, bool live)
                  ScriptPreview(&sel, delta, NULL, &previewing, &previewFrom);
             snprintf(msg, sizeof(msg), ok ? "preview: %d object%s shifted" : "preview move <dx> <dy> <dz> (needs a selection; refused?)",
                      sel.n, sel.n == 1 ? "" : "s");
-        } else snprintf(msg, sizeof(msg), "unknown command '%s' (select also move turn scale size remove duplicate add id undo redo print%s)", w[0],
+        } else snprintf(msg, sizeof(msg), "unknown command '%s' (select also move turn rotation scale size remove duplicate add id undo redo print%s)", w[0],
                         live ? " save disk preview" : "");
 
         if (isEdit && previewOp) {
             ok = sel.n > 0 && ScriptPreview(&sel, NULL, &op, &previewing, &previewFrom);
-            if (ok) snprintf(msg, sizeof(msg), "preview: %d object%s %s", sel.n, sel.n == 1 ? "" : "s", op.kind == EDIT_ROTATE ? "turned" : "scaled");
-            else snprintf(msg, sizeof(msg), "preview %s needs a selection (refused?)", op.kind == EDIT_ROTATE ? "turn" : "scale");
+            bool turned = op.kind == EDIT_ROTATE || op.kind == EDIT_SET_ROTATION;
+            if (ok) snprintf(msg, sizeof(msg), "preview: %d object%s %s", sel.n, sel.n == 1 ? "" : "s", turned ? "turned" : "scaled");
+            else snprintf(msg, sizeof(msg), "preview %s needs a selection (refused?)", turned ? "turn" : "scale");
         } else if (isEdit) {
             MS_EntityId *ids;
             int count;

@@ -38,6 +38,8 @@ Terms used across these pages, in alphabetical order.
 
 **Volumes, volume mode:** axis-aligned boxes marked in world space (key V in spectator mode, or Shift+V from the selection) to point at a space rather than at what the screen shows: a room behind a wall, an empty spot to fill. Sent with requests as V1, V2, ...; never saved into the map.
 
+**Rotate gizmo:** in edit mode, the rings drawn at the selection's pivot (X red, Y green, Z blue, a white view ring, a grey trackball disc inside), as in Blender: drag one to turn the selection about that axis ([user-guide.md](user-guide.md)).
+
 **Shadow tiles:** the sun's shadow map rendered for fixed tiles of the world and then only sampled, instead of every frame. The two tiles around the map's play area are drawn once per load; moving far away draws a new one about every 90 m. Which tile is used depends only on the camera position, so turning never re-renders them (`--shadow-camera` switches back to R3D's per-view shadow map).
 
 **Skill:** a Claude Code instruction file in `.claude/skills/<name>/SKILL.md`. Claude loads the matching one for its task (map requests, engine code, benchmarking, …).
@@ -49,5 +51,7 @@ Terms used across these pages, in alphabetical order.
 **Subagent:** a helper Claude Code agent the coordinator starts for one request. It edits the map, checks the result with screenshots and writes `result.md`.
 
 **Tier:** the size of Claude model a request gets (fast, default, heavy), chosen from its wording; `@fast` / `@default` / `@heavy` at the start of a prompt overrides it.
+
+**Turned box:** a `box` or `block` line with `rot yaw pitch roll`: the box turned about its own centre. It draws, collides and is picked as its turned shape; the runtime keeps its world AABB in `boxes[]` and the shape in `turnedBoxes` ([map-format.md](map-format.md) §2).
 
 **Volumetric fog:** fog that is lit by the sun and lights, so light shafts show through gaps. Distance fog is the plain haze that fades far geometry.

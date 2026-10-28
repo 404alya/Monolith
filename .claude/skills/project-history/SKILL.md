@@ -133,6 +133,16 @@ Edit mode used to write every key press into the map file and run a full `MS_Rel
 - **RMB-held flying in edit mode** (the developer's call) frees the letter keys for Blender's G / R / S / X / Y / Z.
 - **The inspector's filter hides ranges from every pass and redraws the shadow caches**, so a hidden object drops its shadow; the fog bake waits while something is hidden (R3D bakes from the frame's draw list).
 
+## Free rotation (2026-10-28)
+
+Boxes were **axis-aligned everywhere** from round 1: the format (two corners), the colliders and their BVH (AABB overlap), `MS_Raycast` (slab test, axis normals), hidden-face removal and the merged per-cell meshes (only axis-aligned faces can cover each other exactly), the AO volume (an AABB distance), the compiled records and the dumps. That kept every one of those paths simple and exact, and the default map (a grid of concrete) never needed anything else; a diagonal was a model or a staircase of boxes, and the edit mode turned boxes only in 90° steps about the vertical (the corners swapped). Placing ramps, leaning slabs, beams and fallen rubble by eye made that too slow, so the developer decided (design: `docs/live-editing.md` §11):
+- **Boxes and blocks turn freely, like models** (`box … rot y p r`, the models' `R = Ry · Rx · Rz`, about the box's own centre). Stairs, waffles and lights don't.
+- **A turned box collides as its turned shape** (a separating-axis test, and `MS_ColliderTop` for landing and stepping), not as the AABB around it; the player walks slopes up to 46°.
+- **`boxes[]` and `colliders[]` keep the world AABB** of a turned box and the exact shape sits beside them (`turnedBoxes` / `boxTurned`), so everything that uses boxes as bounds (clusters, culling, dirty regions, hover) needed no change, and **every new path runs only for a box that has a rotation**: maps without one are bit-identical in every dump and shot (the round's acceptance test). Turned boxes take no part in hidden-face removal and get their own per-cell ranges, so the axis-aligned meshes stay byte-identical.
+- **The editor writes the simplest form:** a box whose pose ends axis-aligned (any 90° multiple) is written as plain corners without `rot`.
+- **Controls follow Blender:** plain R is a 90° step about the vertical (no free control), ALT+R the keyboard modal, ALT+SHIFT+R the reset, plus a rotate gizmo (axis rings, view ring, trackball) whenever something that can turn is selected.
+- **Compiled maps went to version 3** (one record per turned box, the boxes stored as written); version 2 is still read.
+
 ## The instruction files
 
 Superseded layouts, for reading old bundles, commits and notes; the current layout is `CLAUDE.md` + `.claude/skills/` + `docs/`.

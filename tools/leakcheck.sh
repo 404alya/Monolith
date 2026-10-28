@@ -27,7 +27,8 @@
 # with a failing step; with the fog cache and the AO volume; refused without --shot / a dump),
 # the transform ops (turn with pitch / roll / local / pivot, scale, size: --apply-edits with a failing
 # command, --edit-script with turn / scale previews) and the transform modal (--edit-modal: open with
-# the HUD, committed, cancelled; --input-script: mouse and keys through the input shim, a no-op turn),
+# the HUD, committed, cancelled; --input-script: mouse and keys through the input shim, a no-op turn), the
+# rotate gizmo, the R step and reset, turned boxes (shots with the caches, a reload, live edits),
 # the model picker (--model-picker: thumbnails of the scene's files and of one loaded for the render,
 # a filter, freed and rendered again across a reload and a renderer restart, ENTER and ESC),
 # --submit (tools/stub-terminal.sh instead of a terminal, MONOLITH_WORKSPACE=) on both maps, in
@@ -316,6 +317,26 @@ Run edit-modal-commit 0 "$M" --shot "$TMP/modal-commit.png" --view 1 --map "$TMP
                             --edit-modal "s Y 1.5 commit"
 Run edit-modal-cancel 0 "$M" --shot "$TMP/modal-cancel.png" --view 1 --map tests/models --select 30 --select 40 --select 45 \
                             --edit-modal "g x 1.25 cancel"
+# The rotate gizmo and the R step / reset (docs/live-editing.md 11.10), on a model and on turned boxes
+Run gizmo-hover 0       "$M" --shot "$TMP/gizmo.png" --view 1 --map tests/models --shot-hud --select 40 --edit-modal "gizmo hover y"
+cp -r tests/models "$TMP/gizmo-models"
+Run gizmo-ring 0        "$M" --shot "$TMP/gizmo-ring.png" --view 1 --map "$TMP/gizmo-models" --shot-hud --select 40 \
+                            --edit-modal "ring y 37.5 commit"
+Run gizmo-ball 0        "$M" --shot "$TMP/gizmo-ball.png" --view 1 --map "$TMP/gizmo-models" --select 40 --edit-modal "ball 30 -10 commit"
+Run gizmo-view 0        "$M" --shot "$TMP/gizmo-view.png" --view 1 --map "$TMP/gizmo-models" --select 40 --edit-modal "ring view 20 cancel"
+cp -r tests/rotated "$TMP/gizmo-rotated"
+Run step-r90 0          "$M" --shot "$TMP/step.png" --view 1 --map "$TMP/gizmo-rotated" --select 155 --edit-modal "r90"
+Run reset-rotation 0    "$M" --shot "$TMP/reset.png" --view 1 --map "$TMP/gizmo-rotated" --select 147 --edit-modal "reset"
+Run gizmo-ring-box 0    "$M" --shot "$TMP/gizmo-box.png" --view 1 --map "$TMP/gizmo-rotated" --select 142 --edit-modal "ring x 15 commit"
+# Turned boxes (box / block lines with `rot`): merged and instanced meshes, the caches, a reload, live
+# edits that add, change and drop a rotation, previews
+Run rotated-shot 0      "$M" --shot "$TMP/rotated.png" --view 2 --map tests/rotated --fog-cache 1 2 --ao-volume 0.5 0.6
+Run rotated-reload 0    "$M" --shot "$TMP/rotated-reload.png" --view 1 --map tests/rotated --reload-test tests/models
+cp -r tests/rotated "$TMP/rotated-live"
+printf 'select line 147\npreview turn 0 30 0\npreview end\nturn 0 30 0 local\nrotation 0 0 0\nselect line 142\nturn 37.5\nturn -37.5\nundo\nselect line 149\nturn 15 pivot 0 0 0\n' \
+    > "$TMP/rotated-live.txt"
+Run rotated-edits 0     "$M" --shot "$TMP/rotated-live.png" --view 1 --map "$TMP/rotated-live" --edit-script "$TMP/rotated-live.txt" \
+                            --ao-volume 0.5 0.6
 # The modal through the input shim (--input-script): a click selects a repeat copy, R / G / S with
 # the mouse, a lock, typed digits, LMB / ENTER / RMB, the cursor hidden and shown again, CTRL+S
 cp -r tests/models "$TMP/input-models"
@@ -323,7 +344,9 @@ cat > "$TMP/input.txt" <<'INPUT'
 at 1180 440
 click left
 wait 2
+down ALT
 press R
+up ALT
 move 140 0 10
 click left
 wait 2
@@ -334,7 +357,9 @@ press ENTER
 press S
 move 80 0 5
 click right
+down ALT
 press R
+up ALT
 press Y
 press 4
 press 5
@@ -349,7 +374,7 @@ Run input-script 0      "$M" --shot "$TMP/input.png" --view 2 --map "$TMP/input-
 printf 'select line 32\nsize 2 0 2\n' > "$TMP/input-square.txt"
 cp -r tests/models "$TMP/input-square"
 Run input-square-prep 0 "$M" --apply-edits "$TMP/input-square.txt" --map "$TMP/input-square"
-printf 'at 860 352\npress R\nmove 200 0 20\nclick left\n' > "$TMP/input-noop.txt"
+printf 'at 860 352\ndown ALT\npress R\nup ALT\nclick left\n' > "$TMP/input-noop.txt"
 Run input-noop 0        "$M" --shot "$TMP/input-noop.png" --view 1 --map "$TMP/input-square" --shot-hud --select 32 --edit-mode \
                             --input-script "$TMP/input-noop.txt"
 printf 'press NOKEY\n' > "$TMP/input-bad.txt"

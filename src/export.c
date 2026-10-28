@@ -661,8 +661,13 @@ static char *MakeReadme(const MS_Scene *s, const char *name, const char *assetsP
         "The scene sets R3D's environment (`MS_ApplyEnvironment`); change fields of `R3D_GetEnvironment()` after it "
         "if your game needs other settings. **Map data for your game**: `scene->spawnFeet` / `spawnYawDeg` (the "
         "player start), `scene->viewpoints` (named cameras), `scene->colliders` (world AABBs of the boxes and the "
-        "models' colliders, for your physics), `scene->bounds`. **Queries**: `MS_Collides(scene, box)` (strict AABB "
-        "overlap with any collider), `MS_Raycast(scene, origin, dir, maxDist)` (boxes and model triangles), "
+        "models' colliders, for your physics; a turned box's entry is its bounds, the exact test is `MS_Collides`), "
+        "`scene->turnedBoxes` / `scene->boxTurned` (boxes written with `rot`: centre, size along their own axes, "
+        "rotation and axes; `boxTurned[i]` is box i's index in `turnedBoxes`, -1 for an axis-aligned box, and the "
+        "array is NULL when no box is turned), `scene->bounds`. **Queries**: `MS_Collides(scene, box)` (strict "
+        "overlap of an AABB with any collider, a turned box as its turned shape), `MS_ColliderTop` / "
+        "`MS_ColliderBottom` (a collider's surface over a footprint, for standing on a slope), "
+        "`MS_Raycast(scene, origin, dir, maxDist)` (boxes, turned boxes included, and model triangles), "
         "`MS_ObjectRef` / `MS_ObjectBounds` for what a ray hit. `MS_InitRenderer` calls `glEnable` from libGL / "
         "opengl32, so link against it (as every raylib program does).\n\n",
         name, name, name);

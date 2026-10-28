@@ -564,6 +564,28 @@ static void DrawBoxOutline(BoundingBox b, Vector3 eye, Color c)
     DrawCubeWiresV(center, size, c);
 }
 
+// A turned box (docs/live-editing.md 11.2): its oriented box, pushed out like DrawBoxOutline;
+// false for an axis-aligned one
+static bool DrawTurnedBoxOutline(int i, Vector3 eye, Color c)
+{
+    if (!scene->boxTurned || scene->boxTurned[i] < 0) return false;
+    const MS_TurnedBox *t = &scene->turnedBoxes[scene->boxTurned[i]];
+    float e = fminf(0.004f + 0.0015f * BoxDistance(scene->boxes[i], eye), 0.1f);
+    Vector3 q[8];
+    for (int k = 0; k < 8; k++) {
+        Vector3 dir = { 0 };
+        dir = Vector3Add(dir, Vector3Scale(t->axis[0], (k & 1) ? t->size.x * 0.5f : -t->size.x * 0.5f));
+        dir = Vector3Add(dir, Vector3Scale(t->axis[1], (k & 2) ? t->size.y * 0.5f : -t->size.y * 0.5f));
+        dir = Vector3Add(dir, Vector3Scale(t->axis[2], (k & 4) ? t->size.z * 0.5f : -t->size.z * 0.5f));
+        float len = Vector3Length(dir);
+        q[k] = Vector3Add(t->center, len > 0.0f ? Vector3Scale(dir, (len + e) / len) : dir);
+    }
+    for (int k = 0; k < 8; k++)
+        for (int b = 1; b < 8; b <<= 1)
+            if (!(k & b)) DrawLine3D(q[k], q[k | b], c);
+    return true;
+}
+
 static void DrawModelOutline(const MS_ModelInstance *m, Vector3 eye, Color c)
 {
     BoundingBox lb = scene->modelFiles[m->file].bounds;
@@ -668,7 +690,7 @@ void InspectorDrawOverlay(const Inspector *in, Camera3D cam, int screenW, int sc
         const MS_DrawRangeInfo *R = &in->ranges[c[k].range];
         Color col = Fade(RangeColor(in, R), 0.9f);
         if (R->kind == MS_DRAW_MODELS) DrawModelOutline(&scene->models[c[k].obj], eye, col);
-        else DrawBoxOutline(scene->boxes[c[k].obj], eye, col);
+        else if (!DrawTurnedBoxOutline(c[k].obj, eye, col)) DrawBoxOutline(scene->boxes[c[k].obj], eye, col);
     }
     EndOverlay();
     if (!labels) return;

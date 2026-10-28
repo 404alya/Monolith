@@ -13,12 +13,17 @@
 //   arrows / PGUP / PGDN   move one snap step along the world axis nearest to the view (as
 //                          volume mode); the first selected object lands on the snap grid,
 //                          the others keep their offsets. CTRL: exactly one step, no grid
-//   N                      snap step 0.1 / 0.25 / 0.5 / 1 / 2 m (shared with volume mode)
-//   G / R / S              the transform modal (transform.c): grab, rotate, scale the selection with
+//   N / SHIFT+N            snap step 0.1 / 0.25 / 0.5 / 1 / 2 m (shared with volume mode) / the angle
+//                          snap 1 / 5 / 15 / 45 / 90 degrees (CTRL in a rotate; 15 by default)
+//   G / ALT+R / S          the transform modal (transform.c): grab, rotate, scale the selection with
 //                          the mouse or a typed value, X / Y / Z (SHIFT: plane) locks, LMB / ENTER
 //                          commit one edit, RMB / ESC cancel
-//   ALT+R / ALT+SHIFT+R    turn one step: models +-15 degrees of yaw (CTRL: 1), boxes +-90 (box and
-//                          block lines: the footprint turns about its centre; stairs and waffles can't)
+//   R / SHIFT+R            turn 90 / -90 degrees about the vertical, each object about its own centre
+//                          (boxes) / origin (models): one edit, no modal (stairs and waffles can't)
+//   ALT+SHIFT+R            reset the rotation (EDIT_SET_ROTATION 0 0 0)
+//   LMB on the gizmo       the rotate gizmo (transform.c: axis rings, view ring, trackball): drag to
+//                          turn, the release commits; a click keeps it open as the modal
+//   L                      the gizmo's axes: global / the active object's own (local)
 //   DELETE                 remove
 //   CTRL+D                 duplicate, the copies one footprint further along the view's right
 //   I                      the model picker (modelpicker.c, opened by main.c): the package's models/
@@ -44,8 +49,7 @@
 #include <math.h>
 
 #define EDIT_COLOR      (Color){ 255, 214, 90, 255 }
-#define TURN_MODEL_DEG  15.0
-#define TURN_FINE_DEG   1.0
+#define STEP_TURN_DEG   90.0    // R / SHIFT+R (docs/live-editing.md 11.10)
 #define WARN_TIME       3.0f
 
 static bool KeyRepeat(int key) { return IsKeyPressed(key) || IsKeyPressedRepeat(key); }
@@ -217,12 +221,18 @@ static EditModeResult MoveStep(EditMode *m, Designer *d, int key, Vector3 dir)
     return Apply(m, d, key, &op);
 }
 
-static EditModeResult Turn(EditMode *m, Designer *d, int key)
+// R / SHIFT+R: the plain turn (only `degrees`: each object about its own centre / origin)
+static EditModeResult StepTurn(EditMode *m, Designer *d, int key, double degrees)
 {
-    int boxes = 0;
-    for (int i = 0; i < d->selectedCount; i++) boxes += d->selected[i].kind == MS_OBJ_BOX;
-    double step = boxes > 0 && boxes == d->selectedCount ? 90.0 : Ctrl() ? TURN_FINE_DEG : TURN_MODEL_DEG;
-    return Apply(m, d, key, &(EditOp){ .kind = EDIT_ROTATE, .degrees = Shift() ? -step : step });
+    return Apply(m, d, key, &(EditOp){ .kind = EDIT_ROTATE, .degrees = degrees });
+}
+
+// ALT+SHIFT+R (ypr 0 0 0) and --edit-modal "rot y p r": the rotation set, each object about its own
+// centre / origin
+static EditModeResult SetRotation(EditMode *m, Designer *d, int key, double yaw, double pitch, double roll)
+{
+    EditOp op = { .kind = EDIT_SET_ROTATION, .ypr = { yaw, pitch, roll } };
+    return Apply(m, d, key, &op);
 }
 
 // The copies go one footprint of the selection (whole snap steps, at least one) to the right
@@ -372,11 +382,78 @@ static EditModeResult ModalStart(EditMode *m, Designer *d, TransformKind kind)
 
 bool EditModeModalRunning(const EditMode *m) { return TransformRunning(&m->modal); }
 
-bool EditModeOpenModal(EditMode *m, Designer *d, Camera3D cam, const char *spec)
+// LMB on a gizmo part: the drag (the modal with that source)
+static EditModeResult GizmoStart(EditMode *m, Designer *d, Camera3D cam, GizmoPart part)
 {
     char msg[256];
+    if (!TransformGizmoBegin(&m->modal, d, cam, part, msg, sizeof(msg))) Say(m, true, msg);
+    return EDITMODE_NONE;
+}
+
+bool EditModeGizmoHover(EditMode *m, Designer *d, Camera3D cam, Vector2 px, bool enabled)
+{
+    if (!m->active || m->idOpen) enabled = false;
+    return TransformGizmoHover(&m->modal, d, cam, px, enabled) != GIZMO_NONE;
+}
+
+void EditModeDrawGizmo(EditMode *m, Designer *d, Camera3D cam)
+{
+    if (m->active && !m->idOpen) TransformDrawGizmo(&m->modal, d, cam);
+}
+
+static const char *const GIZMO_PART_NAMES[] = { "", "x", "y", "z", "view", "ball" };
+
+bool EditModeOpenModal(EditMode *m, Designer *d, Camera3D cam, const char *spec, int end, bool *reloaded)
+{
+    char msg[256];
+    *reloaded = false;
     if (!m->active) EditModeOpen(m, d);
-    if (TransformOpenScripted(&m->modal, d, cam, spec, msg, sizeof(msg))) return true;
+    char w0[16] = "";
+    double v[3] = { 0, 0, 0 };
+    int n = sscanf(spec, "%15s %lf %lf %lf", w0, &v[0], &v[1], &v[2]);
+    bool step = !strcmp(w0, "r90") || !strcmp(w0, "r-90"), reset = !strcmp(w0, "reset"), rot = !strcmp(w0, "rot");
+    if (step || reset || rot) {
+        // The keys' one-shot edits (R / SHIFT+R, ALT+SHIFT+R, the typed rotation): applied now,
+        // or nothing with "cancel"
+        if ((step || reset) && n != 1) {
+            snprintf(msg, sizeof(msg), "--edit-modal \"%s\" takes no numbers", w0);
+        } else if (rot && n != 4) {
+            snprintf(msg, sizeof(msg), "--edit-modal \"rot <yaw> <pitch> <roll>\": not '%s'", spec);
+        } else if (end == 2) {
+            TraceLog(LOG_INFO, "monolith: --edit-modal: %s cancelled (nothing applied)", w0);
+            return true;
+        } else {
+            EditModeResult r = step ? StepTurn(m, d, KEY_R, w0[1] == '-' ? -STEP_TURN_DEG : STEP_TURN_DEG)
+                             : SetRotation(m, d, KEY_R, rot ? v[0] : 0.0, rot ? v[1] : 0.0, rot ? v[2] : 0.0);
+            *reloaded = r == EDITMODE_RELOADED;
+            TraceLog(LOG_INFO, "monolith: --edit-modal: %s%s", *reloaded ? "" : "FAILED: ", m->message);
+            return *reloaded;
+        }
+    } else if (!strcmp(w0, "gizmo")) {
+        // Just the gizmo (with a hovered part)
+        char w1[16] = "", w2[16] = "";
+        int k = sscanf(spec, "%*s %15s %15s", w1, w2);
+        m->modal.forceHover = GIZMO_NONE;
+        if (k >= 1 && strcmp(w1, "hover") == 0) {
+            for (int p = 1; p <= GIZMO_BALL; p++)
+                if (k == 2 && !strcmp(w2, GIZMO_PART_NAMES[p])) m->modal.forceHover = (GizmoPart)p;
+            if (m->modal.forceHover == GIZMO_NONE) {
+                snprintf(msg, sizeof(msg), "--edit-modal \"gizmo [hover <x|y|z|view|ball>]\": not '%s'", spec);
+                Say(m, true, msg);
+                TraceLog(LOG_WARNING, "monolith: --edit-modal: %s", msg);
+                return false;
+            }
+        } else if (k != -1 && k != 0) {
+            snprintf(msg, sizeof(msg), "--edit-modal \"gizmo [hover <x|y|z|view|ball>]\": not '%s'", spec);
+            Say(m, true, msg);
+            TraceLog(LOG_WARNING, "monolith: --edit-modal: %s", msg);
+            return false;
+        }
+        m->modal.hover = m->modal.forceHover;
+        return true;
+    } else if (!strcmp(w0, "ring") || !strcmp(w0, "ball")) {
+        if (TransformGizmoScripted(&m->modal, d, cam, spec, msg, sizeof(msg))) return true;
+    } else if (TransformOpenScripted(&m->modal, d, cam, spec, msg, sizeof(msg))) return true;
     Say(m, true, msg);
     TraceLog(LOG_WARNING, "monolith: --edit-modal: %s", msg);
     return false;
@@ -516,7 +593,15 @@ EditModeResult EditModeUpdate(EditMode *m, Designer *d, Camera3D cam, float dt)
     }
     if (!m->active) return EDITMODE_NONE;
 
-    if (IsKeyPressed(KEY_N)) Say(m, false, TextFormat("snap %g m", DesignerCycleSnap(d)));
+    // RMB held flies the camera (main.c): the letter keys and the gizmo are the mode's only without it
+    bool flying = IsMouseButtonDown(MOUSE_BUTTON_RIGHT);
+    if (!flying && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && m->modal.hover != GIZMO_NONE)
+        return GizmoStart(m, d, cam, m->modal.hover);    // (main.c kept the click from selecting)
+
+    if (IsKeyPressed(KEY_N) && !ctrl) {
+        if (shift) Say(m, false, TextFormat("angle snap %g deg (CTRL in a rotate)", DesignerCycleAngleSnap(d)));
+        else Say(m, false, TextFormat("snap %g m", DesignerCycleSnap(d)));
+    }
 
     Vector3 fwd, right;
     ViewAxes(d, &fwd, &right);
@@ -524,13 +609,18 @@ EditModeResult EditModeUpdate(EditMode *m, Designer *d, Camera3D cam, float dt)
     const Vector3 dirs[6] = { fwd, Vector3Negate(fwd), right, Vector3Negate(right), { 0, 1, 0 }, { 0, -1, 0 } };
     for (int k = 0; k < 6; k++)
         if (KeyRepeat(KEYS[k])) return MoveStep(m, d, KEYS[k], dirs[k]);
-    // RMB held flies the camera (main.c): the letter keys are the mode's only without it
-    bool flying = IsMouseButtonDown(MOUSE_BUTTON_RIGHT);
-    if (IsKeyPressed(KEY_R) && Alt()) return Turn(m, d, KEY_R);
+    if (!flying && !ctrl && IsKeyPressed(KEY_R)) {
+        // R / SHIFT+R a 90 degree step, ALT+R the keyboard rotate modal, ALT+SHIFT+R reset
+        if (Alt()) return shift ? SetRotation(m, d, KEY_R, 0.0, 0.0, 0.0) : ModalStart(m, d, TRANSFORM_ROTATE);
+        return StepTurn(m, d, KEY_R, shift ? -STEP_TURN_DEG : STEP_TURN_DEG);
+    }
     if (!flying && !ctrl && !Alt()) {
         if (IsKeyPressed(KEY_G)) return ModalStart(m, d, TRANSFORM_GRAB);
-        if (IsKeyPressed(KEY_R)) return ModalStart(m, d, TRANSFORM_ROTATE);
         if (IsKeyPressed(KEY_S)) return ModalStart(m, d, TRANSFORM_SCALE);
+        if (IsKeyPressed(KEY_L)) {
+            m->modal.gizmoLocal = !m->modal.gizmoLocal;
+            Say(m, false, m->modal.gizmoLocal ? "gizmo: local axes (the first selected box or model)" : "gizmo: global axes");
+        }
     }
     if (IsKeyPressed(KEY_DELETE) && !(ctrl && shift)) return Apply(m, d, KEY_DELETE, &(EditOp){ .kind = EDIT_REMOVE });
     if (ctrl && IsKeyPressed(KEY_D)) return Duplicate(m, d, KEY_D);
@@ -551,7 +641,8 @@ int EditModeDrawHud(const EditMode *m, const Designer *d, int x, int y)
     if (m->active) {
         y += TransformDrawHud(&m->modal, x, y);
         // (state only: the keys are in the keybindings panel, ESC)
-        UiHudText(TextFormat("EDIT MODE  |  snap %g m", DesignerSnap(d)), x, y, UI_HUD_LINE, UI_S, Fade(EDIT_COLOR, 0.95f));
+        UiHudText(TextFormat("EDIT MODE  |  snap %g m, %g deg  |  gizmo %s", DesignerSnap(d), DesignerAngleSnap(d),
+                             m->modal.gizmoLocal ? "local" : "global"), x, y, UI_HUD_LINE, UI_S, Fade(EDIT_COLOR, 0.95f));
         y += UI_HUD_LINE;
         char sel[160] = "nothing selected";
         if (d->selectedCount > 0) {

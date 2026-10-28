@@ -12,6 +12,7 @@
 #define VOLUME_SAMPLES  4096    // cells of a volume's empty-share grid at most (DesignerAnalyzeVolume)
 #define VOLUME_MIN_SIZE 0.01f   // metres: a volume is at least this thick on every axis
 #define VOLUME_SNAP_DEFAULT 0.5f    // metres: the volume snap step until N changes it
+#define ANGLE_SNAP_DEFAULT  15.0f   // degrees: the edit mode's angle snap until SHIFT+N changes it
 
 // Objects are MS_ObjRef (runtime/monolith_scene.h, .claude/skills/map-request/bundle-reference.md): a box
 // (index into scene->boxes) or a model instance (index into scene->models).
@@ -20,7 +21,7 @@
 typedef struct {
     MS_ObjRef obj;
     Vector3 point;          // world-space hit point
-    Vector3 normal;         // face normal (boxes: axis-aligned; models: the triangle's)
+    Vector3 normal;         // face normal (boxes: their face's, turned with a turned box; models: the triangle's)
     float dist;             // from the eye, metres
 } DesignerHit;
 
@@ -164,6 +165,7 @@ typedef struct {
     int volumeCount, volumeCap;
     int activeVolume;       // index into volumes[] (edited by the arrows), -1 = none
     float volumeSnap;       // metres; 0 = VOLUME_SNAP_DEFAULT
+    float angleSnap;        // degrees, the edit mode's rotate snap (SHIFT+N); 0 = ANGLE_SNAP_DEFAULT
     Vector3 eye, viewFwd;   // the camera of the last DesignerPickCamera (arrow directions)
     bool pickValid;         // hit is the pick of pickPos/pickTarget at pickVersion (the crosshair's,
     unsigned int pickVersion;   // or with pickCursor the cursor's at pickPx)
@@ -262,6 +264,11 @@ bool DesignerSelectObject(Designer *d, MS_ObjRef o);
 // 0.1 / 0.25 / 0.5 / 1 / 2 m (returns the new step)
 float DesignerSnap(const Designer *d);
 float DesignerCycleSnap(Designer *d);
+// The edit mode's angle snap (CTRL in a rotate; an editor-session value, not saved) and SHIFT+N's
+// cycle through 1 / 5 / 15 / 45 / 90 degrees (returns the new step); Set: any step > 0 (--edit-modal)
+float DesignerAngleSnap(const Designer *d);
+float DesignerCycleAngleSnap(Designer *d);
+void DesignerSetAngleSnap(Designer *d, float deg);
 // Leaves volume mode (cancels a volume being made)
 void DesignerVolumeModeEnd(Designer *d);
 

@@ -10,7 +10,8 @@ The compiled file holds what the text parser produces, before anything that depe
 
 | Stored | Computed at load (both inputs, same code) |
 |---|---|
-| boxes, already expanded from `repeat` / `at` / `stairs` / `waffle`, each with its `MS_Ref` (line, statement, group, material, copy, part) | the default viewpoint made from the spawn (when the map has none), the sun light, `shadowSizeOverride` / `shadowRangeOverride` |
+| boxes, already expanded from `repeat` / `at` / `stairs` / `waffle`, each with its `MS_Ref` (line, statement, group, material, copy, part); a turned box (`rot`) as written, its corners before the turn | the default viewpoint made from the spawn (when the map has none), the sun light, `shadowSizeOverride` / `shadowRangeOverride` |
+| box turns: the rotation of each turned box | a turned box's record (centre, size, axes) and its world AABB, which becomes its entry in the box list (the parser's own code, `TurnedBoxMake`) |
 | materials (every key the map can set, shader and texture paths, uniforms, samplers, `wrap`, `inherit`, `instanced`, the map lines of the keys) | model bounds, `origin` shifts, transforms and colliders (they need the model file) |
 | groups, model files, model instances (as written: position, rotation, scale, origin, collide boxes in model space, slot materials, shadow) | the collider list and its BVH, the scene bounds |
 | lights (as the parser leaves them: direction normalised, defaults filled in, clip box shifted) | entities (ids come from the stored statement keys) |
@@ -31,11 +32,11 @@ Little-endian only, every field a fixed-width integer or an IEEE-754 `float`, ev
 | Offset | Type | Field |
 |---|---|---|
 | 0 | `u8[8]` | magic `89 4D 41 50 42 0D 0A 1A` (`\x89MAPB\r\n\x1a`: not text, and catches a file mangled by newline conversion) |
-| 8 | `u32` | binary-format version, `MS_COMPILED_VERSION` (2; 1 had no sampler kind). Separate from the map format version `MS_FORMAT_VERSION`; bumped whenever a record or section changes |
+| 8 | `u32` | binary-format version, `MS_COMPILED_VERSION` (3; see *Versions* below). Separate from the map format version `MS_FORMAT_VERSION`; bumped whenever a record or section changes |
 | 12 | `u32` | header size (64) |
 | 16 | `u32` | byte-order tag `0x01020304` (a big-endian reader sees `0x04030201` and refuses the file) |
 | 20 | `u32` | map format version of the source (1 or 2) |
-| 24 | `u32` | section count |
+| 24 | `u32` | section count (17; 16 in version 2) |
 | 28 | `u32` | offset of the section table |
 | 32 | `u64` | file size in bytes (a truncated file fails here) |
 | 40 | `u64` | FNV-1a 64 of the source `.map` bytes |
@@ -65,6 +66,11 @@ Little-endian only, every field a fixed-width integer or an IEEE-754 `float`, ev
 | 14 | environment | `u32 key` (string: the `env` key, e.g. `fog.density`), `u32 type`, `u32 value[6]` | 32 |
 | 15 | spawn | one record: `u32 hasSpawn; f32 feet[3], yawDeg, pitchDeg` | 24 |
 | 16 | dependencies | `u32 path` (package-relative) | 4 |
+| 17 | box turns (version 3) | `u32 box; f32 rotationDeg[3]` (yaw, pitch, roll as written): one record per turned box, sorted by box, each box at most once | 16 |
+
+**Turned boxes:** for a box with a box turn record, its `boxes` record holds the box **as written** (the two corners before the turn, ordered), not its world AABB; the reader rebuilds the turned-box record (centre, size, axes) and the AABB with the parser's own code, so the bits match a text load. Every other box is stored as its corners, as in version 2.
+
+**Versions:** 1 had no sampler kind (`CmSampler.data`); 2 added it; 3 added the box turns section (17), and a turned box's `boxes` record became the box as written. The reader reads versions 2 and 3 (a version 2 file has 16 sections and no turned boxes); the writer always writes 3. Older or newer files are refused with a message to compile the map again.
 
 `ref[6]` is `MS_Ref` in its field order (line, prim, group, material, copy, part). A string field holds an offset into the string table; `0xFFFFFFFF` means none (a material without a shader). Every name and path is stored once. Unused bytes are zero.
 
@@ -81,11 +87,11 @@ A compiled file is input like any other. Before it trusts a byte, the reader che
 - the section table: every section inside the file, aligned, known, once, with the expected record size; counts against `MS_MAX_OBJECTS` (boxes + models + lights, model collision boxes, and every other list);
 - every string offset inside the table, the table NUL-terminated, no control characters in a name or path;
 - every index in range: `MS_Ref` group / material / statement, a model's file, slot and collider ranges, slot materials; each material's uniforms and samplers follow the previous material's (no shared ranges, which would let a small file make the reader allocate a lot);
-- every float finite, and the checks the parser makes on the same values (exactly those: a file the parser could have produced always loads): box corners ordered with finite sizes, spawn and viewpoint positions within ±1 000 000 m (light positions only finite: `repeat` may shift them past the limit), model scale > 0, a point light without a direction and the others with a unit one, spot `inner <= outer`, a light clip box ordered and not flat, viewpoint eye ≠ target, the `env` checks (`CheckEnvValue`, the parser's own function: ranges, `shadow.size`, sky sizes, non-zero sun and sky directions), enum values, integer ranges;
+- every float finite, and the checks the parser makes on the same values (exactly those: a file the parser could have produced always loads): box corners ordered with finite sizes, box turns in range (box < box count), strictly increasing, with finite angles that are not all 0 and a turned box whose centre, size and AABB stay finite, spawn and viewpoint positions within ±1 000 000 m (light positions only finite: `repeat` may shift them past the limit), model scale > 0, a point light without a direction and the others with a unit one, spot `inner <= outer`, a light clip box ordered and not flat, viewpoint eye ≠ target, the `env` checks (`CheckEnvValue`, the parser's own function: ranges, `shadow.size`, sky sizes, non-zero sun and sky directions), enum values, integer ranges;
 - every path package-relative (no absolute path, drive letter, backslash or `..`; the parser's own check), and the file present;
 - material 0 named `default`, statement keys unique and not 0, boxes, models and lights in map order, a map that makes at least one box or model.
 
-A file that fails any check is rejected with `<file>: <message>` (for example `forest.mapb: compiled map: section 'boxes' lies outside the file`, or `forest.mapb: compiled map format 2, this runtime reads format 1: compile the map again`) and nothing is loaded; a bad file never crashes the reader. Errors found later in the load (a texture that won't load) name the source map and line, as for a text load: `forest.map:41: cannot load the texture "textures/bark.png"`.
+A file that fails any check is rejected with `<file>: <message>` (for example `forest.mapb: compiled map: section 'boxes' lies outside the file`, or `forest.mapb: compiled map format 4, this runtime reads formats 2 to 3: compile the map again`) and nothing is loaded; a bad file never crashes the reader. Errors found later in the load (a texture that won't load) name the source map and line, as for a text load: `forest.map:41: cannot load the texture "textures/bark.png"`.
 
 ## 4. API and detection
 
@@ -109,14 +115,14 @@ A file that fails any check is rejected with `<file>: <message>` (for example `f
 | compiled-file writer | yes (`MS_Compile`) | no |
 | compiled-file reader | yes | yes |
 
-A new statement that only makes boxes needs no format change (boxes are stored expanded), and neither does an `env` key of an existing type (keys are stored by name). Anything else the parser stores (a new field or kind of object, a new value type) needs a compiled record or field and a bump of `MS_COMPILED_VERSION` (`CM_VERSION` in the code); older compiled files are then rejected with a message to recompile.
+A new statement that only makes boxes needs no format change (boxes are stored expanded), and neither does an `env` key of an existing type (keys are stored by name). Anything else the parser stores (a new field or kind of object, a new value type) needs a compiled record or field and a bump of `MS_COMPILED_VERSION` (`CM_VERSION` in the code); older compiled files are then rejected with a message to recompile, unless the reader keeps reading them (`CM_VERSION_OLDEST`: version 2 files have no box turns section and still load).
 
 The model-file reference check (glTF URIs, OBJ material libraries and their textures must stay inside the package and fit R3D's importer path buffer) is part of the text parser, so it runs when a map is compiled and exported, not when a game loads the compiled file. A game trusts the model files it ships with, as it trusts its own executable.
 
 ## 6. Tests
 
-- Round trip: every map in `maps/` and `tests/models` compiled into a copy of its package (twice: byte-identical; the Windows build writes the same bytes), then `--dump-boxes`, `--dump-scene`, `--dump-entities` (all but the `map "<path>"` line) and every viewpoint's `--shot` from the `.mapb` equal the text's, 0 pixels different; a `--reload-test` of a compiled map equals its plain shot.
-- `tests/unit/compiled_test.sh`: builds the reader as a game has it with ASan + UBSan and loads ~18,000 damaged copies of the compiled `tests/models`: every truncation, every single-byte flip, 2000 random damages, and targeted header, section-table, index, float, string and path damage, each refused with a message or loaded as a valid scene; no crash, no leak.
+- Round trip: every map in `maps/`, `tests/models` and `tests/rotated` (turned boxes) compiled into a copy of its package (twice: byte-identical; the Windows build writes the same bytes), then `--dump-boxes`, `--dump-scene`, `--dump-entities` (all but the `map "<path>"` line) and every viewpoint's `--shot` from the `.mapb` equal the text's, 0 pixels different; a `--reload-test` of a compiled map equals its plain shot.
+- `tests/unit/compiled_test.sh`: builds the reader as a game has it with ASan + UBSan and loads ~18,000 damaged copies of the compiled `tests/models` and ~17,000 of `tests/rotated` (box turns out of range, unsorted, twice, not finite, 0 0 0, a centre that overflows): every truncation, every single-byte flip, 2000 random damages, and targeted header, section-table, index, float, string and path damage, each refused with a message or loaded as a valid scene; no crash, no leak.
 - `tests/unit/export_strip_test.sh`: the exported `monolith_scene.c/.h` contain no tokenizer, statement parser, model-file scan, compiler, number parsing (`strto*`, `ato*`, `sscanf`), `".map"` lookup or `MONOLITH_EDITOR`.
 - `tools/leakcheck.sh` compiles a map and loads it (dumps, a shot with a reload, a damaged and a stale file).
 

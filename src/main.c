@@ -93,18 +93,28 @@
 //                  (mouse look, WASD / E / Q / SPACE, wheel speed, SHIFT x4, ALT x0.25; the cursor
 //                  is hidden then); otherwise the cursor is free: what is under it is outlined, LMB
 //                  / SHIFT+LMB / CTRL+LMB select there, an RMB click (released within 0.25 s,
-//                  moved < 4 px) clears the selection. G / R / S grab / rotate / scale the
+//                  moved < 4 px) clears the selection. G / ALT+R / S grab / rotate / scale the
 //                  selection (transform.c, the modal: the mouse or a typed number drives it, X / Y
-//                  / Z lock an axis, SHIFT+X / Y / Z a plane, the same key again the first model's
-//                  own axes, a third time none; CTRL held snaps (N step, 15 deg, 0.1), SHIFT held
-//                  x0.1; LMB / ENTER commit one edit, RMB / ESC cancel; R about a vertical axis
-//                  seen from the side: drag right and the near side goes right, 0.5 deg / px; boxes
-//                  turn only about Y in 90 deg steps, the next 30 deg past the last; a turn that
-//                  changes nothing (a square box by 90 deg) is named in red and writes nothing;
-//                  stairs / waffles can't turn or scale). Arrows / PGUP / PGDN move it
+//                  / Z lock an axis, SHIFT+X / Y / Z a plane, the same key again the active
+//                  object's own axes (the first selected box or model), a third time none; CTRL
+//                  held snaps (N step, the angle snap, 0.1), SHIFT held x0.1; LMB / ENTER commit
+//                  one edit, RMB / ESC cancel; ALT+R about a vertical axis seen from the side: drag
+//                  right and the near side goes right, 0.5 deg / px; boxes follow the turns the
+//                  edits accept, the others are named in red; a turn that changes nothing (a square
+//                  box by 90 deg) is named in red and writes nothing; stairs / waffles can't turn or
+//                  scale). R / SHIFT+R turn the selection 90 / -90 deg about the vertical, each
+//                  object about its own centre / origin (one edit, no modal); ALT+SHIFT+R resets
+//                  its rotation. The rotate gizmo (with a box, block or model selected, no modal,
+//                  RMB not held): X / Y / Z rings (red / green / blue, their front halves), a white
+//                  view ring and a grey trackball disc at the pivot, 120 px; LMB drags a ring (the
+//                  angle swept in its plane; edge-on: the turntable), the view ring (the dial) or
+//                  the trackball (about the axis across the drag, 0.5 deg / px), CTRL snaps to the
+//                  angle snap, SHIFT x0.1, digits type the angle; the release commits, a click
+//                  keeps it open as the modal. L: the gizmo's axes global / local; SHIFT+N: the
+//                  angle snap 1 / 5 / 15 / 45 / 90 deg (15). Arrows / PGUP / PGDN move it
 //                  one snap step (N: 0.1 .. 2 m, shared with volume mode; the arrows follow the
 //                  world axes nearest to the view and don't fly to viewpoints then; CTRL: no grid),
-//                  ALT+R / ALT+SHIFT+R turn it a step (models 15 deg, CTRL 1; boxes 90), DELETE
+//                  DELETE
 //                  removes it, CTRL+D duplicates it, I opens the model picker (modelpicker.c: the
 //                  package's models listed in ASSETS.md with thumbnails, triangles, size and licence;
 //                  type to filter, UP / DOWN select, ENTER places the model at the point under the
@@ -265,7 +275,8 @@
 //                  that every static cache is rebuilt on reload)
 //   --dump-boxes <file>   load the map, write every box as hex floats (%a) to <file> and
 //                  exit without opening a window (for checking that edits to the loader
-//                  or the map keep the exact box list). Any map that fails to parse (with
+//                  or the map keep the exact box list; a turned box: its world AABB, then
+//                  " rot y p r center x y z size x y z"). Any map that fails to parse (with
 //                  or without this flag) prints file:line: message and exits with status 1.
 //                  Model files are imported on the CPU (a missing, truncated or unreadable
 //                  one fails), but nothing reaches the GPU (no window)
@@ -362,17 +373,23 @@
 //   --edit-id <digits>   with --edit-mode and --select: open its id panel (CTRL+I) for the
 //                  selection with these digits typed ("" for an empty field), to see it
 //   --edit-modal "<g|r|s> [x|y|z|X|Y|Z] [typed] [commit|cancel]"   with --shot and --select: after
-//                  10 frames open the edit mode and the transform modal (G / R / S) on the selection
-//                  with that lock (capitals: plane locks; doubled, e.g. xx: local axes) and typed
-//                  value, as with --shot-hud to see its HUD; commit / cancel end it after 20 frames
-//                  (one edit, as LMB; or everything back, as RMB). Exit 1 if it can't open or the
-//                  commit is refused (or writes nothing: a value that changes nothing)
+//                  10 frames open the edit mode and the transform modal (G / ALT+R / S) on the
+//                  selection with that lock (capitals: plane locks; doubled, e.g. xx: local axes)
+//                  and typed value, as with --shot-hud to see its HUD; commit / cancel end it after
+//                  20 frames (one edit, as LMB; or everything back, as RMB). Exit 1 if it can't open
+//                  or the commit is refused (or writes nothing: a value that changes nothing).
+//                  Also: "ring <x|y|z|xx|yy|zz|view> <deg>" (a gizmo ring drag of that many degrees;
+//                  doubled: local axes), "ball <dx> <dy>" (a trackball drag of that many px), both
+//                  with optional "ctrl" (CTRL held), "step <deg>" (the angle snap), "type <v>";
+//                  "r90" / "r-90" (R / SHIFT+R), "reset" (ALT+SHIFT+R), "rot <y> <p> <r>" (the
+//                  rotation set): applied at once, nothing with cancel; "gizmo [hover
+//                  <x|y|z|view|ball>]" (only draw the gizmo, that part hovered)
 //   --input-script <file>   with --shot: the run's keyboard and mouse come from this script from
 //                  frame 10 on, through the same code paths as in the window (src/input.c: every
 //                  module reads input through it; cursor show / hide / warp behave as raylib's
 //                  GLFW platform). One step per line: wait n, at x y, move dx dy [n], press <key>,
 //                  down <key>, up <key>, click left|right (format: input.c). The interactive input
-//                  handling runs as in the window (edit mode clicks, G / R / S with the mouse,
+//                  handling runs as in the window (edit mode clicks, G / ALT+R / S with the mouse,
 //                  CTRL+S); the shot is taken 10 frames after the last step. Exit 1 on a bad line
 //   --model-picker [filter]   with --shot: open the edit mode and its model picker (I) with this
 //                  filter typed (an optional value: the next argument unless it starts with --);
@@ -503,7 +520,13 @@ static bool DumpBoxes(const MS_Scene *s, const char *path)
     if (!f) return false;
     for (int i = 0; i < s->boxCount; i++) {
         BoundingBox b = s->boxes[i];
-        fprintf(f, "%a %a %a %a %a %a\n", b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z);
+        fprintf(f, "%a %a %a %a %a %a", b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z);
+        if (s->boxTurned && s->boxTurned[i] >= 0) {     // a turned box: its AABB, then its rotation and shape
+            const MS_TurnedBox *t = &s->turnedBoxes[s->boxTurned[i]];
+            fprintf(f, " rot %a %a %a center %a %a %a size %a %a %a", t->rotationDeg.x, t->rotationDeg.y, t->rotationDeg.z,
+                    t->center.x, t->center.y, t->center.z, t->size.x, t->size.y, t->size.z);
+        }
+        fputc('\n', f);
     }
     return fclose(f) == 0;
 }
@@ -1956,11 +1979,14 @@ static int Run(int argc, char **argv)
             ApplyEnvironment(&effects);     // (a `disk` command may have changed it)
         }
         // --edit-modal: the transform modal opens on the selection after 10 frames (every cache
-        // drawn), as G / R / S would; "... commit" / "... cancel" ends it after 20 frames
+        // drawn), as G / ALT+R / S or a gizmo drag would (r90, reset, rot: that edit now);
+        // "... commit" / "... cancel" ends it after 20 frames
         if (shotPath && editModalSpec && frame == 10) {
             DesignerSync(&designer);
             Camera3D cam = spec.active ? SpectatorCamera(&spec) : PlayerCamera(&player);
-            if (!EditModeOpenModal(&edit, &designer, cam, editModalSpec)) exitStatus = 1;
+            bool reloaded;
+            if (!EditModeOpenModal(&edit, &designer, cam, editModalSpec, editModalEnd, &reloaded)) exitStatus = 1;
+            if (reloaded) ApplyEnvironment(&effects);   // (r90, reset, rot: one edit, live)
         }
         if (shotPath && editModalEnd && frame == 20 && EditModeModalRunning(&edit)) {
             if (EditModeFinishModal(&edit, &designer, editModalEnd == 1) == EDITMODE_RELOADED) ApplyEnvironment(&effects);
@@ -2027,7 +2053,12 @@ static int Run(int argc, char **argv)
                        !KeysCapturesInput(&keys)) {
                 // The edit mode's id panel and the transform modal take every key while they run
                 bool idPanel = EditModeCapturesInput(&edit), modal = EditModeModalRunning(&edit);
-                if (!idPanel && !modal) {
+                // The rotate gizmo under the free cursor: an LMB press there is its drag, not a
+                // selection click (DesignerUpdate skips that frame)
+                bool gizmoOk = editKeys && editCursor == 1 && !idPanel && !modal && !typing && !IsMouseButtonDown(MOUSE_BUTTON_RIGHT);
+                bool gizmoClick = EditModeGizmoHover(&edit, &designer, SpectatorCamera(&spec), GetMousePosition(), gizmoOk) && gizmoOk &&
+                                  IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+                if (!idPanel && !modal && !gizmoClick) {
                     action = DesignerUpdate(&designer, dt);
                     typing = DesignerCapturesInput(&designer);
                     if (designer.snipping || designer.volumeMode) edit.active = false;   // C and V leave the edit mode
@@ -2168,6 +2199,7 @@ static int Run(int argc, char **argv)
                 DesignerDrawOverlay(&designer, camera, true);
                 EditModeDrawGuides(&edit, camera);
                 DesignerDrawVolumes(&designer, camera, GetScreenWidth(), GetScreenHeight(), false);
+                if (spec.active) EditModeDrawGizmo(&edit, &designer, camera);     // (the rotate gizmo, 2D)
                 // (no crosshair while the edit mode's cursor is free or the modal runs)
                 if (!cursorPick && !(EditModeModalRunning(&edit) && (!hidden || scripted))) DesignerDrawCrosshair(GetScreenWidth(), GetScreenHeight());
             }

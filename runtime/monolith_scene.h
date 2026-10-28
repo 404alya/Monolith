@@ -104,9 +104,18 @@ typedef struct {
 
 typedef struct {
     Vector3 position;       // boxes: the centre; models: the position as written; lights: the position
-    Vector3 rotationDeg;    // models: yaw, pitch, roll; boxes and lights: 0
-    Vector3 scale;          // boxes: the size; models: the scale; lights: 1
+    Vector3 rotationDeg;    // models and turned boxes: yaw, pitch, roll; other boxes and lights: 0
+    Vector3 scale;          // boxes: the size (a turned box: along its own axes); models: the scale; lights: 1
 } MS_Transform;
+
+// A turned box (a `box` / `block` line with `rot`): the box before it turned, and its rotation
+// about its centre. Its boxes[] entry (and colliders[] entry) is its world AABB.
+typedef struct {
+    Vector3 center;         // world
+    Vector3 size;           // along its own axes (the extents as written)
+    Vector3 rotationDeg;    // yaw, pitch, roll as written (R = Ry * Rx * Rz, about center)
+    Vector3 axis[3];        // its own x, y, z axes in the world: the columns of R (unit)
+} MS_TurnedBox;
 
 typedef struct {
     int line, prim;         // map line and statement index (= MS_Ref)
@@ -191,9 +200,13 @@ typedef struct {
     long mtime;
 #endif
 
-    const BoundingBox *boxes;       // axis-aligned boxes
+    const BoundingBox *boxes;       // axis-aligned boxes (a turned box: its world AABB)
     const MS_Ref *boxRefs;
     int boxCount;
+    const MS_TurnedBox *turnedBoxes;    // the boxes with a rotation
+    int turnedBoxCount;
+    const int *boxTurned;           // per box: index into turnedBoxes[], -1 = axis-aligned; NULL when
+                                    // turnedBoxCount == 0 (every box is then exactly boxes[i])
 
     const MS_ModelInstance *models;
     int modelCount;
@@ -376,7 +389,8 @@ void MS_EditMarkSaved(MS_Scene *scene);
 // Preview of a transform that follows the mouse (no text): Begin takes the objects out of the
 // merged draws (they are drawn as instanced cubes / their own instances meanwhile), Set gives
 // each one an absolute transform (MS_Transform as the entity components describe it: boxes
-// centre + size, models position / rotation / scale, lights position; version + 1, sun tiles
+// centre + size + rotation (nonzero: drawn turned), models position / rotation / scale, lights
+// position; version + 1, sun tiles
 // and light shadows follow, fog cache and AO volume wait), End puts everything back as it was
 // at Begin. Begin returns false when out of memory or a preview runs already.
 bool MS_EditPreviewBegin(MS_Scene *scene, const MS_ObjRef *objs, int count);
@@ -553,7 +567,7 @@ void MS_DrawGeometry(MS_Scene *scene);
 
 typedef struct {
     MS_ObjRef obj;          // kind MS_OBJ_NONE = nothing hit
-    Vector3 point, normal;  // normal: face normal (boxes: axis-aligned)
+    Vector3 point, normal;  // normal: face normal (boxes: their face's, turned with a turned box)
     float dist;
 } MS_Hit;
 
@@ -569,10 +583,21 @@ MS_Hit MS_Raycast(const MS_Scene *scene, Vector3 origin, Vector3 dir, float maxD
 // (<= 0: unlimited).
 bool MS_RaycastModel(const MS_Scene *scene, int model, Vector3 origin, Vector3 dir, float maxDist, MS_Hit *hit);
 
-// Strict overlap (touching is not a hit) of `box` with any collider
+// Strict overlap (touching is not a hit) of `box` with any collider (a turned box: its turned
+// shape, not its AABB)
 bool MS_Collides(const MS_Scene *scene, BoundingBox box);
 // The lowest index into scene->colliders that `box` strictly overlaps, -1 for none
 int MS_FirstCollision(const MS_Scene *scene, BoundingBox box);
+
+// Steepest face a player may stand and walk on (MS_ColliderTop's *walkable)
+#define MS_WALKABLE_SLOPE_DEG   46.0f
+// The top of collider c above the footprint (the x, z rectangle) of `box`: the collider's highest
+// point over that rectangle (an axis-aligned collider: its max.y). *walkable (may be NULL): its
+// most upward face is at most MS_WALKABLE_SLOPE_DEG steep (axis-aligned: true). For landing and
+// stepping up after MS_FirstCollision.
+float MS_ColliderTop(const MS_Scene *scene, int c, BoundingBox box, bool *walkable);
+// The underside of collider c above that footprint: its lowest point there (axis-aligned: min.y)
+float MS_ColliderBottom(const MS_Scene *scene, int c, BoundingBox box);
 
 const MS_Ref *MS_ObjectRef(const MS_Scene *scene, MS_ObjRef obj);     // NULL for MS_OBJ_NONE
 BoundingBox MS_ObjectBounds(const MS_Scene *scene, MS_ObjRef obj);    // world AABB (lights: their position)

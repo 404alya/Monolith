@@ -3,8 +3,10 @@
 // bad offsets, bad indices, floats, strings and paths. Every damaged file must be refused with a
 // "file: message" error or load as a valid scene; nothing may crash. Built like a game (the
 // runtime without MONOLITH_EDITOR) with ASan + UBSan, which also report leaks:
-//   tests/unit/compiled_test.sh          (builds it, compiles tests/models, runs it)
+//   tests/unit/compiled_test.sh          (builds it, compiles tests/models and tests/rotated, runs it on both)
 //   compiled_test <package folder>       (a copy of a package with its <name>.mapb in it)
+// A package with turned boxes (box turns, section 17) gets the box-turn cases; one without them
+// the cases that need tests/models' uniforms, lights and model paths.
 #include "monolith_scene.h"
 #include <stdint.h>
 #include <stdlib.h>
@@ -15,7 +17,7 @@ static char dir[1024], fuzzPath[1100];
 
 // The header and section table fields this test changes (docs/compiled-map.md, section 2)
 enum { H_VERSION = 8, H_SIZE = 12, H_ORDER = 16, H_FORMAT = 20, H_COUNT = 24, H_TABLE = 28, H_FILESIZE = 32 };
-enum { S_STRINGS = 1, S_BOXES = 2, S_MATERIALS = 4, S_STATEMENTS = 13, S_ENV = 14, S_SECTIONS = 16 };
+enum { S_STRINGS = 1, S_BOXES = 2, S_MATERIALS = 4, S_STATEMENTS = 13, S_ENV = 14, S_BOX_TURNS = 17, S_SECTIONS = 17 };
 
 static uint32_t Rd32(const unsigned char *b, uint32_t at) { uint32_t v; memcpy(&v, b + at, 4); return v; }
 static void Wr32(unsigned char *b, uint32_t at, uint32_t v) { memcpy(b + at, &v, 4); }
@@ -139,6 +141,8 @@ int main(int argc, char **argv)
     CASE("map format 99", Wr32(c, H_FORMAT, 99));
     CASE("file size + 1", Wr32(c, H_FILESIZE, Rd32(c, H_FILESIZE) + 1));
     CASE("section count 15", Wr32(c, H_COUNT, 15));
+    CASE("version 2 with the version 3 section table", Wr32(c, H_VERSION, 2));
+    CASE("version 1", Wr32(c, H_VERSION, 1));
     CASE("section table past the end", Wr32(c, H_TABLE, (uint32_t)size));
     for (int id = 1; id <= S_SECTIONS; id++) {
         uint32_t e;
@@ -179,29 +183,58 @@ int main(int argc, char **argv)
     CASE("box min.x NaN", Wr32(c, boxes, 0x7FC00000u));
     CASE("box min.x infinite", Wr32(c, boxes, 0x7F800000u));
     CASE("box min.x above max.x", Wr32(c, boxes, 0x7149F2CAu));     // (1e30)
-    // Damage the parser could never produce (found by review): shared uniform ranges, light directions
-    uint32_t uniE, lightE, lights = Section(orig, 7, &lightE);
-    Section(orig, 5, &uniE);
-    // (tests/models: material 3, "awning", has the uniforms; light 1 is the spot light)
-    uint32_t awning = mats + 3 * 148, bark = mats + 4 * 148;
-    if (Rd32(orig, uniE + 8) > 0 && Rd32(orig, awning + 136) > 0)
-        CASE("two materials sharing one uniform range",
-             { Wr32(c, bark + 132, Rd32(c, awning + 132)); Wr32(c, bark + 136, Rd32(c, awning + 136)); });
-    else { printf("FAIL the test package needs uniforms on material 3\n"); fails++; }
-    if (Rd32(orig, lightE + 8) > 1) {
-        CASE("point light with a direction", Wr32(c, lights + 16, 0x3F800000u));
-        CASE("spot light direction scaled", Wr32(c, lights + 116 + 16, Rd32(c, lights + 116 + 16) ^ 0x01000000u));
-        CASE("spot light direction zero", { for (int k = 0; k < 3; k++) Wr32(c, lights + 116 + 16 + 4 * k, 0); });
-        CASE("light clip box flat", { Wr32(c, lights + 64, 1); for (int k = 0; k < 3; k++) { Wr32(c, lights + 68 + 4 * k, 0); Wr32(c, lights + 80 + 4 * k, 0); } });
-    } else { printf("FAIL the test package needs two lights\n"); fails++; }
     CASE("statement keys not unique", Wr32(c, stmts + 4, Rd32(c, stmts)));
     CASE("statement key 0", Wr32(c, stmts, 0));
     CASE("env key unknown", Wr32(c, env, Rd32(c, mats)));     // (the name "default")
     CASE("env value type wrong", Wr32(c, env + 4, Rd32(c, env + 4) + 1));
-    // A path that leaves the package: the first "models/" in the string table becomes "../els/"
-    unsigned char *m = memmem(orig + strings, strCount, "models/", 7);
-    if (m) CASE("path with ..", memcpy(c + (m - orig), "../", 3));
-    else { printf("FAIL no \"models/\" path in the string table\n"); fails++; }
+    uint32_t turnsE, turns = Section(orig, S_BOX_TURNS, &turnsE), turnCount = Rd32(orig, turnsE + 8);
+    if (turnCount >= 2) {
+        // Box turns: { u32 box; f32 rotationDeg[3]; }, sorted by box, each box once, finite, not 0 0 0
+        uint32_t boxE;
+        Section(orig, S_BOXES, &boxE);
+        uint32_t boxCount = Rd32(orig, boxE + 8);
+        uint32_t b0 = Rd32(orig, turns), b1 = Rd32(orig, turns + 16);
+        CASE("box turn: box out of range", Wr32(c, turns + 16 * (turnCount - 1), boxCount));
+        CASE("box turn: box 0xFFFFFFFF", Wr32(c, turns, 0xFFFFFFFFu));
+        CASE("box turns unsorted", { Wr32(c, turns, b1); Wr32(c, turns + 16, b0); });
+        CASE("box turned twice", Wr32(c, turns + 16, b0));
+        CASE("more box turns than boxes", Wr32(c, turnsE + 8, boxCount + 1));
+        CASE("box turn yaw NaN", Wr32(c, turns + 4, 0x7FC00000u));
+        CASE("box turn pitch infinite", Wr32(c, turns + 8, 0x7F800000u));
+        CASE("box turn roll -infinite", Wr32(c, turns + 12, 0xFF800000u));
+        CASE("box turn 0 0 0", { for (int k = 1; k < 4; k++) Wr32(c, turns + 4 * k, 0); });
+        CASE("box turn -0 0 -0", { Wr32(c, turns + 4, 0x80000000u); Wr32(c, turns + 8, 0); Wr32(c, turns + 12, 0x80000000u); });
+        // A turned box whose centre overflows: its written box is flat at x = 3e38 (the box record
+        // alone is valid; the turned record is not)
+        CASE("turned box centre out of range", { Wr32(c, boxes + 48 * b0, 0x7F61B1E6u); Wr32(c, boxes + 48 * b0 + 12, 0x7F61B1E6u); });
+        // Loaded as valid: the same turns with another (finite) angle
+        unsigned char *ok = Copy(orig, size);
+        Wr32(ok, turns + 4, 0x42340000u);    // (yaw 45)
+        if (!Load(ok, size, err, sizeof(err))) { printf("FAIL box turn yaw 45: %s\n", err); fails++; }
+        else printf("ok   box turn yaw 45 loads\n");
+        free(ok);
+        printf("ok   %u box turns in the file\n", turnCount);
+    } else if (turnCount == 0) {
+        // Damage the parser could never produce (found by review): shared uniform ranges, light directions
+        uint32_t uniE, lightE, lights = Section(orig, 7, &lightE);
+        Section(orig, 5, &uniE);
+        // (tests/models: material 3, "awning", has the uniforms; light 1 is the spot light)
+        uint32_t awning = mats + 3 * 148, bark = mats + 4 * 148;
+        if (Rd32(orig, uniE + 8) > 0 && Rd32(orig, awning + 136) > 0)
+            CASE("two materials sharing one uniform range",
+                 { Wr32(c, bark + 132, Rd32(c, awning + 132)); Wr32(c, bark + 136, Rd32(c, awning + 136)); });
+        else { printf("FAIL the test package needs uniforms on material 3\n"); fails++; }
+        if (Rd32(orig, lightE + 8) > 1) {
+            CASE("point light with a direction", Wr32(c, lights + 16, 0x3F800000u));
+            CASE("spot light direction scaled", Wr32(c, lights + 116 + 16, Rd32(c, lights + 116 + 16) ^ 0x01000000u));
+            CASE("spot light direction zero", { for (int k = 0; k < 3; k++) Wr32(c, lights + 116 + 16 + 4 * k, 0); });
+            CASE("light clip box flat", { Wr32(c, lights + 64, 1); for (int k = 0; k < 3; k++) { Wr32(c, lights + 68 + 4 * k, 0); Wr32(c, lights + 80 + 4 * k, 0); } });
+        } else { printf("FAIL the test package needs two lights\n"); fails++; }
+        // A path that leaves the package: the first "models/" in the string table becomes "../els/"
+        unsigned char *m = memmem(orig + strings, strCount, "models/", 7);
+        if (m) CASE("path with ..", memcpy(c + (m - orig), "../", 3));
+        else { printf("FAIL no \"models/\" path in the string table\n"); fails++; }
+    } else { printf("FAIL a package with turned boxes needs two of them\n"); fails++; }
 
     printf("%s: %d loads, %d valid scenes, %d failures\n", fails ? "FAILED" : "PASSED", loads, accepted, fails);
     free(orig);

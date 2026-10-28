@@ -13,7 +13,8 @@
 typedef struct { int section; const char *keys, *action; } KeyRow;
 
 static const char *const SECTIONS[] = {
-    "Walking", "Spectator", "Selecting and requests", "Snip and volumes", "Edit mode", "Grab, rotate, scale", "Panels and views",
+    "Walking", "Spectator", "Selecting and requests", "Snip and volumes", "Edit mode", "Grab, rotate, scale", "Rotate gizmo",
+    "Panels and views",
 };
 #define SECTION_COUNT ((int)(sizeof(SECTIONS) / sizeof(SECTIONS[0])))
 
@@ -60,10 +61,12 @@ static const KeyRow ROWS[] = {
     { 4, "M", "enter / leave edit mode (ESC leaves too)" },
     { 4, "RMB held", "fly: mouse look, WASD / E / Q / SPACE, wheel speed" },
     { 4, "LMB, SHIFT+LMB, CTRL+LMB", "select under the cursor, add / remove, its group" },
-    { 4, "G / R / S", "grab / rotate / scale the selection with the mouse" },
+    { 4, "G / ALT+R / S", "grab / rotate / scale the selection with the mouse" },
+    { 4, "R / SHIFT+R", "turn 90 / -90 deg about the vertical, each object about its own centre" },
+    { 4, "ALT+SHIFT+R", "reset the rotation" },
     { 4, "arrows, PGUP / PGDN", "move one snap step (CTRL: exactly one step, no grid)" },
     { 4, "N", "snap step 0.1 / 0.25 / 0.5 / 1 / 2 m" },
-    { 4, "ALT+R / ALT+SHIFT+R", "turn one step: models 15 deg (CTRL 1), boxes 90" },
+    { 4, "SHIFT+N", "angle snap 1 / 5 / 15 / 45 / 90 deg (CTRL in a rotate)" },
     { 4, "DELETE", "remove" },
     { 4, "CTRL+D", "duplicate" },
     { 4, "I", "the model picker: add a model at the cursor" },
@@ -73,22 +76,30 @@ static const KeyRow ROWS[] = {
     { 4, "CTRL+SHIFT+DELETE", "clear the red list of edits that could not be applied again" },
 
     { 5, "move the mouse", "the value: grab follows the cursor, rotate turns, scale by distance" },
-    { 5, "X / Y / Z", "lock to that axis; again: the model's own axis; a third time: no lock" },
+    { 5, "X / Y / Z", "lock to that axis; again: the active object's own axis; a third time: no lock" },
     { 5, "SHIFT+X / Y / Z", "lock to the plane of the other two axes" },
     { 5, "digits . - BACKSPACE", "type an exact value (metres, degrees, factor); - flips the sign" },
-    { 5, "CTRL held", "snap: the N grid, 15 deg, steps of 0.1" },
+    { 5, "CTRL held", "snap: the N grid, the angle snap (SHIFT+N), steps of 0.1" },
     { 5, "SHIFT held", "ten times finer" },
     { 5, "G / R / S", "switch to that kind, from where the objects started" },
     { 5, "LMB / ENTER", "apply (one undo step)" },
     { 5, "RMB / ESC", "cancel: everything back as it was" },
 
-    { 6, "F2", "graphics settings: UP / DOWN select, LEFT / RIGHT change, ESC close" },
-    { 6, "F3", "inspector outlines: by material, by shader, by draw kind, off" },
-    { 6, "SHIFT+F3", "inspector panel: SPACE hide / show, I alone (CTRL+I while typing)" },
-    { 6, "F4 / SHIFT+F4", "buffer view: albedo, normal, ORM, SSAO, SSIL, ... and back" },
-    { 6, "F5", "id panel: ENTER fly there, DELETE remove the id, SHIFT+DELETE the objects" },
-    { 6, "I (edit mode)", "model picker: type to filter, ENTER place at the cursor, ESC close" },
-    { 6, "in a list panel", "type to filter, UP / DOWN / PGUP / PGDN / HOME / END select" },
+    { 6, "LMB drag on a ring", "turn about that axis (X red, Y green, Z blue); the release applies" },
+    { 6, "LMB drag on the white ring", "turn about the view axis (the dial)" },
+    { 6, "LMB drag inside", "trackball: turn about the axis across the drag" },
+    { 6, "LMB click on a part", "keep it open: the mouse turns, LMB / ENTER apply, RMB / ESC cancel" },
+    { 6, "CTRL / SHIFT held", "snap to the angle snap / ten times finer" },
+    { 6, "digits . - BACKSPACE", "type the angle (the trackball: about the view's up)" },
+    { 6, "L", "the gizmo's axes: global / the active object's own" },
+
+    { 7, "F2", "graphics settings: UP / DOWN select, LEFT / RIGHT change, ESC close" },
+    { 7, "F3", "inspector outlines: by material, by shader, by draw kind, off" },
+    { 7, "SHIFT+F3", "inspector panel: SPACE hide / show, I alone (CTRL+I while typing)" },
+    { 7, "F4 / SHIFT+F4", "buffer view: albedo, normal, ORM, SSAO, SSIL, ... and back" },
+    { 7, "F5", "id panel: ENTER fly there, DELETE remove the id, SHIFT+DELETE the objects" },
+    { 7, "I (edit mode)", "model picker: type to filter, ENTER place at the cursor, ESC close" },
+    { 7, "in a list panel", "type to filter, UP / DOWN / PGUP / PGDN / HOME / END select" },
 };
 #define ROW_COUNT ((int)(sizeof(ROWS) / sizeof(ROWS[0])))
 

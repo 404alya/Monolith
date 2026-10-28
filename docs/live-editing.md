@@ -1,7 +1,7 @@
 # Live editing
 
 How manual edits (edit mode, **M**) apply to the loaded scene without a reload, how they reach
-the map file, and the editor tools built on them: the transform modal (**G** / **R** / **S**),
+the map file, and the editor tools built on them: the transform modal (**G** / **R** / **S**; rotate is **ALT+R** since §11),
 the id panel, the render inspector and the model picker. This is the design the development
 round worked from. Implementation notes follow at the end, one per stream as it merged.
 
@@ -295,9 +295,11 @@ edit mode nothing changes.
 | RMB held | fly: mouse look, WASD / E / Q / SPACE, wheel speed, SHIFT ×4, ALT ×0.25 |
 | LMB, SHIFT+LMB, CTRL+LMB | select under the cursor (add / remove, group) |
 | RMB click | clear the selection |
-| **G** / **R** / **S** | grab / rotate / scale the selection (the modal, §7) |
+| **G** / **ALT+R** / **S** | grab / rotate / scale the selection (the modal, §7; rotate moved from R to ALT+R in the free-rotation round, §11.10) |
+| **R** / **SHIFT+R** | turn 90° / −90° about the vertical, each object about its own centre / origin (§11.10) |
+| **ALT+SHIFT+R** | reset the rotation (`EDIT_SET_ROTATION` 0 0 0, §11.9) |
+| LMB on the rotate gizmo, **L**, **SHIFT+N** | turn by a ring / the trackball; gizmo axes global / local; the angle snap step (§11.10) |
 | arrows, PGUP / PGDN | move one snap step (as before; CTRL: exactly one step, no grid) |
-| ALT+R / ALT+SHIFT+R | turn one step (models 15°, CTRL 1°; boxes 90°): the old R / SHIFT+R |
 | N | snap step 0.1 / 0.25 / 0.5 / 1 / 2 m |
 | DELETE | remove |
 | CTRL+D | duplicate |
@@ -316,7 +318,7 @@ mode. V and C still leave edit mode.
 ### 7.1 States
 
 ```
-IDLE --G/R/S (selection not empty)--> RUNNING(kind)
+IDLE --G/ALT+R/S (selection not empty; a gizmo ring / the trackball: §11.10)--> RUNNING(kind)
 RUNNING --mouse move--> RUNNING (value from the mouse, unless a number is typed)
 RUNNING --X/Y/Z--> axis lock (again: local axes for models; a third time: no lock)
 RUNNING --SHIFT+X/Y/Z--> plane lock (the two other axes; again: local; a third time: none)
@@ -339,22 +341,23 @@ through the pivot along each locked axis, in the axis colour: X red, Y green, Z 
   Three typed numbers are not supported (Blender's TAB between components): lock an axis and
   type, then G again for the next axis.
 - **Rotate:** about the view axis without a lock, about the locked axis with one (degrees
-  typed); with boxes in the selection and no lock, about the vertical. A plane lock means the
+  typed). A plane lock means the
   axis normal to it. How the mouse reads depends on that axis: **across the view** (more than 30°
   off the line of sight, e.g. the vertical seen from eye height) the turn follows the motion along
   the screen direction the object's near side moves in, 0.5° per pixel, wherever the cursor
   starts (a turntable: drag right and the side facing you goes right); **pointing at the camera**
   (the view axis, or looking along a locked axis) the horizontal motion when the cursor starts
   within 80 px of the pivot's screen position (right = clockwise on screen), farther out the angle
-  the cursor sweeps around it (Blender's dial). Boxes turn only in 90° steps: the next step comes
-  once the dragged angle is 30° past the last one (30° → 90°, 120° → 180°). A value that leaves
-  every object as it was (a box with a square footprint turned 90° about its centre, any box
-  turned 180°) is named in red in the HUD and LMB / ENTER write nothing.
+  the cursor sweeps around it (Blender's dial). (Until the free-rotation round boxes turned only in
+  90° steps about the vertical; §11 lifted that: boxes turn like models.) A value that leaves
+  every object as it was (a box with a square footprint turned 90° about its centre) is named in
+  red in the HUD and LMB / ENTER write nothing.
 - **Scale:** the ratio of the cursor's distance to the pivot's screen position now and at the
   start; uniform without a lock, one axis with an axis lock, two with a plane lock. Typed: the
   factor.
 - **Snap:** off by default (any value). **Holding CTRL** snaps: grab to the N step (the
-  pivot lands on the grid, like the arrow keys), rotate to 15°, scale to 0.1. **SHIFT held**:
+  pivot lands on the grid, like the arrow keys), rotate to the angle step (SHIFT+N, 15° by
+  default, §11.10), scale to 0.1. **SHIFT held**:
   the mouse moves the value ten times slower. Typed values are never snapped.
 - **Pivot:** the centre of the selection's world bounds; with exactly one model selected, its
   origin (its position).
@@ -363,12 +366,12 @@ through the pivot along each locked axis, in the axis colour: X red, Y green, Z 
 
 | | Grab | Rotate | Scale |
 |---|---|---|---|
-| box, block | any amount | yaw only, multiples of 90° (the value snaps to 90°; the HUD says "boxes turn in 90° steps"); the box orbits the pivot and its footprint turns | each axis about the pivot (uniform or locked axes): corners scale about the pivot |
+| box, block | any amount | any axis, global or local (its own axes), as models (§11.9): an axis-aligned result rewrites the corners, any other writes `rot`; about the pivot it also orbits | each axis about the pivot (uniform or locked axes): corners scale about the pivot |
 | stairs, waffle | any amount | refused ("stairs / waffles can't turn") | refused |
 | model | any amount | any axis; global axes compose on the left, local on the right (`R = Ry Rx Rz` is decomposed back to yaw / pitch / roll); about the pivot it also orbits | uniform or per axis (`scale` key; per-axis scale of a rotated model scales its local axes) |
 | light | any amount (and its clip box) | ignored | ignored |
 
-Exact values: a world-Y turn of a model adds to yaw, a local-Z turn adds to roll, so `R Y 37.5`
+Exact values: a world-Y turn of a model or turned box adds to yaw, a local-Z turn adds to roll, so `R Y 37.5`
 writes `yaw + 37.5` exactly; other turns go through the decomposition and are written with 6
 decimals. Moves and box resizes are written with the fewest decimals (at most 6) that hold the
 value rounded to 1e-6, so a typed 1.25 is written as 1.25.
@@ -377,7 +380,7 @@ value rounded to 1e-6, so a typed 1.25 is written as 1.25.
 
 One line above the edit-mode lines, as Blender's header, state only (the keys are in the
 keybindings panel, ESC): `GRAB  X 1.250 m  global | typed: 1.25_ | snap off`. Rotate shows
-degrees (boxes also what the mouse turned before the 90° snap), scale the factor (per axis when
+degrees, scale the factor (per axis when
 locked). Refusals (a waffle in a rotate) show in red and
 the modal still runs for the rest.
 
@@ -510,9 +513,283 @@ Defaults chosen in phase 0 (each can change; say so in the final summary):
 - List widget: the settings panel's look (§8.4).
 - Flags: `--edit-script`, `--edit-save`, `--edit-modal`, `--id-panel`, `--model-picker`,
   `--inspect`, `--inspector-panel`, `--output-mode`.
-- Keys: F3 / SHIFT+F3 / F4 the inspector, F5 the id panel, I the picker, ALT+R the old step turn.
+- Keys: F3 / SHIFT+F3 / F4 the inspector, F5 the id panel, I the picker, ALT+R the old step turn
+  (the free-rotation round, §11.10: ALT+R is now the rotate modal, R / SHIFT+R the 90° step,
+  ALT+SHIFT+R the reset).
 - Picker: this package's models only.
 - Unsaved edits on close: written to the settings folder's `unsaved/`.
+
+## 11. Free rotation (round: every object turns, Blender-style rotate controls)
+
+Decided by the developer: boxes and blocks turn freely like models (A), a turned box collides as
+its turned shape (B), plain **R** is a 90° step with no free control (C), the keyboard rotate
+modal moves to **ALT+R** (D), R's step is always about the vertical (E, the default: the
+developer left it open), the rotate gizmo shows whenever edit mode has a selection that can turn
+(F). Lights, stairs and waffles don't turn (as before). Maps without a turned box parse, mesh,
+collide, pick, dump, compile and draw exactly as before: every new path is taken only for a box
+that has a rotation.
+
+### 11.1 The format
+
+```
+box   x0 y0 z0 x1 y1 z1 [rot yawDeg pitchDeg rollDeg]
+block cx y0 cz sx sy sz [rot yawDeg pitchDeg rollDeg]
+```
+
+- The numbers before `rot` describe the box **before** it turns (two corners, or a block's centre,
+  floor and sizes); `rot` turns it about **its own centre**, with the models' convention:
+  `R = Ry · Rx · Rz` (roll about +Z, then pitch about +X, then yaw about +Y).
+- `rot` is optional and needs `monolith 2` (a format-1 file with it is an error). It is never
+  shifted: every `repeat` / `at` copy gets the same rotation about its own centre (so a turned
+  `repeat` line is a row of identically turned boxes; turning the row as a whole about a pivot
+  is a mapedit op that also turns the steps, 11.9). `stairs` and `waffle` don't take it (error).
+- `rot 0 0 0` parses to an axis-aligned box (no turned-box record): exactly the box without
+  `rot`. The editor never writes it (11.9).
+- No `MS_FORMAT_VERSION` bump: an older runtime refuses the extra tokens with a line error
+  instead of misreading them.
+
+### 11.2 The runtime representation (`runtime/monolith_scene.h`)
+
+```c
+// A turned box (a box / block line with `rot`): the box before it turned, and its rotation
+typedef struct {
+    Vector3 center;         // world
+    Vector3 size;           // along its own axes (the extents as written)
+    Vector3 rotationDeg;    // yaw, pitch, roll as written (R = Ry * Rx * Rz, about center)
+    Vector3 axis[3];        // its own x, y, z in the world: the columns of R (unit)
+} MS_TurnedBox;
+
+// in MS_Scene, after boxCount:
+    const MS_TurnedBox *turnedBoxes;
+    int turnedBoxCount;
+    const int *boxTurned;   // per box: index into turnedBoxes[], -1 = axis-aligned; NULL when
+                            // turnedBoxCount == 0 (then every box is boxes[i] exactly)
+```
+
+- `boxes[i]` of a turned box is its **world AABB** (the eight turned corners' min / max), so
+  every consumer that treats `boxes[]` as bounds (clusters, culling, dirty regions, the designer's
+  hover and volume tests, `MS_ObjectBounds`, scene bounds, fog / shadow regions) stays correct
+  without a change. Only code that needs the exact shape looks at `boxTurned`.
+- `colliders[i]` (i < boxCount) is the same AABB: the broad phase. Model colliders stay AABBs.
+- The axes are computed once per box at parse / compiled read (floats, `Ry * Rx * Rz` composed
+  with the same quaternion code as the models' rotation), so text and compiled loads give identical bits.
+- `MS_Transform` of a turned box: `position` = `center`, `scale` = `size`, `rotationDeg` = its
+  rotation. Axis-aligned boxes: as today (`rotationDeg` 0).
+- `MS_EditPreviewSet` honours a box's `rotationDeg` (a box with rotation 0 previews exactly as
+  today; a nonzero one previews as a turned box).
+
+### 11.3 Meshing and drawing
+
+- **Hidden faces:** a turned box never hides another box's face and none of its faces is hidden
+  (it is left out of `FindHiddenFaces`' occluder grid and its `hidden` byte stays 0). The
+  hidden faces of axis-aligned boxes are computed exactly as before.
+- **Merged materials:** turned boxes sort after the axis-aligned ones of their material and cell
+  (a `CellItem` key after `big`), so they form **their own per-cell ranges** and the axis-aligned
+  ranges' meshes are byte-identical. Their mesh has all six faces of each box: the unit cube's
+  vertices scaled by `size`, turned by R, moved to `center`; normals and tangents turned by R;
+  UVs as the unit cube has them (so a turned box textures like an unturned one in its own frame).
+- **Instanced materials** (`instanced on`): the instance buffer of a material that has a turned
+  box gets `R3D_INSTANCE_ROTATION` too (identity for its axis-aligned boxes); every other
+  material's buffer keeps today's flags (no change to their shader path).
+- Sun shadow tiles, the fog cache and frame reuse need nothing new (they follow the meshes and
+  `scene->version`).
+
+### 11.4 Collision
+
+- **The test:** `MS_FirstCollision` / `MS_Collides` walk the BVH by the AABBs as today; for a
+  candidate collider that is a turned box (`i < boxCount && boxTurned && boxTurned[i] >= 0`) the
+  strict overlap is a **separating-axis test** of the query AABB against the box (15 axes: the
+  three world axes, the box's three, their nine cross products; touching is not a hit, as for
+  AABBs; a cross product shorter than 1e-6 is skipped). Everything else takes the existing
+  `Overlaps` line.
+- **Landing and stepping** need the surface, not `max.y`. New queries (`monolith_scene.h`):
+
+```c
+// The top of collider `c` above the footprint (x, z rectangle) of `box`: the highest point of the
+// collider over that rectangle (an axis-aligned collider: max.y). *walkable (optional): the
+// collider's most upward face is at most MS_WALKABLE_SLOPE_DEG steep (axis-aligned: true)
+float MS_ColliderTop(const MS_Scene *scene, int c, BoundingBox box, bool *walkable);
+// The underside of collider `c` above that footprint: its lowest point there (min.y)
+float MS_ColliderBottom(const MS_Scene *scene, int c, BoundingBox box);
+#define MS_WALKABLE_SLOPE_DEG 46.0f
+```
+
+  The highest / lowest point of the box over the rectangle is the maximum / minimum of y over the
+  polytope "box ∩ vertical prism of the rectangle": taken over its candidate vertices (the box's
+  corners inside the prism, the box's 12 edges cut by the prism's 4 side planes, the prism's 4
+  vertical edges through the box's faces). Exact, no allocation, ~100 flops.
+- **`src/player.c`:** every `colliders[hit].max.y` / `min.y` goes through `MS_ColliderTop` /
+  `MS_ColliderBottom` (for an axis-aligned collider they return exactly `max.y` / `min.y`, so the
+  walk on every map is unchanged). Step up onto a turned box only when the rise is at most
+  `STEP_HEIGHT` and the box is walkable, or its whole top (`boxes[i].max.y`) is within
+  `STEP_HEIGHT` of the feet (rubble you step over); otherwise it is a wall. On a 30° ramp each
+  frame's rise is a few cm, so the player walks up it and stands on the slope (feet at the
+  surface's highest point under the footprint). **Walking down** a turned walkable box: when the
+  player was grounded, isn't jumping and nothing is under the feet after the move, a probe down
+  by `STEP_HEIGHT` that hits a **turned** walkable box snaps the feet onto it (so a ramp is walked
+  down, not fallen down in hops); axis-aligned boxes keep today's fall (unchanged behaviour on
+  stairs).
+- The movement is split from the input: `PlayerStep(Player *, Vector3 wish, bool run, bool jump,
+  float dt)` does the physics and `UpdatePlayer` reads the keys and calls it, so
+  `tests/unit/collision_test.c` drives it against a `noGpu` scene of the test map (11.12).
+
+### 11.5 Raycast (picking)
+
+`MS_Raycast`: for a turned box the ray goes into the box's frame (origin − centre, dotted with
+the three axes) and takes the slab test against ± size / 2; the hit normal is that axis in the
+world, facing the ray. Same rules as before: an origin inside the box is skipped, the nearest hit
+wins, ties go to the lower index. Axis-aligned boxes: the existing loop, unchanged. `MS_Hit.normal`'s
+comment becomes "face normal (boxes: their face's, turned with a turned box)".
+
+### 11.6 The AO volume and `--bake-surface`
+
+- **AO volume: voxelised by the turned box** (it is cheap): `AoSplatBox` takes an optional
+  `MS_TurnedBox`; the voxels within `AO_DIST_MAX` of its AABB are visited as today, and each
+  voxel centre is moved into the box's frame (3 dot products) for the same box distance. An
+  axis-aligned box splats exactly as now.
+- `--bake-surface` bakes a material's surface shader into textures and doesn't read the boxes:
+  nothing to do.
+
+### 11.7 Compiled maps and the export
+
+- `CM_VERSION` 3. New section `CM_BOX_TURNS` ("box turns"; after `CM_DEPS`), one 16-byte record
+  per turned box, sorted by box, each box at most once:
+  `typedef struct { uint32_t box; float rotationDeg[3]; } CmBoxTurn;`
+  The `CM_BOXES` record keeps the box **as written** (the corners before the turn), not its AABB;
+  the reader rebuilds the turned-box record (centre, size, axes, AABB) with the parser's code,
+  so the bits match a text load. Checks: box < box count, strictly increasing, finite angles.
+- The reader accepts **version 2** (no such section: no turned boxes) and 3; anything else is
+  refused as today. The writer always writes 3.
+- `docs/compiled-map.md`: the new section, the version history line.
+- The export runtime is this file without the editor blocks: everything above is outside them.
+  `runtime/export/viewer.c` and the examples need no change (`MS_Collides` stays exact).
+  `src/export.c`'s README text: `colliders` are "world AABBs (a turned box: its bounds; the exact
+  test is `MS_Collides`)", plus `turnedBoxes` / `boxTurned`.
+
+### 11.8 Dumps and the request bundle
+
+- `--dump-boxes`: an axis-aligned box prints exactly today's line; a turned box appends
+  ` rot <yaw> <pitch> <roll> center <x> <y> <z> size <x> <y> <z>` (`%a`) after its AABB.
+- `--dump-scene` / `--dump-scene-diff`: the same suffix on a turned box's `box` line; the
+  `counts` line gains ` turned <n>` only when n > 0. `--dump-entities` prints the transform as it
+  does (now with the box's rotation).
+- The bundle (`src/launcher.c`): a turned box in the object tables shows its rotation
+  (`rot y p r` in `request.md`, `"rotationDeg"` in `request.json` only for a turned box); the
+  `"format"` number goes up by one and `.claude/skills/map-request/bundle-reference.md` describes
+  it. Unturned boxes are written as before.
+
+### 11.9 Edits (`src/mapedit.c`, `EditOp`)
+
+- `EDIT_ROTATE` applies to `box` and `block` lines about any axis, global or **local** (now a
+  box's own axes too), with or without a pivot. The written result of turning a box by `M`:
+  - the box's total rotation `R' = M · R0` (global; local: `R0 · M`), its centre orbiting the
+    pivot (local or no pivot: its own centre);
+  - **when R' is axis-aligned** (a signed permutation: every entry exactly 0 or ±1, which the
+    exact sin / cos of multiples of 90° give): the line stays an axis-aligned box. Its corners are
+    rewritten (the extents permuted, a block's sizes permuted) and a `rot` it had is removed.
+    So a 90° step of an unturned box rewrites the corners as today, and turning a turned box back
+    to 0 0 0 (or any axis-aligned pose) drops its `rot`;
+  - otherwise the extents stay as written, the centre moves (box: both corners; block: `cx cz`
+    and `y0` = centre y − sy / 2), and `rot` is written / added as yaw, pitch, roll: **exact**
+    for a world-Y turn (adds to yaw) and a local-Z turn (adds to roll), 6 decimals otherwise
+    (as for models).
+- A whole `repeat` line turned with a pivot: the steps and `at` turn too (as today); every copy
+  gets the same new `rot`. One copy: split out as today.
+- **New op `EDIT_SET_ROTATION`** (reset and typed yaw / pitch / roll): `ypr[3]` absolute, each
+  object about its own centre (boxes) / origin (models). Boxes: the same written rule (0 0 0 or
+  an axis-aligned pose → corners, no `rot`; else `rot ypr`); models: `rot` set (0 0 0 removes
+  it). Lights, stairs, waffles: refused as for turns.
+
+```c
+EDIT_SET_ROTATION,      // ypr[] absolute about each object's own centre / origin (reset: 0 0 0)
+...
+double ypr[3];          // EDIT_SET_ROTATION: yaw, pitch, roll (degrees)
+```
+
+- Lifted: the 90° rule and the X/Z refusals (`RwTurn`, `RwTransform`, `MapEditPreviewTransform`,
+  the selection checks near "turn boxes and models separately"). A plain `turn <deg>` (no pivot,
+  no axis) now turns boxes by any yaw too (a non-multiple of 90 adds `rot`), and mixed boxes and
+  models in one turn are fine.
+- `MapEditPreviewTransform` gives a box's new `rotationDeg` (the decomposed R') and, for an
+  axis-aligned R', the permuted size with rotation 0, exactly as the commit writes it.
+- Edit script additions: `rotation <yaw> <pitch> <roll>` (`EDIT_SET_ROTATION`); `turn` as before
+  (now on boxes with any angles).
+
+### 11.10 Controls (`src/transform.c`, `src/editmode.c`)
+
+| Key (edit mode) | Does |
+|---|---|
+| **R** / **SHIFT+R** | turn the selection 90° / −90° about the vertical, each object about its own centre / origin (one edit; no modal). Boxes, blocks, models (lights, stairs, waffles: named and skipped, as today) |
+| **ALT+R** | the keyboard rotate modal (§7: X / Y / Z locks, typed angle, turntable / dial, CTRL snap, SHIFT slow), now for boxes about any axis too |
+| **ALT+SHIFT+R** | reset rotation: `EDIT_SET_ROTATION` 0 0 0 on the selection |
+| **LMB on a gizmo ring / the trackball** | drag to turn (below) |
+| **L** | the gizmo's axes: global ↔ local (the active object's own axes: the first selected box or model) |
+| **SHIFT+N** | the angle snap step: 1 → 5 → 15 → 45 → 90° (default 15; N still cycles the grid step) |
+| G, S, the rest | as §6 |
+
+Inside the ALT+R modal R still switches to rotate (G / R / S switch kind, §7.1).
+
+**The gizmo** (shown in edit mode when the selection has a box, block or model that can turn,
+no modal or drag runs and RMB isn't held; drawn in 2D after `R3D_End` with the guides, on top of
+the scene, constant screen size):
+- at the transform pivot (§7.2), three axis rings of radius **120 px** (X red, Y green, Z blue;
+  the global axes or, with L, the active object's), only their **front half** (the half toward
+  the camera) drawn and hit; a white **view ring** at 1.15 × the radius facing the camera; the
+  **trackball**: a faint grey disc inside the radius. Line 2 px, 3 px and brighter when hovered.
+- Hover (when the cursor isn't on a panel): the view ring if within 8 px of it, else the nearest
+  axis ring within 8 px, else the trackball if inside the radius, else nothing (LMB selects as
+  usual). An edge-on ring (seen as a line) is still hit along that line.
+- **Drag a ring:** the angle swept around the pivot **in the ring's plane** (the cursor's rays hit
+  the plane through the pivot, normal to the axis; the angle between the start and current hit
+  about the axis, unwrapped). When the ring is edge-on (its plane seen at less than 15° from the line of sight) it falls
+  back to the turntable (`TrackDirection`, 0.5°/px). The view ring turns about the view axis by the screen
+  angle swept around the pivot (the dial).
+- **Drag the trackball:** axis = normalise(camUp · dx + camRight · dy) (perpendicular to the drag
+  on screen), angle = |drag| · 0.5°/px, from the drag since the start (one axis-angle turn, so one
+  `EDIT_ROTATE` with `axis[]`).
+- While dragging: an **arc** in the ring's plane from the start to the current angle (a filled
+  translucent sector in the axis colour) and a **readout** next to the cursor (`37.5°`, with
+  the snap step when CTRL is held); the HUD line as §7.4.
+- CTRL snaps the angle to the snap step (SHIFT+N); SHIFT: ten times slower; typed values (`37.5`,
+  `-90`; the trackball: degrees about the camera's up) override the mouse and are exact.
+- **Commit / cancel:** a drag (the cursor moved more than 4 px with LMB held) commits on LMB
+  release, unless something was typed; a ring **click** (released within 4 px), or a drag with
+  typed text, stays open as a modal without the button: the mouse still turns, ENTER / LMB commit,
+  ESC / RMB cancel. One undo step per commit. The no-change rule (§7.2: a value that leaves every
+  object where it was is named in red and writes nothing) holds for all of them.
+- The rotate drag is the transform modal with a source (`TRANSFORM_SRC_KEYS` for ALT+R / G / S,
+  `TRANSFORM_SRC_RING` with its axis 0..2 or view, `TRANSFORM_SRC_BALL`); the preview and the op
+  are built as for the keyboard modal.
+
+`--edit-modal` gains (with `--select`, `--shot`, `--shot-hud`, `commit` / `cancel` as before):
+`r90` / `r-90` (the step), `reset`, `rot <y> <p> <r>` (typed YPR: `EDIT_SET_ROTATION`),
+`ring <x|y|z|xx|yy|zz|view> <deg>` (a ring drag of that many degrees; doubled = local),
+`ball <dx> <dy>` (a trackball drag of that many pixels), `gizmo` (just draw the gizmo, with
+`hover <x|y|z|view|ball>`), plus the existing `<g|r|s> …` forms (now the ALT+R modal for r).
+
+### 11.11 Defaults chosen (say so in the final summary)
+
+- Gizmo: X red, Y green, Z blue (the guide colours), view ring white at 1.15 × radius, trackball
+  grey disc; radius 120 px, hit tolerance 8 px, constant on screen; front halves only.
+- Gizmo axes: global by default, **L** toggles local.
+- Snap: CTRL held; the step cycles 1 / 5 / 15 / 45 / 90° on **SHIFT+N**, 15° by default (an
+  editor-session value in `designer.c` beside the grid step; not saved).
+- Reset: **ALT+SHIFT+R** (Blender's ALT+R), replacing the old reverse step turn.
+- Trackball 0.5°/px, as the turntable.
+- AO volume: turned boxes voxelised by their shape.
+- Walkable slope: 46° (`MS_WALKABLE_SLOPE_DEG`); step-down snap only onto turned walkable boxes.
+- A turned box whose pose becomes axis-aligned is written as plain corners without `rot`.
+
+### 11.12 Verification
+
+As in the round's task prompt: every map's `--dump-boxes` and shots identical; the test map
+`tests/rotated/` (a 30° ramp, a 45° yawed wall, a tumbled crate, a turned `repeat` row, a turned
+block, a turned box under `instanced on`) with shots from three viewpoints, `--select` picks on
+turned faces (the normal in the bundle), the collision unit test (`tests/unit/collision_test.sh`:
+the player walks up the ramp and stands on it, walks down it without leaving the ground, and
+stops at the yawed wall's true face where its AABB would have stopped it ≥ 0.3 m earlier), the
+compile and export round trips, a `--reload-test`, and `--edit-modal` shots of every control on a
+box and a model with the line before and after.
 
 ## Implementation notes
 
@@ -1088,3 +1365,219 @@ dump identical. What only a person can check: the feel of the drag with a real m
 speed), and GLFW itself (the shim follows raylib 5.5's `rcore_desktop_glfw.c`: `DisableCursor` /
 `EnableCursor` recentre through `SetMousePosition`, which also resets the previous position, so the
 first frame's delta is 0, not a jump).
+
+### Round: free rotation, phase 1 (controls)
+
+The keys and the gizmo of §11.10 (`src/transform.c/.h`, `src/editmode.c/.h`, `src/designer.c/.h`,
+`src/inspector.c`, `src/keyspanel.c`, `src/main.c`); `mapedit.c` and the runtime are phase 2's.
+
+- **Keys** (`EditModeUpdate`): R / SHIFT+R is one `EDIT_ROTATE` with only `degrees` = ±90 (the plain
+  turn); ALT+R starts the keyboard modal (`ModalStart`); ALT+SHIFT+R builds `EDIT_SET_ROTATION`
+  0 0 0. Phase 1's `mapedit.c` has no case for that op and falls through to the duplicate path, so
+  `SetRotation` doesn't apply it yet (`SET_ROTATION_READY = false`, a `MERGE` note beside it; the
+  HUD and `--edit-modal reset` / `rot` say "not applied yet", exit 1). The merge sets it true.
+  L flips `TransformModal.gizmoLocal`; SHIFT+N cycles `Designer.angleSnap` (`DesignerAngleSnap` /
+  `DesignerCycleAngleSnap` / `DesignerSetAngleSnap`, 15 by default, not saved), the CTRL step of
+  every rotate (keyboard and gizmo). The edit mode's HUD line shows both snaps and the gizmo space.
+- **The modal has a source** (`TransformSource`): `TRANSFORM_SRC_KEYS` (G / ALT+R / S), `_RING`
+  (`ring` 0..2 an axis ring, 3 the view ring) and `_BALL`. A ring sets `axisMask` / `local` as a
+  lock would, so `BuildOp` and the HUD take the lock paths unchanged (a world-Y ring writes a yaw,
+  exact; a local-Z ring a roll, exact); the view ring is the no-lock view axis with the dial forced;
+  the trackball is one `EDIT_ROTATE` with `axis[]` (`ballAxis`, perpendicular to the drag on screen)
+  + `angle`. `RingDegrees`: the start's and the cursor's rays through the ring's plane, the signed
+  angle about the axis unwrapped frame by frame; a ring seen within 15° of edge-on at the start
+  (`ringTrack`) uses `TrackDirection` (0.5°/px). SHIFT slows the accumulated mouse (so every source
+  is 10× finer); a typed value overrides (the trackball: about the camera's up). X / Y / Z or
+  G / R / S during a drag turn it into the keyboard modal. Commit: `dragging` until LMB is up; a
+  release after more than 4 px of raw motion confirms (unless typed), otherwise the modal stays
+  open without the button (LMB / ENTER confirm, RMB / ESC cancel).
+- **Boxes' 90° rule removed** from transform.c (`boxes90`, `BoxSteps`, the default vertical axis,
+  the refusals in `Classify`): boxes follow whatever `MapEditPreviewTransform` accepts; a refused
+  one stays and `Compute` names it ("N boxes can't take this turn (they stay)"). With phase 1's
+  mapedit.c only yaw multiples of 90° pass, so a 37° ring drag on a box is red and commits nothing.
+  `hasModel` is now `hasLocal` (`ActiveAxes`: the first box, block or model's `rotationDeg`).
+- **The gizmo** (`TransformGizmoHover`, `TransformGizmoBegin`, `TransformDrawGizmo`): the pivot
+  (`SelectionPivot`, the modal's rule) and axes come from the designer's selection, its classes
+  cached by a hash of the selection and `scene->version` / `loadVersion` (`GizmoSelection`: a heap
+  array grown on change, nothing per frame). The world radius is 120 px at the pivot's depth; 72
+  segments per ring, a segment drawn and hit when its middle faces the camera (`dir · toCam >
+  -0.05 r`: a ring facing the camera shows whole). main.c calls `EditModeGizmoHover` before
+  `DesignerUpdate` (only with the edit mode's free cursor, no panel / modal / RMB); an LMB press on
+  a part skips `DesignerUpdate` that frame (no select / deselect) and `EditModeUpdate` starts the
+  drag. It is drawn in 2D after `DesignerDrawVolumes`, only in the HUD layer: plain shots are
+  unchanged.
+- **Turned-box outlines and picks** (`scene->boxTurned`, NULL today): `DrawObjWires` / `DrawObjTint`
+  (designer.c) and the inspector's outlines draw the turned box's oriented corners; `PickBoxes`
+  does the slab test in the box's frame (normal = its axis), as §11.5's `MS_Raycast`.
+- **`--edit-modal`**: `r90`, `r-90`, `reset`, `rot y p r` apply at frame 10 (nothing with `cancel`);
+  `ring <x|y|z|xx|yy|zz|view> <deg>` and `ball <dx> <dy>` open a gizmo drag (a ring: `scriptDeg`
+  stands for the dragged angle and the virtual cursor sits on the ring at the end of the arc),
+  with optional `ctrl`, `step <deg>`, `type <v>` (`r …` takes `ctrl` / `step` too);
+  `gizmo [hover <part>]` only draws it (`forceHover`).
+- **Verified** (phase 1 alone): both builds 0 warnings; leak check OK; every viewpoint of
+  `maps/pine_forest`, `maps/monolith`, `maps/test1`, `tests/models` 0 changed pixels against the
+  base build, box dumps identical. Commits on `tests/models`' rock (`rot 30 0 10`): `ring y 37.5`
+  → `rot 67.5 0 10`, `ring zz 20` → `rot 30 0 30`, `r-90` → `rot -60 0 10` (exact); `ring x 15` →
+  `rot 30.867478 12.95254 17.63074` (= Rx(15)·R, 7e-9); `r90` on `box -6 2.5 -9 6 2.7 -7` → `box -1
+  2.5 -14 1 2.7 -2`. Through `--input-script`: a click on the Y ring, 80 px, a click commits
+  (`rot 61.14 0 10`, the rock stays selected); a trackball click + (40, 20) px + ENTER = 22.36°.
+- **For the merge / phase 3**: `tools/leakcheck.sh`'s input scripts press R for the old modal (now a
+  90° step: they still pass, but `input-noop` no longer exercises a no-op drag: use ALT+R there,
+  and add gizmo runs); `docs/user-guide.md` / `command-line.md` and §6's table still list the old
+  keys; `src/input.c` has no `down` / `up` for mouse buttons, so a scripted ring *drag* (button
+  held) can't be played yet (clicks open the modal, which covers the same value path).
+
+
+### Round: free rotation, phase 2 (turned boxes)
+
+Implements §11.1–11.6, 11.9 and 11.12's runtime / edit parts (the compiled form, the export, the
+dumps and the bundle, §11.7–11.8, are a later step; the controls, §11.10, another stream).
+
+**Runtime** (`runtime/monolith_scene.c`):
+
+- **Parse.** `ParsePrimitive` takes `rot y p r` after a `box` / `block`'s six numbers (format 2;
+  an error on `stairs` / `waffle` and in format 1); `rot 0 0 0` is the plain box. `TurnedBox` makes
+  the record with `TurnedBoxMake` (centre and size of the box as written, the axes from
+  `RotationYpr`, the models' quaternion code, and the AABB of the 8 turned corners) and adds the
+  AABB through `Box`. `SceneData.turned[]` / `boxTurned[]` (allocated with the first turned box,
+  then grown by every `Box`) are published as `turnedBoxes` / `boxTurned` (NULL without turned
+  boxes) and freed in `FreeData`. `TurnedBoxMake` sits in the parser's editor block: the
+  compiled reader needs it outside (move it next to `RotationYpr` when the reader uses it).
+- **Entities:** a turned box's `MS_Transform` is centre, size, rotation.
+- **Meshing.** `HideRange` / `HideGridBuild` / `HideTotal` skip turned boxes (no occluder, every
+  face kept). `CellItem.turned` sorts after `big`, and `AddRanges` starts a range when it changes,
+  so turned boxes get their own per-cell ranges and the axis-aligned ranges' meshes stay as they
+  were. `TurnedFaces` writes the six faces of a turned box (positions with the shader's
+  `M_Rotate3D` arithmetic on the box's quaternion, so a merged face lies where an instanced cube's
+  would; normals and tangents turned, UVs as the cube's). `LoadBoxInstances` (shared by
+  `UploadBoxes` and `UploadBoxesLive`) gives a material's buffer `R3D_INSTANCE_ROTATION` only when
+  one of its boxes is turned (identity for the others).
+- **Collision.** `OverlapsTurned`: 15-axis SAT of the query AABB against the box (touching is no
+  hit; cross products shorter than 1e-6 skipped), only for candidates whose AABB already overlaps.
+  `MS_ColliderTop` / `MS_ColliderBottom`: `TurnedSpanY` takes the y range of the polytope box ∩
+  prism over the footprint from its candidate vertices (corners inside, the 12 edges cut by the 4
+  side planes, the 4 vertical prism edges clipped by the box's slabs); axis-aligned colliders return
+  `max.y` / `min.y` exactly and walkable. Walkable: the most upward face normal's y ≥ cos 46°.
+- **Raycast:** a turned box's slab test in its own frame; the normal is its axis in the world.
+- **AO volume:** `AoSplat` dispatches; `AoSplatTurned` visits the same AABB window and measures each
+  voxel centre in the box's frame (outside: the length of the positive part, inside: minus the depth).
+- **Live edits.** `BoxKey` / `BoxSame` include the turned record, so a box that turns, un-turns or
+  changes its rotation is a changed box (dirty regions, ranges rebuilt, buffers re-made); the
+  ranges' old/new walk compares `turned` like the cell. Preview: `MS_EditPreviewSet` gives a box
+  with a rotation its turned AABB (a turned box's record follows, restored at End), the preview
+  buffer always has rotations (identity for the others), and turned boxes of a **merged** material
+  are drawn from a per-range preview mesh built by `TurnedFaces` (their cubes get scale 0): an
+  instanced cube's float normal shades 1–3 levels apart from the merged mesh's SNORM8 normal, so a
+  cube preview differed from the commit in up to 1 257 pixels; with the mesh, 0.
+
+**Player** (`src/player.c`): `PlayerStep(p, wish, run, jump, dt)` is the physics, `UpdatePlayer`
+reads the input and calls it. Every `max.y` / `min.y` goes through `MS_ColliderTop` / `Bottom`; a
+turned box is climbed only when walkable or entirely within `STEP_HEIGHT` of the feet; the feet
+land `TURNED_LAND_GAP` (0.5 mm) above a turned box (an exact contact with a slope reads as a tiny
+overlap through float rounding, which then blocked walking downhill); the step-down snap
+(`SnapDown`, only with turned boxes in the map) probes a slab `STEP_HEIGHT` deep under the feet,
+re-probing above an axis-aligned top it finds, and snaps onto the first turned walkable box
+(its top may be up to 1 cm above the feet: the ramp's crest where it meets the platform).
+
+**Edits** (`src/mapedit.c`): every turn (also the plain `turn <yaw>`) goes through `RwTransform`;
+`RwTurn` is gone. Box and block lines: `BoxTurn` composes the rotation (`TurnYpr` = `ModelTurn`'s
+exact yaw / local-roll rules, else decomposition at 6 decimals; `EDIT_SET_ROTATION`: the typed
+angles), moves the centre (global: about the pivot; local and set: in place), and when
+`MatYpr(new)` is a signed permutation (`SignedPermutation`, exact for multiples of 90° thanks to
+`SinCosDeg`) writes plain corners (`box`: the smaller first; `block`: the size tokens' text
+permuted, `y0` from the centre) and drops `rot` (`RwRot`), else keeps the written extents and
+writes `rot`. Turned-box scale: the centre about the pivot, each own-axis extent by the factor of
+the nearest world axis (`ModelAxisFactors`, as models). `size` needs nothing new (the corners are
+the box before the turn). `rotation <yaw> <pitch> <roll>` in the script; `preview rotation` too.
+The refusals for non-90° box turns, X / Z axes and mixed boxes and models are gone; "a box turned
+by 180 degrees is the same box" stays for a plain turn of only unturned boxes.
+`MapEditPreviewTransform` uses `BoxTurn` too (permuted size and rotation 0 for an axis-aligned
+result).
+
+**Verification** (base: the build before this phase): every viewpoint, a yaw sweep 0..300 and a
+`--reload-test` of `maps/monolith`, `maps/pine_forest`, `maps/test1` and `tests/models`: 0 changed
+pixels; their `--dump-boxes`, `--dump-scene`, `--dump-entities` and every viewpoint's `--pick`
+identical; viewpoint 1 with `--ao baked` (the occlusion volume) 0 pixels. 20 edit scripts the old
+editor accepted (90° box / block / pivot / split turns, model turns, scale, size, move, duplicate)
+write byte-identical files with both builds; the two it refused (`turn 45`, `turn 0 90 0` of a box)
+now work. `tests/rotated` (the test package): live (`--edit-script`) vs `--apply-edits` + reload
+for a 37.5° turn (rot added), turned back (rot dropped), a 90° X turn of a plain box (corners), a
+local turn of a turned box, a block turn, a whole `repeat` line about a pivot, `rotation 0 0 0` on
+a box and a model, a split copy moved and turned, scale, size, duplicate: 0 pixels in all three
+viewpoints (the block turn also with `--ao baked`, the occlusion volume's live update); previews vs commits 0 pixels except the pivot turn of a whole
+`repeat` line (6 pixels: the commit writes the turned steps with 6 decimals, the preview places
+each copy exactly). `tests/unit/collision_test.sh`: up the ramp onto the platform with the feet on
+the slope (max error 0.5 mm, the gap), down without a frame off the ground, standing still on the
+slope, stopped 1.67 m before the wall's AABB would have stopped it, at its true face; the raycast
+normal of the yawed wall (0.707, 0, 0.707).
+
+**Open / left for the next steps:** the compiled writer still writes a turned box's AABB as a plain
+box (a `--compile` of `tests/rotated` loses the turns until §11.7 lands; `WriteCompiled` /
+`ReadCompiled`, `CM_BOX_TURNS`); `--dump-boxes` / `--dump-scene` print turned boxes like plain ones
+(§11.8, `main.c`'s `DumpBoxes`, `src/dumpscene.c`); `src/designer.c`'s `--pick` prints a box's
+normal with `%.0f` (a turned face shows `1 0 1`; the bundle's `face normal` is exact).
+
+### Round: free rotation, phase 2b (compiled, export, dumps)
+
+Implements §11.7–11.8.
+
+**Compiled maps** (`runtime/monolith_scene.c`, region "Compiled maps"; `docs/compiled-map.md`):
+`CM_VERSION` 3, section 17 `CM_BOX_TURNS` ("box turns", `CmBoxTurn { u32 box; f32 rotationDeg[3]; }`,
+16 bytes, `_Static_assert`ed), one record per turned box in box order. A turned box's `CM_BOXES`
+record holds the box as written. That needs the written corners, which `SceneData` did not keep (a
+record's `center ± size / 2` does not give back the corners bit for bit), so `TurnedBox` now also
+stores them in `SceneData.turnedWritten[]` (parallel to `turned[]`, ordered corners, freed in
+`FreeData`); only the writer reads it. `CmReadBoxTurns` (after the boxes) checks each record (box <
+box count, strictly increasing, finite angles, not all 0 as the parser never makes `rot 0 0 0` a
+turned box, and the parser's checks on the turned centre / size / AABB), calls `TurnedBoxMake` on the
+stored corners and puts the AABB in `boxes[]`. `TurnedBoxMake` moved out of the parser's editor block
+to "Small helpers: turned boxes". `CmReadHeader` accepts versions `CM_VERSION_OLDEST` (2) to 3; the
+number of sections it expects follows the version (16 / 17), so a version 2 file has no turns
+section and loads as before. The writer always writes 3.
+
+**Dumps:** `--dump-boxes` appends ` rot … center … size …` (`%a`) to a turned box's line;
+`--dump-scene` / `--dump-scene-diff` append the same to its `box` line (after `material`), and the
+`counts` line gets ` turned <n>` only when n > 0. Maps without turned boxes dump byte for byte as
+before.
+
+**Bundle** (`src/launcher.c`, format 4, `bundle-reference.md`): the hit of a turned box gets a line
+`- turned: rot y p r`; a selection table of a line with turned boxes gets a last column
+`rot (yaw pitch roll)` and a sentence that min / max / centre / size are world bounds; `request.json`
+gives a turned box `"rotationDeg"` in `hit` and in `selection[].objects[]`. Region and volume objects
+are unchanged (bounds only).
+
+**Export:** the README text on `colliders` (world AABBs; a turned box's entry is its bounds, the exact
+test is `MS_Collides`), `turnedBoxes` / `boxTurned`, `MS_ColliderTop` / `Bottom`; `docs/export.md`
+likewise. Nothing a game build needs for turned boxes is in an editor block.
+
+**Verification** (base: `scratchpad/base-linux/monolith`, the build before the round):
+- `maps/monolith`, `maps/pine_forest`, `tests/models`: `--dump-boxes`, `--dump-scene`,
+  `--dump-scene-diff`, `--dump-entities` identical to the base build.
+- Round trip (`maps/monolith`, `maps/pine_forest`, `tests/models`, `tests/rotated`): compiled twice
+  into a copy of the package, byte-identical (2 728 392 / 108 112 / 8 112 / 7 272 bytes); the four dumps
+  from the `.mapb` equal the text's (all but the `map` line; `tests/rotated`: `turned 9`, every
+  `rot` / `center` / `size` equal); every viewpoint's shot 0 changed pixels.
+- Version 2: the base build's `.mapb` of the three maps (version 2, 16 sections) loads in the new
+  build: the four dumps equal the text's, every viewpoint 0 pixels.
+- `tests/unit/compiled_test.sh` now runs on `tests/models` and `tests/rotated` (PASSED, 18 377 and
+  16 703 loads); the turned cases (box out of range, 0xFFFFFFFF, unsorted, twice, NaN / ±inf angles,
+  `0 0 0`, `-0 0 -0`, a written box whose turned centre overflows) are refused, a changed finite
+  angle loads; versions 1 and "2 with a version 3 section table" are refused. The models-specific
+  cases (uniforms, lights, model path) run only on a package without turns.
+- `tests/unit/export_strip_test.sh`: OK. The collision test also passes built as a game (no
+  `MONOLITH_EDITOR`) on a compiled `tests/rotated` with its `.map` moved away.
+- Export of `tests/rotated` and `maps/pine_forest` into scratch, copied to fresh folders, `./build.sh`
+  and `./build.sh --win` built; every viewpoint rendered by `examples/01_minimal` + the test harness
+  linked against the export's `monolith_scene.c` and prebuilt libraries: 0 changed pixels against
+  `monolith --shot` (3 + 5 viewpoints).
+- `--submit` (stub terminal, scratch requests dir) on `tests/rotated` with lines 136 and 149 selected:
+  the `rot` column and `"rotationDeg"`; line 137 (a plain box): no rotation anywhere. The same
+  submit on `tests/models` with the base and the new build: only the format number (3 → 4) and the
+  binary's path differ.
+- Both targets, the examples and their test build without warnings; the runtime with and without
+  `MONOLITH_EDITOR` / `MS_PATCHED_R3D`: 0 warnings; `tools/leakcheck.sh`: OK.
+
+**Open:** `src/main.c`'s header comment and `docs/command-line.md` don't yet mention the turned-box
+suffix of `--dump-boxes` / `--dump-scene` (both outside this step's files). The exported runtime has
+older comments outside the editor blocks that mention "editor builds" (the compiled-map reader and
+`InitData`, before this round).

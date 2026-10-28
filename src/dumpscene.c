@@ -3,8 +3,10 @@
 // human-readable values follow in decimal after a '#'. Format (version line first):
 //   monolith-scene-dump 1
 //   map "<path>" format <n>
-//   counts boxes <n> models <n> modelFiles <n> materials <n> lights <n> groups <n> colliders <n>
+//   counts boxes <n> models <n> modelFiles <n> materials <n> lights <n> groups <n> colliders <n> [turned <n>]
 //   box <i> <minx miny minz maxx maxy maxz>  line <l> group <g> material <m>
+//       [rot <3 hex> center <3 hex> size <3 hex>]     (a turned box: its rotation and shape; the
+//                                                      six numbers are then its world AABB)
 //   modelfile <i> "<path>" loaded <yes|no> meshes <n> triangles <n> materials <n> bounds <6 hex>
 //   model <i> file <f> line <l> group <g> material <m|-1> origin <o> collide <c> shadow <on|off>
 //         position <3 hex> rotationDeg <3 hex> scale <3 hex> translation <3 hex> rotation <4 hex>
@@ -56,8 +58,10 @@ bool DumpScene(const MS_Scene *s, const char *path, bool diff)
     static const char *const COLLIDE[] = { "aabb", "none", "box" };
     static const char *const LIGHT[] = { "dir", "spot", "point" };
     fprintf(f, "monolith-scene-dump 1%s\nmap \"%s\" format %d\n", diff ? " diff" : "", s->path, s->formatVersion);
-    fprintf(f, "counts boxes %d models %d modelFiles %d materials %d lights %d groups %d colliders %d\n", s->boxCount,
+    fprintf(f, "counts boxes %d models %d modelFiles %d materials %d lights %d groups %d colliders %d", s->boxCount,
             s->modelCount, s->modelFileCount, s->materialCount, s->lightCount, s->groupCount, s->colliderCount);
+    if (s->turnedBoxCount > 0) fprintf(f, " turned %d", s->turnedBoxCount);    // (only then: older dumps stay equal)
+    fprintf(f, "\n");
     for (int i = 0; i < s->groupCount; i++) {
         fprintf(f, "group");
         Index(f, diff, i);
@@ -70,6 +74,15 @@ bool DumpScene(const MS_Scene *s, const char *path, bool diff)
         Line(f, diff, s->boxRefs[i].line);
         GroupRef(f, s, diff, s->boxRefs[i].group);
         MaterialRef(f, s, diff, "material", s->boxRefs[i].material);
+        if (s->boxTurned && s->boxTurned[i] >= 0) {
+            const MS_TurnedBox *t = &s->turnedBoxes[s->boxTurned[i]];
+            fprintf(f, " rot");
+            Hex3(f, t->rotationDeg);
+            fprintf(f, " center");
+            Hex3(f, t->center);
+            fprintf(f, " size");
+            Hex3(f, t->size);
+        }
         fprintf(f, "\n");
     }
     for (int i = 0; i < s->modelFileCount; i++) {

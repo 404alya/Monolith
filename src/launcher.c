@@ -319,6 +319,12 @@ static const char *GroupName(int g)
 static bool ObjValid(MS_ObjRef o) { return MS_ObjectRef(scene, o) != NULL; }
 static const char *ObjKindName(MS_ObjRef o) { return o.kind == MS_OBJ_BOX ? "box" : o.kind == MS_OBJ_MODEL ? "model" : "none"; }
 static BoundingBox ObjBounds(MS_ObjRef o) { return MS_ObjectBounds(scene, o); }
+// A turned box's record (a box line with `rot`; its bounds are then its world AABB), NULL otherwise
+static const MS_TurnedBox *ObjTurn(MS_ObjRef o)
+{
+    return o.kind == MS_OBJ_BOX && scene->boxTurned && scene->boxTurned[o.index] >= 0 ? &scene->turnedBoxes[scene->boxTurned[o.index]]
+                                                                                    : NULL;
+}
 static int ObjLine(MS_ObjRef o) { return MS_ObjectRef(scene, o)->line; }
 static int ObjGroup(MS_ObjRef o) { return MS_ObjectRef(scene, o)->group; }
 // Material name (models: their override material; NULL = the model's own materials)
@@ -1202,7 +1208,7 @@ static bool WriteRequestMd(const char *path, const Bundle *B)
 
     fprintf(f, "# Map edit request: %s\n\n", B->slug);
     fprintf(f, "Model: %s (%s tier: %s)\n\n", B->model.name, ModelTierName(B->model.tier), B->model.reason);
-    fprintf(f, "Request `%s`, submitted %s from the monolith map designer. Bundle format 3: besides the "
+    fprintf(f, "Request `%s`, submitted %s from the monolith map designer. Bundle format 4: besides the "
                "crosshair hit and the selected objects it may contain **screen regions** the developer "
                "dragged over the frame and **volumes**, boxes marked in world space (see *Screen regions* and "
                "*Volumes* below and `.claude/skills/map-request/bundle-reference.md`).\n\n", B->id, B->created);
@@ -1247,6 +1253,9 @@ static bool WriteRequestMd(const char *path, const Bundle *B)
                 o.kind == MS_OBJ_MODEL ? "world bounds " : "");
         MdVec(f, b.min); fprintf(f, ", max "); MdVec(f, b.max); fprintf(f, "\n");
         if (o.kind == MS_OBJ_MODEL) MdModel(f, o.index, "- ");
+        const MS_TurnedBox *t = ObjTurn(o);
+        if (t) fprintf(f, "- turned: `rot %g %g %g` (yaw, pitch, roll in degrees, about its centre); min / max are its world "
+                          "bounds\n", t->rotationDeg.x, t->rotationDeg.y, t->rotationDeg.z);
         fprintf(f, "- copy: ");
         MdCopy(f, o);
         fprintf(f, " among the %s%s of map line %d (0-based", ObjKindName(o), o.kind == MS_OBJ_BOX ? "es" : "s", ObjLine(o));
@@ -1276,7 +1285,12 @@ static bool WriteRequestMd(const char *path, const Bundle *B)
         fprintf(f, ".\n\n");
         if (model) fprintf(f, "| model | copy | file | position | rotation (yaw pitch roll) | scale | world min | world max |\n"
                               "|---|---|---|---|---|---|---|---|\n");
-        else fprintf(f, "| box | copy | min | max | centre | size |\n|---|---|---|---|---|---|\n");
+        bool turned = false;    // a line with turned boxes gets a rotation column (min / max: world bounds)
+        for (int i = sl->first; i < sl->first + sl->count && !model; i++) turned |= ObjTurn(B->selOrder[i]) != NULL;
+        if (turned) fprintf(f, "Turned boxes: min, max, centre and size are their world bounds; `rot` turns the box as written "
+                               "about its centre.\n\n| box | copy | min | max | centre | size | rot (yaw pitch roll) |\n"
+                               "|---|---|---|---|---|---|---|\n");
+        else if (!model) fprintf(f, "| box | copy | min | max | centre | size |\n|---|---|---|---|---|---|\n");
         for (int i = sl->first; i < sl->first + sl->count; i++) {
             MS_ObjRef o = B->selOrder[i];
             BoundingBox b = ObjBounds(o);
@@ -1298,6 +1312,9 @@ static bool WriteRequestMd(const char *path, const Bundle *B)
             fprintf(f, " | "); MdVec(f, b.max);
             fprintf(f, " | "); MdVec(f, Vector3Scale(Vector3Add(b.min, b.max), 0.5f));
             fprintf(f, " | "); MdVec(f, Vector3Subtract(b.max, b.min));
+            const MS_TurnedBox *t = ObjTurn(o);
+            if (t) fprintf(f, " | `rot %g %g %g`", t->rotationDeg.x, t->rotationDeg.y, t->rotationDeg.z);
+            else if (turned) fprintf(f, " | -");
             fprintf(f, " |\n");
         }
         fprintf(f, "\n");
@@ -1509,7 +1526,7 @@ static bool WriteRequestJson(const char *path, const Bundle *B)
     FILE *f = fopen(path, "wb");
     if (!f) return false;
 
-    fprintf(f, "{\n  \"format\": 3,\n  \"kind\": \"edit\",\n  \"id\": "); JsonStr(f, B->id);
+    fprintf(f, "{\n  \"format\": 4,\n  \"kind\": \"edit\",\n  \"id\": "); JsonStr(f, B->id);
     fprintf(f, ",\n  \"slug\": "); JsonStr(f, B->slug);
     fprintf(f, ",\n  \"created\": "); JsonStr(f, B->created);
     fprintf(f, ",\n  \"instructions\": ");
@@ -1548,6 +1565,7 @@ static bool WriteRequestJson(const char *path, const Bundle *B)
         if (o.kind == MS_OBJ_BOX) fprintf(f, ",\n    \"box\": %d", o.index);
         fprintf(f, ",\n    \"min\": "); JsonVec(f, b.min);
         fprintf(f, ",\n    \"max\": "); JsonVec(f, b.max);
+        if (ObjTurn(o)) { fprintf(f, ",\n    \"rotationDeg\": "); JsonVec(f, ObjTurn(o)->rotationDeg); }
         if (o.kind == MS_OBJ_MODEL) { fprintf(f, ",\n    \"model\": "); JsonModel(f, o.index); }
         fprintf(f, ",\n    \"group\": "); JsonStr(f, GroupName(ObjGroup(o)));
         fprintf(f, ",\n    "); JsonCopy(f, o);
@@ -1576,6 +1594,7 @@ static bool WriteRequestJson(const char *path, const Bundle *B)
             fprintf(f, ", \"max\": "); JsonVec(f, b.max);
             fprintf(f, ", \"center\": "); JsonVec(f, Vector3Scale(Vector3Add(b.min, b.max), 0.5f));
             fprintf(f, ", \"size\": "); JsonVec(f, Vector3Subtract(b.max, b.min));
+            if (ObjTurn(o)) { fprintf(f, ", \"rotationDeg\": "); JsonVec(f, ObjTurn(o)->rotationDeg); }
             if (o.kind == MS_OBJ_MODEL) { fprintf(f, ", \"model\": "); JsonModel(f, o.index); }
             fprintf(f, " }");
         }

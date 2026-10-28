@@ -19,8 +19,14 @@
 //                                  group, until the next `group` (names: any length, no '"')
 //
 // Primitives (meters; +Y is up; numbers are plain decimals, e.g. 12, -4.5, 0.75):
-//   box    x0 y0 z0 x1 y1 z1                    [1] two opposite corners, any order
-//   block  cx y0 cz sx sy sz                    [1] centered on (cx, cz), from y0 up to y0 + sy
+//   box    x0 y0 z0 x1 y1 z1 [rot y p r]        [1] two opposite corners, any order
+//   block  cx y0 cz sx sy sz [rot y p r]        [1] centered on (cx, cz), from y0 up to y0 + sy
+//       rot yawDeg pitchDeg rollDeg   (format 2) turns the box as written about its own centre,
+//                                     with the models' convention (R = Ry * Rx * Rz). Never
+//                                     shifted: every repeat / at copy turns about its own centre.
+//                                     rot 0 0 0 is the box without rot. A turned box draws, collides
+//                                     and picks as its turned shape; its boxes[] / colliders[] entry
+//                                     is its world AABB (MS_Scene.turnedBoxes, boxTurned)
 //   stairs cx baseY startZ width steps rise run [1] `steps` (integer) solid steps climbing
 //                                                   toward -Z from startZ, each down to baseY
 //   waffle x0 x1 y0 y1 z depth bayW floorH      [1] facade: back wall z-1..z, vertical fins
@@ -318,8 +324,9 @@ typedef struct {
 typedef struct { int group, first, count; BoundingBox bounds; R3D_Mesh mesh; } DrawRange;
 
 // An object to sort into cells: group, then big (wider than a cell in x or z: one cluster per
-// group), then cell, then index (keeps map order within a cluster)
-typedef struct { int group, big, cx, cz, index; BoundingBox bounds; } CellItem;
+// group), then turned (a turned box: ranges of their own after the axis-aligned ones), then cell,
+// then index (keeps map order within a cluster)
+typedef struct { int group, big, turned, cx, cz, index; BoundingBox bounds; } CellItem;
 
 // One instanced draw: the model instances of one file with the same material set and shadow flag
 typedef struct {
@@ -355,6 +362,12 @@ typedef struct {
     BoundingBox *boxes;
     MS_Ref *boxRefs;
     int boxCount, boxCap, boxRefCap;
+    MS_TurnedBox *turned;               // the boxes with a rotation (boxes[] holds their world AABBs)
+    int turnedCount, turnedCap;
+    int *boxTurned;                     // per box: index into turned[], -1 = none; NULL while there are none
+    int boxTurnedCap;
+    BoundingBox *turnedWritten;         // parallel to turned[]: each box as written (corners ordered), for
+    int turnedWrittenCap;               // compiled maps, which rebuild the record from it bit for bit
     char **groups;
     int groupCount, groupCap;
     MS_Material *materials;
@@ -483,6 +496,7 @@ struct EditPreview {
     MS_ObjRef *objs;
     int count;
     BoundingBox *boxOrig;               // per object: boxes' bounds at Begin
+    MS_TurnedBox *turnOrig;             //   and turned boxes' records
     MS_ModelInstance *modelOrig;        // models
     int *localFirst;                    // models: first of their `collide box` boxes in localColliders
     BoundingBox *colliderOrig;          // models' world colliders, objs[i]'s at colliderAt[i]
@@ -499,6 +513,9 @@ struct EditPreview {
     BoundingBox *modelRangeOrig;        // model range bounds at Begin (grown while models move)
     R3D_InstanceBuffer buf;             // the selected boxes as cubes, by material
     int *bufBox, bufCount;              //   box of each slot
+    R3D_Mesh *turnMesh;                 // per draw range of a merged material: its boxes that have a
+    BoundingBox *turnBounds;            //   rotation as one mesh (as their merged range will draw
+    R3D_MeshData cube;                  //   them; their cubes get a zero scale), R3D's cube data
     int *drawMat, *drawFirst, *drawCount, drawRanges;
     BoundingBox *drawBounds;
     long long trisDrawn;                // d->boxTrisDrawn, d->boxMeshCount at Begin
@@ -1180,6 +1197,63 @@ static bool GrowStmtSet(SceneData *d)
 // #endregion
 
 // ======================================================================================
+// #region Small helpers: turned boxes (a box or block with a rotation)
+// ======================================================================================
+
+// R = Ry * Rx * Rz of yaw, pitch, roll in degrees (the same code as the models' rotation)
+static Quaternion RotationYpr(Vector3 deg)
+{
+    Quaternion qy = QuaternionFromAxisAngle((Vector3){ 0, 1, 0 }, deg.x * DEG2RAD);
+    Quaternion qx = QuaternionFromAxisAngle((Vector3){ 1, 0, 0 }, deg.y * DEG2RAD);
+    Quaternion qz = QuaternionFromAxisAngle((Vector3){ 0, 0, 1 }, deg.z * DEG2RAD);
+    return QuaternionNormalize(QuaternionMultiply(QuaternionMultiply(qy, qx), qz));
+}
+
+// Box b's turned-box record, NULL for an axis-aligned box
+static inline const MS_TurnedBox *TurnedOf(const SceneData *d, int b)
+{
+    return d->boxTurned && d->boxTurned[b] >= 0 ? &d->turned[d->boxTurned[b]] : NULL;
+}
+
+// A direction given in a turned box's own frame, in the world
+static inline Vector3 TurnedDir(const MS_TurnedBox *t, float x, float y, float z)
+{
+    return (Vector3){ t->axis[0].x * x + t->axis[1].x * y + t->axis[2].x * z,
+                      t->axis[0].y * x + t->axis[1].y * y + t->axis[2].y * z,
+                      t->axis[0].z * x + t->axis[1].z * y + t->axis[2].z * z };
+}
+
+// A point given in a turned box's own frame (offsets from its centre along its axes)
+static inline Vector3 TurnedPoint(const MS_TurnedBox *t, float x, float y, float z)
+{
+    return Vector3Add(t->center, TurnedDir(t, x, y, z));
+}
+
+// A turned box from the box as written (its corners before the turn, any order) and its
+// rotation about its centre: the record (centre, size, axes) and its world AABB (the min / max of
+// its eight turned corners)
+static void TurnedBoxMake(BoundingBox written, Vector3 rotationDeg, MS_TurnedBox *t, BoundingBox *aabb)
+{
+    BoundingBox w = { Vector3Min(written.min, written.max), Vector3Max(written.min, written.max) };
+    t->center = Vector3Scale(Vector3Add(w.min, w.max), 0.5f);
+    t->size = Vector3Subtract(w.max, w.min);
+    t->rotationDeg = rotationDeg;
+    Matrix m = QuaternionToMatrix(RotationYpr(rotationDeg));
+    t->axis[0] = (Vector3){ m.m0, m.m1, m.m2 };
+    t->axis[1] = (Vector3){ m.m4, m.m5, m.m6 };
+    t->axis[2] = (Vector3){ m.m8, m.m9, m.m10 };
+    Vector3 h = Vector3Scale(t->size, 0.5f);
+    *aabb = (BoundingBox){ { INFINITY, INFINITY, INFINITY }, { -INFINITY, -INFINITY, -INFINITY } };
+    for (int c = 0; c < 8; c++) {
+        Vector3 q = TurnedPoint(t, c & 1 ? h.x : -h.x, c & 2 ? h.y : -h.y, c & 4 ? h.z : -h.z);
+        aabb->min = Vector3Min(aabb->min, q);
+        aabb->max = Vector3Max(aabb->max, q);
+    }
+}
+
+// #endregion
+
+// ======================================================================================
 // #region Parser
 // ======================================================================================
 // The text parser exists only in editor builds: games read compiled maps (see "Compiled maps").
@@ -1456,13 +1530,40 @@ static bool Box(Parser *P, float x0, float y0, float z0, float x1, float y1, flo
         P->badNumber = true;
         return false;
     }
-    if (!MS_RESERVE(d->boxes, d->boxCap, d->boxCount + 1) || !MS_RESERVE(d->boxRefs, d->boxRefCap, d->boxCount + 1)) {
+    if (!MS_RESERVE(d->boxes, d->boxCap, d->boxCount + 1) || !MS_RESERVE(d->boxRefs, d->boxRefCap, d->boxCount + 1) ||
+        (d->boxTurned && !MS_RESERVE(d->boxTurned, d->boxTurnedCap, d->boxCount + 1))) {
         P->outOfMemory = true;
         return false;
     }
+    if (d->boxTurned) d->boxTurned[d->boxCount] = -1;
     d->boxes[d->boxCount] = b;
     d->boxRefs[d->boxCount++] = P->cur;
     P->cur.part++;
+    return true;
+}
+
+// A box with a nonzero rotation: its AABB as the box (Box), plus its turned-box record
+static bool TurnedBox(Parser *P, BoundingBox written, Vector3 rotationDeg)
+{
+    SceneData *d = P->d;
+    MS_TurnedBox t;
+    BoundingBox a;
+    TurnedBoxMake(written, rotationDeg, &t, &a);
+    if (!isfinite(t.size.x) || !isfinite(t.size.y) || !isfinite(t.size.z) || !isfinite(t.center.x) ||
+        !isfinite(t.center.y) || !isfinite(t.center.z)) {
+        P->badNumber = true;
+        return false;
+    }
+    if (!d->boxTurned) {        // the first one: every box before it is axis-aligned
+        if (!MS_RESERVE(d->boxTurned, d->boxTurnedCap, d->boxCount + 1)) { P->outOfMemory = true; return false; }
+        for (int i = 0; i < d->boxCount; i++) d->boxTurned[i] = -1;
+    }
+    if (!MS_RESERVE(d->turned, d->turnedCap, d->turnedCount + 1) ||
+        !MS_RESERVE(d->turnedWritten, d->turnedWrittenCap, d->turnedCount + 1)) { P->outOfMemory = true; return false; }
+    if (!Box(P, a.min.x, a.min.y, a.min.z, a.max.x, a.max.y, a.max.z)) return false;
+    d->boxTurned[d->boxCount - 1] = d->turnedCount;
+    d->turnedWritten[d->turnedCount] = (BoundingBox){ Vector3Min(written.min, written.max), Vector3Max(written.min, written.max) };
+    d->turned[d->turnedCount++] = t;
     return true;
 }
 
@@ -1583,6 +1684,17 @@ static void BeginCopy(Parser *P, const int *cnt, int i0, int i1, int i2)
 
 static bool ParsePrimitive(Parser *P, const PrimDef *def, Token *args, int argc, const Placement *pl)
 {
+    // `rot yaw pitch roll` after a box's or block's numbers (format 2): turned about its centre
+    Vector3 rot = { 0 };
+    if (argc > def->argc && strcmp(args[def->argc].s, "rot") == 0) {
+        if (def->argc != 6) return Fail(P, "%s can't turn (rot is for box and block lines)", def->name);
+        if (P->d->formatVersion < 2) return Fail(P, "rot on a %s needs map format 2: add 'monolith 2' as the first line", def->name);
+        if (argc != def->argc + 4) return Fail(P, "rot takes 3 numbers: rot yawDeg pitchDeg rollDeg", NULL);
+        for (int i = 0; i < 3; i++)
+            if (!NumF(P, args[def->argc + 1 + i], &((float *)&rot)[i])) return false;
+        argc = def->argc;
+    }
+    bool turned = rot.x != 0.0f || rot.y != 0.0f || rot.z != 0.0f;     // rot 0 0 0: the box without rot
     if (argc != def->argc) {
         char what[64];
         snprintf(what, sizeof(what), "%s takes %d numbers, got %d", def->name, def->argc, argc);
@@ -1619,8 +1731,16 @@ static bool ParsePrimitive(Parser *P, const PrimDef *def, Token *args, int argc,
         switch (def->argc) {
             case 7:  ok = Stairs(P, p[0], p[1], p[2], p[3], steps, p[5], p[6]); break;
             case 8:  ok = WaffleFacade(P, p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]); break;
-            default: ok = (def == &PRIMS[0]) ? Box(P, p[0], p[1], p[2], p[3], p[4], p[5])
-                                             : Block(P, p[0], p[1], p[2], p[3], p[4], p[5]); break;
+            default:
+                if (turned) {
+                    // the box as written: Box's corners, or Block's (the same float math)
+                    BoundingBox w = def == &PRIMS[0]
+                        ? (BoundingBox){ { p[0], p[1], p[2] }, { p[3], p[4], p[5] } }
+                        : (BoundingBox){ { p[0] - p[3] * 0.5f, p[1], p[2] - p[5] * 0.5f }, { p[0] + p[3] * 0.5f, p[1] + p[4], p[2] + p[5] * 0.5f } };
+                    ok = TurnedBox(P, w, rot);
+                } else ok = (def == &PRIMS[0]) ? Box(P, p[0], p[1], p[2], p[3], p[4], p[5])
+                                               : Block(P, p[0], p[1], p[2], p[3], p[4], p[5]);
+                break;
         }
         if (!ok) return Fail(P, P->badNumber ? "coordinate or size out of range" : P->outOfMemory ? "out of memory"
                                 : "too many objects (a map makes at most 1000000 boxes, models and lights)", NULL);
@@ -2644,7 +2764,8 @@ static bool ParseText(Parser *P, const char *text, int size)
 // fixed-width fields, every record a multiple of 4 bytes, sections at multiples of 8. The
 // reader checks the whole file before it uses any of it.
 
-#define CM_VERSION          2           // MS_COMPILED_VERSION: bump on any change to a record or section
+#define CM_VERSION          3           // MS_COMPILED_VERSION: bump on any change to a record or section
+#define CM_VERSION_OLDEST   2           // the oldest version still read (2: no box turns section)
 #define CM_BYTE_ORDER       0x01020304u
 #define CM_NONE             0xFFFFFFFFu // a string field without a string
 #define CM_MAX_ENV          4096        // env records (the key tables have ~120 keys)
@@ -2692,6 +2813,7 @@ typedef struct { float min[3], max[3]; } CmCollider;
 typedef struct { int32_t slot, material; } CmSlot;
 typedef struct { uint32_t key, type, value[6]; } CmEnv;         // key: the env key's name; type: T_*
 typedef struct { uint32_t hasSpawn; float feet[3], yawDeg, pitchDeg; } CmSpawn;
+typedef struct { uint32_t box; float rotationDeg[3]; } CmBoxTurn;  // a turned box: its CmBox holds the box as written
 
 // The layout is the file format: sizes and offsets must not move (docs/compiled-map.md)
 _Static_assert(sizeof(float) == 4, "compiled maps store IEEE-754 binary32 floats");
@@ -2717,13 +2839,16 @@ _Static_assert(sizeof(CmModel) == 92 && offsetof(CmModel, origin) == 40 && offse
 _Static_assert(sizeof(CmCollider) == 24 && sizeof(CmSlot) == 8, "CmCollider, CmSlot");
 _Static_assert(sizeof(CmEnv) == 32 && offsetof(CmEnv, value) == 8, "CmEnv");
 _Static_assert(sizeof(CmSpawn) == 24, "CmSpawn");
+_Static_assert(sizeof(CmBoxTurn) == 16 && offsetof(CmBoxTurn, rotationDeg) == 4, "CmBoxTurn");
 // T_* values are stored in CmEnv.type: the key types only ever get new values at the end
 _Static_assert(T_F == 0 && T_PATH == 8 && T_AMBMODE == 14, "T_* values are part of the compiled format");
 
 enum {
     CM_STRINGS = 1, CM_BOXES, CM_GROUPS, CM_MATERIALS, CM_UNIFORMS, CM_SAMPLERS, CM_LIGHTS, CM_VIEWPOINTS,
     CM_MODEL_FILES, CM_MODELS, CM_COLLIDERS, CM_SLOTS, CM_STATEMENTS, CM_ENV, CM_SPAWN, CM_DEPS,
-    CM_SECTIONS = CM_DEPS
+    CM_BOX_TURNS,                       // version 3
+    CM_SECTIONS = CM_BOX_TURNS,
+    CM_SECTIONS_V2 = CM_DEPS            // the sections of a version 2 file
 };
 // Per section id: name (messages), record size, most records
 static const struct { const char *name; uint32_t size; uint32_t max; } CM_SECTION[CM_SECTIONS + 1] = {
@@ -2743,6 +2868,7 @@ static const struct { const char *name; uint32_t size; uint32_t max; } CM_SECTIO
     [CM_ENV]         = { "environment", sizeof(CmEnv), CM_MAX_ENV },
     [CM_SPAWN]       = { "spawn", sizeof(CmSpawn), 1 },
     [CM_DEPS]        = { "dependencies", 4, MS_MAX_OBJECTS },
+    [CM_BOX_TURNS]   = { "box turns", sizeof(CmBoxTurn), MS_MAX_OBJECTS },
 };
 
 static bool IsCompiledMap(const char *bytes, int size)
@@ -2838,22 +2964,24 @@ static bool CmReadHeader(CmReader *R, CmHeader *h)
     if (memcmp(h->magic, CM_MAGIC, sizeof(CM_MAGIC)) != 0) return CmFail(R, "not a compiled map");
     if (h->byteOrder != CM_BYTE_ORDER)
         return CmFail(R, "compiled map: unsupported byte order (compiled maps are little-endian; big-endian hosts are not supported)");
-    if (h->version != CM_VERSION)
-        return CmFail(R, "compiled map format %u, this runtime reads format %d: compile the map again", h->version, CM_VERSION);
+    if (h->version < CM_VERSION_OLDEST || h->version > CM_VERSION)
+        return CmFail(R, "compiled map format %u, this runtime reads formats %d to %d: compile the map again", h->version,
+                      CM_VERSION_OLDEST, CM_VERSION);
+    uint32_t sections = h->version == 2 ? CM_SECTIONS_V2 : CM_SECTIONS;    // a section's id is its place in this list
     if (h->headerSize != sizeof(CmHeader) || h->flags != 0) return CmFail(R, "compiled map: bad header");
     if (h->fileSize != R->size)
         return CmFail(R, "compiled map: the header says %llu bytes, the file has %u (truncated or damaged)",
                       (unsigned long long)h->fileSize, R->size);
     if (h->formatVersion < 1 || h->formatVersion > MS_FORMAT_VERSION)
         return CmFail(R, "map format %u is newer than this runtime supports (%d); update monolith_scene", h->formatVersion, MS_FORMAT_VERSION);
-    if (h->sectionCount != CM_SECTIONS || h->sectionTable < sizeof(CmHeader) || h->sectionTable % 4 ||
+    if (h->sectionCount != sections || h->sectionTable < sizeof(CmHeader) || h->sectionTable % 4 ||
         (uint64_t)h->sectionTable + (uint64_t)h->sectionCount * sizeof(CmSection) > R->size)
         return CmFail(R, "compiled map: bad section table");
     memset(R->sec, 0, sizeof(R->sec));
     for (uint32_t i = 0; i < h->sectionCount; i++) {
         CmSection s;
         memcpy(&s, R->bytes + h->sectionTable + i * sizeof(CmSection), sizeof(s));
-        if (s.id < 1 || s.id > CM_SECTIONS) return CmFail(R, "compiled map: unknown section %u", s.id);
+        if (s.id < 1 || s.id > sections) return CmFail(R, "compiled map: unknown section %u", s.id);
         const char *name = CM_SECTION[s.id].name;
         if (R->sec[s.id].id) return CmFail(R, "compiled map: section '%s' appears twice", name);
         if (s.recordSize != CM_SECTION[s.id].size)
@@ -2863,7 +2991,8 @@ static bool CmReadHeader(CmReader *R, CmHeader *h)
             return CmFail(R, "compiled map: section '%s' lies outside the file", name);
         R->sec[s.id] = s;
     }
-    // (all CM_SECTIONS ids present: sectionCount of them, none twice, none unknown)
+    // (all ids of the version present: sectionCount of them, none twice, none unknown; a version 2
+    // file leaves the newer sections empty)
     if (R->sec[CM_SPAWN].count != 1) return CmFail(R, "compiled map: section 'spawn' must have one record");
     uint32_t n = R->sec[CM_STRINGS].count;
     R->str = (const char *)R->bytes + R->sec[CM_STRINGS].offset;
@@ -3033,6 +3162,47 @@ static bool CmReadEnvRecord(CmReader *R, const CmEnv *c)
     return true;
 }
 
+// The box turns (version 3): each turned box's CmBox holds the box as written; its record and
+// world AABB are rebuilt with the parser's own code (TurnedBoxMake), so the bits match a text load
+static bool CmReadBoxTurns(CmReader *R)
+{
+    SceneData *d = R->d;
+    uint32_t n = R->sec[CM_BOX_TURNS].count;
+    if (n == 0) return true;
+    if (n > (uint32_t)d->boxCount) return CmFail(R, "compiled map: more box turns (%u) than boxes (%d)", n, d->boxCount);
+    if (!MS_RESERVE(d->turned, d->turnedCap, (int)n) || !MS_RESERVE(d->turnedWritten, d->turnedWrittenCap, (int)n) ||
+        !MS_RESERVE(d->boxTurned, d->boxTurnedCap, d->boxCount))
+        return CmFail(R, "out of memory");
+    for (int i = 0; i < d->boxCount; i++) d->boxTurned[i] = -1;
+    uint32_t prev = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        CmBoxTurn c;
+        CmRecord(R, CM_BOX_TURNS, i, &c);
+        // The parser's guarantees: one record per turned box, in box order, a finite nonzero rotation
+        if (c.box >= (uint32_t)d->boxCount) return CmFail(R, "box turn %u: box %u out of range", i, c.box);
+        if (i > 0 && c.box <= prev) return CmFail(R, "box turn %u: not in box order", i);
+        prev = c.box;
+        if (!Finite3(c.rotationDeg)) return CmFail(R, "box turn %u: rotation not finite", i);
+        if (c.rotationDeg[0] == 0.0f && c.rotationDeg[1] == 0.0f && c.rotationDeg[2] == 0.0f)
+            return CmFail(R, "box turn %u: rotation 0 0 0 (that box is not turned)", i);
+        BoundingBox w = d->boxes[c.box], a;
+        MS_TurnedBox t;
+        TurnedBoxMake(w, V3(c.rotationDeg), &t, &a);
+        // TurnedBox's and Box's checks on the same values
+        if (!isfinite(t.size.x) || !isfinite(t.size.y) || !isfinite(t.size.z) || !isfinite(t.center.x) ||
+            !isfinite(t.center.y) || !isfinite(t.center.z) || !isfinite(a.min.x) || !isfinite(a.min.y) || !isfinite(a.min.z) ||
+            !isfinite(a.max.x) || !isfinite(a.max.y) || !isfinite(a.max.z) ||
+            !isfinite(a.max.x - a.min.x) || !isfinite(a.max.y - a.min.y) || !isfinite(a.max.z - a.min.z))
+            return CmFail(R, "box turn %u: coordinate or size out of range", i);
+        d->boxes[c.box] = a;
+        d->boxTurned[c.box] = (int)i;
+        d->turnedWritten[i] = w;
+        d->turned[i] = t;
+        d->turnedCount = (int)i + 1;
+    }
+    return true;
+}
+
 // Fills d (after InitData) from a compiled map: the same SceneData the text parser would have made
 static bool ReadCompiled(SceneData *d, const char *bytes, int size, char *err, int errSize)
 {
@@ -3097,6 +3267,7 @@ static bool ReadCompiled(SceneData *d, const char *bytes, int size, char *err, i
         d->boxes[i] = b;
         d->boxCount = (int)i + 1;
     }
+    if (!CmReadBoxTurns(&R)) return false;
 
     n = R.sec[CM_MODEL_FILES].count;
     if (!MS_RESERVE(d->modelFiles, d->modelFileCap, (int)n) || !MS_RESERVE(d->modelPick, d->modelPickCap, (int)n))
@@ -3439,9 +3610,15 @@ static unsigned char *WriteCompiled(const SceneData *d, const char *srcName, uns
         }
     }
     for (int i = 0; i < d->boxCount; i++) {
-        const BoundingBox *b = &d->boxes[i];
+        // a turned box: the box as written (the reader rebuilds its AABB) plus a box turn record
+        const MS_TurnedBox *t = TurnedOf(d, i);
+        const BoundingBox *b = t ? &d->turnedWritten[d->boxTurned[i]] : &d->boxes[i];
         CmBox c = { { b->min.x, b->min.y, b->min.z }, { b->max.x, b->max.y, b->max.z }, CmRefOf(d->boxRefs[i]) };
         CmPut(&W, CM_BOXES, &c);
+        if (t) {
+            CmBoxTurn r = { (uint32_t)i, { t->rotationDeg.x, t->rotationDeg.y, t->rotationDeg.z } };
+            CmPut(&W, CM_BOX_TURNS, &r);
+        }
     }
     for (int i = 0; i < d->modelFileCount; i++) {
         CmModelFile c = { CmStr(&W, d->modelFiles[i].path), d->modelFiles[i].line };
@@ -3716,6 +3893,49 @@ static void AoSplatBox(const BoundingBox *box, const float *rmin, float voxel, c
     }
 }
 
+// A turned box into dist[] the same way: the voxels within AO_DIST_MAX of its AABB `box`, each
+// centre taken into the box's own frame for its distance to the box (outside: the distance,
+// inside: minus the depth)
+static void AoSplatTurned(const MS_TurnedBox *t, const BoundingBox *box, const float *rmin, float voxel, const int wlo[3],
+                          const int wdim[3], float *dist)
+{
+    const float *bmin = (const float *)&box->min, *bmax = (const float *)&box->max;
+    const float h[3] = { t->size.x * 0.5f, t->size.y * 0.5f, t->size.z * 0.5f };
+    int lo[3], hi[3];
+    for (int a = 0; a < 3; a++) {
+        lo[a] = CellKey((bmin[a] - AO_DIST_MAX - rmin[a]) / voxel - 0.5f);
+        hi[a] = -CellKey(-((bmax[a] + AO_DIST_MAX - rmin[a]) / voxel - 0.5f));
+        if (lo[a] < wlo[a]) lo[a] = wlo[a];
+        if (hi[a] > wlo[a] + wdim[a] - 1) hi[a] = wlo[a] + wdim[a] - 1;
+        if (lo[a] > hi[a]) return;
+    }
+    for (int z = lo[2]; z <= hi[2]; z++)
+        for (int y = lo[1]; y <= hi[1]; y++) {
+            float *row = dist + ((size_t)(z - wlo[2]) * wdim[1] + (y - wlo[1])) * wdim[0];
+            for (int x = lo[0]; x <= hi[0]; x++) {
+                Vector3 c = { rmin[0] + ((float)x + 0.5f) * voxel, rmin[1] + ((float)y + 0.5f) * voxel, rmin[2] + ((float)z + 0.5f) * voxel };
+                Vector3 r = Vector3Subtract(c, t->center);
+                float q[3], out = 0.0f, in = -INFINITY;
+                for (int a = 0; a < 3; a++) {
+                    q[a] = fabsf(Vector3DotProduct(r, t->axis[a])) - h[a];
+                    out += q[a] > 0.0f ? q[a] * q[a] : 0.0f;
+                    in = fmaxf(in, q[a]);
+                }
+                float e = in <= 0.0f ? in : sqrtf(out);
+                if (e < row[x - wlo[0]]) row[x - wlo[0]] = e;
+            }
+        }
+}
+
+// Box b of d into dist[] (AoSplatBox, or AoSplatTurned for a turned box)
+static void AoSplat(const SceneData *d, int b, const float *rmin, float voxel, const int wlo[3], const int wdim[3],
+                    float *dist, float *axis)
+{
+    const MS_TurnedBox *t = TurnedOf(d, b);
+    if (t) AoSplatTurned(t, &d->boxes[b], rmin, voxel, wlo, wdim, dist);
+    else AoSplatBox(&d->boxes[b], rmin, voxel, wlo, wdim, dist, axis);
+}
+
 static unsigned char AoByte(float dist)
 {
     float v = (Clamp(dist, AO_DIST_MIN, AO_DIST_MAX) - AO_DIST_MIN) / (AO_DIST_MAX - AO_DIST_MIN);
@@ -3738,7 +3958,7 @@ static unsigned char *AoBake(const SceneData *d, float voxel, BoundingBox *regio
     // dist > 0: distance to the nearest box outside all boxes; <= 0: minus the depth inside
     for (size_t i = 0; i < count; i++) dist[i] = AO_DIST_MAX;
     static const int ZERO[3] = { 0, 0, 0 };
-    for (int b = 0; b < d->boxCount; b++) AoSplatBox(&d->boxes[b], (const float *)&region.min, voxel, ZERO, dim, dist, axis);
+    for (int b = 0; b < d->boxCount; b++) AoSplat(d, b, (const float *)&region.min, voxel, ZERO, dim, dist, axis);
     for (size_t i = 0; i < count; i++) grid[i] = AoByte(dist[i]);
     free(dist); free(axis);
     *regionOut = region;
@@ -4133,9 +4353,13 @@ static bool BuildEntities(SceneData *d)
         int model = -1;
         if (pb <= pm && pb <= pli) {
             BoundingBox b = d->boxes[ib];
+            const MS_TurnedBox *t = TurnedOf(d, ib);
             r = &d->boxRefs[ib];
-            tr.position = Vector3Scale(Vector3Add(b.min, b.max), 0.5f);
-            tr.scale = Vector3Subtract(b.max, b.min);
+            if (t) tr = (MS_Transform){ t->center, t->rotationDeg, t->size };
+            else {
+                tr.position = Vector3Scale(Vector3Add(b.min, b.max), 0.5f);
+                tr.scale = Vector3Subtract(b.max, b.min);
+            }
             d->entityObjects[e] = (MS_ObjRef){ MS_OBJ_BOX, ib };
             d->objEntities[ib++] = e;
         } else if (pm <= pli) {
@@ -4603,6 +4827,7 @@ static int CompareCellItems(const void *pa, const void *pb)
     const CellItem *a = pa, *b = pb;
     if (a->group != b->group) return a->group < b->group ? -1 : 1;
     if (a->big != b->big) return a->big < b->big ? -1 : 1;
+    if (a->turned != b->turned) return a->turned < b->turned ? -1 : 1;
     if (a->cx != b->cx) return a->cx < b->cx ? -1 : 1;
     if (a->cz != b->cz) return a->cz < b->cz ? -1 : 1;
     return a->index < b->index ? -1 : a->index > b->index;
@@ -4613,7 +4838,8 @@ static bool AddRanges(DrawRange **ranges, int *n, int *cap, int group, const Cel
 {
     for (int k = 0; k < count; k++) {
         const CellItem *it = &items[k];
-        if (k == 0 || it->big != items[k - 1].big || it->cx != items[k - 1].cx || it->cz != items[k - 1].cz) {
+        if (k == 0 || it->big != items[k - 1].big || it->turned != items[k - 1].turned || it->cx != items[k - 1].cx ||
+            it->cz != items[k - 1].cz) {
             DrawRange *r = MS_PUSH(*ranges, *n, *cap);
             if (!r) return false;
             *r = (DrawRange){ .group = group, .first = k, .bounds = it->bounds };
@@ -4963,7 +5189,7 @@ static void HideRange(HideJob *J, int from, int to, int *nb, int *stamp, Rect *p
     const SceneData *d = J->d;
     for (int i = from; i < to; i++) {
         int m = d->boxRefs[i].material, nbCount = 0, lo[3], hi[3], cell[3];
-        if (m < 0 || m >= d->materialCount || !d->matDefs[m].merge) continue;
+        if (m < 0 || m >= d->materialCount || !d->matDefs[m].merge || TurnedOf(d, i)) continue;   // (a turned box shows every face)
         const Box6 *A = &J->bx[i];
         // Neighbours: the occluders in A's cells (a touching box shares a cell with A), once
         // each, and the big ones. A box in too many cells only has the big ones.
@@ -5054,7 +5280,8 @@ static bool HideGridBuild(const SceneData *d, const unsigned char *skip, HideGri
         const BoundingBox *B = &d->boxes[i];
         g->bx[i] = (Box6){ { B->min.x, B->min.y, B->min.z }, { B->max.x, B->max.y, B->max.z } };
         int m = d->boxRefs[i].material, lo[3], hi[3];
-        if (m < 0 || m >= d->materialCount || !d->matDefs[m].occluder || (skip && skip[i])) continue;
+        // (a turned box hides nothing: its AABB is not its shape)
+        if (m < 0 || m >= d->materialCount || !d->matDefs[m].occluder || (skip && skip[i]) || TurnedOf(d, i)) continue;
         if (!HideCells(&g->bx[i], lo, hi)) g->big[g->bigCount++] = i;
         else total += (long long)(hi[0] - lo[0] + 1) * (hi[1] - lo[1] + 1) * (hi[2] - lo[2] + 1);
     }
@@ -5076,7 +5303,8 @@ static bool HideGridBuild(const SceneData *d, const unsigned char *skip, HideGri
             }
             for (int i = 0; i < count; i++) {
                 int m = d->boxRefs[i].material, lo[3], hi[3], cell[3];
-                if (m < 0 || m >= d->materialCount || !d->matDefs[m].occluder || (skip && skip[i]) || !HideCells(&g->bx[i], lo, hi))
+                if (m < 0 || m >= d->materialCount || !d->matDefs[m].occluder || (skip && skip[i]) || TurnedOf(d, i) ||
+                    !HideCells(&g->bx[i], lo, hi))
                     continue;
                 for (cell[0] = lo[0]; cell[0] <= hi[0]; cell[0]++)
                     for (cell[1] = lo[1]; cell[1] <= hi[1]; cell[1]++)
@@ -5147,6 +5375,32 @@ static bool FindHiddenFaces(const SceneData *d, const R3D_MeshData *cube, unsign
     return ok;
 }
 
+// The six faces of turned box t appended to md (room for 24 vertices, 36 indices): the cube scaled
+// by its size, turned, moved to its centre (the arithmetic of an instanced cube's rotation, so it
+// lies where its instance would); normals and tangents turned with it (UVs as the cube's: the box
+// is textured in its own frame)
+static void TurnedFaces(R3D_MeshData *md, const MS_TurnedBox *t, const R3D_MeshData *cube)
+{
+    Quaternion q = RotationYpr(t->rotationDeg);
+    Vector3 qv = { q.x, q.y, q.z };
+    for (int f = 0; f < 6; f++) {
+        unsigned int base = (unsigned int)md->vertexCount;
+        for (int c = 0; c < 4; c++) {
+            R3D_Vertex vx = cube->vertices[f * 4 + c];
+            Vector3 v = { vx.position.x * t->size.x, vx.position.y * t->size.y, vx.position.z * t->size.z };
+            Vector3 tv = Vector3Scale(Vector3CrossProduct(qv, v), 2.0f);
+            vx.position = Vector3Add(Vector3Add(Vector3Add(v, Vector3Scale(tv, q.w)), Vector3CrossProduct(qv, tv)), t->center);
+            Vector3 n = R3D_UnpackNormal(vx.normal);
+            Vector4 tg = R3D_UnpackTangent(vx.tangent);
+            Vector3 tn = TurnedDir(t, tg.x, tg.y, tg.z);
+            R3D_PackNormal(vx.normal, TurnedDir(t, n.x, n.y, n.z));
+            R3D_PackTangent(vx.tangent, (Vector4){ tn.x, tn.y, tn.z, tg.w });
+            md->vertices[md->vertexCount++] = vx;
+        }
+        for (int j = 0; j < 6; j++) md->indices[md->indexCount++] = base + cube->indices[f * 6 + j] - (unsigned int)(f * 4);
+    }
+}
+
 // One mesh of the visible faces of the boxes items[0..R->count): R3D's own unit-cube faces (vertex
 // format, UVs, normals, winding), each corner placed the way the GPU placed an instanced cube's,
 // local * scale + position with the same position and scale floats
@@ -5164,6 +5418,11 @@ static bool BuildBoxMesh(SceneData *d, DrawRange *R, const CellItem *items, cons
     }
     for (int k = 0; k < R->count; k++) {
         const BoundingBox *B = &d->boxes[items[k].index];
+        const MS_TurnedBox *t = TurnedOf(d, items[k].index);
+        if (t) {
+            TurnedFaces(&md, t, cube);
+            continue;
+        }
         Vector3 pos = Vector3Scale(Vector3Add(B->min, B->max), 0.5f), scl = Vector3Subtract(B->max, B->min);
         for (int f = 0; f < 6; f++) {
             if (hidden[items[k].index] >> f & 1) continue;
@@ -5180,6 +5439,37 @@ static bool BuildBoxMesh(SceneData *d, DrawRange *R, const CellItem *items, cons
     R3D_UnloadMeshData(md);
     d->boxMeshCount += R->mesh.vertexCount > 0;
     return R->mesh.vertexCount > 0;
+}
+
+// The instance buffer of material m's boxes items[0..count): unit cubes at the boxes' centres,
+// scaled by their sizes; a material with a turned box also gets the rotations (identity for its
+// axis-aligned boxes), the others keep a buffer without them. False when out of memory.
+static bool LoadBoxInstances(SceneData *d, int m, const CellItem *items, int count)
+{
+    bool turned = false;
+    for (int k = 0; k < count && !turned; k++) turned = items[k].turned;
+    R3D_InstanceFlags flags = R3D_INSTANCE_POSITION | R3D_INSTANCE_SCALE | (turned ? R3D_INSTANCE_ROTATION : 0);
+    d->inst[m] = R3D_LoadInstanceBuffer(count, flags);
+    if (d->inst[m].capacity < count) return false;
+    Vector3 *pos = R3D_MapInstances(d->inst[m], R3D_INSTANCE_POSITION, false);
+    Vector3 *scl = R3D_MapInstances(d->inst[m], R3D_INSTANCE_SCALE, false);
+    Quaternion *rot = turned ? R3D_MapInstances(d->inst[m], R3D_INSTANCE_ROTATION, false) : NULL;
+    bool ok = pos && scl && (!turned || rot);
+    for (int k = 0; k < count && ok; k++) {
+        const MS_TurnedBox *t = TurnedOf(d, items[k].index);
+        if (t) {
+            pos[k] = t->center;
+            scl[k] = t->size;
+            rot[k] = RotationYpr(t->rotationDeg);
+            continue;
+        }
+        const BoundingBox *B = &d->boxes[items[k].index];
+        pos[k] = Vector3Scale(Vector3Add(B->min, B->max), 0.5f);
+        scl[k] = Vector3Subtract(B->max, B->min);
+        if (rot) rot[k] = QuaternionIdentity();
+    }
+    R3D_UnmapInstances(d->inst[m], (pos ? R3D_INSTANCE_POSITION : 0) | (scl ? R3D_INSTANCE_SCALE : 0) | (rot ? R3D_INSTANCE_ROTATION : 0));
+    return ok;
 }
 
 #ifdef MONOLITH_EDITOR
@@ -5227,7 +5517,8 @@ static bool UploadBoxes(SceneData *d, char *err, int errSize)
     for (int b = 0; b < d->boxCount; b++) {
         int m = d->boxRefs[b].material;
         if (m < 0 || m >= d->materialCount) continue;
-        items[n++] = MakeCellItem(m, b, d->boxes[b], MS_CELL_SIZE);
+        items[n] = MakeCellItem(m, b, d->boxes[b], MS_CELL_SIZE);
+        items[n++].turned = TurnedOf(d, b) != NULL;
         d->instCount[m]++;
         anyMerge |= d->matDefs[m].merge;
     }
@@ -5260,17 +5551,10 @@ static bool UploadBoxes(SceneData *d, char *err, int errSize)
         if (count == 0) continue;
         int first = d->boxRangeCount;
         if (!d->matDefs[m].merge) {
-            d->inst[m] = R3D_LoadInstanceBuffer(count, R3D_INSTANCE_POSITION | R3D_INSTANCE_SCALE);
-            if (d->inst[m].capacity < count) { ok = false; break; }
-            Vector3 *pos = R3D_MapInstances(d->inst[m], R3D_INSTANCE_POSITION, false);
-            Vector3 *scl = R3D_MapInstances(d->inst[m], R3D_INSTANCE_SCALE, false);
-            if (!pos || !scl) ok = false;
-            for (int k = 0; k < count && ok; k++) {
-                const BoundingBox *B = &d->boxes[items[at + k].index];
-                pos[k] = Vector3Scale(Vector3Add(B->min, B->max), 0.5f);
-                scl[k] = Vector3Subtract(B->max, B->min);
+            if (!LoadBoxInstances(d, m, items + at, count)) {
+                ok = false;
+                if (d->inst[m].capacity < count) break;
             }
-            R3D_UnmapInstances(d->inst[m], (pos ? R3D_INSTANCE_POSITION : 0) | (scl ? R3D_INSTANCE_SCALE : 0));
             d->boxTrisDrawn += 12LL * count;
         }
         if (ok && !AddRanges(&d->boxRanges, &d->boxRangeCount, &d->boxRangeCap, m, items + at, count)) ok = false;
@@ -5520,6 +5804,9 @@ static void FreeData(SceneData *d)
     free(d->viewpoints);
     free(d->boxes);
     free(d->boxRefs);
+    free(d->turned);
+    free(d->boxTurned);
+    free(d->turnedWritten);
     free(d->lights);
     free(d->stmtKeys);
     free(d->stmtLines);
@@ -5558,6 +5845,9 @@ static void Publish(MS_Scene *s, SceneData *d)
     s->boxes = d->boxes;
     s->boxRefs = d->boxRefs;
     s->boxCount = d->boxCount;
+    s->turnedBoxes = d->turned;
+    s->turnedBoxCount = d->turnedCount;
+    s->boxTurned = d->turnedCount > 0 ? d->boxTurned : NULL;
     s->models = d->models;
     s->modelCount = d->modelCount;
     s->modelFiles = d->modelFiles;
@@ -6126,12 +6416,16 @@ static int LiveMatchTake(LiveMatch *m, unsigned long long key, LiveSame same, co
 static unsigned long long BoxKey(const SceneData *d, int i)
 {
     unsigned long long h = Fnv1a64Update(FNV_OFFSET, &d->boxes[i], sizeof(BoundingBox));
+    const MS_TurnedBox *t = TurnedOf(d, i);
+    if (t) h = Fnv1a64Update(h, t, sizeof(MS_TurnedBox));
     return Fnv1a64Update(h, &d->boxRefs[i].material, sizeof(int));
 }
 
 static bool BoxSame(const SceneData *a, int i, const SceneData *b, int j)
 {
-    return memcmp(&a->boxes[i], &b->boxes[j], sizeof(BoundingBox)) == 0 && a->boxRefs[i].material == b->boxRefs[j].material;
+    const MS_TurnedBox *ta = TurnedOf(a, i), *tb = TurnedOf(b, j);
+    return memcmp(&a->boxes[i], &b->boxes[j], sizeof(BoundingBox)) == 0 && a->boxRefs[i].material == b->boxRefs[j].material &&
+           !ta == !tb && (!ta || memcmp(ta, tb, sizeof(MS_TurnedBox)) == 0);
 }
 
 // A model instance: file, placement, materials, shadow, colliders (what its draw and its cache
@@ -6311,7 +6605,7 @@ static long long HideTotal(const SceneData *d)
     long long total = 0;
     for (int b = 0; b < d->boxCount; b++) {
         int m = d->boxRefs[b].material, lo[3], hi[3];
-        if (m < 0 || m >= d->materialCount || !d->matDefs[m].occluder) continue;
+        if (m < 0 || m >= d->materialCount || !d->matDefs[m].occluder || TurnedOf(d, b)) continue;
         Box6 bx = { { d->boxes[b].min.x, d->boxes[b].min.y, d->boxes[b].min.z }, { d->boxes[b].max.x, d->boxes[b].max.y, d->boxes[b].max.z } };
         if (HideCells(&bx, lo, hi)) total += (long long)(hi[0] - lo[0] + 1) * (hi[1] - lo[1] + 1) * (hi[2] - lo[2] + 1);
     }
@@ -6339,7 +6633,8 @@ static bool UploadBoxesLive(MS_Private *p, SceneData *old, SceneData *d, const i
     for (int b = 0; b < d->boxCount; b++) {
         int m = d->boxRefs[b].material;
         if (m < 0 || m >= mc) continue;
-        items[n++] = MakeCellItem(m, b, d->boxes[b], MS_CELL_SIZE);
+        items[n] = MakeCellItem(m, b, d->boxes[b], MS_CELL_SIZE);
+        items[n++].turned = TurnedOf(d, b) != NULL;
         d->instCount[m]++;
         anyMerge |= d->matDefs[m].merge;
     }
@@ -6450,18 +6745,9 @@ static bool UploadBoxesLive(MS_Private *p, SceneData *old, SceneData *d, const i
             if (sameList && old->inst[m].capacity >= count) {
                 d->inst[m] = old->inst[m];
                 B->instFrom[m] = true;
-            } else {
-                d->inst[m] = R3D_LoadInstanceBuffer(count, R3D_INSTANCE_POSITION | R3D_INSTANCE_SCALE);
-                if (d->inst[m].capacity < count) { ok = false; break; }
-                Vector3 *pos = R3D_MapInstances(d->inst[m], R3D_INSTANCE_POSITION, false);
-                Vector3 *scl = R3D_MapInstances(d->inst[m], R3D_INSTANCE_SCALE, false);
-                if (!pos || !scl) ok = false;
-                for (int k = 0; k < count && ok; k++) {
-                    const BoundingBox *Bx = &d->boxes[items[at + k].index];
-                    pos[k] = Vector3Scale(Vector3Add(Bx->min, Bx->max), 0.5f);
-                    scl[k] = Vector3Subtract(Bx->max, Bx->min);
-                }
-                R3D_UnmapInstances(d->inst[m], (pos ? R3D_INSTANCE_POSITION : 0) | (scl ? R3D_INSTANCE_SCALE : 0));
+            } else if (!LoadBoxInstances(d, m, items + at, count)) {
+                ok = false;
+                if (d->inst[m].capacity < count) break;
             }
             d->boxTrisDrawn += 12LL * count;
         }
@@ -6479,8 +6765,9 @@ static bool UploadBoxesLive(MS_Private *p, SceneData *old, SceneData *d, const i
                 const DrawRange *O = &old->boxRanges[o];
                 int oi = old->boxOrder[oat + O->first];
                 CellItem oc = MakeCellItem(m, oi, old->boxes[oi], MS_CELL_SIZE);
-                int c = oc.big != it->big ? (oc.big < it->big ? -1 : 1) : oc.cx != it->cx ? (oc.cx < it->cx ? -1 : 1)
-                      : oc.cz != it->cz ? (oc.cz < it->cz ? -1 : 1) : 0;
+                oc.turned = TurnedOf(old, oi) != NULL;
+                int c = oc.big != it->big ? (oc.big < it->big ? -1 : 1) : oc.turned != it->turned ? (oc.turned < it->turned ? -1 : 1)
+                      : oc.cx != it->cx ? (oc.cx < it->cx ? -1 : 1) : oc.cz != it->cz ? (oc.cz < it->cz ? -1 : 1) : 0;
                 if (c < 0) { o++; continue; }
                 if (c == 0 && O->count == R->count) {
                     bool same = true;
@@ -6562,7 +6849,7 @@ static bool AoUpdate(MS_Private *p, const SceneData *d, int count)
         if (!dist || !axis) { free(dist); free(axis); return false; }
         for (size_t i = 0; i < vol; i++) dist[i] = AO_DIST_MAX;
         for (int b = 0; b < d->boxCount; b++)
-            AoSplatBox(&d->boxes[b], (const float *)&p->aoRegion.min, p->aoVoxel, lo, wdim, dist, axis);
+            AoSplat(d, b, (const float *)&p->aoRegion.min, p->aoVoxel, lo, wdim, dist, axis);
         for (int z = 0; z < wdim[2]; z++)
             for (int y = 0; y < wdim[1]; y++) {
                 unsigned char *row = p->aoGrid + ((size_t)(z + lo[2]) * p->aoDim[1] + (y + lo[1])) * p->aoDim[0] + lo[0];
@@ -6854,10 +7141,12 @@ static void PreviewFree(struct EditPreview *v)
 {
     if (!v) return;
     if (v->buf.capacity > 0) R3D_UnloadInstanceBuffer(v->buf);
-    free(v->objs); free(v->boxOrig); free(v->modelOrig); free(v->localFirst); free(v->colliderOrig); free(v->colliderAt);
+    for (int r = 0; v->turnMesh && r < v->drawRanges; r++) R3D_UnloadMesh(v->turnMesh[r]);
+    R3D_UnloadMeshData(v->cube);
+    free(v->objs); free(v->boxOrig); free(v->turnOrig); free(v->modelOrig); free(v->localFirst); free(v->colliderOrig); free(v->colliderAt);
     free(v->lightOrig); free(v->entityOrig); free(v->reach); free(v->boxSel); free(v->hiddenOrig); free(v->ranges);
     free(v->meshOrig); free(v->instMat); free(v->instSlot); free(v->instScaleOrig); free(v->modelRangeOrig);
-    free(v->bufBox); free(v->drawMat); free(v->drawFirst); free(v->drawCount); free(v->drawBounds);
+    free(v->bufBox); free(v->turnMesh); free(v->turnBounds); free(v->drawMat); free(v->drawFirst); free(v->drawCount); free(v->drawBounds);
     free(v);
 }
 
@@ -6943,16 +7232,55 @@ static void PreviewBoxBuffer(SceneData *d, struct EditPreview *v)
     if (v->bufCount == 0) return;
     Vector3 *pos = R3D_MapInstances(v->buf, R3D_INSTANCE_POSITION, false);
     Vector3 *scl = R3D_MapInstances(v->buf, R3D_INSTANCE_SCALE, false);
-    for (int k = 0; pos && scl && k < v->bufCount; k++) {
+    Quaternion *rot = R3D_MapInstances(v->buf, R3D_INSTANCE_ROTATION, false);
+    for (int k = 0; pos && scl && rot && k < v->bufCount; k++) {
+        // a box with a rotation: its transform (centre, size, rotation); else its bounds as today.
+        // (A turned box of a merged material is drawn by turnMesh instead, as its range will.)
+        const MS_Transform *et = &d->entityTransforms[d->objEntities[v->bufBox[k]]];
+        if (et->rotationDeg.x != 0.0f || et->rotationDeg.y != 0.0f || et->rotationDeg.z != 0.0f) {
+            pos[k] = et->position;
+            scl[k] = d->matDefs[d->boxRefs[v->bufBox[k]].material].merge ? Vector3Zero() : et->scale;
+            rot[k] = RotationYpr(et->rotationDeg);
+            continue;
+        }
         const BoundingBox *B = &d->boxes[v->bufBox[k]];
         pos[k] = Vector3Scale(Vector3Add(B->min, B->max), 0.5f);
         scl[k] = Vector3Subtract(B->max, B->min);
+        rot[k] = QuaternionIdentity();
     }
-    R3D_UnmapInstances(v->buf, (pos ? R3D_INSTANCE_POSITION : 0) | (scl ? R3D_INSTANCE_SCALE : 0));
+    R3D_UnmapInstances(v->buf, (pos ? R3D_INSTANCE_POSITION : 0) | (scl ? R3D_INSTANCE_SCALE : 0) | (rot ? R3D_INSTANCE_ROTATION : 0));
     for (int r = 0; r < v->drawRanges; r++) {
         BoundingBox b = d->boxes[v->bufBox[v->drawFirst[r]]];
         for (int k = 1; k < v->drawCount[r]; k++) b = BoundsUnion(b, d->boxes[v->bufBox[v->drawFirst[r] + k]]);
         v->drawBounds[r] = b;
+        // the turned boxes of a merged material: one mesh of their faces, built as UploadBoxes does
+        R3D_UnloadMesh(v->turnMesh[r]);
+        v->turnMesh[r] = (R3D_Mesh){ 0 };
+        if (!d->matDefs[v->drawMat[r]].merge || v->cube.vertexCount != 24) continue;
+        int n = 0;
+        for (int k = 0; k < v->drawCount[r]; k++) {
+            Vector3 deg = d->entityTransforms[d->objEntities[v->bufBox[v->drawFirst[r] + k]]].rotationDeg;
+            n += deg.x != 0.0f || deg.y != 0.0f || deg.z != 0.0f;
+        }
+        if (n == 0) continue;
+        R3D_MeshData md = R3D_LoadMeshData(24 * n, 36 * n);
+        BoundingBox tb = { { INFINITY, INFINITY, INFINITY }, { -INFINITY, -INFINITY, -INFINITY } };
+        for (int k = 0; md.vertices && md.indices && k < v->drawCount[r]; k++) {
+            int box = v->bufBox[v->drawFirst[r] + k];
+            const MS_Transform *et = &d->entityTransforms[d->objEntities[box]];
+            if (et->rotationDeg.x == 0.0f && et->rotationDeg.y == 0.0f && et->rotationDeg.z == 0.0f) continue;
+            Vector3 h = Vector3Scale(et->scale, 0.5f);
+            MS_TurnedBox t;
+            BoundingBox a;
+            TurnedBoxMake((BoundingBox){ Vector3Subtract(et->position, h), Vector3Add(et->position, h) }, et->rotationDeg, &t, &a);
+            TurnedFaces(&md, &t, &v->cube);
+            tb = BoundsUnion(tb, d->boxes[box]);
+        }
+        if (md.vertices && md.indices) {
+            v->turnBounds[r] = tb;
+            v->turnMesh[r] = R3D_LoadMesh(R3D_PRIMITIVE_TRIANGLES, md, &v->turnBounds[r]);
+        }
+        R3D_UnloadMeshData(md);
     }
 }
 
@@ -7020,6 +7348,7 @@ bool MS_EditPreviewBegin(MS_Scene *s, const MS_ObjRef *objs, int count)
     v->count = count;
     v->objs = malloc(sizeof(MS_ObjRef) * nc);
     v->boxOrig = calloc(nc, sizeof(BoundingBox));
+    v->turnOrig = calloc(nc, sizeof(MS_TurnedBox));
     v->modelOrig = calloc(nc, sizeof(MS_ModelInstance));
     v->localFirst = calloc(nc, sizeof(int));
     v->colliderAt = calloc(nc, sizeof(int));
@@ -7029,6 +7358,8 @@ bool MS_EditPreviewBegin(MS_Scene *s, const MS_ObjRef *objs, int count)
     v->boxSel = calloc(d->boxCount > 0 ? (size_t)d->boxCount : 1, 1);
     v->modelRangeOrig = malloc(sizeof(BoundingBox) * (d->modelRangeCount > 0 ? (size_t)d->modelRangeCount : 1));
     v->bufBox = malloc(sizeof(int) * nc);
+    v->turnMesh = calloc(nc, sizeof(R3D_Mesh));
+    v->turnBounds = calloc(nc, sizeof(BoundingBox));
     v->drawMat = malloc(sizeof(int) * nc);
     v->drawFirst = malloc(sizeof(int) * nc);
     v->drawCount = malloc(sizeof(int) * nc);
@@ -7038,8 +7369,8 @@ bool MS_EditPreviewBegin(MS_Scene *s, const MS_ObjRef *objs, int count)
     v->instScaleOrig = malloc(sizeof(Vector3) * nc);
     v->trisDrawn = d->boxTrisDrawn;
     v->meshCount = d->boxMeshCount;
-    bool ok = v->objs && v->boxOrig && v->modelOrig && v->localFirst && v->colliderAt && v->lightOrig && v->entityOrig && v->reach &&
-              v->boxSel && v->modelRangeOrig && v->bufBox && v->drawMat && v->drawFirst && v->drawCount && v->drawBounds &&
+    bool ok = v->objs && v->boxOrig && v->turnOrig && v->modelOrig && v->localFirst && v->colliderAt && v->lightOrig && v->entityOrig && v->reach &&
+              v->boxSel && v->modelRangeOrig && v->bufBox && v->turnMesh && v->turnBounds && v->drawMat && v->drawFirst && v->drawCount && v->drawBounds &&
               v->instMat && v->instSlot && v->instScaleOrig;
     // What everything was at Begin
     int colliders = 0;
@@ -7051,6 +7382,7 @@ bool MS_EditPreviewBegin(MS_Scene *s, const MS_ObjRef *objs, int count)
         v->entityOrig[i] = d->entityTransforms[e];
         if (o.kind == MS_OBJ_BOX) {
             v->boxOrig[i] = v->reach[i] = d->boxes[o.index];
+            if (TurnedOf(d, o.index)) v->turnOrig[i] = *TurnedOf(d, o.index);
             v->boxSel[o.index] = 1;
         } else if (o.kind == MS_OBJ_MODEL) {
             v->modelOrig[i] = d->models[o.index];
@@ -7179,7 +7511,9 @@ bool MS_EditPreviewBegin(MS_Scene *s, const MS_ObjRef *objs, int count)
             }
             v->drawCount[v->drawRanges - 1]++;
         }
-        v->buf = R3D_LoadInstanceBuffer(v->bufCount, R3D_INSTANCE_POSITION | R3D_INSTANCE_SCALE);
+        // (with rotations: a box may turn during the preview; identity draws as without them)
+        v->buf = R3D_LoadInstanceBuffer(v->bufCount, R3D_INSTANCE_POSITION | R3D_INSTANCE_ROTATION | R3D_INSTANCE_SCALE);
+        v->cube = R3D_GenMeshDataCube(1.0f, 1.0f, 1.0f);
         ok = v->buf.capacity >= v->bufCount;
         if (ok) PreviewBoxBuffer(d, v);
     }
@@ -7213,9 +7547,18 @@ bool MS_EditPreviewSet(MS_Scene *s, const MS_Transform *tr)
             before = d->boxes[o.index];
             Vector3 h = Vector3Scale(tr[i].scale, 0.5f);
             after = (BoundingBox){ Vector3Subtract(tr[i].position, h), Vector3Add(tr[i].position, h) };
+            Vector3 r = tr[i].rotationDeg;
+            if (r.x != 0.0f || r.y != 0.0f || r.z != 0.0f || TurnedOf(d, o.index)) {
+                // turned: its AABB as the box (a turned box's record follows; an axis-aligned one
+                // collides and picks as that AABB until the edit is made)
+                MS_TurnedBox t;
+                TurnedBoxMake(after, r, &t, &after);
+                if (TurnedOf(d, o.index)) d->turned[d->boxTurned[o.index]] = t;
+            }
             d->boxes[o.index] = after;
             if (d->modelCount > 0) d->colliders[o.index] = after;
             d->entityTransforms[e].position = tr[i].position;
+            d->entityTransforms[e].rotationDeg = r;
             d->entityTransforms[e].scale = tr[i].scale;
             boxes = colliders = true;
         } else if (o.kind == MS_OBJ_MODEL) {
@@ -7270,6 +7613,7 @@ void MS_EditPreviewEnd(MS_Scene *s)
         MS_ObjRef o = v->objs[i];
         if (o.kind == MS_OBJ_BOX) {
             d->boxes[o.index] = v->boxOrig[i];
+            if (TurnedOf(d, o.index)) d->turned[d->boxTurned[o.index]] = v->turnOrig[i];
             if (d->modelCount > 0) d->colliders[o.index] = v->boxOrig[i];
             d->entityTransforms[d->objEntities[o.index]] = v->entityOrig[i];
             colliders = true;
@@ -7310,6 +7654,11 @@ static void PreviewDraw(MS_Private *p)
         R3D_BeginCluster(v->drawBounds[r]);
         R3D_DrawMeshInstancedEx(p->cube, d->materials[v->drawMat[r]].material, v->buf, v->drawFirst[r], v->drawCount[r]);
         R3D_EndCluster();
+        if (v->turnMesh[r].vertexCount > 0) {
+            R3D_BeginCluster(v->turnBounds[r]);
+            R3D_DrawMeshInstancedEx(v->turnMesh[r], d->materials[v->drawMat[r]].material, d->unit, 0, 1);
+            R3D_EndCluster();
+        }
     }
 }
 
@@ -7928,18 +8277,34 @@ MS_Hit MS_Raycast(const MS_Scene *s, Vector3 origin, Vector3 dir, float maxDist)
             int i = sd->colliderOrder[k];
             if (i >= s->boxCount) continue;     // a model collider: models are hit by their triangles below
             const BoundingBox *b = &s->boxes[i];
-            const float mn[3] = { b->min.x, b->min.y, b->min.z };
-            const float mx[3] = { b->max.x, b->max.y, b->max.z };
+            float mn[3] = { b->min.x, b->min.y, b->min.z };
+            float mx[3] = { b->max.x, b->max.y, b->max.z };
+            const float *O = o, *D = d;
+            // A turned box: the same slab test in its own frame (the ray's origin and direction
+            // along its axes, the box +-size / 2 about its centre)
+            const MS_TurnedBox *T = TurnedOf(sd, i);
+            float to[3], td[3];
+            if (T) {
+                Vector3 rel = Vector3Subtract(origin, T->center);
+                for (int a = 0; a < 3; a++) {
+                    to[a] = Vector3DotProduct(rel, T->axis[a]);
+                    td[a] = Vector3DotProduct(dir, T->axis[a]);
+                    mx[a] = ((const float *)&T->size)[a] * 0.5f;
+                    mn[a] = -mx[a];
+                }
+                O = to;
+                D = td;
+            }
             float tNear = -INFINITY, tFar = INFINITY;
             int axis = -1;
             bool miss = false;
             for (int a = 0; a < 3 && !miss; a++) {
-                if (fabsf(d[a]) < 1e-12f) {
+                if (fabsf(D[a]) < 1e-12f) {
                     // Parallel to this slab: inside it or never
-                    if (o[a] < mn[a] || o[a] > mx[a]) miss = true;
+                    if (O[a] < mn[a] || O[a] > mx[a]) miss = true;
                     continue;
                 }
-                float t1 = (mn[a] - o[a]) / d[a], t2 = (mx[a] - o[a]) / d[a];
+                float t1 = (mn[a] - O[a]) / D[a], t2 = (mx[a] - O[a]) / D[a];
                 if (t1 > t2) { float t = t1; t1 = t2; t2 = t; }
                 if (t1 > tNear) { tNear = t1; axis = a; }
                 if (t2 < tFar) tFar = t2;
@@ -7954,8 +8319,8 @@ MS_Hit MS_Raycast(const MS_Scene *s, Vector3 origin, Vector3 dir, float maxDist)
             best.dist = tNear;
             best.point = Vector3Add(origin, Vector3Scale(dir, tNear));
             float n[3] = { 0, 0, 0 };
-            n[axis] = d[axis] > 0.0f ? -1.0f : 1.0f;
-            best.normal = (Vector3){ n[0], n[1], n[2] };
+            n[axis] = D[axis] > 0.0f ? -1.0f : 1.0f;
+            best.normal = T ? Vector3Scale(T->axis[axis], n[axis]) : (Vector3){ n[0], n[1], n[2] };
         }
     }
     // Models: only strictly nearer than the best box (a box wins a tie)
@@ -8064,6 +8429,24 @@ static inline bool Overlaps(BoundingBox a, Vector3 mn, Vector3 mx)
     return a.min.x < mx.x && a.max.x > mn.x && a.min.y < mx.y && a.max.y > mn.y && a.min.z < mx.z && a.max.z > mn.z;
 }
 
+// Strict overlap of the AABB a with turned box t (separating axes: the world's three, the box's
+// three and their nine cross products; touching is not an overlap)
+static bool OverlapsTurned(BoundingBox a, const MS_TurnedBox *t)
+{
+    Vector3 ca = Vector3Scale(Vector3Add(a.min, a.max), 0.5f), ha = Vector3Scale(Vector3Subtract(a.max, a.min), 0.5f);
+    Vector3 T = Vector3Subtract(t->center, ca), hb = Vector3Scale(t->size, 0.5f);
+    const Vector3 E[3] = { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } };
+    for (int k = 0; k < 15; k++) {
+        Vector3 L = k < 3 ? E[k] : k < 6 ? t->axis[k - 3] : Vector3CrossProduct(E[(k - 6) / 3], t->axis[(k - 6) % 3]);
+        if (k >= 6 && Vector3LengthSqr(L) < 1e-12f) continue;     // (parallel axes: no separating axis there)
+        float ra = ha.x * fabsf(L.x) + ha.y * fabsf(L.y) + ha.z * fabsf(L.z);
+        float rb = hb.x * fabsf(Vector3DotProduct(L, t->axis[0])) + hb.y * fabsf(Vector3DotProduct(L, t->axis[1])) +
+                   hb.z * fabsf(Vector3DotProduct(L, t->axis[2]));
+        if (fabsf(Vector3DotProduct(T, L)) >= ra + rb) return false;
+    }
+    return true;
+}
+
 int MS_FirstCollision(const MS_Scene *s, BoundingBox a)
 {
     // Through the colliders' BVH (a node strictly overlaps `a` whenever one of its colliders does)
@@ -8080,7 +8463,8 @@ int MS_FirstCollision(const MS_Scene *s, BoundingBox a)
         }
         for (int k = nd->first; k < nd->first + nd->count; k++) {
             int i = d->colliderOrder[k];
-            if ((first < 0 || i < first) && Overlaps(a, s->colliders[i].min, s->colliders[i].max)) first = i;
+            if ((first < 0 || i < first) && Overlaps(a, s->colliders[i].min, s->colliders[i].max) &&
+                (i >= d->boxCount || !TurnedOf(d, i) || OverlapsTurned(a, TurnedOf(d, i)))) first = i;
         }
     }
     return first;
@@ -8089,6 +8473,81 @@ int MS_FirstCollision(const MS_Scene *s, BoundingBox a)
 bool MS_Collides(const MS_Scene *s, BoundingBox a)
 {
     return MS_FirstCollision(s, a) >= 0;
+}
+
+// The lowest and highest y of turned box t over the rectangle [x0, x1] x [z0, z1]: the extremes of
+// the polytope "box inside the vertical prism over the rectangle", taken over its candidate vertices
+// (the box's corners inside the prism, its 12 edges cut by the prism's 4 side planes, the prism's 4
+// vertical edges through the box). False when the box isn't over the rectangle.
+static bool TurnedSpanY(const MS_TurnedBox *t, float x0, float x1, float z0, float z1, float *lo, float *hi)
+{
+    Vector3 h = Vector3Scale(t->size, 0.5f), q[8];
+    *lo = INFINITY;
+    *hi = -INFINITY;
+    for (int c = 0; c < 8; c++) {
+        q[c] = TurnedPoint(t, c & 1 ? h.x : -h.x, c & 2 ? h.y : -h.y, c & 4 ? h.z : -h.z);
+        if (q[c].x >= x0 && q[c].x <= x1 && q[c].z >= z0 && q[c].z <= z1) { *lo = fminf(*lo, q[c].y); *hi = fmaxf(*hi, q[c].y); }
+    }
+    // the edges (corners that differ in one bit) cut by the planes x = x0, x1 and z = z0, z1
+    for (int c = 0; c < 8; c++)
+        for (int bit = 1; bit < 8; bit <<= 1) {
+            if (c & bit) continue;
+            Vector3 a = q[c], b = q[c | bit];
+            for (int pl = 0; pl < 4; pl++) {
+                bool px = pl < 2;
+                float v = px ? (pl == 0 ? x0 : x1) : (pl == 2 ? z0 : z1);
+                float av = px ? a.x : a.z, bv = px ? b.x : b.z;
+                if (av == bv || (av - v) * (bv - v) > 0.0f) continue;
+                float f = (v - av) / (bv - av);
+                float other = px ? a.z + (b.z - a.z) * f : a.x + (b.x - a.x) * f;
+                if (px ? (other < z0 || other > z1) : (other < x0 || other > x1)) continue;
+                float y = a.y + (b.y - a.y) * f;
+                *lo = fminf(*lo, y);
+                *hi = fmaxf(*hi, y);
+            }
+        }
+    // the prism's vertical edges: the y interval where (X, y, Z) is inside the box on every axis
+    for (int e = 0; e < 4; e++) {
+        Vector3 r = { (e & 1 ? x1 : x0) - t->center.x, -t->center.y, (e & 2 ? z1 : z0) - t->center.z };
+        float ylo = -INFINITY, yhi = INFINITY;
+        for (int k = 0; k < 3 && ylo <= yhi; k++) {
+            float q0 = Vector3DotProduct(r, t->axis[k]), ay = t->axis[k].y, hk = ((const float *)&h)[k];
+            if (fabsf(ay) < 1e-12f) {
+                if (fabsf(q0) > hk) ylo = INFINITY;
+                continue;
+            }
+            float u = (-hk - q0) / ay, w = (hk - q0) / ay;
+            ylo = fmaxf(ylo, fminf(u, w));
+            yhi = fminf(yhi, fmaxf(u, w));
+        }
+        if (ylo <= yhi) { *lo = fminf(*lo, ylo); *hi = fmaxf(*hi, yhi); }
+    }
+    return *lo <= *hi;
+}
+
+float MS_ColliderTop(const MS_Scene *s, int c, BoundingBox box, bool *walkable)
+{
+    const SceneData *d = s->priv->d;
+    if (walkable) *walkable = true;
+    if (c < 0 || c >= s->colliderCount) return 0.0f;
+    const MS_TurnedBox *t = c < d->boxCount ? TurnedOf(d, c) : NULL;
+    if (!t) return s->colliders[c].max.y;
+    if (walkable) {
+        float up = fmaxf(fabsf(t->axis[0].y), fmaxf(fabsf(t->axis[1].y), fabsf(t->axis[2].y)));
+        *walkable = up >= cosf(MS_WALKABLE_SLOPE_DEG * DEG2RAD);
+    }
+    float lo, hi;
+    return TurnedSpanY(t, box.min.x, box.max.x, box.min.z, box.max.z, &lo, &hi) ? hi : s->colliders[c].max.y;
+}
+
+float MS_ColliderBottom(const MS_Scene *s, int c, BoundingBox box)
+{
+    const SceneData *d = s->priv->d;
+    if (c < 0 || c >= s->colliderCount) return 0.0f;
+    const MS_TurnedBox *t = c < d->boxCount ? TurnedOf(d, c) : NULL;
+    float lo, hi;
+    if (!t || !TurnedSpanY(t, box.min.x, box.max.x, box.min.z, box.max.z, &lo, &hi)) return s->colliders[c].min.y;
+    return lo;
 }
 
 const MS_Ref *MS_ObjectRef(const MS_Scene *s, MS_ObjRef obj)

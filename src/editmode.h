@@ -24,7 +24,7 @@ typedef struct {
     bool idOpen;
     char idText[12];
     int idLine, idHas, idNext; // the line, its id (0 = implicit), the next free id
-    TransformModal modal;   // G / R / S (transform.c)
+    TransformModal modal;   // G / ALT+R / S and the rotate gizmo (transform.c)
 } EditMode;
 
 typedef enum {
@@ -34,9 +34,11 @@ typedef enum {
 } EditModeResult;
 
 // Spectator-mode input, after DesignerUpdate and only when the designer doesn't capture the
-// keys: M toggles the mode; in it G / R / S start the transform modal (transform.c; while it runs
-// it takes every key and the mouse: call only this then, with the frozen camera), arrows / PGUP /
-// PGDN move the selection (snap: N), ALT+R / ALT+SHIFT+R turn it a step, DELETE removes it, CTRL+D
+// keys: M toggles the mode; in it G / ALT+R / S and LMB on the rotate gizmo start the transform
+// modal (transform.c; while it runs it takes every key and the mouse: call only this then, with the
+// frozen camera), arrows / PGUP / PGDN move the selection (snap: N; SHIFT+N the angle snap), R /
+// SHIFT+R turn it 90 / -90 degrees, ALT+SHIFT+R resets its rotation, L switches the gizmo's axes
+// (global / local), DELETE removes it, CTRL+D
 // duplicates it, CTRL+I gives the selection's line an id (the id panel); plain I is the model
 // picker's (modelpicker.c: main.c opens it). CTRL+Z / CTRL+SHIFT+Z
 // (CTRL+Y) undo / redo, CTRL+S saves and CTRL+SHIFT+DELETE clears the list of edits a rebase
@@ -47,9 +49,19 @@ typedef enum {
 EditModeResult EditModeUpdate(EditMode *m, Designer *d, Camera3D cam, float dt);
 // The transform modal runs: the camera is frozen, the cursor hidden, every key and click is its
 bool EditModeModalRunning(const EditMode *m);
-// --edit-modal "<g|r|s> [lock] [typed]": opens the mode and the modal on the selection (HUD shots);
-// EditModeFinishModal then commits it (one edit, as LMB) or cancels it (everything back)
-bool EditModeOpenModal(EditMode *m, Designer *d, Camera3D cam, const char *spec);
+// --edit-modal (docs/live-editing.md 11.10): "<g|r|s> [lock] [typed]" (r: the ALT+R modal), "ring
+// <x|y|z|xx|yy|zz|view> <deg> ...", "ball <dx> <dy> ..." open the mode and the modal on the
+// selection (HUD shots), EditModeFinishModal then commits it (one edit, as LMB) or cancels it
+// (everything back); "r90", "r-90", "reset", "rot <y> <p> <r>" apply that edit now (end 2, cancel:
+// nothing; *reloaded: it went live); "gizmo [hover <x|y|z|view|ball>]" only shows the gizmo.
+// false: a bad spec, or the edit was refused (the log says why)
+bool EditModeOpenModal(EditMode *m, Designer *d, Camera3D cam, const char *spec, int end, bool *reloaded);
+// The rotate gizmo: what is under the cursor px (call every frame before DesignerUpdate; enabled
+// false when the cursor isn't the mode's, a panel has it or RMB flies). True: an LMB press there is
+// the gizmo's (don't let it select)
+bool EditModeGizmoHover(EditMode *m, Designer *d, Camera3D cam, Vector2 px, bool enabled);
+// The gizmo (2D, after R3D_End, on top of the scene)
+void EditModeDrawGizmo(EditMode *m, Designer *d, Camera3D cam);
 EditModeResult EditModeFinishModal(EditMode *m, Designer *d, bool commit);
 // The modal's axis guides (3D, after R3D_End, like DesignerDrawOverlay)
 void EditModeDrawGuides(const EditMode *m, Camera3D cam);

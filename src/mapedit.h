@@ -1,4 +1,4 @@
-// Manual map edits: remove, move, turn, duplicate and add objects as minimal text edits to the
+// Manual map edits: remove, move, turn, scale, duplicate and add objects as minimal text edits to the
 // map file (mapedit.c), with undo / redo; the edit script of --apply-edits
 #ifndef MONOLITH_MAPEDIT_H
 #define MONOLITH_MAPEDIT_H
@@ -10,19 +10,22 @@ typedef enum {
     EDIT_SCALE,             // factor[] about pivot[] (boxes: corners; models: scale and position)
     EDIT_SIZE,              // boxes: size[] about the box's centre (0 = keep that axis)
     EDIT_ID_REMOVE,         // the selection's lines lose their `id N` prefix (objects stay)
+    EDIT_SET_ROTATION,      // ypr[] absolute, each object about its own centre / origin (reset: 0 0 0;
+                            // docs/live-editing.md 11.9)
 } EditOpKind;
 
 typedef struct {
     EditOpKind kind;
     double delta[3];        // EDIT_MOVE: the shift; EDIT_DUPLICATE: where the copies go (metres)
-    double degrees;         // EDIT_ROTATE: yaw; models any angle, boxes multiples of 90
-    // EDIT_ROTATE beyond a yaw (docs/live-editing.md 7.3, 7.5): with axis[] all 0 the turn is
-    // R = Ry(degrees) Rx(pitch) Rz(roll); else `angle` degrees about axis[] (a unit vector).
-    // Global (the turn composes on the left of a model's rotation, and with hasPivot the
-    // objects orbit pivot[]) or local (on the right: about each model's own axes, each about its
-    // own origin; boxes have no local axes and turn as global). Without hasPivot every object
-    // turns about its own centre (boxes) / origin (models). Boxes: only yaw, multiples of 90.
-    // Only `degrees` set (no pivot, axis, pitch, roll, local) is the old `turn <yaw>`, unchanged.
+    double degrees;         // EDIT_ROTATE: yaw (any angle)
+    // EDIT_ROTATE beyond a yaw (docs/live-editing.md 7.3, 7.5, 11.9): with axis[] all 0 the turn
+    // is R = Ry(degrees) Rx(pitch) Rz(roll); else `angle` degrees about axis[] (a unit vector).
+    // Global (the turn composes on the left of a model's or box's rotation, and with hasPivot the
+    // objects orbit pivot[]) or local (on the right: about each object's own axes, each about its
+    // own centre / origin). Without hasPivot every object turns about its own centre (boxes) /
+    // origin (models). A box whose rotation ends up axis-aligned is written as plain corners
+    // (no `rot`), else with `rot`. Only `degrees` set (no pivot, axis, pitch, roll, local) is the
+    // plain `turn <yaw>`.
     double pitch, roll;
     double axis[3], angle;
     bool local, hasPivot;
@@ -31,6 +34,7 @@ typedef struct {
                             // position + `scale`: each model axis takes the factor of the world axis
                             // nearest to it; local: factor[i] scales the models' own axis i)
     double size[3];         // EDIT_SIZE: box / block size in metres about its centre, 0 = keep
+    double ypr[3];          // EDIT_SET_ROTATION: yaw, pitch, roll in degrees (R = Ry Rx Rz)
     const char *modelPath;  // EDIT_ADD: package-relative model file
     double pos[3];          // EDIT_ADD: where it stands (origin bottom)
     MS_ObjRef anchor;       // EDIT_ADD: the new line goes right after this object's line (its group)
@@ -149,8 +153,9 @@ typedef enum {
 // classes[i] for objs[i] (each line read once; allocates only while reading the lines)
 void MapEditClassify(const MS_ObjRef *objs, int count, unsigned char *classes);
 // The transform an object of class cls (EditObjClass) gets from op (EDIT_MOVE, EDIT_ROTATE,
-// EDIT_SCALE), with the same math MapEditApply writes the line with (before its rounding to the
-// written decimals): the transform modal's preview. False: it doesn't follow (*out = *in)
+// EDIT_SET_ROTATION, EDIT_SCALE), with the same math MapEditApply writes the line with (before its
+// rounding to the written decimals): the transform modal's preview. A box that becomes
+// axis-aligned gets its permuted size and rotation 0, as written. False: it doesn't follow (*out = *in)
 bool MapEditPreviewTransform(const EditOp *op, int cls, const MS_Transform *in, MS_Transform *out);
 
 // --apply-edits <script>: runs an edit script against the loaded scene (a noGpu load of
