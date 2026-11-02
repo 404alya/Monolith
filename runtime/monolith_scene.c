@@ -2798,26 +2798,71 @@ static bool ParseText(Parser *P, const char *text, int size)
 #define CM_MAX_ENV          4096        // env records (the key tables have ~120 keys)
 static const unsigned char CM_MAGIC[8] = { 0x89, 'M', 'A', 'P', 'B', '\r', '\n', 0x1A };
 
+// --- Records. The field order, types and array sizes are the file's layout: any change here
+// bumps CM_VERSION. A string field (`uint32_t name`, `path`, …) is an offset into the string table,
+// CM_NONE for none. A `line` is the map line a value came from (for messages); never negative.
+
+// The file header (64 bytes, at offset 0). sectionTable: the section table's offset;
+// sourceName: the source file's name (a string); sourceHash / sourceSize: FNV-1a 64 and size of the
+// source text, to tell a stale compiled file; flags: 0.
 typedef struct {
     uint8_t magic[8];
     uint32_t version, headerSize, byteOrder, formatVersion, sectionCount, sectionTable;
     uint64_t fileSize, sourceHash, sourceSize;
     uint32_t sourceName, flags;
 } CmHeader;
-typedef struct { uint32_t id, offset, count, recordSize; } CmSection;
-typedef struct { int32_t line, prim, group, material, copy, part; } CmRef;      // = MS_Ref
-typedef struct { float min[3], max[3]; CmRef ref; } CmBox;
+
+// One section table entry: where section `id` lies in the file, how many records it has and
+// their size (which must equal the reader's: CM_SECTION[id].size)
+typedef struct {
+    uint32_t id, offset, count, recordSize;
+} CmSection;
+
+// The source reference of a box, model or light: MS_Ref in its field order (map line, statement
+// index, group, material, repeat copy, part of a primitive)
+typedef struct {
+    int32_t line, prim, group, material, copy, part;
+} CmRef;
+
+// A box (section "boxes"), already expanded from repeat / at / stairs / waffle. A turned box holds
+// the box as written (before the turn); its CmBoxTurn holds the rotation.
+typedef struct {
+    float min[3], max[3];
+    CmRef ref;
+} CmBox;
+
+// A `material` line. maps: texture paths (CM_NONE for none); mapLine: the line of each map key;
+// cull, transparency, blend: R3D's enums; inherit: INHERIT_* bits (`inherit`, model overrides);
+// unlit / instanced: 0 or 1; uniformFirst / samplerFirst: the material's first record in the
+// uniforms / samplers sections (each material's ranges follow the previous material's).
 typedef struct {
     uint32_t name, shader, maps[MAP_COUNT];     // maps: albedo, normal, orm, emission
     int32_t line, shaderLine, mapLine[MAP_COUNT];
     uint8_t albedo[4], emission[4];
-    float emissionEnergy, normalScale, occlusion, roughness, metalness, specular, uvScale[2], uvOffset[2], alphaCutoff;
+    float emissionEnergy, normalScale, occlusion, roughness, metalness, specular,
+          uvScale[2], uvOffset[2], alphaCutoff;
     int32_t cull, transparency, blend, priority, wrap;
     uint32_t inherit, unlit, instanced;
     uint32_t uniformFirst, uniformCount, samplerFirst, samplerCount;
 } CmMaterial;
-typedef struct { uint32_t name, count; float v[4]; } CmUniform;
-typedef struct { uint32_t name, path; int32_t line; uint32_t data; } CmSampler;   // data: 1 = data_sampler
+
+// A material's shader uniform (`uniform <name> f [f f f]`): count: how many of v are used (1 to 4); the
+// others are 0
+typedef struct {
+    uint32_t name, count;
+    float v[4];
+} CmUniform;
+
+// A material's texture sampler (`sampler <name> "path"` or `data_sampler <name> "path"`)
+typedef struct {
+    uint32_t name, path;
+    int32_t line;
+    uint32_t data;                              // data: 1 = data_sampler
+} CmSampler;
+
+// A `light` line as the parser leaves it (direction normalised, defaults filled in, clip box
+// shifted). type: R3D_LightType; inner / outer: a spot's cut-off angles; shadow / clip: 0 or 1;
+// clipMin / clipMax: the clip box (zeros without one).
 typedef struct {
     uint32_t type;
     float position[3], direction[3];
@@ -2827,8 +2872,21 @@ typedef struct {
     float clipMin[3], clipMax[3];
     CmRef ref;
 } CmLight;
-typedef struct { uint32_t name; float eye[3], target[3]; } CmViewpoint;
-typedef struct { uint32_t path; int32_t line; } CmModelFile;
+
+// A `viewpoint` line: its name, the eye and the point it looks at
+typedef struct {
+    uint32_t name;
+    float eye[3], target[3];
+} CmViewpoint;
+
+// A model file the map's `model` lines use: its path and the line that first names it
+typedef struct {
+    uint32_t path;
+    int32_t line;
+} CmModelFile;
+
+// A `model` line (an instance) as written. file: index into the model files section; origin,
+// collide: MS_ModelOrigin, MS_ModelCollide; castShadow: 0 or 1.
 typedef struct {
     int32_t file;
     float position[3], rotationDeg[3], scale[3];
@@ -2836,12 +2894,39 @@ typedef struct {
     int32_t colliderFirst, colliderCount, slotFirst, slotCount;     // in the model colliders / slots sections
     CmRef ref;
 } CmModel;
-typedef struct { float min[3], max[3]; } CmCollider;
-typedef struct { int32_t slot, material; } CmSlot;
-typedef struct { uint32_t key, type, value[6]; } CmEnv;         // key: the env key's name; type: T_*
-typedef struct { uint32_t hasSpawn; float feet[3], yawDeg, pitchDeg; } CmSpawn;
-typedef struct { uint32_t box; float rotationDeg[3]; } CmBoxTurn;  // a turned box: its CmBox holds the box as written
 
+// A model's collision box in model space (section "model colliders"; `collide box …`)
+typedef struct {
+    float min[3], max[3];
+} CmCollider;
+
+// A model's slot material (section "model slots"; `material.N "name"`): the slot number N and
+// the material's index
+typedef struct {
+    int32_t slot, material;
+} CmSlot;
+
+// An `env` key with its final value. value: the type's words (a float, an int, 0 / 1, four colour
+// components 0-255, 3 / 4 / 6 floats, an enum index or a path's string offset); the unused words
+// are 0.
+typedef struct {
+    uint32_t key, type, value[6];               // key: the env key's name; type: T_*
+} CmEnv;
+
+// The `spawn` line (always one record; hasSpawn 0 without a spawn line)
+typedef struct {
+    uint32_t hasSpawn;
+    float feet[3], yawDeg, pitchDeg;
+} CmSpawn;
+
+// A box's turn (`box … rot`, version 3): the box's index and its rotation as written (yaw, pitch,
+// roll). The turned box's CmBox holds the box as written.
+typedef struct {
+    uint32_t box;
+    float rotationDeg[3];
+} CmBoxTurn;
+
+// The section ids, in file order (an id is also the section's place in the section table)
 enum {
     CM_STRINGS = 1, CM_BOXES, CM_GROUPS, CM_MATERIALS, CM_UNIFORMS, CM_SAMPLERS, CM_LIGHTS, CM_VIEWPOINTS,
     CM_MODEL_FILES, CM_MODELS, CM_COLLIDERS, CM_SLOTS, CM_STATEMENTS, CM_ENV, CM_SPAWN, CM_DEPS,
@@ -2849,8 +2934,17 @@ enum {
     CM_SECTIONS = CM_BOX_TURNS,
     CM_SECTIONS_V2 = CM_DEPS            // the sections of a version 2 file
 };
+
+// What the code knows about one section: its name (for messages), its record size and the most
+// records it may have
+typedef struct {
+    const char *name;
+    uint32_t size;
+    uint32_t max;
+} CmSectionInfo;
+
 // Per section id: name (messages), record size, most records
-static const struct { const char *name; uint32_t size; uint32_t max; } CM_SECTION[CM_SECTIONS + 1] = {
+static const CmSectionInfo CM_SECTION[CM_SECTIONS + 1] = {
     [CM_STRINGS]     = { "strings", 1, MS_MAX_COMPILED_BYTES },
     [CM_BOXES]       = { "boxes", sizeof(CmBox), MS_MAX_OBJECTS },
     [CM_GROUPS]      = { "groups", 4, MS_MAX_OBJECTS },
@@ -2870,6 +2964,9 @@ static const struct { const char *name; uint32_t size; uint32_t max; } CM_SECTIO
     [CM_BOX_TURNS]   = { "box turns", sizeof(CmBoxTurn), MS_MAX_OBJECTS },
 };
 
+// --- Reader
+
+// Whether the bytes start with the compiled-map magic (how a load tells the two inputs apart)
 static bool IsCompiledMap(const char *bytes, int size)
 {
     return size >= (int)sizeof(CM_MAGIC) && memcmp(bytes, CM_MAGIC, sizeof(CM_MAGIC)) == 0;
@@ -2877,16 +2974,18 @@ static bool IsCompiledMap(const char *bytes, int size)
 
 // A reader over the checked file: the bytes, its sections, and where messages go
 typedef struct {
-    SceneData *d;
+    SceneData *d;                   // the scene being filled
     const unsigned char *bytes;
     uint32_t size;
-    CmSection sec[CM_SECTIONS + 1];
+    CmSection sec[CM_SECTIONS + 1]; // by section id, from the checked section table (empty: not in the file)
     const char *str;                // the string table (NUL-terminated: checked)
     uint32_t strSize;
-    char *err;
+    char *err;                      // the message buffer: "<file>: <message>"
     int errSize;
 } CmReader;
 
+// Writes "<file>: <message>" into the reader's message buffer; returns false, so a check can
+// `return CmFail(…)`
 static bool CmFail(CmReader *R, const char *fmt, ...)
 {
     char msg[400];
@@ -2932,30 +3031,50 @@ static bool CmPath(CmReader *R, uint32_t off, bool optional, const char *what, c
     *out = NULL;
     if (!CmString(R, off, optional, what, &s)) return false;
     if (!s) return true;
+
+    // The parser's checks: inside the package, and the file is there
     if (!InsidePackage(s)) return CmFail(R, "%s: path must stay inside the package: \"%s\"", what, s);
     char full[MS_PATH_MAX];
-    if (snprintf(full, sizeof(full), "%s%s", R->d->root, s) >= (int)sizeof(full)) return CmFail(R, "path too long: \"%s\"", s);
-    if (!FileExists(full)) return CmFail(R, "file not found: \"%s\" (paths are relative to the package folder)", s);
+    if (snprintf(full, sizeof(full), "%s%s", R->d->root, s) >= (int)sizeof(full))
+        return CmFail(R, "path too long: \"%s\"", s);
+    if (!FileExists(full))
+        return CmFail(R, "file not found: \"%s\" (paths are relative to the package folder)", s);
+
     if (!(*out = MS_StrDup(s))) return CmFail(R, "out of memory");
     return true;
 }
 
 // The number checks the reader repeats. Each copies a guarantee of the text parser, so a file
 // that passes them holds only values a parse could have produced.
+
+// n finite floats
 static bool FiniteN(const float *v, int n)
 {
     for (int k = 0; k < n; k++)
         if (!isfinite(v[k])) return false;
     return true;
 }
+
+// A finite float[3]; a finite Vector3
 static bool Finite3(const float *v) { return FiniteN(v, 3); }
 static bool FiniteV3(Vector3 v) { return isfinite(v.x) && isfinite(v.y) && isfinite(v.z); }
-static bool InCoordLimit(const float *v) { return Finite3(v) && fabsf(v[0]) <= MS_COORD_LIMIT && fabsf(v[1]) <= MS_COORD_LIMIT && fabsf(v[2]) <= MS_COORD_LIMIT; }
+
+// A position the parser reads as written (never shifted): finite and within ±MS_COORD_LIMIT
+static bool InCoordLimit(const float *v)
+{
+    return Finite3(v) &&
+           fabsf(v[0]) <= MS_COORD_LIMIT &&
+           fabsf(v[1]) <= MS_COORD_LIMIT &&
+           fabsf(v[2]) <= MS_COORD_LIMIT;
+}
+
 // Finite corners with min <= max on every axis (a NaN fails the comparison too)
 static bool FiniteOrdered(const float *min, const float *max)
 {
-    return Finite3(min) && Finite3(max) && min[0] <= max[0] && min[1] <= max[1] && min[2] <= max[2];
+    return Finite3(min) && Finite3(max) &&
+           min[0] <= max[0] && min[1] <= max[1] && min[2] <= max[2];
 }
+
 // Box()'s check: shifts and sizes can overflow even when every number written is finite, so the
 // corners and the size must both be finite
 static bool FiniteBox(BoundingBox b)
@@ -2963,14 +3082,21 @@ static bool FiniteBox(BoundingBox b)
     return FiniteV3(b.min) && FiniteV3(b.max) &&
            isfinite(b.max.x - b.min.x) && isfinite(b.max.y - b.min.y) && isfinite(b.max.z - b.min.z);
 }
+
+// A record's float[3] as a Vector3
 static Vector3 V3(const float *v) { return (Vector3){ v[0], v[1], v[2] }; }
 
 // An MS_Ref; boxes and lights always use a material (the active `use`), models may have none (-1)
-static bool CmReadRef(CmReader *R, const CmRef *c, bool modelMaterial, const char *what, uint32_t i, MS_Ref *out)
+static bool CmReadRef(CmReader *R, const CmRef *c, bool modelMaterial, const char *what, uint32_t i,
+                      MS_Ref *out)
 {
     const SceneData *d = R->d;
-    if (c->line < 0 || c->prim < 0 || c->prim >= d->stmtCount || c->group < -1 || c->group >= d->groupCount ||
-        c->material < (modelMaterial ? -1 : 0) || c->material >= d->materialCount || c->copy < 0 || c->part < 0)
+    if (c->line < 0 ||
+        c->prim < 0 || c->prim >= d->stmtCount ||
+        c->group < -1 || c->group >= d->groupCount ||
+        c->material < (modelMaterial ? -1 : 0) || c->material >= d->materialCount ||
+        c->copy < 0 ||
+        c->part < 0)
         return CmFail(R, "%s %u: source reference out of range", what, i);
     *out = (MS_Ref){ c->line, c->prim, c->group, c->material, c->copy, c->part };
     return true;
@@ -2979,6 +3105,7 @@ static bool CmReadRef(CmReader *R, const CmRef *c, bool modelMaterial, const cha
 // The header and the section table: sizes, versions, bounds. Nothing else is read before this.
 static bool CmReadHeader(CmReader *R, CmHeader *h)
 {
+    // The header: magic, byte order, versions, sizes
     if (R->size < sizeof(CmHeader)) return CmFail(R, "compiled map: file too short (%u bytes)", R->size);
     memcpy(h, R->bytes, sizeof(*h));
     if (memcmp(h->magic, CM_MAGIC, sizeof(CM_MAGIC)) != 0) return CmFail(R, "not a compiled map");
@@ -2987,16 +3114,24 @@ static bool CmReadHeader(CmReader *R, CmHeader *h)
     if (h->version < CM_VERSION_OLDEST || h->version > CM_VERSION)
         return CmFail(R, "compiled map version %u; this runtime reads compiled map versions %d to %d: compile the map again",
                       h->version, CM_VERSION_OLDEST, CM_VERSION);
-    uint32_t sections = h->version == 2 ? CM_SECTIONS_V2 : CM_SECTIONS;    // a section's id is its place in this list
+    // The sections of this version (a section's id is its place in this list)
+    uint32_t sections = h->version == 2 ? CM_SECTIONS_V2 : CM_SECTIONS;
     if (h->headerSize != sizeof(CmHeader) || h->flags != 0) return CmFail(R, "compiled map: bad header");
     if (h->fileSize != R->size)
         return CmFail(R, "compiled map: the header says %llu bytes, the file has %u (truncated or damaged)",
                       (unsigned long long)h->fileSize, R->size);
     if (h->formatVersion < 1 || h->formatVersion > MS_FORMAT_VERSION)
-        return CmFail(R, "map format %u is newer than this runtime supports (%d); update monolith_scene", h->formatVersion, MS_FORMAT_VERSION);
-    if (h->sectionCount != sections || h->sectionTable < sizeof(CmHeader) || h->sectionTable % 4 ||
+        return CmFail(R, "map format %u is newer than this runtime supports (%d); update monolith_scene",
+                      h->formatVersion, MS_FORMAT_VERSION);
+
+    // The section table: one entry per section of this version, inside the file
+    if (h->sectionCount != sections ||
+        h->sectionTable < sizeof(CmHeader) ||
+        h->sectionTable % 4 ||
         (uint64_t)h->sectionTable + (uint64_t)h->sectionCount * sizeof(CmSection) > R->size)
         return CmFail(R, "compiled map: bad section table");
+
+    // Each section: a known id, once, the reader's record size, at most its records, inside the file
     memset(R->sec, 0, sizeof(R->sec));
     for (uint32_t i = 0; i < h->sectionCount; i++) {
         CmSection s;
@@ -3005,21 +3140,32 @@ static bool CmReadHeader(CmReader *R, CmHeader *h)
         const char *name = CM_SECTION[s.id].name;
         if (R->sec[s.id].id) return CmFail(R, "compiled map: section '%s' appears twice", name);
         if (s.recordSize != CM_SECTION[s.id].size)
-            return CmFail(R, "compiled map: section '%s' has %u-byte records, expected %u", name, s.recordSize, CM_SECTION[s.id].size);
-        if (s.count > CM_SECTION[s.id].max) return CmFail(R, "compiled map: section '%s' has too many records (%u)", name, s.count);
-        if (s.offset < sizeof(CmHeader) || s.offset % 4 || (uint64_t)s.offset + (uint64_t)s.count * s.recordSize > R->size)
+            return CmFail(R, "compiled map: section '%s' has %u-byte records, expected %u",
+                          name, s.recordSize, CM_SECTION[s.id].size);
+        if (s.count > CM_SECTION[s.id].max)
+            return CmFail(R, "compiled map: section '%s' has too many records (%u)", name, s.count);
+        if (s.offset < sizeof(CmHeader) ||
+            s.offset % 4 ||
+            (uint64_t)s.offset + (uint64_t)s.count * s.recordSize > R->size)
             return CmFail(R, "compiled map: section '%s' lies outside the file", name);
         R->sec[s.id] = s;
     }
     // (all ids of the version present: sectionCount of them, none twice, none unknown; a version 2
     // file leaves the newer sections empty)
     if (R->sec[CM_SPAWN].count != 1) return CmFail(R, "compiled map: section 'spawn' must have one record");
+
+    // The string table: starts and ends with a NUL (so every offset inside it ends in one), no
+    // control characters
     uint32_t n = R->sec[CM_STRINGS].count;
     R->str = (const char *)R->bytes + R->sec[CM_STRINGS].offset;
     R->strSize = n;
-    if (n == 0 || R->str[0] != '\0' || R->str[n - 1] != '\0') return CmFail(R, "compiled map: bad string table");
+    if (n == 0 || R->str[0] != '\0' || R->str[n - 1] != '\0')
+        return CmFail(R, "compiled map: bad string table");
     for (uint32_t i = 0; i < n; i++)
-        if ((unsigned char)R->str[i] < 0x20 && R->str[i] != '\0') return CmFail(R, "compiled map: control character in the string table");
+        if ((unsigned char)R->str[i] < 0x20 && R->str[i] != '\0')
+            return CmFail(R, "compiled map: control character in the string table");
+
+    // The parser's cap on objects
     if ((uint64_t)R->sec[CM_BOXES].count + R->sec[CM_MODELS].count + R->sec[CM_LIGHTS].count > MS_MAX_OBJECTS)
         return CmFail(R, "too many objects (a map makes at most 1000000 boxes, models and lights)");
     return true;
@@ -3036,11 +3182,16 @@ static bool CmReadHeader(CmReader *R, CmHeader *h)
 static bool CmReadSourceName(CmReader *R, const CmHeader *h)
 {
     SceneData *d = R->d;
+
+    // A plain file name next to the compiled file
     const char *src;
     if (!CmString(R, h->sourceName, false, "source name", &src)) return false;
     if (!src[0] || strchr(src, '/') || strchr(src, '\\')) return CmFail(R, "compiled map: bad source name");
+
+    // Its path in the package replaces the compiled file's path in messages
     char full[MS_PATH_MAX];
-    if (snprintf(full, sizeof(full), "%s%s", d->root, src) >= (int)sizeof(full)) return CmFail(R, "path too long: \"%s\"", src);
+    if (snprintf(full, sizeof(full), "%s%s", d->root, src) >= (int)sizeof(full))
+        return CmFail(R, "path too long: \"%s\"", src);
     char *srcPath = MS_StrDup(full);
     if (!srcPath) return CmFail(R, "out of memory");
     free(d->srcPath);
@@ -3063,6 +3214,8 @@ static bool CmReadStatements(CmReader *R)
         uint32_t key;
         CmRecord(R, CM_STATEMENTS, i, &key);
         if (key == 0) return CmFail(R, "compiled map: statement %u has key 0", i);
+
+        // The statement key set (open addressing) finds a duplicate
         if (2 * (d->stmtCount + 1) > d->stmtSetCap && !GrowStmtSet(d)) return CmFail(R, "out of memory");
         int *slot = StmtSlot(d, key);
         if (*slot) return CmFail(R, "compiled map: duplicate statement key %08x", key);
@@ -3072,6 +3225,7 @@ static bool CmReadStatements(CmReader *R)
     return true;
 }
 
+// Group names (`group` lines): each a non-empty name, counted as soon as its copy is made
 static bool CmReadGroups(CmReader *R)
 {
     SceneData *d = R->d;
@@ -3092,14 +3246,21 @@ static bool CmMaterialInRange(const CmMaterial *c)
 {
     bool lines = c->line >= 0 && c->shaderLine >= 0;
     for (int k = 0; k < MAP_COUNT; k++) lines = lines && c->mapLine[k] >= 0;
-    return lines && c->cull >= 0 && c->cull <= 2 && c->transparency >= 0 && c->transparency <= 2 && c->blend >= 0 &&
-           c->blend <= 4 && c->priority >= -1000000 && c->priority <= 1000000 && c->wrap >= 0 && c->wrap <= 2 &&
-           c->inherit <= 15 && c->unlit <= 1 && c->instanced <= 1;
+    return lines &&
+           c->cull >= 0 && c->cull <= 2 &&
+           c->transparency >= 0 && c->transparency <= 2 &&
+           c->blend >= 0 && c->blend <= 4 &&
+           c->priority >= -1000000 && c->priority <= 1000000 &&
+           c->wrap >= 0 && c->wrap <= 2 &&
+           c->inherit <= 15 &&
+           c->unlit <= 1 &&
+           c->instanced <= 1;
 }
 
 // A checked material record into its MS_Material and MatDef (names and paths are already there)
 static void CmFillMaterial(const CmMaterial *c, MS_Material *M, MatDef *D)
 {
+    // What R3D draws with
     R3D_Material *m = &M->material;
     M->line = c->line;
     m->albedo.color = (Color){ c->albedo[0], c->albedo[1], c->albedo[2], c->albedo[3] };
@@ -3118,6 +3279,8 @@ static void CmFillMaterial(const CmMaterial *c, MS_Material *M, MatDef *D)
     m->blendMode = (R3D_BlendMode)c->blend;
     m->priority = c->priority;
     m->unlit = c->unlit == 1;
+
+    // What the load needs besides (texture lines, wrap, inheritance, instancing)
     D->shaderLine = c->shaderLine;
     for (int k = 0; k < MAP_COUNT; k++) D->mapLine[k] = c->mapLine[k];
     D->wrap = c->wrap;
@@ -3131,14 +3294,19 @@ static void CmFillMaterial(const CmMaterial *c, MS_Material *M, MatDef *D)
 static bool CmReadMaterialParams(CmReader *R, const CmMaterial *c, MatDef *D, const char *name,
                                  uint32_t *uniformsUsed, uint32_t *samplersUsed)
 {
-    if (c->uniformFirst != *uniformsUsed || c->samplerFirst != *samplersUsed ||
+    // The ranges: right after the previous material's, inside their sections
+    if (c->uniformFirst != *uniformsUsed ||
+        c->samplerFirst != *samplersUsed ||
         (uint64_t)c->uniformFirst + c->uniformCount > R->sec[CM_UNIFORMS].count ||
         (uint64_t)c->samplerFirst + c->samplerCount > R->sec[CM_SAMPLERS].count)
         return CmFail(R, "material \"%s\": uniform or sampler range out of range", name);
     *uniformsUsed += c->uniformCount;
     *samplersUsed += c->samplerCount;
-    if (!MS_RESERVE(D->uniforms, D->uniformCap, (int)c->uniformCount) || !MS_RESERVE(D->samplers, D->samplerCap, (int)c->samplerCount))
+    if (!MS_RESERVE(D->uniforms, D->uniformCap, (int)c->uniformCount) ||
+        !MS_RESERVE(D->samplers, D->samplerCap, (int)c->samplerCount))
         return CmFail(R, "out of memory");
+
+    // Uniforms: counted before the name is copied, so FreeData frees it on a later failure
     for (uint32_t k = 0; k < c->uniformCount; k++) {
         CmUniform u;
         CmRecord(R, CM_UNIFORMS, c->uniformFirst + k, &u);
@@ -3150,12 +3318,16 @@ static bool CmReadMaterialParams(CmReader *R, const CmMaterial *c, MatDef *D, co
         U->count = (int)u.count;
         memcpy(U->v, u.v, sizeof(U->v));
     }
+
+    // Samplers: the same, with a path that must exist
     for (uint32_t k = 0; k < c->samplerCount; k++) {
         CmSampler sm;
         CmRecord(R, CM_SAMPLERS, c->samplerFirst + k, &sm);
         MatSampler *S = &D->samplers[D->samplerCount++];
-        if (!CmName(R, sm.name, "sampler", &S->name) || !CmPath(R, sm.path, false, "sampler", &S->path)) return false;
-        if (sm.line < 0 || sm.data > 1) return CmFail(R, "material \"%s\": sampler line or kind out of range", name);
+        if (!CmName(R, sm.name, "sampler", &S->name) || !CmPath(R, sm.path, false, "sampler", &S->path))
+            return false;
+        if (sm.line < 0 || sm.data > 1)
+            return CmFail(R, "material \"%s\": sampler line or kind out of range", name);
         S->line = sm.line;
         S->data = sm.data == 1;
     }
@@ -3169,23 +3341,33 @@ static bool CmReadMaterial(CmReader *R, uint32_t i, uint32_t *uniformsUsed, uint
     SceneData *d = R->d;
     CmMaterial c;
     CmRecord(R, CM_MATERIALS, i, &c);
+
+    // Counted first: the strings below are heap copies FreeData must find
     MS_Material *M = &d->materials[i];
     MatDef *D = &d->matDefs[i];
     d->materialCount = (int)i + 1;
     *M = (MS_Material){ .material = R3D_MATERIAL_BASE };
     *D = (MatDef){ 0 };
+
+    // Strings
     char *name, *shader;
     if (!CmName(R, c.name, "material", &name)) return false;
     M->name = name;
-    if (i == 0 && strcmp(name, "default") != 0) return CmFail(R, "compiled map: material 0 must be \"default\"");
+    if (i == 0 && strcmp(name, "default") != 0)
+        return CmFail(R, "compiled map: material 0 must be \"default\"");
     if (!CmPath(R, c.shader, true, "material shader", &shader)) return false;
     M->shader = shader;
     for (int k = 0; k < MAP_COUNT; k++)
         if (!CmPath(R, c.maps[k], true, "material texture", &D->maps[k])) return false;
-    float f[] = { c.emissionEnergy, c.normalScale, c.occlusion, c.roughness, c.metalness, c.specular,
-                  c.uvScale[0], c.uvScale[1], c.uvOffset[0], c.uvOffset[1], c.alphaCutoff };
+
+    // Numbers, lines and enums
+    float f[] = {
+        c.emissionEnergy, c.normalScale, c.occlusion, c.roughness, c.metalness, c.specular,
+        c.uvScale[0], c.uvScale[1], c.uvOffset[0], c.uvOffset[1], c.alphaCutoff
+    };
     if (!FiniteN(f, COUNT(f))) return CmFail(R, "material \"%s\": number out of range", name);
     if (!CmMaterialInRange(&c)) return CmFail(R, "material \"%s\": value out of range", name);
+
     CmFillMaterial(&c, M, D);
     return CmReadMaterialParams(R, &c, D, name, uniformsUsed, samplersUsed);
 }
@@ -3197,10 +3379,14 @@ static bool CmReadMaterials(CmReader *R)
     SceneData *d = R->d;
     uint32_t n = R->sec[CM_MATERIALS].count;
     if (n == 0) return CmFail(R, "compiled map: no materials (material 0 is \"default\")");
-    if (!MS_RESERVE(d->materials, d->materialCap, (int)n) || !MS_RESERVE(d->matDefs, d->matDefCap, (int)n)) return CmFail(R, "out of memory");
+    if (!MS_RESERVE(d->materials, d->materialCap, (int)n) || !MS_RESERVE(d->matDefs, d->matDefCap, (int)n))
+        return CmFail(R, "out of memory");
+
     uint32_t uniformsUsed = 0, samplersUsed = 0;
     for (uint32_t i = 0; i < n; i++)
         if (!CmReadMaterial(R, i, &uniformsUsed, &samplersUsed)) return false;
+
+    // No record left over that no material's range covers
     if (uniformsUsed != R->sec[CM_UNIFORMS].count || samplersUsed != R->sec[CM_SAMPLERS].count)
         return CmFail(R, "compiled map: uniforms or samplers no material uses");
     return true;
@@ -3212,14 +3398,17 @@ static bool CmReadBoxes(CmReader *R)
 {
     SceneData *d = R->d;
     uint32_t n = R->sec[CM_BOXES].count;
-    if (!MS_RESERVE(d->boxes, d->boxCap, (int)n) || !MS_RESERVE(d->boxRefs, d->boxRefCap, (int)n)) return CmFail(R, "out of memory");
+    if (!MS_RESERVE(d->boxes, d->boxCap, (int)n) || !MS_RESERVE(d->boxRefs, d->boxRefCap, (int)n))
+        return CmFail(R, "out of memory");
     for (uint32_t i = 0; i < n; i++) {
         CmBox c;
         CmRecord(R, CM_BOXES, i, &c);
         BoundingBox b = { V3(c.min), V3(c.max) };
-        if (!FiniteOrdered(c.min, c.max) || !FiniteBox(b)) return CmFail(R, "box %u: coordinate or size out of range", i);
+        if (!FiniteOrdered(c.min, c.max) || !FiniteBox(b))
+            return CmFail(R, "box %u: coordinate or size out of range", i);
         if (!CmReadRef(R, &c.ref, false, "box", i, &d->boxRefs[i])) return false;
-        if (i > 0 && d->boxRefs[i].prim < d->boxRefs[i - 1].prim) return CmFail(R, "box %u: out of map order", i);
+        if (i > 0 && d->boxRefs[i].prim < d->boxRefs[i - 1].prim)
+            return CmFail(R, "box %u: out of map order", i);
         d->boxes[i] = b;
         d->boxCount = (int)i + 1;
     }
@@ -3235,13 +3424,17 @@ static bool CmReadBoxTurns(CmReader *R)
     SceneData *d = R->d;
     uint32_t n = R->sec[CM_BOX_TURNS].count;
     if (n == 0) return true;
-    if (n > (uint32_t)d->boxCount) return CmFail(R, "compiled map: more box turns (%u) than boxes (%d)", n, d->boxCount);
-    if (!MS_RESERVE(d->turned, d->turnedCap, (int)n) || !MS_RESERVE(d->turnedWritten, d->turnedWrittenCap, (int)n) ||
+    if (n > (uint32_t)d->boxCount)
+        return CmFail(R, "compiled map: more box turns (%u) than boxes (%d)", n, d->boxCount);
+    if (!MS_RESERVE(d->turned, d->turnedCap, (int)n) ||
+        !MS_RESERVE(d->turnedWritten, d->turnedWrittenCap, (int)n) ||
         !MS_RESERVE(d->boxTurned, d->boxTurnedCap, d->boxCount))
         return CmFail(R, "out of memory");
     for (int i = 0; i < d->boxCount; i++) d->boxTurned[i] = -1;
+
     uint32_t prev = 0;
     for (uint32_t i = 0; i < n; i++) {
+        // Check: an existing box, after the previous turn's, turned by a finite nonzero rotation
         CmBoxTurn c;
         CmRecord(R, CM_BOX_TURNS, i, &c);
         if (c.box >= (uint32_t)d->boxCount) return CmFail(R, "box turn %u: box %u out of range", i, c.box);
@@ -3250,11 +3443,15 @@ static bool CmReadBoxTurns(CmReader *R)
         if (!Finite3(c.rotationDeg)) return CmFail(R, "box turn %u: rotation not finite", i);
         if (c.rotationDeg[0] == 0.0f && c.rotationDeg[1] == 0.0f && c.rotationDeg[2] == 0.0f)
             return CmFail(R, "box turn %u: rotation 0 0 0 (that box is not turned)", i);
+
+        // Rebuild: the turned box and its world AABB from the box as written
         BoundingBox w = d->boxes[c.box], a;
         MS_TurnedBox t;
         TurnedBoxMake(w, V3(c.rotationDeg), &t, &a);
         if (!FiniteV3(t.size) || !FiniteV3(t.center) || !FiniteBox(a))
             return CmFail(R, "box turn %u: coordinate or size out of range", i);
+
+        // Store: the box list holds the AABB, the written box is kept beside it
         d->boxes[c.box] = a;
         d->boxTurned[c.box] = (int)i;
         d->turnedWritten[i] = w;
@@ -3264,11 +3461,14 @@ static bool CmReadBoxTurns(CmReader *R)
     return true;
 }
 
+// Model files: a path inside the package that exists, counted as soon as its copy is made, then
+// its line checked
 static bool CmReadModelFiles(CmReader *R)
 {
     SceneData *d = R->d;
     uint32_t n = R->sec[CM_MODEL_FILES].count;
-    if (!MS_RESERVE(d->modelFiles, d->modelFileCap, (int)n) || !MS_RESERVE(d->modelPick, d->modelPickCap, (int)n))
+    if (!MS_RESERVE(d->modelFiles, d->modelFileCap, (int)n) ||
+        !MS_RESERVE(d->modelPick, d->modelPickCap, (int)n))
         return CmFail(R, "out of memory");
     for (uint32_t i = 0; i < n; i++) {
         CmModelFile c;
@@ -3297,7 +3497,7 @@ static bool CmReadColliders(CmReader *R)
     return true;
 }
 
-// A model's slot materials (`material <slot> <name>`): a slot number and a material read above
+// A model's slot materials (`material.N "name"`): a slot number and a material read above
 static bool CmReadSlots(CmReader *R)
 {
     SceneData *d = R->d;
@@ -3306,7 +3506,8 @@ static bool CmReadSlots(CmReader *R)
     for (uint32_t i = 0; i < n; i++) {
         CmSlot c;
         CmRecord(R, CM_SLOTS, i, &c);
-        if (c.slot < 0 || c.slot > MS_MAX_OBJECTS || c.material < 0 || c.material >= d->materialCount)
+        if (c.slot < 0 || c.slot > MS_MAX_OBJECTS ||
+            c.material < 0 || c.material >= d->materialCount)
             return CmFail(R, "model slot %u: out of range", i);
         d->modelSlots[d->modelSlotCount++] = (MS_SlotMaterial){ c.slot, c.material };
     }
@@ -3314,8 +3515,8 @@ static bool CmReadSlots(CmReader *R)
 }
 
 // Model instances, after the files, colliders and slots they index. The parser's guarantees for a
-// `model` line: finite transform, positive scale, enums in range, collider ranges only for `collide boxes`, map
-// order, and its cap on collision boxes (an `aabb` model makes one per copy)
+// `model` line: finite transform, positive scale, enums in range, collider ranges only for
+// `collide box …`, map order, and its cap on collision boxes (an `aabb` model makes one per copy)
 static bool CmReadModels(CmReader *R)
 {
     SceneData *d = R->d;
@@ -3325,19 +3526,36 @@ static bool CmReadModels(CmReader *R)
         CmModel c;
         CmRecord(R, CM_MODELS, i, &c);
         MS_ModelInstance M = { 0 };
-        if (c.file < 0 || c.file >= d->modelFileCount || !Finite3(c.position) || !Finite3(c.rotationDeg) ||
-            !Finite3(c.scale) || !(c.scale[0] > 0.0f && c.scale[1] > 0.0f && c.scale[2] > 0.0f) || c.origin > 2 ||
-            c.collide > 2 || c.castShadow > 1)
+
+        // The file, the transform and the enums
+        if (c.file < 0 || c.file >= d->modelFileCount ||
+            !Finite3(c.position) ||
+            !Finite3(c.rotationDeg) ||
+            !Finite3(c.scale) ||
+            !(c.scale[0] > 0.0f && c.scale[1] > 0.0f && c.scale[2] > 0.0f) ||
+            c.origin > 2 ||
+            c.collide > 2 ||
+            c.castShadow > 1)
             return CmFail(R, "model %u: value out of range", i);
-        if (c.colliderFirst < 0 || c.colliderCount < 0 || (int64_t)c.colliderFirst + c.colliderCount > d->localColliderCount ||
+
+        // The collider and slot ranges (colliders only for `collide box …`)
+        if (c.colliderFirst < 0 || c.colliderCount < 0 ||
+            (int64_t)c.colliderFirst + c.colliderCount > d->localColliderCount ||
             (c.collide != MS_COLLIDE_BOXES && c.colliderCount != 0) ||
-            c.slotFirst < 0 || c.slotCount < 0 || (int64_t)c.slotFirst + c.slotCount > d->modelSlotCount)
+            c.slotFirst < 0 || c.slotCount < 0 ||
+            (int64_t)c.slotFirst + c.slotCount > d->modelSlotCount)
             return CmFail(R, "model %u: collider or slot range out of range", i);
+
+        // The source reference, map order, and the cap on collision boxes
         if (!CmReadRef(R, &c.ref, true, "model", i, &M.ref)) return false;
-        if (i > 0 && M.ref.prim < d->models[i - 1].ref.prim) return CmFail(R, "model %u: out of map order", i);
+        if (i > 0 && M.ref.prim < d->models[i - 1].ref.prim)
+            return CmFail(R, "model %u: out of map order", i);
         int perCopy = c.collide == MS_COLLIDE_AABB ? 1 : c.colliderCount;
-        if (d->modelColliderCount + perCopy > MS_MAX_OBJECTS) return CmFail(R, "too many model collision boxes (max 1000000)");
+        if (d->modelColliderCount + perCopy > MS_MAX_OBJECTS)
+            return CmFail(R, "too many model collision boxes (max 1000000)");
         d->modelColliderCount += perCopy;
+
+        // Fill and store
         M.file = c.file;
         M.position = V3(c.position);
         M.rotationDeg = V3(c.rotationDeg);
@@ -3361,18 +3579,34 @@ static bool CmReadModels(CmReader *R)
 // breaks this fail when the map is compiled, which reads the result back.)
 static bool CmLightInRange(const CmLight *c)
 {
+    // Every number finite, the enums and switches in range
     float f[] = { c->energy, c->specular, c->range, c->falloff, c->inner, c->outer, c->fogEnergy };
-    bool ok = c->type <= 2 && Finite3(c->position) && Finite3(c->direction) && c->shadow <= 1 && c->clip <= 1 &&
+    bool ok = c->type <= 2 &&
+              Finite3(c->position) &&
+              Finite3(c->direction) &&
+              c->shadow <= 1 &&
+              c->clip <= 1 &&
               FiniteN(f, COUNT(f));
+
+    // The direction by type: none for a point light, unit length otherwise
     float len = ok ? Vector3Length(V3(c->direction)) : 0.0f;
-    if (c->type == R3D_LIGHT_OMNI) ok = ok && c->direction[0] == 0.0f && c->direction[1] == 0.0f && c->direction[2] == 0.0f;
-    else ok = ok && fabsf(len - 1.0f) <= 1e-3f;
+    if (c->type == R3D_LIGHT_OMNI)
+        ok = ok && c->direction[0] == 0.0f && c->direction[1] == 0.0f && c->direction[2] == 0.0f;
+    else
+        ok = ok && fabsf(len - 1.0f) <= 1e-3f;
+
+    // A spot's cone, the clip box
     if (c->type == R3D_LIGHT_SPOT) ok = ok && c->inner <= c->outer;
-    if (c->clip) ok = ok && Finite3(c->clipMin) && Finite3(c->clipMax) && c->clipMin[0] < c->clipMax[0] &&
-                      c->clipMin[1] < c->clipMax[1] && c->clipMin[2] < c->clipMax[2];
+    if (c->clip)
+        ok = ok &&
+             Finite3(c->clipMin) && Finite3(c->clipMax) &&
+             c->clipMin[0] < c->clipMax[0] &&
+             c->clipMin[1] < c->clipMax[1] &&
+             c->clipMin[2] < c->clipMax[2];
     return ok;
 }
 
+// Lights: checked (CmLightInRange, the source reference, map order), then into R3D_Light fields
 static bool CmReadLights(CmReader *R)
 {
     SceneData *d = R->d;
@@ -3384,7 +3618,9 @@ static bool CmReadLights(CmReader *R)
         if (!CmLightInRange(&c)) return CmFail(R, "light %u: value out of range", i);
         MS_LightDef L = { 0 };
         if (!CmReadRef(R, &c.ref, false, "light", i, &L.ref)) return false;
-        if (i > 0 && L.ref.prim < d->lights[i - 1].ref.prim) return CmFail(R, "light %u: out of map order", i);
+        if (i > 0 && L.ref.prim < d->lights[i - 1].ref.prim)
+            return CmFail(R, "light %u: out of map order", i);
+
         L.light.type = (R3D_LightType)c.type;
         L.light.position = V3(c.position);
         L.light.direction = V3(c.direction);
@@ -3414,6 +3650,8 @@ static bool CmReadViewpoints(CmReader *R)
         CmViewpoint c;
         CmRecord(R, CM_VIEWPOINTS, i, &c);
         MS_Viewpoint *v = &d->viewpoints[i];
+
+        // Counted as soon as the name is copied, then checked
         char *name;
         if (!CmName(R, c.name, "viewpoint", &name)) return false;
         *v = (MS_Viewpoint){ name, V3(c.eye), V3(c.target) };
@@ -3446,18 +3684,27 @@ static bool CmReadEnvRecord(CmReader *R, const CmEnv *c)
     EnvDef *e = &R->d->env;
     const char *key;
     if (!CmString(R, c->key, false, "env key", &key)) return false;
+
+    // The key's table entry: ENV_KEYS (R3D_Environment fields), DEF_KEYS, then the sky tables
+    // (`sky.*` and `ambientSky.*` share SKY_KEYS)
     int type = -1;
     void *dst = NULL;
     int sky = -1;
     bool amb = false;
     for (int i = 0; i < COUNT(ENV_KEYS) && !dst; i++)
-        if (strcmp(ENV_KEYS[i].key, key) == 0) { type = ENV_KEYS[i].type; dst = (char *)&e->env + ENV_KEYS[i].off; }
+        if (strcmp(ENV_KEYS[i].key, key) == 0) {
+            type = ENV_KEYS[i].type;
+            dst = (char *)&e->env + ENV_KEYS[i].off;
+        }
     for (int i = 0; i < COUNT(DEF_KEYS) && !dst; i++)
         if (strcmp(DEF_KEYS[i].key, key) == 0) { type = DEF_KEYS[i].type; dst = (char *)e + DEF_KEYS[i].off; }
     if (!dst) {
         amb = strncmp(key, "ambientSky.", 11) == 0;
         if (amb || strncmp(key, "sky.", 4) == 0) sky = SkyKeyIndex(key + (amb ? 11 : 4));
-        if (sky >= 0) { type = SKY_KEYS[sky].type; dst = (char *)(amb ? &e->ambient : &e->sky) + SKY_KEYS[sky].off; }
+        if (sky >= 0) {
+            type = SKY_KEYS[sky].type;
+            dst = (char *)(amb ? &e->ambient : &e->sky) + SKY_KEYS[sky].off;
+        }
     }
     if (!dst) return CmFail(R, "unknown env key '%s'", key);
     if (c->type != (uint32_t)type) return CmFail(R, "env key '%s': wrong value type", key);
@@ -3481,9 +3728,15 @@ static bool CmReadEnvRecord(CmReader *R, const CmEnv *c)
     }
     for (int k = words; k < 6; k++) ok = ok && w[k] == 0;
     if (!ok) return CmFail(R, "env key '%s': value out of range", key);
+
+    // Store the value in the field's own type
     switch (type) {
         case T_B: *(bool *)dst = w[0] == 1; break;
-        case T_COLOR: *(Color *)dst = (Color){ (unsigned char)w[0], (unsigned char)w[1], (unsigned char)w[2], (unsigned char)w[3] }; break;
+        case T_COLOR:
+            *(Color *)dst = (Color){
+                (unsigned char)w[0], (unsigned char)w[1], (unsigned char)w[2], (unsigned char)w[3]
+            };
+            break;
         case T_V3: case T_QUAT: case T_BOX: memcpy(dst, f, (size_t)words * sizeof(float)); break;
         case T_PATH: {
             char *path;
@@ -3496,6 +3749,7 @@ static bool CmReadEnvRecord(CmReader *R, const CmEnv *c)
         }
         default: memcpy(dst, w, 4); break;     // float, int, enums (all 4 bytes)
     }
+
     // The checks across keys and the "set by the map" flags, exactly as the parser leaves them
     char msg[160];
     if (!CheckEnvValue(key, type, dst, msg, sizeof(msg))) return CmFail(R, "%s", msg);
@@ -3529,10 +3783,12 @@ static bool CmReadDeps(CmReader *R)
         const char *rel;
         CmRecord(R, CM_DEPS, i, &off);
         if (!CmString(R, off, false, "dependency", &rel)) return false;
-        if (!InsidePackage(rel)) return CmFail(R, "dependency: path must stay inside the package: \"%s\"", rel);
+        if (!InsidePackage(rel))
+            return CmFail(R, "dependency: path must stay inside the package: \"%s\"", rel);
 #ifdef MONOLITH_EDITOR
         char full[MS_PATH_MAX];
-        if (snprintf(full, sizeof(full), "%s%s", d->root, rel) >= (int)sizeof(full)) return CmFail(R, "path too long: \"%s\"", rel);
+        if (snprintf(full, sizeof(full), "%s%s", d->root, rel) >= (int)sizeof(full))
+            return CmFail(R, "path too long: \"%s\"", rel);
         char *dep = MS_StrDup(full);
         char **slot = dep ? MS_PUSH(d->deps, d->depCount, d->depCap) : NULL;
         if (!slot) { free(dep); return CmFail(R, "out of memory"); }
@@ -3549,7 +3805,8 @@ static bool CmCheckNotEmpty(CmReader *R)
 {
     const SceneData *d = R->d;
     if (d->boxCount == 0 && d->modelCount == 0)
-        return CmFail(R, d->formatVersion >= 2 ? "map is empty (no boxes and no models)" : "map is empty (no boxes)");
+        return CmFail(R, d->formatVersion >= 2 ? "map is empty (no boxes and no models)"
+                                               : "map is empty (no boxes)");
     return true;
 }
 
@@ -3559,11 +3816,21 @@ static bool CmCheckNotEmpty(CmReader *R)
 // are read first. The order is also the order of the messages when a file has several faults.
 static bool ReadCompiled(SceneData *d, const char *bytes, int size, char *err, int errSize)
 {
-    CmReader R = { .d = d, .bytes = (const unsigned char *)bytes, .size = (uint32_t)size, .err = err, .errSize = errSize };
+    CmReader R = {
+        .d = d,
+        .bytes = (const unsigned char *)bytes,
+        .size = (uint32_t)size,
+        .err = err,
+        .errSize = errSize
+    };
+
+    // The header and the section table first
     CmHeader h;
     if (size < 0 || !CmReadHeader(&R, &h)) return false;
     d->formatVersion = (int)h.formatVersion;
     if (!CmReadSourceName(&R, &h)) return false;
+
+    // Then the sections, each after the ones it points into
     return CmReadStatements(&R) &&      // every MS_Ref points at a statement,
            CmReadGroups(&R) &&          // a group (or none)
            CmReadMaterials(&R) &&       // and a material; slots name materials too
@@ -3588,6 +3855,8 @@ static MS_SourceState SourceState(const SceneData *d)
     if (!d->compiled) return MS_SOURCE_TEXT;
     FILE *f = fopen(d->srcPath, "rb");
     if (!f) return MS_SOURCE_MISSING;
+
+    // FNV-1a 64 and size of the whole file, as the writer computed them
     unsigned long long h = FNV_OFFSET;
     long long n = 0;
     unsigned char buf[65536];
@@ -3600,19 +3869,24 @@ static MS_SourceState SourceState(const SceneData *d)
     return h == d->srcHash && n == d->srcSize ? MS_SOURCE_CURRENT : MS_SOURCE_STALE;
 }
 
+// A warning in the log when the compiled map is older than its source text
 static void WarnStale(const SceneData *d)
 {
     if (SourceState(d) == MS_SOURCE_STALE)
-        TraceLog(LOG_WARNING, "monolith_scene: %s was compiled from an older %s: compile it again", d->path, d->srcPath);
+        TraceLog(LOG_WARNING, "monolith_scene: %s was compiled from an older %s: compile it again",
+                 d->path, d->srcPath);
 }
 
 // --- Writer (editor): a parsed SceneData (before FinishParse) as a compiled map
 
+// A growing byte buffer: one section's contents
 typedef struct {
     unsigned char *b;
     int n, cap;
 } CmBuf;
 
+// The writer's state: each section's bytes and record count, the string table's index, and one
+// out-of-memory flag that every later call checks (so the writers need no error paths)
 typedef struct {
     CmBuf sec[CM_SECTIONS + 1];     // section contents
     uint32_t count[CM_SECTIONS + 1];
@@ -3621,6 +3895,7 @@ typedef struct {
     bool oom;
 } CmWriter;
 
+// Appends one record (CM_SECTION[id].size bytes from rec) to section id
 static void CmPut(CmWriter *W, int id, const void *rec)
 {
     CmBuf *B = &W->sec[id];
@@ -3631,6 +3906,7 @@ static void CmPut(CmWriter *W, int id, const void *rec)
     W->count[id]++;
 }
 
+// The string table index's hash of a string
 static unsigned long long CmHash(const char *s) { return Fnv1a64Update(FNV_OFFSET, s, strlen(s)); }
 
 // The string's offset in the string table (each string stored once, in first-use order); NULL = CM_NONE
@@ -3639,6 +3915,8 @@ static uint32_t CmStr(CmWriter *W, const char *s)
     if (!s) return CM_NONE;
     CmBuf *T = &W->sec[CM_STRINGS];
     if (W->oom) return 0;
+
+    // Grow the index at half full: rehash every stored string into a table twice the size
     if (2 * (W->strCount + 1) > W->strSlotCap) {
         int cap = W->strSlotCap ? W->strSlotCap * 2 : 1024;
         uint32_t *t = calloc((size_t)cap, sizeof(uint32_t));
@@ -3653,9 +3931,13 @@ static uint32_t CmStr(CmWriter *W, const char *s)
         W->strSlot = t;
         W->strSlotCap = cap;
     }
+
+    // Already stored: its offset
     unsigned h = (unsigned)CmHash(s) & (unsigned)(W->strSlotCap - 1);
     for (; W->strSlot[h]; h = (h + 1) & (unsigned)(W->strSlotCap - 1))
         if (strcmp((const char *)T->b + W->strSlot[h] - 1, s) == 0) return W->strSlot[h] - 1;
+
+    // New: appended to the table with its NUL, and indexed in the free slot the probe ended on
     int len = (int)strlen(s) + 1;
     if (!MS_RESERVE(T->b, T->cap, T->n + len)) { W->oom = true; return 0; }
     uint32_t off = (uint32_t)T->n;
@@ -3667,6 +3949,7 @@ static uint32_t CmStr(CmWriter *W, const char *s)
     return off;
 }
 
+// An MS_Ref as its record
 static CmRef CmRefOf(MS_Ref r) { return (CmRef){ r.line, r.prim, r.group, r.material, r.copy, r.part }; }
 
 // A vector or colour as the float / byte array of a record field (in an initializer)
@@ -3680,7 +3963,14 @@ static void CmPutEnv(CmWriter *W, const char *key, int type, const void *p)
     CmEnv c = { .key = CmStr(W, key), .type = (uint32_t)type };
     switch (type) {
         case T_B: c.value[0] = *(const bool *)p ? 1 : 0; break;
-        case T_COLOR: { const Color *col = p; c.value[0] = col->r; c.value[1] = col->g; c.value[2] = col->b; c.value[3] = col->a; break; }
+        case T_COLOR: {
+            const Color *col = p;
+            c.value[0] = col->r;
+            c.value[1] = col->g;
+            c.value[2] = col->b;
+            c.value[3] = col->a;
+            break;
+        }
         case T_V3: memcpy(c.value, p, 3 * sizeof(float)); break;
         case T_QUAT: memcpy(c.value, p, 4 * sizeof(float)); break;
         case T_BOX: memcpy(c.value, p, 6 * sizeof(float)); break;
@@ -3690,17 +3980,22 @@ static void CmPutEnv(CmWriter *W, const char *key, int type, const void *p)
     CmPut(W, CM_ENV, &c);
 }
 
+// Every env key with its final value, in table order: ENV_KEYS, DEF_KEYS (without the optional
+// keys the map didn't set), then per sky key `sky.*` and the `ambientSky.*` the map set
 static void CmPutEnvironment(CmWriter *W, const EnvDef *e)
 {
     for (int i = 0; i < COUNT(ENV_KEYS); i++)
         CmPutEnv(W, ENV_KEYS[i].key, ENV_KEYS[i].type, (const char *)&e->env + ENV_KEYS[i].off);
+
     for (int i = 0; i < COUNT(DEF_KEYS); i++) {
         const char *k = DEF_KEYS[i].key;
-        if ((strcmp(k, "shadow.home") == 0 && !e->homeSet) || (strcmp(k, "fogCache.region") == 0 && !e->fogRegionSet) ||
+        if ((strcmp(k, "shadow.home") == 0 && !e->homeSet) ||
+            (strcmp(k, "fogCache.region") == 0 && !e->fogRegionSet) ||
             (DEF_KEYS[i].type == T_PATH && !((const char *)e + DEF_KEYS[i].off)[0]))
             continue;       // optional and not set by the map (the reader keeps the built-in value)
         CmPutEnv(W, k, DEF_KEYS[i].type, (const char *)e + DEF_KEYS[i].off);
     }
+
     for (int i = 0; i < COUNT(SKY_KEYS); i++) {
         char key[64];
         if (strcmp(SKY_KEYS[i].key, "sunDirection") != 0 || e->skySunDirSet) {
@@ -3714,6 +4009,7 @@ static void CmPutEnvironment(CmWriter *W, const EnvDef *e)
     }
 }
 
+// Whether this host stores integers little-endian (records are copied out of memory as they are)
 static bool IsLittleEndianHost(void)
 {
     uint32_t v = CM_BYTE_ORDER;
@@ -3728,11 +4024,13 @@ static bool IsLittleEndianHost(void)
 // it. The order of the CmStr calls (these writers in WriteCompiled's order, and the calls inside
 // each) is therefore part of the output: keep it, or the same map compiles to other bytes.
 
+// One key per statement, by statement index
 static void CmPutStatements(CmWriter *W, const SceneData *d)
 {
     for (int i = 0; i < d->stmtCount; i++) CmPut(W, CM_STATEMENTS, &d->stmtKeys[i]);
 }
 
+// The group names, by group index
 static void CmPutGroups(CmWriter *W, const SceneData *d)
 {
     for (int i = 0; i < d->groupCount; i++) {
@@ -3749,14 +4047,19 @@ static void CmPutMaterials(CmWriter *W, const SceneData *d)
         const MS_Material *M = &d->materials[i];
         const MatDef *D = &d->matDefs[i];
         const R3D_Material *m = &M->material;
+
+        // Strings in this order: name, shader, then the maps (in the loop below)
         uint32_t name = CmStr(W, M->name), shader = CmStr(W, M->shader);
         CmMaterial c = {
-            .name = name, .shader = shader, .line = M->line, .shaderLine = D->shaderLine,
+            .name = name, .shader = shader,
+            .line = M->line, .shaderLine = D->shaderLine,
             .albedo = CM_RGBA(m->albedo.color), .emission = CM_RGBA(m->emission.color),
-            .emissionEnergy = m->emission.energy, .normalScale = m->normal.scale, .occlusion = m->orm.occlusion,
-            .roughness = m->orm.roughness, .metalness = m->orm.metalness, .specular = m->orm.specular,
+            .emissionEnergy = m->emission.energy, .normalScale = m->normal.scale,
+            .occlusion = m->orm.occlusion, .roughness = m->orm.roughness,
+            .metalness = m->orm.metalness, .specular = m->orm.specular,
             .uvScale = CM_XY(m->uvScale), .uvOffset = CM_XY(m->uvOffset), .alphaCutoff = m->alphaCutoff,
-            .cull = m->cullMode, .transparency = m->transparencyMode, .blend = m->blendMode, .priority = m->priority,
+            .cull = m->cullMode, .transparency = m->transparencyMode, .blend = m->blendMode,
+            .priority = m->priority,
             .wrap = D->wrap, .inherit = D->inherit, .unlit = m->unlit, .instanced = D->instanced,
             .uniformFirst = W->count[CM_UNIFORMS], .uniformCount = (uint32_t)D->uniformCount,
             .samplerFirst = W->count[CM_SAMPLERS], .samplerCount = (uint32_t)D->samplerCount,
@@ -3766,6 +4069,8 @@ static void CmPutMaterials(CmWriter *W, const SceneData *d)
             c.mapLine[k] = D->mapLine[k];
         }
         CmPut(W, CM_MATERIALS, &c);
+
+        // Its uniforms and samplers, right after the previous material's
         for (int k = 0; k < D->uniformCount; k++) {
             CmUniform u = { CmStr(W, D->uniforms[k].name), (uint32_t)D->uniforms[k].count, { 0 } };
             memcpy(u.v, D->uniforms[k].v, sizeof(u.v));
@@ -3814,9 +4119,11 @@ static void CmPutModels(CmWriter *W, const SceneData *d)
     for (int i = 0; i < d->modelCount; i++) {
         const MS_ModelInstance *M = &d->models[i];
         CmModel c = {
-            .file = M->file, .position = CM_XYZ(M->position), .rotationDeg = CM_XYZ(M->rotationDeg), .scale = CM_XYZ(M->scale),
+            .file = M->file,
+            .position = CM_XYZ(M->position), .rotationDeg = CM_XYZ(M->rotationDeg), .scale = CM_XYZ(M->scale),
             .origin = M->origin, .collide = M->collide, .castShadow = M->castShadow,
-            .colliderFirst = M->colliderFirst, .colliderCount = M->colliderCount, .slotFirst = M->slotFirst, .slotCount = M->slotCount,
+            .colliderFirst = M->colliderFirst, .colliderCount = M->colliderCount,
+            .slotFirst = M->slotFirst, .slotCount = M->slotCount,
             .ref = CmRefOf(M->ref),
         };
         CmPut(W, CM_MODELS, &c);
@@ -3830,9 +4137,12 @@ static void CmPutLights(CmWriter *W, const SceneData *d)
         const MS_LightDef *L = &d->lights[i];
         const R3D_Light *l = &L->light;
         CmLight c = {
-            .type = l->type, .position = CM_XYZ(l->position), .direction = CM_XYZ(l->direction), .color = CM_RGBA(l->color),
-            .energy = l->energy, .specular = l->specular, .range = l->range, .falloff = l->falloff, .inner = l->innerCutOff,
-            .outer = l->outerCutOff, .fogEnergy = l->fogEnergy, .shadow = L->shadow, .clip = L->clip,
+            .type = l->type,
+            .position = CM_XYZ(l->position), .direction = CM_XYZ(l->direction),
+            .color = CM_RGBA(l->color),
+            .energy = l->energy, .specular = l->specular, .range = l->range, .falloff = l->falloff,
+            .inner = l->innerCutOff, .outer = l->outerCutOff, .fogEnergy = l->fogEnergy,
+            .shadow = L->shadow, .clip = L->clip,
             .ref = CmRefOf(L->ref),
         };
         if (L->clip) {
@@ -3843,6 +4153,7 @@ static void CmPutLights(CmWriter *W, const SceneData *d)
     }
 }
 
+// The viewpoints in map order: name, eye, target
 static void CmPutViewpoints(CmWriter *W, const SceneData *d)
 {
     for (int i = 0; i < d->viewpointCount; i++) {
@@ -3874,9 +4185,11 @@ static void CmPutDeps(CmWriter *W, const SceneData *d)
 // The file from the written sections: the header, the section table (every section, in id
 // order), then the sections in id order, each at a multiple of 8 with zero padding. *outSize and
 // the malloc'd bytes, or NULL with a message (out of memory, too large).
-static unsigned char *CmAssemble(const CmWriter *W, const SceneData *d, uint32_t srcNameOff, unsigned long long srcHash,
-                                 long long srcSize, int *outSize, char *err, int errSize)
+static unsigned char *CmAssemble(const CmWriter *W, const SceneData *d, uint32_t srcNameOff,
+                                 unsigned long long srcHash, long long srcSize, int *outSize,
+                                 char *err, int errSize)
 {
+    // The layout: each section's offset, and the file's size
     uint64_t total = sizeof(CmHeader) + CM_SECTIONS * sizeof(CmSection);
     uint32_t offset[CM_SECTIONS + 1];
     for (int id = 1; id <= CM_SECTIONS; id++) {
@@ -3884,16 +4197,32 @@ static unsigned char *CmAssemble(const CmWriter *W, const SceneData *d, uint32_t
         offset[id] = (uint32_t)total;
         total += (uint64_t)W->sec[id].n;
     }
+
+    // The buffer, zeroed (the padding), unless a writer ran out of memory or the file is too large
     unsigned char *out = NULL;
     if (W->oom) snprintf(err, errSize, "%s: out of memory", d->path);
-    else if (total > MS_MAX_COMPILED_BYTES) snprintf(err, errSize, "%s: the compiled map would be larger than 256 MB", d->path);
+    else if (total > MS_MAX_COMPILED_BYTES)
+        snprintf(err, errSize, "%s: the compiled map would be larger than 256 MB", d->path);
     else if (!(out = calloc(1, (size_t)total))) snprintf(err, errSize, "%s: out of memory", d->path);
     if (!out) return NULL;
-    CmHeader h = { .version = CM_VERSION, .headerSize = sizeof(CmHeader), .byteOrder = CM_BYTE_ORDER,
-                   .formatVersion = (uint32_t)d->formatVersion, .sectionCount = CM_SECTIONS, .sectionTable = sizeof(CmHeader),
-                   .fileSize = total, .sourceHash = srcHash, .sourceSize = (uint64_t)srcSize, .sourceName = srcNameOff };
+
+    // The header
+    CmHeader h = {
+        .version = CM_VERSION,
+        .headerSize = sizeof(CmHeader),
+        .byteOrder = CM_BYTE_ORDER,
+        .formatVersion = (uint32_t)d->formatVersion,
+        .sectionCount = CM_SECTIONS,
+        .sectionTable = sizeof(CmHeader),
+        .fileSize = total,
+        .sourceHash = srcHash,
+        .sourceSize = (uint64_t)srcSize,
+        .sourceName = srcNameOff
+    };
     memcpy(h.magic, CM_MAGIC, sizeof(CM_MAGIC));
     memcpy(out, &h, sizeof(h));
+
+    // The section table entries and the sections
     for (int id = 1; id <= CM_SECTIONS; id++) {
         CmSection s = { (uint32_t)id, offset[id], W->count[id], CM_SECTION[id].size };
         memcpy(out + sizeof(CmHeader) + (id - 1) * sizeof(CmSection), &s, sizeof(s));
@@ -3905,13 +4234,15 @@ static unsigned char *CmAssemble(const CmWriter *W, const SceneData *d, uint32_t
 
 // The compiled file of d (parsed, before FinishParse) in a malloc'd buffer; srcName, srcHash,
 // srcSize describe the map text it came from. NULL with a message on failure.
-static unsigned char *WriteCompiled(const SceneData *d, const char *srcName, unsigned long long srcHash, long long srcSize,
-                                    int *outSize, char *err, int errSize)
+static unsigned char *WriteCompiled(const SceneData *d, const char *srcName, unsigned long long srcHash,
+                                    long long srcSize, int *outSize, char *err, int errSize)
 {
     if (!IsLittleEndianHost()) {
         snprintf(err, errSize, "%s: compiled maps are little-endian; this host is not", d->path);
         return NULL;
     }
+
+    // The sections. This order is the order of the strings in the string table: keep it.
     CmWriter W = { 0 };
     CmPut(&W, CM_STRINGS, "");      // offset 0: the empty string (the table starts with a NUL)
     uint32_t srcNameOff = CmStr(&W, srcName);
@@ -3925,6 +4256,8 @@ static unsigned char *WriteCompiled(const SceneData *d, const char *srcName, uns
     CmPutSpawn(&W, d);
     CmPutEnvironment(&W, &d->env);
     CmPutDeps(&W, d);
+
+    // The file, then the writer's buffers freed
     unsigned char *out = CmAssemble(&W, d, srcNameOff, srcHash, srcSize, outSize, err, errSize);
     for (int id = 1; id <= CM_SECTIONS; id++) free(W.sec[id].b);
     free(W.strSlot);
