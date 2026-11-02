@@ -1426,7 +1426,7 @@ static int Run(int argc, char **argv)
             // The edits work on the text and the parsed lines only: a noGpu scene, reloaded
             // after every edit like the game's
             scene = peek;
-            int status = MapEditRunScript(applyEditsPath);
+            signed char status = (signed char)MapEditRunScript(applyEditsPath);
             MS_Unload(peek);
             scene = NULL;
             return status;
@@ -1558,7 +1558,7 @@ static int Run(int argc, char **argv)
         if (editDump) {
             // --edit-script, then the dumps of the live scene
             MapEditor ed = { .autoSave = gfx.editSave == 1 };
-            int status = MapEditRunLiveScript(&ed, editScriptPath);
+            signed char status = (signed char)MapEditRunLiveScript(&ed, editScriptPath);
             MapEditFree(&ed);
             bool ok = true;
             if (dumpPath) {

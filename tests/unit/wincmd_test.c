@@ -39,7 +39,7 @@ int main(void)
                 + strlen(" --model \"opus\"") + (size_t)N * strlen(" \"--some-long-flag\"") + 1 + strlen(prompt) + 3;
     const char *tail = " \"Map edit request: read requests/x/request.md and carry it out.\"\"";
     size_t len = s ? strlen(s) : 0;
-    int okTail = len >= strlen(tail) && strcmp(s + len - strlen(tail), tail) == 0;
+    signed char okTail = (signed char)(len >= strlen(tail) && strcmp(s + len - strlen(tail), tail) == 0);
     if (!okTail || len != want || skipped != 0) { printf("FAIL long: len %zu want %zu, tail ok %d\n", len, want, okTail); fails++; }
     else printf("ok   long (%zu bytes, prompt at the end)\n", len);
     free(s);

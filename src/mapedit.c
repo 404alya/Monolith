@@ -2550,7 +2550,8 @@ static int RunScript(MapEditor *E, const char *scriptPath, bool live)
     char *text = ReadFileBytes(scriptPath, &size);
     if (!text) { fprintf(stderr, "monolith: cannot read the edit script %s\n", scriptPath); return 1; }
     ObjList sel = { 0 };
-    int status = 0, lineNo = 0;
+    signed char status = 0;
+    int lineNo = 0;
     bool previewing = false;
     MS_Transform *previewFrom = NULL;
     char *save = text;
@@ -2743,7 +2744,7 @@ static int RunScript(MapEditor *E, const char *scriptPath, bool live)
 int MapEditRunScript(const char *scriptPath)
 {
     MapEditor E = { 0 };
-    int status = RunScript(&E, scriptPath, false);
+    signed char status = (signed char)RunScript(&E, scriptPath, false);
     MapEditFree(&E);
     return status;
 }
