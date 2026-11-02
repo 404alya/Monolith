@@ -70,13 +70,13 @@ Little-endian only, every field a fixed-width integer or an IEEE-754 `float`, ev
 
 **Turned boxes:** for a box with a box turn record, its `boxes` record holds the box **as written** (the two corners before the turn, ordered), not its world AABB; the reader rebuilds the turned-box record (centre, size, axes) and the AABB with the parser's own code, so the bits match a text load. Every other box is stored as its corners, as in version 2.
 
-**Versions:** 1 had no sampler kind (`CmSampler.data`); 2 added it; 3 added the box turns section (17), and a turned box's `boxes` record became the box as written. The reader reads versions 2 and 3 (a version 2 file has 16 sections and no turned boxes); the writer always writes 3. Older or newer files are refused with a message to compile the map again.
+**Versions:** 1 had no sampler kind (`CmSampler.data`); 2 added it; 3 added the box turns section (17), and a turned box's `boxes` record became the box as written. The reader reads versions 2 and 3 (a version 2 file has 16 sections and no turned boxes); the writer always writes 3. Older or newer files are refused with a message that names the file's version and the versions the runtime reads, and asks to compile the map again. A change to the layout always comes with a new version: the version, not a check in the code, is what tells a reader whether it can read a file.
 
 `ref[6]` is `MS_Ref` in its field order (line, prim, group, material, copy, part). A string field holds an offset into the string table; `0xFFFFFFFF` means none (a material without a shader). Every name and path is stored once. Unused bytes are zero.
 
 **Environment values** are stored by key name rather than by position, so the key tables can grow or be reordered without breaking compiled files. The value words by type: float and degree keys one `f32` (degree keys hold the radians the parser computed), integers one `i32`, switches 0 / 1, colours four words 0–255, vectors 3, quaternions 4, boxes 6 (`min`, then `max`), enums their index, paths a string offset. The compiler writes every key with its final value (built-in defaults included), except the optional ones the map didn't set (`shadow.home`, `fogCache.region`, `sky.sunDirection`, unset `ambientSky.*`, an empty `sky.panorama`). The reader starts from the built-in environment and applies the records, which gives the same environment as the text parser.
 
-The records are defined once, in `runtime/monolith_scene.c` (region "Compiled maps"), with `_Static_assert`s on every record's size and on the field offsets.
+The records are defined once, in `runtime/monolith_scene.c` (region "Compiled maps"). The file's version is what guards the layout: any change to a record (a field added, removed, resized or moved, even one that keeps the size), to a section or to a stored value type bumps `CM_VERSION`, and the reader refuses versions it doesn't read and sections whose record size differs.
 
 **Deterministic output:** the same map gives byte-identical compiled files: records in map order, strings in first-use order, no timestamps, padding zeroed.
 
@@ -91,7 +91,7 @@ A compiled file is input like any other. Before it trusts a byte, the reader che
 - every path package-relative (no absolute path, drive letter, backslash or `..`; the parser's own check), and the file present;
 - material 0 named `default`, statement keys unique and not 0, boxes, models and lights in map order, a map that makes at least one box or model.
 
-A file that fails any check is rejected with `<file>: <message>` (for example `forest.mapb: compiled map: section 'boxes' lies outside the file`, or `forest.mapb: compiled map format 4, this runtime reads formats 2 to 3: compile the map again`) and nothing is loaded; a bad file never crashes the reader. Errors found later in the load (a texture that won't load) name the source map and line, as for a text load: `forest.map:41: cannot load the texture "textures/bark.png"`.
+A file that fails any check is rejected with `<file>: <message>` (for example `forest.mapb: compiled map: section 'boxes' lies outside the file`, or `forest.mapb: compiled map version 4; this runtime reads compiled map versions 2 to 3: compile the map again`) and nothing is loaded; a bad file never crashes the reader. Errors found later in the load (a texture that won't load) name the source map and line, as for a text load: `forest.map:41: cannot load the texture "textures/bark.png"`.
 
 ## 4. API and detection
 

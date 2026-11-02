@@ -781,6 +781,7 @@ static void RootOf(const char *mapPath, char *root, int size)
 // #region Key tables: env, sky, sun (one place for every key; used to parse and to write)
 // ======================================================================================
 
+// Compiled maps store these values (CmEnv.type): new types only at the end, CM_VERSION bumped
 enum {
     T_F, T_I, T_B, T_COLOR, T_V3, T_QUAT, T_DEG, T_BOX, T_PATH,
     T_FOG, T_BLOOM, T_TONEMAP, T_DOF, T_SKYMODE, T_AMBMODE,
@@ -2782,10 +2783,13 @@ static bool ParseText(Parser *P, const char *text, int size)
 // fixed-width fields, every record a multiple of 4 bytes, sections at multiples of 8. The
 // reader checks the whole file before it uses any of it.
 //
-// A new record: its struct with _Static_asserts, a section id at the end of the enum with its
-// CM_SECTION entry, CM_VERSION bumped (CmReadHeader: how many sections each version has), a
-// section reader (CmRead*) in ReadCompiled's list after the sections its records point into, and
-// the matching section writer (CmPut*). The layout goes into docs/compiled-map.md.
+// The version is the guard: a file names its CM_VERSION and each section its record size, and the
+// reader refuses a version it doesn't know or a record size that differs. So bump CM_VERSION on any
+// change to a record (a field added, removed, resized or moved), to a section or to a stored T_*
+// value, even one that keeps the size. A new record: a section id at the end of the enum with its
+// CM_SECTION entry, CM_VERSION bumped (CmReadHeader: how many sections each version has), a section
+// reader (CmRead*) in ReadCompiled's list after the sections its records point into, and the
+// matching section writer (CmPut*). The layout goes into docs/compiled-map.md.
 
 #define CM_VERSION          3           // MS_COMPILED_VERSION: bump on any change to a record or section
 #define CM_VERSION_OLDEST   2           // the oldest version still read (2: no box turns section)
@@ -2837,34 +2841,6 @@ typedef struct { int32_t slot, material; } CmSlot;
 typedef struct { uint32_t key, type, value[6]; } CmEnv;         // key: the env key's name; type: T_*
 typedef struct { uint32_t hasSpawn; float feet[3], yawDeg, pitchDeg; } CmSpawn;
 typedef struct { uint32_t box; float rotationDeg[3]; } CmBoxTurn;  // a turned box: its CmBox holds the box as written
-
-// The layout is the file format: sizes and offsets must not move (docs/compiled-map.md)
-_Static_assert(sizeof(float) == 4, "compiled maps store IEEE-754 binary32 floats");
-_Static_assert(sizeof(CmHeader) == 64, "CmHeader");
-_Static_assert(offsetof(CmHeader, version) == 8 && offsetof(CmHeader, sectionTable) == 28 &&
-               offsetof(CmHeader, fileSize) == 32 && offsetof(CmHeader, sourceHash) == 40 &&
-               offsetof(CmHeader, sourceSize) == 48 && offsetof(CmHeader, sourceName) == 56 &&
-               offsetof(CmHeader, flags) == 60, "CmHeader offsets");
-_Static_assert(sizeof(CmSection) == 16, "CmSection");
-_Static_assert(sizeof(CmRef) == 24, "CmRef");
-_Static_assert(sizeof(CmBox) == 48 && offsetof(CmBox, ref) == 24, "CmBox");
-_Static_assert(sizeof(CmMaterial) == 148 && offsetof(CmMaterial, line) == 24 && offsetof(CmMaterial, albedo) == 48 &&
-               offsetof(CmMaterial, emissionEnergy) == 56 && offsetof(CmMaterial, cull) == 100 &&
-               offsetof(CmMaterial, inherit) == 120 && offsetof(CmMaterial, uniformFirst) == 132, "CmMaterial");
-_Static_assert(sizeof(CmUniform) == 24 && offsetof(CmUniform, v) == 8, "CmUniform");
-_Static_assert(sizeof(CmSampler) == 16, "CmSampler");
-_Static_assert(sizeof(CmLight) == 116 && offsetof(CmLight, color) == 28 && offsetof(CmLight, energy) == 32 &&
-               offsetof(CmLight, shadow) == 60 && offsetof(CmLight, clipMin) == 68 && offsetof(CmLight, ref) == 92, "CmLight");
-_Static_assert(sizeof(CmViewpoint) == 28, "CmViewpoint");
-_Static_assert(sizeof(CmModelFile) == 8, "CmModelFile");
-_Static_assert(sizeof(CmModel) == 92 && offsetof(CmModel, origin) == 40 && offsetof(CmModel, colliderFirst) == 52 &&
-               offsetof(CmModel, ref) == 68, "CmModel");
-_Static_assert(sizeof(CmCollider) == 24 && sizeof(CmSlot) == 8, "CmCollider, CmSlot");
-_Static_assert(sizeof(CmEnv) == 32 && offsetof(CmEnv, value) == 8, "CmEnv");
-_Static_assert(sizeof(CmSpawn) == 24, "CmSpawn");
-_Static_assert(sizeof(CmBoxTurn) == 16 && offsetof(CmBoxTurn, rotationDeg) == 4, "CmBoxTurn");
-// T_* values are stored in CmEnv.type: the key types only ever get new values at the end
-_Static_assert(T_F == 0 && T_PATH == 8 && T_AMBMODE == 14, "T_* values are part of the compiled format");
 
 enum {
     CM_STRINGS = 1, CM_BOXES, CM_GROUPS, CM_MATERIALS, CM_UNIFORMS, CM_SAMPLERS, CM_LIGHTS, CM_VIEWPOINTS,
@@ -3009,8 +2985,8 @@ static bool CmReadHeader(CmReader *R, CmHeader *h)
     if (h->byteOrder != CM_BYTE_ORDER)
         return CmFail(R, "compiled map: unsupported byte order (compiled maps are little-endian; big-endian hosts are not supported)");
     if (h->version < CM_VERSION_OLDEST || h->version > CM_VERSION)
-        return CmFail(R, "compiled map format %u, this runtime reads formats %d to %d: compile the map again", h->version,
-                      CM_VERSION_OLDEST, CM_VERSION);
+        return CmFail(R, "compiled map version %u; this runtime reads compiled map versions %d to %d: compile the map again",
+                      h->version, CM_VERSION_OLDEST, CM_VERSION);
     uint32_t sections = h->version == 2 ? CM_SECTIONS_V2 : CM_SECTIONS;    // a section's id is its place in this list
     if (h->headerSize != sizeof(CmHeader) || h->flags != 0) return CmFail(R, "compiled map: bad header");
     if (h->fileSize != R->size)

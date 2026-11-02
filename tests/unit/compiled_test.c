@@ -64,6 +64,15 @@ static void ExpectRefused(const char *what, const unsigned char *b, size_t size)
     else printf("ok   %s: %s\n", what, err);
 }
 
+// A damaged copy that must be refused with a message containing `want`
+static void ExpectMessage(const char *what, const unsigned char *b, size_t size, const char *want)
+{
+    char err[512];
+    if (Load(b, size, err, sizeof(err))) { printf("FAIL %s: loaded\n", what); fails++; }
+    else if (!strstr(err, want)) { printf("FAIL %s: the message lacks \"%s\": %s\n", what, want, err); fails++; }
+    else printf("ok   %s: %s\n", what, err);
+}
+
 static unsigned char *Copy(const unsigned char *b, size_t size)
 {
     unsigned char *c = malloc(size);
@@ -135,14 +144,20 @@ int main(int argc, char **argv)
     unsigned char *c;
     #define CASE(what, change) do { c = Copy(orig, size); change; ExpectRefused(what, c, size); free(c); } while (0)
     CASE("magic", c[1] = 'X');
-    CASE("format version", Wr32(c, H_VERSION, Rd32(c, H_VERSION) + 1));
+    // A version this runtime doesn't read: the message names the file's version and the versions read
+    // (the reader holds no layout asserts: the version and the record sizes are the guard)
+    uint32_t version = Rd32(orig, H_VERSION);
+    char want[96];
+    snprintf(want, sizeof(want), "compiled map version %u; this runtime reads compiled map versions 2 to %u", version + 1, version);
+    c = Copy(orig, size); Wr32(c, H_VERSION, version + 1); ExpectMessage("format version", c, size, want); free(c);
+    snprintf(want, sizeof(want), "compiled map version 1; this runtime reads compiled map versions 2 to %u", version);
+    c = Copy(orig, size); Wr32(c, H_VERSION, 1); ExpectMessage("version 1", c, size, want); free(c);
     CASE("header size", Wr32(c, H_SIZE, 60));
     CASE("big-endian byte order", Wr32(c, H_ORDER, 0x04030201u));
     CASE("map format 99", Wr32(c, H_FORMAT, 99));
     CASE("file size + 1", Wr32(c, H_FILESIZE, Rd32(c, H_FILESIZE) + 1));
     CASE("section count 15", Wr32(c, H_COUNT, 15));
     CASE("version 2 with the version 3 section table", Wr32(c, H_VERSION, 2));
-    CASE("version 1", Wr32(c, H_VERSION, 1));
     CASE("section table past the end", Wr32(c, H_TABLE, (uint32_t)size));
     for (int id = 1; id <= S_SECTIONS; id++) {
         uint32_t e;

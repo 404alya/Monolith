@@ -1523,7 +1523,7 @@ Implements §11.7–11.8.
 
 **Compiled maps** (`runtime/monolith_scene.c`, region "Compiled maps"; `docs/compiled-map.md`):
 `CM_VERSION` 3, section 17 `CM_BOX_TURNS` ("box turns", `CmBoxTurn { u32 box; f32 rotationDeg[3]; }`,
-16 bytes, `_Static_assert`ed), one record per turned box in box order. A turned box's `CM_BOXES`
+16 bytes; its record size in the section table is checked), one record per turned box in box order. A turned box's `CM_BOXES`
 record holds the box as written. That needs the written corners, which `SceneData` did not keep (a
 record's `center ± size / 2` does not give back the corners bit for bit), so `TurnedBox` now also
 stores them in `SceneData.turnedWritten[]` (parallel to `turned[]`, ordered corners, freed in
