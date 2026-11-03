@@ -81,6 +81,78 @@ static unsigned char *Copy(const unsigned char *b, size_t size)
     return c;
 }
 
+// True if s is valid UTF-8 to its end (in particular: it doesn't end in half a character)
+static bool WholeUtf8(const char *s)
+{
+    for (const unsigned char *p = (const unsigned char *)s; *p; ) {
+        int n = *p < 0x80 ? 1 : *p >= 0xF0 ? 4 : *p >= 0xE0 ? 3 : *p >= 0xC0 ? 2 : 0;
+        if (n == 0) return false;
+        for (int k = 1; k < n; k++) if ((p[k] & 0xC0) != 0x80) return false;
+        p += n;
+    }
+    return true;
+}
+
+// Messages longer than any buffer the reader keeps (tests/unit/compiled_test.sh makes the package
+// "longname": a material whose texture lies three folders of 120 'é' deep). With the texture
+// renamed away the load fails with "<file>: file not found: \"<~740 bytes>\" (…)", written straight
+// into the caller's buffer: whole in a large one; in every smaller one cut at its end, NUL-terminated,
+// never in half a UTF-8 character, never past errSize.
+static void MessageCases(const char *mapb)
+{
+    char tex[1400], away[1400];
+    const char *E = "\xC3\xA9";     // é
+    int n = snprintf(tex, sizeof(tex), "%s/textures/", dir);
+    for (int f = 0; f < 3; f++) {
+        for (int i = 0; i < 120; i++) n += snprintf(tex + n, sizeof(tex) - n, "%s", E);
+        n += snprintf(tex + n, sizeof(tex) - n, "/");
+    }
+    snprintf(tex + n, sizeof(tex) - n, "tile.png");
+    snprintf(away, sizeof(away), "%s.away", tex);
+    if (rename(tex, away) != 0) { printf("FAIL cannot rename %s\n", tex); fails++; return; }
+
+    // The whole message, in a buffer larger than it
+    static char full[8192];
+    MS_Scene *s = MS_Load(mapb, &(MS_LoadOptions){ .noGpu = true }, full, sizeof(full));
+    loads++;
+    const char *tail = "(paths are relative to the package folder)";
+    size_t len = strlen(full), tailLen = strlen(tail);
+    if (s) { printf("FAIL loaded without its texture\n"); fails++; MS_Unload(s); }
+    else if (strncmp(full, mapb, strlen(mapb)) != 0 || !strstr(full, tex + strlen(dir) + 1) ||
+             len < tailLen || strcmp(full + len - tailLen, tail) != 0 || !WholeUtf8(full)) {
+        printf("FAIL the long message isn't whole: %s\n", full); fails++;
+    } else printf("ok   long message whole (%zu bytes): %s\n", len, full);
+
+    // Every smaller size: the start of the whole message, cut at most 3 bytes short (half a
+    // character), NUL-terminated, nothing written past errSize
+    int trimmed = 0, bad = 0;
+    char *buf = malloc(len + 64);
+    if (!buf) exit(1);
+    for (int size = 1; size <= (int)len + 1; size++) {
+        memset(buf, 0x7F, len + 64);
+        s = MS_Load(mapb, &(MS_LoadOptions){ .noGpu = true }, buf, size);
+        loads++;
+        if (s) { MS_Unload(s); bad++; continue; }
+        size_t got = strnlen(buf, (size_t)size);
+        size_t room = (size_t)size - 1;
+        bool ok = got <= room && memcmp(buf, full, got) == 0 && WholeUtf8(buf) &&
+                  (got == (room < len ? room : len) ||                          // as much as fits, or
+                   (room - got <= 3 && (unsigned char)full[got] >= 0xC0)) &&    // back to a character's start
+                  (unsigned char)buf[size] == 0x7F;
+        if (!ok) {
+            if (bad++ < 5) printf("FAIL errSize %d: %zu bytes \"%.*s\"\n", size, got, (int)got, buf);
+            continue;
+        }
+        if (got < (size_t)size - 1) trimmed++;
+        if (size == 1 || size == 16) printf("ok   errSize %d: \"%s\" (%zu bytes)\n", size, buf, got);
+    }
+    fails += bad;
+    printf("%s   errSize 1..%zu: every message a clean cut (%d cut back to a whole UTF-8 character)\n",
+           bad ? "FAIL" : "ok", len + 1, trimmed);
+    free(buf);
+    if (rename(away, tex) != 0) { printf("FAIL cannot rename %s back\n", away); fails++; }
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 2) { fprintf(stderr, "usage: compiled_test <package folder with <name>.mapb>\n"); return 2; }
@@ -90,6 +162,11 @@ int main(int argc, char **argv)
     char path[1200];
     const char *base = strrchr(dir, '/') ? strrchr(dir, '/') + 1 : dir;
     snprintf(path, sizeof(path), "%s/%s.mapb", dir, base);
+    if (strcmp(base, "longname") == 0) {
+        MessageCases(path);
+        printf("%s: %d loads, %d failures\n", fails ? "FAILED" : "PASSED", loads, fails);
+        return fails ? 1 : 0;
+    }
     FILE *f = fopen(path, "rb");
     if (!f) { printf("FAIL cannot open %s\n", path); return 1; }
     fseek(f, 0, SEEK_END);

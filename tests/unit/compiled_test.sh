@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # tests/unit/compiled_test.sh -- corruption test of the compiled-map reader under ASan + UBSan
 # (tests/unit/compiled_test.c). Needs ./build.sh first (build/linux/monolith and R3D's libraries).
-# Copies tests/models and tests/rotated (turned boxes) into build/compiled-test/, compiles them with
-# monolith --compile, builds the test against the runtime as a game has it (no MONOLITH_EDITOR)
-# and runs it on both.
+# Copies tests/models and tests/rotated (turned boxes) into build/compiled-test/, makes the package
+# longname there (a long UTF-8 path: the error-message cases), compiles them with monolith --compile,
+# builds the test against the runtime as a game has it (no MONOLITH_EDITOR) and runs it on all three.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 R3D_DIR="${R3D_DIR:-$ROOT/submodules/r3d}"
@@ -12,8 +12,21 @@ OUT="$ROOT/build/compiled-test"
 CC="${CC:-clang}"
 
 [[ -x "$ROOT/build/linux/monolith" && -f "$LIBDIR/lib/libr3d.a" ]] || { echo "compiled_test: run ./build.sh first" >&2; exit 1; }
-PACKAGES=(models rotated)
+PACKAGES=(models rotated longname)
+# longname: messages longer than any fixed buffer (compiled_test.c, MessageCases): a texture three
+# folders of 120 'é' deep
+E="$(printf '\xc3\xa9%.0s' {1..120})"
+LONG="$OUT/longname"
+mkdir -p "$LONG/textures/$E/$E/$E"
+cp "$ROOT/tests/models/textures/tiles.png" "$LONG/textures/$E/$E/$E/tile.png"
+printf 'monolith 2\nmaterial "long" albedo_map "textures/%s/%s/%s/tile.png"\nuse "long"\nbox 0 0 0 1 1 1\nspawn 0 0 3 0\n' \
+  "$E" "$E" "$E" > "$LONG/longname.map"
 for p in "${PACKAGES[@]}"; do
+  if [[ "$p" == longname ]]; then
+    "$ROOT/build/linux/monolith" --map "$LONG" --compile "$LONG/longname.mapb" >/dev/null 2>"$OUT/compile.log" ||
+      { cat "$OUT/compile.log" >&2; exit 1; }
+    continue
+  fi
   mkdir -p "$OUT/$p"
   cp -r "$ROOT/tests/$p/." "$OUT/$p/"     # (refreshes the copy; nothing is removed)
   "$ROOT/build/linux/monolith" --map "$OUT/$p" --compile "$OUT/$p/$p.mapb" >/dev/null 2>"$OUT/compile.log" ||

@@ -144,6 +144,12 @@ Boxes were **axis-aligned everywhere** from round 1: the format (two corners), t
 - **Controls follow Blender:** plain R is a 90° step about the vertical (no free control), ALT+R the keyboard modal, ALT+SHIFT+R the reset, plus a rotate gizmo (axis rings, view ring, trackball) whenever something that can turn is selected.
 - **Compiled maps went to version 3** (one record per turned box, the boxes stored as written); version 2 is still read.
 
+## Error messages without a message buffer (2026-11-02)
+
+The parser's `Fail` and the compiled-map reader's `CmFail` used to format the message into a local `msg[512]` / `msg[400]` and then copy "<file>: <msg>" into the caller's `err`; a few parser checks (`Keyword`, model-file references) pre-formatted into their own `m[256]` / `msg[]` first. Those messages hold content (tokens, names, paths), so a long one was cut twice, silently, before the caller's buffer even mattered, and could end in half a UTF-8 character. Now one helper, `MsErrorV`, writes the prefix and the message straight into the caller's buffer; the caller's `errSize` is the only limit, and a cut keeps the file and the start of the message, NUL-terminated and on a character boundary (`tests/unit/compiled_test.sh` with its `longname` package, `tests/unit/parse_error_test.sh`). The defaults chosen:
+- **The caller's buffer, not a heap string:** a failure path is also the out-of-memory path, so it must not allocate, and the API (`char *err, int errSize`) is caller-sized already.
+- **No change to the API or to any message text;** the editor's own `char err[512]` buffers in `src/` are callers' buffers and stayed (a long message reaches the editor's terminal cut at 511 bytes, cleanly).
+
 ## The instruction files
 
 Superseded layouts, for reading old bundles, commits and notes; the current layout is `CLAUDE.md` + `.claude/skills/` + `docs/`.

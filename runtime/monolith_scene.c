@@ -618,6 +618,34 @@ char *MS_StrDup(const char *s)
     return MS_StrNDup(s, strlen(s));
 }
 
+// Cuts a string that was cut at s[len] back to its last whole UTF-8 character, so a cut message
+// never ends in half a character (bytes that weren't valid UTF-8 to begin with are left alone)
+static void TrimUtf8Tail(char *s, size_t len)
+{
+    size_t k = 0;   // continuation bytes (10xxxxxx) at the end
+    while (k < 3 && k < len && ((unsigned char)s[len - 1 - k] & 0xC0) == 0x80) k++;
+    if (k == len) return;
+    unsigned char lead = (unsigned char)s[len - 1 - k];
+    size_t need = lead >= 0xF0 ? 4 : lead >= 0xE0 ? 3 : lead >= 0xC0 ? 2 : 1;
+    if (need > 1 && k + 1 < need) s[len - 1 - k] = '\0';
+}
+
+// Writes "<path>: <message>" (line > 0: "<path>:<line>: <message>") straight into the caller's
+// buffer err of errSize bytes, with no message buffer in between: the caller's size is the only
+// limit. A message that doesn't fit is cut at its end (the file and the start of the message
+// stay), NUL-terminated and never inside a UTF-8 character. No allocation: this is also the
+// out-of-memory path.
+static void MsErrorV(char *err, int errSize, const char *path, int line, const char *fmt, va_list ap)
+{
+    if (!err || errSize <= 0) return;
+    int n = line > 0 ? snprintf(err, (size_t)errSize, "%s:%d: ", path, line) : snprintf(err, (size_t)errSize, "%s: ", path);
+    if (n < 0) { err[0] = '\0'; return; }
+    if (n >= errSize) { TrimUtf8Tail(err, (size_t)errSize - 1); return; }
+    int m = vsnprintf(err + n, (size_t)(errSize - n), fmt, ap);
+    if (m < 0) err[n] = '\0';
+    else if (m >= errSize - n) TrimUtf8Tail(err, (size_t)errSize - 1);
+}
+
 #ifdef MONOLITH_EDITOR
 static unsigned long long Fnv1a64Update(unsigned long long h, const void *data, size_t size)
 {
@@ -1300,13 +1328,21 @@ typedef struct {
     int tokCap;
 } Parser;
 
+// Writes "<file>:<line>: <message>" ("<file>: <message>" outside a line) into the parser's
+// message buffer (MsErrorV); returns false, so a check can `return FailF(…)`
+static bool FailF(Parser *P, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    MsErrorV(P->err, P->errSize, P->path, P->line, fmt, ap);
+    va_end(ap);
+    return false;
+}
+
+// FailF with at most one string argument (NULL: none)
 static bool Fail(Parser *P, const char *fmt, const char *arg)
 {
-    char msg[512];
-    snprintf(msg, sizeof(msg), fmt, arg ? arg : "");
-    if (P->line > 0) snprintf(P->err, P->errSize, "%s:%d: %s", P->path, P->line, msg);
-    else snprintf(P->err, P->errSize, "%s: %s", P->path, msg);
-    return false;
+    return FailF(P, fmt, arg ? arg : "");
 }
 
 static bool ParseFloat(Parser *P, const char *s, float *out)
@@ -1451,11 +1487,11 @@ static int Keyword(Parser *P, Token t, const char *const *names, int count, cons
 {
     for (int i = 0; i < count; i++)
         if (!t.quoted && strcmp(t.s, names[i]) == 0) { *out = i; return 1; }
-    char m[256];
-    int n = snprintf(m, sizeof(m), "bad %s '%s' (expected", what, t.s);
-    for (int i = 0; i < count && n < (int)sizeof(m); i++) n += snprintf(m + n, sizeof(m) - n, " %s", names[i]);
-    if (n < (int)sizeof(m)) snprintf(m + n, sizeof(m) - n, ")");
-    Fail(P, "%s", m);
+    char list[256];     // the table's names (a few short keywords); the token goes in whole
+    int n = 0;
+    list[0] = '\0';
+    for (int i = 0; i < count && n < (int)sizeof(list); i++) n += snprintf(list + n, sizeof(list) - n, " %s", names[i]);
+    FailF(P, "bad %s '%s' (expected%s)", what, t.s, list);
     return 0;
 }
 
@@ -2126,10 +2162,8 @@ enum { REF_DEP = 1, REF_TEXTURE = 2 };
 // removed, '\' read as '/'. Fails if it is absolute, a URL, or leaves the package.
 static bool RefResolve(Parser *P, const char *modelRel, const char *base, const char *ref, char *out, int outSize)
 {
-    char msg[2 * MS_PATH_MAX + 200];
     if (strstr(ref, "://") || ref[0] == '/' || ref[0] == '\\' || (ref[0] && ref[1] == ':')) {
-        snprintf(msg, sizeof(msg), "\"%s\" refers to \"%s\", outside the package", modelRel, ref);
-        return Fail(P, "%s", msg);
+        return FailF(P, "\"%s\" refers to \"%s\", outside the package", modelRel, ref);
     }
     char joined[2 * MS_PATH_MAX];
     const char *slash = strrchr(base, '/');
@@ -2142,8 +2176,7 @@ static bool RefResolve(Parser *P, const char *modelRel, const char *base, const 
         if (seg == 0 || (seg == 1 && c[0] == '.')) { /* skip */ }
         else if (seg == 2 && c[0] == '.' && c[1] == '.') {
             if (len == 0) {
-                snprintf(msg, sizeof(msg), "\"%s\" refers to \"%s\", outside the package", modelRel, ref);
-                return Fail(P, "%s", msg);
+                return FailF(P, "\"%s\" refers to \"%s\", outside the package", modelRel, ref);
             }
             while (len > 0 && out[len - 1] != '/') len--;
             if (len > 0) len--;     // the '/' before the dropped segment
@@ -2194,13 +2227,10 @@ static bool ModelRef(Parser *P, const char *modelRel, const char *base, const ch
     // both forms (assimp and R3D may or may not %-decode): each must stay inside
     if (!RefResolve(P, modelRel, base, raw, out, sizeof(out)) || !RefResolve(P, modelRel, base, dec, out, sizeof(out))) return false;
     if (!(flags & REF_DEP)) return true;
-    char full[MS_PATH_MAX], msg[MS_PATH_MAX + 200];
+    char full[MS_PATH_MAX];
     if (snprintf(full, sizeof(full), "%s%s", P->d->root, out) >= (int)sizeof(full)) return Fail(P, "path too long: \"%s\"", out);
     if (!AddDep(P, full)) return false;     // (a dependency: hot reload watches it)
-    if (!FileExists(full)) {
-        snprintf(msg, sizeof(msg), "file not found: \"%s\" (named by \"%s\")", out, modelRel);
-        return Fail(P, "%s", msg);
-    }
+    if (!FileExists(full)) return FailF(P, "file not found: \"%s\" (named by \"%s\")", out, modelRel);
     if (outRel) memcpy(outRel, out, strlen(out) + 1);
     return true;
 }
@@ -2984,16 +3014,14 @@ typedef struct {
     int errSize;
 } CmReader;
 
-// Writes "<file>: <message>" into the reader's message buffer; returns false, so a check can
+// Writes "<file>: <message>" into the reader's message buffer (MsErrorV); returns false, so a check can
 // `return CmFail(…)`
 static bool CmFail(CmReader *R, const char *fmt, ...)
 {
-    char msg[400];
     va_list ap;
     va_start(ap, fmt);
-    vsnprintf(msg, sizeof(msg), fmt, ap);
+    MsErrorV(R->err, R->errSize, R->d->path, 0, fmt, ap);
     va_end(ap);
-    snprintf(R->err, R->errSize, "%s: %s", R->d->path, msg);
     return false;
 }
 

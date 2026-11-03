@@ -58,6 +58,7 @@ monolith/
 ├── tests/models/                # small CC0 test package: every statement kind once
 ├── tests/unit/                  # wincmd_test.c: the Windows request command line (build line in its header);
 │                                #   compiled_test.c/.sh: the compiled-map reader under corruption (ASan + UBSan);
+│                                #   parse_error_test.c/.sh: the parser's messages, long and cut (ASan + UBSan);
 │                                #   export_strip_test.sh: the exported runtime has no text parser
 ├── tests/profile/               # perf.txt + bench.md: a cut-down real profile and bench report (leakcheck runs tools/profile.c on them)
 ├── export/, requests/, benchmark/   # gitignored: F9 exports, request bundles, --bench reports
