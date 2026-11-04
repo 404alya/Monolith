@@ -369,6 +369,8 @@ typedef struct {
     bool full;                  // non-object statements changed: uploaded in full (a reload from memory)
     int boxesChanged, modelsChanged, lightsChanged;     // objects without an identical one before / after
     int rangesRebuilt, rangesKept;                      // merged box meshes
+    int materialsRebuilt;       // materials appended, or changed only in uv_faces / filter / albedo_map
+                                // (built again while the others were kept; docs/painting.md 9.4)
     int tilesDirty, lightShadowsDirty;                  // sun shadow tiles / light shadow maps to draw again
     bool fogDirty, aoDirty;                             // fog cache / AO volume to bake again (part or all)
     double ms;                  // the whole call
@@ -606,6 +608,87 @@ BoundingBox MS_ObjectBounds(const MS_Scene *scene, MS_ObjRef obj);    // world A
 int MS_ObjectEntity(const MS_Scene *scene, MS_ObjRef obj);
 // The entity with this id in the loaded map, -1 if there is none (a hash lookup)
 int MS_FindEntity(const MS_Scene *scene, MS_EntityId id);
+
+#ifdef MONOLITH_EDITOR
+// ======================================================================================
+// Painting (editor: draw mode; docs/painting.md)
+// ======================================================================================
+// Where on a surface a ray hits (the texture coordinate the albedo map is sampled at), the
+// triangles of a model's material slot, a material's box face layout (`uv_faces`), and
+// textures: read back, provided from memory for package paths that have no file yet, and
+// updated in place (a rectangle and the mipmaps) without a new scene version.
+
+typedef struct {
+    MS_Hit hit;             // as MS_Raycast (the same object, point, normal and distance)
+    int material;           // materials[] index the surface is drawn with; -1: a model slot's own material
+    int face;               // boxes: 0..5 = +x -x +y -y +z -z (a turned box: its own axes); models: -1
+    int slot;               // models: the file's material slot of the triangle; boxes: -1
+    int mesh, triangle;     // models: the file's mesh and the triangle in it; boxes: -1
+    Vector2 faceUv;         // boxes: where on the face, 0..1 (before uv_faces); models: the texcoord
+    Vector2 uv;             // where the albedo map is sampled: after uv_faces, uv_scale and
+                            // uv_offset, before the wrap
+    Vector3 bary;           // models: barycentric coordinates of the hit in the triangle
+} MS_SurfaceHit;
+
+// MS_Raycast, plus where on the surface it hit. False when nothing is hit (out->hit.obj.kind
+// MS_OBJ_NONE). A model without texture coordinates is still hit, with uv 0 0 and slot set.
+bool MS_RaycastSurface(const MS_Scene *scene, Vector3 origin, Vector3 dir, float maxDist, MS_SurfaceHit *out);
+
+// The triangles of model file `file` drawn with its material slot `slot`: how many, then each
+// one's three texture coordinates and model-space positions. False when out of range or the
+// file has no texture coordinates.
+int MS_ModelSlotTriangleCount(const MS_Scene *scene, int file, int slot);
+bool MS_ModelSlotTriangle(const MS_Scene *scene, int file, int slot, int k, Vector2 uv[3], Vector3 pos[3]);
+// k of MS_ModelSlotTriangle for triangle `triangle` of mesh `mesh` (MS_SurfaceHit's), in its slot
+// (the mesh's material slot); -1 when out of range
+int MS_ModelSlotTriangleIndex(const MS_Scene *scene, int file, int mesh, int triangle);
+
+// A material's box face layout (`uv_faces`): false when it has none. cells[f] for the faces
+// +x -x +y -y +z -z, and the grid of cells (cols x rows).
+bool MS_MaterialFaceLayout(const MS_Scene *scene, int material, unsigned char cells[6], int *cols, int *rows);
+// The rectangle of face f's cell in 0..1 texture space (inset: with the gutter of 1/64 cell on
+// each side, where the face's 0..1 UVs go). The box meshes use the same function.
+Rectangle MS_FaceCellRect(const unsigned char cells[6], int face, bool inset);
+
+// How the scene draws box `box`, for drawing it alone in an offscreen frame (the draw mode's
+// shader bake): its material, the unit cube its material's boxes are drawn with (R3D's, or the
+// face layout's), and either the material's instance buffer and the box's slot in it
+// (`instanced`: drawn as the scene draws it, so a shader sees the same INSTANCE_* and model-space
+// POSITION) or, for a merged material, the transform that puts the unit cube where the box's
+// merged faces lie (scaled, turned, moved: the same world positions, normals and UVs). False
+// when out of range or the scene has no GPU state.
+typedef struct {
+    R3D_Material material;
+    R3D_Mesh cube;
+    bool instanced;
+    R3D_InstanceBuffer instances;
+    int index;              // instanced: the box's slot in `instances`
+    Matrix transform;       // merged: model matrix of the unit cube
+} MS_BoxDraw;
+bool MS_BoxDrawOf(const MS_Scene *scene, int box, MS_BoxDraw *out);
+
+// The GPU texture the scene loaded for this package path (the first cache entry with it; id 0:
+// none)
+Texture2D MS_TextureFind(const MS_Scene *scene, const char *rel);
+// The albedo texture of model file `file`'s material slot `slot` as the file has it (id 0: none)
+Texture2D MS_ModelSlotTexture(const MS_Scene *scene, int file, int slot);
+// A GPU texture's level 0 as an RGBA8 image (UnloadImage it). False if tex.id is 0.
+bool MS_TextureRead(Texture2D tex, Image *out);
+// Pixels for a package path that the next MS_EditSetText (and any upload from memory) uses
+// instead of the file, also while the file doesn't exist (a new canvas). Copied (as RGBA8);
+// img NULL forgets the path. Kept across live edits; dropped by a load or reload from disk and
+// by MS_Unload. False when out of memory.
+bool MS_TextureProvide(MS_Scene *scene, const char *rel, const Image *img);
+// Uploads rect (texels) of img (RGBA8, the texture's size) into every cached texture with this
+// package path and regenerates their mipmaps; MS_TextureGeneration + 1 (scene->version is not
+// changed). A material with alpha_cutoff > 0 or transparency that uses it also redraws the sun
+// tiles and light shadows its objects reach. False if no texture of img's size has the path.
+// (A provided image of another size than the cached texture makes the next live edit that loads
+// the path load a texture of its size: a canvas resized or laid out anew.)
+bool MS_TextureUpdate(MS_Scene *scene, const char *rel, const Image *img, Rectangle rect);
+// +1 on every MS_TextureUpdate (frame reuse keys on it)
+unsigned int MS_TextureGeneration(const MS_Scene *scene);
+#endif
 
 #ifdef MONOLITH_EDITOR
 // ======================================================================================

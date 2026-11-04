@@ -18,6 +18,8 @@ static char dir[1024], fuzzPath[1100];
 // The header and section table fields this test changes (docs/compiled-map.md, section 2)
 enum { H_VERSION = 8, H_SIZE = 12, H_ORDER = 16, H_FORMAT = 20, H_COUNT = 24, H_TABLE = 28, H_FILESIZE = 32 };
 enum { S_STRINGS = 1, S_BOXES = 2, S_MATERIALS = 4, S_STATEMENTS = 13, S_ENV = 14, S_BOX_TURNS = 17, S_SECTIONS = 17 };
+// A material record (version 4) and its face layout, filter and padding bytes
+enum { MAT_SIZE = 156, MAT_UV_FACES = 148, MAT_FILTER = 154, MAT_PAD = 155 };
 
 static uint32_t Rd32(const unsigned char *b, uint32_t at) { uint32_t v; memcpy(&v, b + at, 4); return v; }
 static void Wr32(unsigned char *b, uint32_t at, uint32_t v) { memcpy(b + at, &v, 4); }
@@ -267,7 +269,26 @@ int main(int argc, char **argv)
     CASE("control character in the string table", c[strings + strCount - 2] = 0x01);
     CASE("material name offset outside the string table", Wr32(c, mats, strCount));
     CASE("material name offset 0xFFFFFFFE", Wr32(c, mats, 0xFFFFFFFEu));
-    CASE("material 0 not \"default\"", Wr32(c, mats, Rd32(c, mats + 148)));   // (material 1's name)
+    CASE("material 0 not \"default\"", Wr32(c, mats, Rd32(c, mats + MAT_SIZE)));   // (material 1's name)
+    // Face layouts (uv_faces) and the filter: only what the parser accepts
+    static const unsigned char GAP[6] = { 0, 0, 3, 3, 3, 3 }, SIX[6] = { 6, 0, 1, 2, 3, 4 }, PART[6] = { 255, 0, 0, 0, 0, 0 },
+                               ALL[6] = { 0, 1, 2, 3, 4, 5 };
+    CASE("material uv_faces with a gap (0 0 3 3 3 3)", memcpy(c + mats + MAT_UV_FACES, GAP, 6));
+    CASE("material uv_faces cell 6", memcpy(c + mats + MAT_UV_FACES, SIX, 6));
+    CASE("material uv_faces partly none", memcpy(c + mats + MAT_UV_FACES, PART, 6));
+    CASE("material filter 2", c[mats + MAT_FILTER] = 2);
+    CASE("material padding 1", c[mats + MAT_PAD] = 1);
+    // A layout needs uv_scale 1 1 (tests/models: material 2, "tiles", has 2 2); material 0 loads with one
+    if (Rd32(orig, mats + 2 * MAT_SIZE + 80) != 0x3F800000u)       // (its uvScale.x is not 1)
+        CASE("uv_faces on a material with uv_scale 2 2", memcpy(c + mats + 2 * MAT_SIZE + MAT_UV_FACES, ALL, 6));
+    {
+        unsigned char *ok = Copy(orig, size);
+        memcpy(ok + mats + MAT_UV_FACES, ALL, 6);
+        ok[mats + MAT_FILTER] = 1;
+        if (!Load(ok, size, err, sizeof(err))) { printf("FAIL uv_faces 0 1 2 3 4 5 and filter nearest on material 0: %s\n", err); fails++; }
+        else printf("ok   uv_faces 0 1 2 3 4 5 and filter nearest on material 0 load\n");
+        free(ok);
+    }
     CASE("material cull mode 7", Wr32(c, mats + 100, 7));
     CASE("box material 9999", Wr32(c, boxes + 36, 9999));
     CASE("box statement -1", Wr32(c, boxes + 28, 0xFFFFFFFFu));
@@ -311,7 +332,7 @@ int main(int argc, char **argv)
         uint32_t uniE, lightE, lights = Section(orig, 7, &lightE);
         Section(orig, 5, &uniE);
         // (tests/models: material 3, "awning", has the uniforms; light 1 is the spot light)
-        uint32_t awning = mats + 3 * 148, bark = mats + 4 * 148;
+        uint32_t awning = mats + 3 * MAT_SIZE, bark = mats + 4 * MAT_SIZE;
         if (Rd32(orig, uniE + 8) > 0 && Rd32(orig, awning + 136) > 0)
             CASE("two materials sharing one uniform range",
                  { Wr32(c, bark + 132, Rd32(c, awning + 132)); Wr32(c, bark + 136, Rd32(c, awning + 136)); });

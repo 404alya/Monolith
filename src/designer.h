@@ -271,6 +271,12 @@ float DesignerCycleAngleSnap(Designer *d);
 void DesignerSetAngleSnap(Designer *d, float deg);
 // Leaves volume mode (cancels a volume being made)
 void DesignerVolumeModeEnd(Designer *d);
+// Volume mode on (V; the draw mode's V: docs/painting.md 13.1)
+void DesignerVolumeModeBegin(Designer *d);
+// 3D drawing over the scene, depth-tested against it with the overlay's bias (the draw mode's
+// brush cursor uses the same as the selection outlines); End restores what 2D drawing expects
+void DesignerBeginOverlay3D(Camera3D cam);
+void DesignerEndOverlay3D(void);
 
 // After LauncherSubmit: closes the box (and clears the text) on success, keeps it on failure
 void DesignerSubmitDone(Designer *d, bool ok, const char *msg);

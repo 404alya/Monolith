@@ -2127,6 +2127,24 @@ static bool FindClaude(char *out, int outSize)
 #endif
 }
 
+// An AI agent's shell (CLAUDECODE / AI_AGENT set) never opens a real terminal: a scripted --shot run
+// whose input reached the prompt box would otherwise start a coordinator on the developer's screen.
+// Tests set MONOLITH_TERMINAL (tools/stub-terminal.sh); MONOLITH_ALLOW_WINDOW lifts it, as for the
+// game window.
+static bool AgentShellRefuses(char *err, int errSize)
+{
+    const char *keys[] = { "CLAUDECODE", "AI_AGENT" };
+    bool agent = false;
+    for (int i = 0; i < 2; i++) {
+        const char *v = getenv(keys[i]);
+        if (v && v[0] && strcmp(v, "0") != 0) agent = true;
+    }
+    const char *allow = getenv("MONOLITH_ALLOW_WINDOW"), *term = getenv("MONOLITH_TERMINAL");
+    if (!agent || (allow && allow[0] && strcmp(allow, "0") != 0) || (term && term[0])) return false;
+    snprintf(err, errSize, "refusing to open a terminal from an AI agent's shell (set MONOLITH_TERMINAL to tools/stub-terminal.sh)");
+    return true;
+}
+
 #ifdef _WIN32
 
 static bool FindProgram(const char *name, char *out, int outSize)
@@ -2161,6 +2179,7 @@ static bool Launch(const char *title, const char *mark, const char *prompt, cons
 {
     (void)t;
     (void)mark;
+    if (AgentShellRefuses(err, errSize)) return false;
     char claude[1024];
     if (!FindClaude(claude, sizeof(claude))) {
         snprintf(err, errSize, "claude not found in PATH (or MONOLITH_CLAUDE)");
@@ -2338,6 +2357,7 @@ static const char COORDINATOR_WRAPPER[] =
 static bool Launch(const char *title, const char *mark, const char *prompt, const char *model, const char *lock,
                    TermWindow *t, char *err, int errSize)
 {
+    if (AgentShellRefuses(err, errSize)) return false;
     // Terminal: env override (program + extra args) or the first known one in PATH
     ArgList term = { 0 }, args = { 0 };
     char termPath[4096];

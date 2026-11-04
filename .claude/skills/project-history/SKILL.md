@@ -150,6 +150,17 @@ The parser's `Fail` and the compiled-map reader's `CmFail` used to format the me
 - **The caller's buffer, not a heap string:** a failure path is also the out-of-memory path, so it must not allocate, and the API (`char *err, int errSize`) is caller-sized already.
 - **No change to the API or to any message text;** the editor's own `char err[512]` buffers in `src/` are callers' buffers and stayed (a long message reaches the editor's terminal cut at 511 bytes, cleanly).
 
+## Painting (2026-11-03)
+
+The developer wanted to put marks, signs, decals and pixel art on objects by hand instead of describing them in a request. Draw mode (B) paints on boxes and models in the editor (design: `docs/painting.md`; four phases by agents in worktrees, merged by the lead, two independent verifiers). The developer decided:
+- **"Pixel size" is two controls:** the brush size in texels and the canvas density in texels per metre (new canvases; Resize to density), plus `filter nearest` for a pixel-art look.
+- **Each object gets its own texture:** the first stroke copies its material as `paint_<id>` with `textures/paint/paint_<id>.png`; a Shared switch paints the material's own texture instead.
+- **The developer says which box faces share texture space:** `uv_faces a b c d e f` (+x −x +y −y +z −z; faces with the same number share a cell). Box UVs were 0–1 on every face from R3D's unit cube, so one face's paint showed on all six; the key is opt-in, so every unpainted map stays bit-identical (the round's acceptance test).
+
+How it fits the earlier rounds: paint is pixels plus the smallest text edit, so requests, hot reload, compiled maps (version 4) and the export keep reading the package; strokes are steps of the live-editing history (undo tiles, rebase replays strokes onto a PNG that changed on disk); the runtime only receives pixels (`MS_TextureProvide`, `MS_TextureUpdate`) and says where a ray hit a surface (`MS_RaycastSurface`). Lessons:
+- **A scripted shot can reach the real launcher.** A `--draw-panel` test's ENTER reached the designer, opened the prompt box, submitted bundles and started a coordinator in a visible terminal on the developer's screen. Since then the launcher refuses to open a real terminal from an agent's shell unless `MONOLITH_TERMINAL` is a stub, and draw-mode / panel input never reaches the designer.
+- **A freed vertex range can be drawn with its old contents** when back-to-back live edits free and refill it before a frame is drawn (NVIDIA 615.71; R3D's shared vertex buffer). It also explained a nondeterministic sun shadow after live edits from before the round. Live edits now free replaced meshes after the next draw (`LiveRetire`).
+
 ## The instruction files
 
 Superseded layouts, for reading old bundles, commits and notes; the current layout is `CLAUDE.md` + `.claude/skills/` + `docs/`.

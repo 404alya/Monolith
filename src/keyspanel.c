@@ -14,7 +14,7 @@ typedef struct { int section; const char *keys, *action; } KeyRow;
 
 static const char *const SECTIONS[] = {
     "Walking", "Spectator", "Selecting and requests", "Snip and volumes", "Edit mode", "Grab, rotate, scale", "Rotate gizmo",
-    "Panels and views",
+    "Draw mode", "Panels and views",
 };
 #define SECTION_COUNT ((int)(sizeof(SECTIONS) / sizeof(SECTIONS[0])))
 
@@ -93,13 +93,30 @@ static const KeyRow ROWS[] = {
     { 6, "digits . - BACKSPACE", "type the angle (the trackball: about the view's up)" },
     { 6, "L", "the gizmo's axes: global / the active object's own" },
 
-    { 7, "F2", "graphics settings: UP / DOWN select, LEFT / RIGHT change, ESC close" },
-    { 7, "F3", "inspector outlines: by material, by shader, by draw kind, off" },
-    { 7, "SHIFT+F3", "inspector panel: SPACE hide / show, I alone (CTRL+I while typing)" },
-    { 7, "F4 / SHIFT+F4", "buffer view: albedo, normal, ORM, SSAO, SSIL, ... and back" },
-    { 7, "F5", "id panel: ENTER fly there, DELETE remove the id, SHIFT+DELETE the objects" },
-    { 7, "I (edit mode)", "model picker: type to filter, ENTER place at the cursor, ESC close" },
-    { 7, "in a list panel", "type to filter, UP / DOWN / PGUP / PGDN / HOME / END select" },
+    { 7, "B", "enter / leave draw mode (spectator; with unsaved edits the first press only warns)" },
+    { 7, "RMB held", "fly: mouse look, WASD / E / Q / SPACE, wheel speed" },
+    { 7, "LMB (drag)", "paint with the pen under the cursor; fill: fill the face's cell / the UV island" },
+    { 7, "ALT+LMB", "eyedropper: the texture's colour under the cursor" },
+    { 7, "1 .. 5", "pen: hard round, square, soft round, eraser, fill (the effect toggles wait)" },
+    { 7, "[ / ], CTRL+wheel", "brush size (1 .. 256 texels)" },
+    { 7, "SHIFT+wheel", "brush alpha +-8" },
+    { 7, "X", "swap the colour with the one before" },
+    { 7, "H", "shared: paint the texture the material already has (every object using it)" },
+    { 7, "TAB", "hide / show the draw panel" },
+    { 7, "the panel", "the surface the cursor rested on; drag a slider, click a field to type (ENTER / a click elsewhere applies, ESC cancels)" },
+    { 7, "wheel over the panel", "scroll it (over a slider or a field: step the value)" },
+    { 7, "CTRL+S", "save the canvases (PNGs, licence rows) and the map" },
+    { 7, "CTRL+Z / CTRL+SHIFT+Z", "undo / redo strokes and edits, one history with edit mode (also CTRL+Y)" },
+    { 7, "CTRL+SHIFT+DELETE", "clear the red list of edits that could not be applied again" },
+    { 7, "ESC, M / V / C", "leave draw mode; into edit / volume / snip mode" },
+
+    { 8, "F2", "graphics settings: UP / DOWN select, LEFT / RIGHT change, ESC close" },
+    { 8, "F3", "inspector outlines: by material, by shader, by draw kind, off" },
+    { 8, "SHIFT+F3", "inspector panel: SPACE hide / show, I alone (CTRL+I while typing)" },
+    { 8, "F4 / SHIFT+F4", "buffer view: albedo, normal, ORM, SSAO, SSIL, ... and back" },
+    { 8, "F5", "id panel: ENTER fly there, DELETE remove the id, SHIFT+DELETE the objects" },
+    { 8, "I (edit mode)", "model picker: type to filter, ENTER place at the cursor, ESC close" },
+    { 8, "in a list panel", "type to filter, UP / DOWN / PGUP / PGDN / HOME / END select" },
 };
 #define ROW_COUNT ((int)(sizeof(ROWS) / sizeof(ROWS[0])))
 

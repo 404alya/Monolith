@@ -86,8 +86,12 @@ bool EditModeTakesArrows(const EditMode *m);
 void EditModeSync(EditMode *m, Designer *d, bool newScene);
 // Unsaved edits (0 before the first edit, and in auto save mode unless a write failed)
 int EditModeUnsaved(const EditMode *m);
-// CTRL+S: writes the working copy to the map file; msg says what happened
+// CTRL+S: writes the working copy to the map file (and the draw mode's canvases: MapEditSaveAll);
+// msg says what happened
 bool EditModeSave(EditMode *m, char *msg, int msgSize);
+// A request is open on the map: the first press of `key` after the last save warns (the HUD
+// message), the same key again within 3 s goes ahead (true). The draw mode's strokes use it too
+bool EditModeConfirm(EditMode *m, int key);
 // Opens the mode without a key (--edit-mode)
 void EditModeOpen(EditMode *m, Designer *d);
 // HUD lines at (x, y), returns the height used (nothing while the mode is off and quiet)

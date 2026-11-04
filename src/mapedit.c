@@ -98,6 +98,19 @@
 //   id [<n>]                       the selection's line gets `id n` (one line), or without n each
 //                                  selected line without an id gets the next free one
 //   id remove                      the selection's lines lose their `id n` prefix (objects stay)
+//   paint-material "<name>" [slot <N>] <keys...>
+//                                  the draw mode's first stroke (docs/painting.md 3.1, 10.3): the
+//                                  selection (the objects of one line, or of one copy of a repeat)
+//                                  gets the new material <name> with these keys (written as given).
+//                                  The material line goes after the file's last material line when
+//                                  that is before the object, else right before it; a box line is
+//                                  wrapped in use "<name>" ... use "<its material>", a model line
+//                                  gets material.N "<name>" (no slot: `material "<name>"`); a copy of
+//                                  a repeat is split out, the line gets an id. Refused when a
+//                                  material of that name exists
+//   material-set "<name>" <keys...>   the keys replace the same keys of the material (the first
+//                                  occurrence on its lines; later ones go) or are added to its first
+//                                  line; "-key" removes a key
 //   undo, redo
 //   print                          the selection (entity id, kind, line, copy); --edit-script: also
 //                                  the unsaved count and the steps a rebase could not apply
@@ -482,7 +495,8 @@ static int CompareSplices(const void *a, const void *b)
 // The line with the splices applied (they must not overlap; an insertion has s == e)
 static void RwBuild(Rewrite *w, const Stmt *st, StrBuf *out)
 {
-    qsort(w->sp, (size_t)w->n, sizeof(Splice), CompareSplices);
+    // (qsort with a NULL array is undefined even for 0 elements: a line no splice changes)
+    if (w->n > 1) qsort(w->sp, (size_t)w->n, sizeof(Splice), CompareSplices);
     int p = 0;
     for (int i = 0; i < w->n; i++) {
         SbAdd(out, st->text + p, w->sp[i].s - p);
@@ -655,6 +669,10 @@ typedef struct {
     int nextId;             // the next free `id`
     Rewrite rw;
     char why[200];          // first refusal
+    // EDIT_PAINT_MATERIAL: the material line when it goes right before the object (else ""), and
+    // the material the lines after a painted box go back to
+    char *matLine;
+    char oldUse[256];
 } Ctx;
 
 static double NormalizeYaw(double y)
@@ -1221,6 +1239,22 @@ bool MapEditPreviewTransform(const EditOp *op, int cls, const MS_Transform *in, 
     return false;
 }
 
+// A model line's `material.N "name"` (slot >= 0) or `material "name"` (slot -1): the name of the
+// key it has replaced, else the key added after the line's last token (before its comment)
+static void RwModelMaterial(Rewrite *w, const Stmt *st, int slot, const char *name)
+{
+    char key[32], val[300];
+    if (slot >= 0) snprintf(key, sizeof(key), "material.%d", slot);
+    else snprintf(key, sizeof(key), "material");
+    snprintf(val, sizeof(val), "\"%s\"", name);
+    for (int k = st->kw + 5; k + 1 < st->n; k++)
+        if (TokIs(st, k, key) && st->tok[k + 1].quoted) { RwStr(w, st->tok[k + 1].s, st->tok[k + 1].e, val); return; }
+    char add[340];
+    snprintf(add, sizeof(add), " %s %s", key, val);
+    int at = st->tok[st->n - 1].e;
+    RwStr(w, at, at, add);
+}
+
 // Copy c of the line as a plain line of its own (world numbers, no repeat / at, new id),
 // moved / turned / scaled / resized / shifted by the op (EDIT_REMOVE never gets here)
 static bool CopyLine(Ctx *C, const Stmt *st, int c, StrBuf *out)
@@ -1242,6 +1276,7 @@ static bool CopyLine(Ctx *C, const Stmt *st, int c, StrBuf *out)
     if (IsTransform(C->op) && !RwTransform(C, st, vals, false)) return false;
     for (int k = 0; k < st->posCount; k++) RwNumber(w, st, st->posTok[k], vals[k], decs[k]);
     RwId(w, st, C->nextId++);
+    if (C->op->kind == EDIT_PAINT_MATERIAL && st->kind == ST_MODEL) RwModelMaterial(w, st, C->op->slot, C->op->matName);
     RwBuild(w, st, out);
     return !w->oom;
 }
@@ -1466,7 +1501,12 @@ static bool EditStatement(Ctx *C, Patch *P, const StmtSel *S, const Stmt *st, Li
                     if (k != EDIT_REMOVE) {
                         int id = C->nextId;
                         if (!first) SbStr(out, "\n");
+                        // (a painted box copy: its material around it, docs/painting.md 3.1)
+                        bool wrap = k == EDIT_PAINT_MATERIAL && st->kind == ST_BOX;
+                        if (k == EDIT_PAINT_MATERIAL && C->matLine && C->matLine[0]) { SbStr(out, C->matLine); SbStr(out, "\n"); }
+                        if (wrap) SbFmt(out, "use \"%s\"\n", C->op->matName);
                         if (!CopyLine(C, st, c, out)) return false;
+                        if (wrap) SbFmt(out, "\nuse \"%s\"", C->oldUse);
                         first = false;
                         for (int i = 0, n = PartsOf(S, c); i < n; i++) SelAdd(P, (unsigned int)id, i);
                     }
@@ -1665,6 +1705,253 @@ static void AmountText(const EditOp *op, char *out, int outSize)
     else snprintf(out, outSize, " %s %s %s %s%s%s", op->kind == EDIT_SCALE ? "by" : "to", a[0], a[1], a[2], loc, piv);
 }
 
+// --- Materials of the painting (docs/painting.md 3.1, 10.3) ---------------------------------
+
+// The material statement on line `l` (0-based) of P: true when it is `material "name" ...`
+// (name NULL: any material), the line tokenized into st
+static bool MaterialLineIs(const Patch *P, int l, const char *name, Stmt *st)
+{
+    const char *s = P->text + P->lines[l].start;
+    int len = P->lines[l].contentEnd - P->lines[l].start, i = 0;
+    while (i < len && (s[i] == ' ' || s[i] == '\t')) i++;
+    if (len - i < 9 || memcmp(s + i, "material", 8) != 0) return false;
+    st->text = s;
+    st->len = len;
+    if (!Tokenize(st) || st->n < 2 || !TokIs(st, 0, "material") || !st->tok[1].quoted) return false;
+    if (!name) return true;
+    int n = st->tok[1].e - st->tok[1].s - 2;
+    return n == (int)strlen(name) && memcmp(s + st->tok[1].s + 1, name, (size_t)n) == 0;
+}
+
+// The tokens of one material key and its values, [k, end): word keys take one word, uniform a name
+// and numbers, samplers a name and a path, the others the numbers or the quoted path after them
+static int KeyEnd(const Stmt *st, int k)
+{
+    static const char *const WORD[] = { "filter", "wrap", "cull", "transparency", "blend", "unlit", "instanced", "inherit" };
+    char key[32];
+    if (!TokCopy(st, k, key, sizeof(key)) || key[0] == '-') return k + 1;
+    int e = k + 1;
+    for (size_t i = 0; i < sizeof(WORD) / sizeof(WORD[0]); i++)
+        if (strcmp(key, WORD[i]) == 0) return e < st->n ? e + 1 : e;
+    if (strcmp(key, "sampler") == 0 || strcmp(key, "data_sampler") == 0) return k + 3 <= st->n ? k + 3 : st->n;
+    if (strcmp(key, "uniform") == 0 && e < st->n) e++;
+    while (e < st->n && (st->tok[e].quoted || TokNum(st, e, NULL, NULL))) e++;
+    return e;
+}
+
+// Token k's word (st) equals key token kk's (ks) without its leading '-'
+static bool KeyNameIs(const Stmt *st, int k, const Stmt *ks, int kk)
+{
+    int a = st->tok[k].s, an = st->tok[k].e - a, b = ks->tok[kk].s, bn = ks->tok[kk].e - b;
+    if (st->tok[k].quoted || ks->tok[kk].quoted) return false;
+    if (bn > 0 && ks->text[b] == '-') { b++; bn--; }
+    return an == bn && memcmp(st->text + a, ks->text + b, (size_t)an) == 0;
+}
+
+// Removes tokens [from, to) with the blanks after them, or at the end of the line with the blanks
+// before them
+static void RwDropKey(Rewrite *w, const Stmt *st, int from, int to)
+{
+    if (to < st->n) { RwDropTokens(w, st, from, to); return; }
+    int s = st->tok[from].s;
+    while (s > 0 && (st->text[s - 1] == ' ' || st->text[s - 1] == '\t')) s--;
+    RwStr(w, s, st->tok[to - 1].e, "");
+}
+
+// EDIT_MATERIAL_SET: every key of matKeys replaces the same key on the material's lines (the first
+// one found; later ones go), "-key" removes it, a key the material doesn't have is added at the end
+// of its first line
+static bool MaterialSet(Ctx *C, Patch *P, Stmt *st)
+{
+    const EditOp *op = C->op;
+    if (!op->matName || !op->matName[0]) { snprintf(C->why, sizeof(C->why), "material-set needs a material name"); return false; }
+    Stmt ks = { .text = op->matKeys ? op->matKeys : "", .len = op->matKeys ? (int)strlen(op->matKeys) : 0 };
+    bool ok = false;
+    bool *found = NULL, *written = NULL;
+    int *mlines = NULL, mlCount = 0, mlCap = 0;
+    if (!Tokenize(&ks)) { snprintf(C->why, sizeof(C->why), "material-set: cannot read the keys"); goto done; }
+    if (ks.n == 0) { snprintf(C->why, sizeof(C->why), "material-set needs keys"); goto done; }
+    for (int l = 0; l < P->lineCount; l++)
+        if (MaterialLineIs(P, l, op->matName, st)) {
+            int *slot = MS_PUSH(mlines, mlCount, mlCap);
+            if (!slot) { snprintf(C->why, sizeof(C->why), "out of memory"); goto done; }
+            *slot = l;
+        }
+    if (mlCount == 0) { snprintf(C->why, sizeof(C->why), "no material \"%s\" in the map", op->matName); goto done; }
+    if (!(found = calloc((size_t)ks.n, sizeof(bool))) || !(written = calloc((size_t)ks.n, sizeof(bool)))) { snprintf(C->why, sizeof(C->why), "out of memory"); goto done; }
+    // Pass 0 finds which keys the material has, pass 1 writes the lines
+    for (int pass = 0; pass < 2; pass++)
+        for (int i = 0; i < mlCount; i++) {
+            int l = mlines[i];
+            MaterialLineIs(P, l, op->matName, st);
+            RwReset(&C->rw);
+            int splices = 0;
+            for (int kk = 0; kk < ks.n; kk = KeyEnd(&ks, kk)) {
+                bool remove = ks.text[ks.tok[kk].s] == '-';
+                for (int k = 2; k < st->n; k = KeyEnd(st, k)) {
+                    if (!KeyNameIs(st, k, &ks, kk)) continue;
+                    int e = KeyEnd(st, k), ke = KeyEnd(&ks, kk);
+                    if (pass == 0) { found[kk] = true; continue; }
+                    // (the first occurrence is replaced, the later ones removed)
+                    if (!remove && !written[kk]) {
+                        RwSet(&C->rw, st->tok[k].s, st->tok[e - 1].e, ks.text + ks.tok[kk].s, ks.tok[ke - 1].e - ks.tok[kk].s);
+                        written[kk] = true;
+                    } else RwDropKey(&C->rw, st, k, e);
+                    splices++;
+                }
+            }
+            if (pass == 1 && i == 0)
+                for (int kk = 0; kk < ks.n; kk = KeyEnd(&ks, kk)) {
+                    if (found[kk] || ks.text[ks.tok[kk].s] == '-') continue;
+                    int ke = KeyEnd(&ks, kk), at = st->tok[st->n - 1].e;
+                    StrBuf b = { 0 };
+                    SbStr(&b, " ");
+                    SbAdd(&b, ks.text + ks.tok[kk].s, ks.tok[ke - 1].e - ks.tok[kk].s);
+                    if (b.oom) { free(b.s); snprintf(C->why, sizeof(C->why), "out of memory"); goto done; }
+                    RwSet(&C->rw, at, at, b.s, b.len);
+                    free(b.s);
+                    splices++;
+                }
+            if (pass == 0 || splices == 0) continue;
+            LineOut *o = OutFor(P, l + 1);
+            if (!o) { snprintf(C->why, sizeof(C->why), "out of memory"); goto done; }
+            RwBuild(&C->rw, st, &o->text);
+            if (C->rw.oom || o->text.oom) { snprintf(C->why, sizeof(C->why), "out of memory"); goto done; }
+        }
+    snprintf(P->what, sizeof(P->what), "material %s: %.150s", op->matName, ks.text);
+    ok = true;
+done:
+    free(found);
+    free(written);
+    free(mlines);
+    free(ks.tok);
+    return ok;
+}
+
+// EDIT_PAINT_MATERIAL on the objects of one statement (one copy, or every copy): the material line
+// (after the file's last material line when that is before the object, else right before it), then
+// the object: a box line wrapped in use "name" ... use "<its material>", a model line with
+// material.N; one copy of a repeat line is split out (CopyLine, EditStatement), the line gets an id
+// Several model lines (every copy of each): the draw mode's shared texture of a model slot
+// (docs/painting.md 3.4): each line gets material.N (and an id), the material line goes before the
+// first of them (or after the file's last material line)
+static bool PaintModelLines(Ctx *C, Patch *P, const StmtSel *ss, int ssCount, Stmt *st, int lastMat, const char *matLine)
+{
+    const EditOp *op = C->op;
+    for (int k = 0; k < ssCount; k++) {
+        const StmtSel *S = &ss[k];
+        if (S->line < 1 || S->line > P->lineCount) { snprintf(C->why, sizeof(C->why), "line %d is not in the file", S->line); return false; }
+        const LineSpan *ls = &P->lines[S->line - 1];
+        if (!Analyze(st, P->text + ls->start, ls->contentEnd - ls->start, C->why, sizeof(C->why))) return false;
+        if (st->kind != ST_MODEL || S->selCopies != S->copies || CopyCount(st) != S->copies) {
+            snprintf(C->why, sizeof(C->why), "paint-material on several lines: only whole model lines (line %d)", S->line);
+            return false;
+        }
+    }
+    bool before = !(lastMat > 0 && lastMat < ss[0].line);
+    if (!before) {
+        LineOut *m = OutFor(P, lastMat);
+        if (!m) { snprintf(C->why, sizeof(C->why), "out of memory"); return false; }
+        SbAdd(&m->text, P->text + P->lines[lastMat - 1].start, P->lines[lastMat - 1].contentEnd - P->lines[lastMat - 1].start);
+        SbStr(&m->text, "\n");
+        SbStr(&m->text, matLine);
+    }
+    for (int k = 0; k < ssCount; k++) {
+        const StmtSel *S = &ss[k];
+        const LineSpan *ls = &P->lines[S->line - 1];
+        Analyze(st, P->text + ls->start, ls->contentEnd - ls->start, C->why, sizeof(C->why));
+        LineOut *o = OutFor(P, S->line);
+        if (!o) { snprintf(C->why, sizeof(C->why), "out of memory"); return false; }
+        Rewrite *w = &C->rw;
+        RwReset(w);
+        int id = st->idTok >= 0 ? st->id : C->nextId++;
+        if (st->idTok < 0) RwId(w, st, id);
+        RwModelMaterial(w, st, op->slot, op->matName);
+        if (k == 0 && before) { SbStr(&o->text, matLine); SbStr(&o->text, "\n"); }
+        RwBuild(w, st, &o->text);
+        if (w->oom || o->text.oom) { snprintf(C->why, sizeof(C->why), "out of memory"); return false; }
+        for (int i = 0; i < S->entityCount; i++) SelAdd(P, (unsigned int)id, i);
+    }
+    snprintf(P->what, sizeof(P->what), "painted %d model lines from line %d: material %s on slot %d", ssCount, ss[0].line, op->matName, op->slot);
+    return true;
+}
+
+static bool PaintMaterial(Ctx *C, Patch *P, const StmtSel *ss, int ssCount, Stmt *st)
+{
+    const EditOp *op = C->op;
+    if (!op->matName || !op->matName[0] || strchr(op->matName, '"')) { snprintf(C->why, sizeof(C->why), "bad material name"); return false; }
+    const StmtSel *S = &ss[0];
+    if (S->line < 1 || S->line > P->lineCount) { snprintf(C->why, sizeof(C->why), "line %d is not in the file", S->line); return false; }
+    int lastMat = 0;
+    for (int l = 0; l < P->lineCount; l++) {
+        if (!MaterialLineIs(P, l, NULL, st)) continue;
+        lastMat = l + 1;
+        if (MaterialLineIs(P, l, op->matName, st)) {
+            snprintf(C->why, sizeof(C->why), "material %s exists on disk", op->matName);
+            return false;
+        }
+    }
+    const LineSpan *ls = &P->lines[S->line - 1];
+    if (!Analyze(st, P->text + ls->start, ls->contentEnd - ls->start, C->why, sizeof(C->why))) return false;
+    if (CopyCount(st) != S->copies) { snprintf(C->why, sizeof(C->why), "line %d: the copies don't match the loaded map", S->line); return false; }
+    if (st->kind == ST_LIGHT) { snprintf(C->why, sizeof(C->why), "line %d: a light can't be painted", S->line); return false; }
+    if (S->selCopies != 1 && S->selCopies != S->copies) {
+        snprintf(C->why, sizeof(C->why), "line %d: paint one copy of the repeat or all of them (%d of %d selected)", S->line,
+                 S->selCopies, S->copies);
+        return false;
+    }
+    StrBuf matLine = { 0 };
+    SbFmt(&matLine, "material \"%s\"", op->matName);
+    if (op->matKeys && op->matKeys[0]) { SbStr(&matLine, " "); SbStr(&matLine, op->matKeys); }
+    bool ok = false;
+    if (matLine.oom) { snprintf(C->why, sizeof(C->why), "out of memory"); goto done; }
+    if (ssCount > 1) {
+        ok = PaintModelLines(C, P, ss, ssCount, st, lastMat, matLine.s);
+        goto done;
+    }
+    if (lastMat > 0 && lastMat < S->line) {
+        LineOut *m = OutFor(P, lastMat);
+        if (!m) { snprintf(C->why, sizeof(C->why), "out of memory"); goto done; }
+        SbAdd(&m->text, P->text + P->lines[lastMat - 1].start, P->lines[lastMat - 1].contentEnd - P->lines[lastMat - 1].start);
+        SbStr(&m->text, "\n");
+        SbStr(&m->text, matLine.s);
+        C->matLine = NULL;
+    } else C->matLine = matLine.s;
+    if (st->kind == ST_BOX) {
+        ActiveUse(P, S->line, C->oldUse, sizeof(C->oldUse));
+        if (!C->oldUse[0]) snprintf(C->oldUse, sizeof(C->oldUse), "default");
+    }
+    LineOut *o = OutFor(P, S->line);
+    if (!o) { snprintf(C->why, sizeof(C->why), "out of memory"); goto done; }
+    bool split = S->selCopies < S->copies;
+    if (split) {
+        if (!EditStatement(C, P, S, st, o)) {
+            if (!C->why[0]) snprintf(C->why, sizeof(C->why), "line %d: cannot rewrite it", S->line);
+            goto done;
+        }
+    } else {
+        Rewrite *w = &C->rw;
+        RwReset(w);
+        int id = st->idTok >= 0 ? st->id : C->nextId++;
+        if (st->idTok < 0) RwId(w, st, id);
+        if (st->kind == ST_MODEL) RwModelMaterial(w, st, op->slot, op->matName);
+        if (C->matLine) { SbStr(&o->text, C->matLine); SbStr(&o->text, "\n"); }
+        if (st->kind == ST_BOX) SbFmt(&o->text, "use \"%s\"\n", op->matName);
+        RwBuild(w, st, &o->text);
+        if (st->kind == ST_BOX) SbFmt(&o->text, "\nuse \"%s\"", C->oldUse);
+        if (w->oom || o->text.oom) { snprintf(C->why, sizeof(C->why), "out of memory"); goto done; }
+        for (int i = 0; i < S->entityCount; i++) SelAdd(P, (unsigned int)id, i);
+    }
+    snprintf(P->what, sizeof(P->what), "painted line %d: material %s%s%s", S->line, op->matName,
+             st->kind == ST_MODEL ? (op->slot >= 0 ? TextFormat(" on slot %d", op->slot) : " on every slot") : "",
+             split ? " (split)" : "");
+    ok = true;
+done:
+    C->matLine = NULL;
+    free(matLine.s);
+    return ok;
+}
+
 // Fills P->outs (one per changed line) and P->sel for op on sel[]. False with C->why.
 static bool BuildPatch(Ctx *C, Patch *P, const MS_ObjRef *sel, int selCount)
 {
@@ -1674,6 +1961,10 @@ static bool BuildPatch(Ctx *C, Patch *P, const MS_ObjRef *sel, int selCount)
     Stmt st = { 0 };
     bool ok = false;
 
+    if (op->kind == EDIT_MATERIAL_SET) {
+        ok = MaterialSet(C, P, &st);
+        goto done;
+    }
     if (op->kind == EDIT_ADD) {
         const MS_Ref *r = MS_ObjectRef(scene, op->anchor);
         if (!r || r->line < 1 || r->line > P->lineCount) { snprintf(C->why, sizeof(C->why), "nothing to place it on"); goto done; }
@@ -1756,6 +2047,10 @@ static bool BuildPatch(Ctx *C, Patch *P, const MS_ObjRef *sel, int selCount)
     }
     if (op->kind == EDIT_ID_REMOVE) {
         ok = IdRemoveLines(C, P, ss, ssCount, &st);
+        goto doneSel;
+    }
+    if (op->kind == EDIT_PAINT_MATERIAL) {
+        ok = PaintMaterial(C, P, ss, ssCount, &st);
         goto doneSel;
     }
 
@@ -1888,28 +2183,32 @@ static char *ApplyHunks(const char *text, int size, const EditStep *step, bool i
 // #region Apply, undo, redo
 // ======================================================================================
 
-static void FreeStep(EditStep *s)
+// (the step's paint goes back to the draw mode, which owns it: MapEditPaintHooks.release)
+static void FreeStep(MapEditor *E, EditStep *s)
 {
     for (int i = 0; i < s->hunkCount; i++) { free(s->hunks[i].oldText); free(s->hunks[i].newText); }
     free(s->hunks);
     free(s->selBefore);
     free(s->selAfter);
     free(s->modelPath);
+    free(s->matName);
+    free(s->matKeys);
+    if (s->paint && E->paintHooks.release) E->paintHooks.release(E->paintHooks.user, s->paint);
     memset(s, 0, sizeof(*s));
 }
 
-static void ClearStack(EditStep *stack, int *count)
+static void ClearStack(MapEditor *E, EditStep *stack, int *count)
 {
-    for (int i = 0; i < *count; i++) FreeStep(&stack[i]);
+    for (int i = 0; i < *count; i++) FreeStep(E, &stack[i]);
     *count = 0;
 }
 
 void MapEditFree(MapEditor *E)
 {
-    ClearStack(E->undo, &E->undoCount);
-    ClearStack(E->redo, &E->redoCount);
-    ClearStack(E->failed, &E->failedCount);
-    ClearStack(E->lost, &E->lostCount);
+    ClearStack(E, E->undo, &E->undoCount);
+    ClearStack(E, E->redo, &E->redoCount);
+    ClearStack(E, E->failed, &E->failedCount);
+    ClearStack(E, E->lost, &E->lostCount);
     free(E->undo);
     free(E->redo);
     free(E->failed);
@@ -1921,8 +2220,8 @@ void MapEditFree(MapEditor *E)
 bool MapEditSync(MapEditor *E, char *msg, int msgSize)
 {
     if ((E->undoCount == 0 && E->redoCount == 0) || scene->hash == E->knownHash) return false;
-    ClearStack(E->undo, &E->undoCount);
-    ClearStack(E->redo, &E->redoCount);
+    ClearStack(E, E->undo, &E->undoCount);
+    ClearStack(E, E->redo, &E->redoCount);
     snprintf(msg, msgSize, "the map changed on disk (not by a manual edit): undo history cleared");
     return true;
 }
@@ -1966,8 +2265,31 @@ static MS_EntityId *CopyIds(const MS_EntityId *ids, int n)
     return c;
 }
 
-EditResult MapEditApply(MapEditor *E, const MS_ObjRef *sel, int selCount, const EditOp *op,
-                        MS_EntityId **outSel, int *outSelCount, char *msg, int msgSize)
+// The new top of the undo stack (the redo stack goes; the steps undone past the save point move to
+// lost[], the file still has them)
+static void PushStep(MapEditor *E, EditStep *slot, EditStep *step)
+{
+    if (E->work && E->savedAt > E->undoCount) {
+        int undone = E->savedAt - E->undoCount;
+        for (int k = 0; k < undone && k < E->redoCount; k++) {
+            EditStep *lostSlot = MS_PUSH(E->lost, E->lostCount, E->lostCap);
+            if (!lostSlot) break;
+            *lostSlot = E->redo[E->redoCount - 1 - k];
+            memset(&E->redo[E->redoCount - 1 - k], 0, sizeof(EditStep));
+        }
+        E->savedAt = E->undoCount;
+    }
+    *slot = *step;
+    E->undoCount++;
+    memset(step, 0, sizeof(*step));
+    ClearStack(E, E->redo, &E->redoCount);
+}
+
+// MapEditApply, and with *paint (MapEditPushPaint) a step that holds the paint as well: *paint is
+// the step's (NULL) once it is pushed; a paint step isn't auto-saved here (the draw mode writes its
+// canvases and the map at LMB up)
+static EditResult ApplyStep(MapEditor *E, const MS_ObjRef *sel, int selCount, const EditOp *op, PaintStep **paint,
+                            MS_EntityId **outSel, int *outSelCount, char *msg, int msgSize)
 {
     *outSel = NULL;
     *outSelCount = 0;
@@ -2013,6 +2335,14 @@ EditResult MapEditApply(MapEditor *E, const MS_ObjRef *sel, int selCount, const 
     // The op, so a rebase can apply the step again to another text
     step.op = *op;
     step.op.modelPath = NULL;
+    step.op.matName = step.op.matKeys = NULL;
+    if (op->kind == EDIT_PAINT_MATERIAL || op->kind == EDIT_MATERIAL_SET) {
+        step.matName = MS_StrDup(op->matName ? op->matName : "");
+        step.matKeys = MS_StrDup(op->matKeys ? op->matKeys : "");
+        if (!step.matName || !step.matKeys) { snprintf(msg, msgSize, "out of memory"); goto done; }
+        step.op.matName = step.matName;
+        step.op.matKeys = step.matKeys;
+    }
     if (op->kind == EDIT_ADD) {
         if (!(step.modelPath = MS_StrDup(op->modelPath ? op->modelPath : ""))) { snprintf(msg, msgSize, "out of memory"); goto done; }
         step.op.modelPath = step.modelPath;
@@ -2042,28 +2372,20 @@ EditResult MapEditApply(MapEditor *E, const MS_ObjRef *sel, int selCount, const 
     }
     // The save point is on the redo stack, which goes now: the steps undone past it are still in
     // the file (lost[]), and the depth both texts share is the current one
-    if (E->work && E->savedAt > E->undoCount) {
-        int undone = E->savedAt - E->undoCount;
-        for (int k = 0; k < undone && k < E->redoCount; k++) {
-            EditStep *lostSlot = MS_PUSH(E->lost, E->lostCount, E->lostCap);
-            if (!lostSlot) break;
-            *lostSlot = E->redo[E->redoCount - 1 - k];
-            memset(&E->redo[E->redoCount - 1 - k], 0, sizeof(EditStep));
-        }
-        E->savedAt = E->undoCount;
+    bool painted = paint && *paint;
+    if (painted) {
+        step.paint = *paint;
+        *paint = NULL;
     }
-    *slot = step;
-    E->undoCount++;
-    memset(&step, 0, sizeof(step));
-    ClearStack(E->redo, &E->redoCount);
+    PushStep(E, slot, &step);
     E->knownHash = scene->hash;
     *outSel = CopyIds(P.sel, P.selCount);
     *outSelCount = *outSel ? P.selCount : 0;
     snprintf(msg, msgSize, "%s", E->undo[E->undoCount - 1].what);
-    if (live && E->autoSave) AutoSave(E, msg, msgSize);
+    if (live && E->autoSave && !painted) AutoSave(E, msg, msgSize);
     res = EDIT_DONE;
 done:
-    FreeStep(&step);
+    FreeStep(E, &step);
     FreePatch(&P);
     free(C.rw.sp);
     free(C.rw.pool.s);
@@ -2072,7 +2394,15 @@ done:
     return res;
 }
 
-// Moves the top of one stack to the other, writing its inverse (undo) or itself (redo)
+EditResult MapEditApply(MapEditor *E, const MS_ObjRef *sel, int selCount, const EditOp *op,
+                        MS_EntityId **outSel, int *outSelCount, char *msg, int msgSize)
+{
+    return ApplyStep(E, sel, selCount, op, NULL, outSel, outSelCount, msg, msgSize);
+}
+
+// Moves the top of one stack to the other, writing its inverse (undo) or itself (redo). A step with
+// paint calls the draw mode's hook first (the canvas pixels the text's materials load are provided
+// then), and the other one when its text can't go live; a step of paint alone changes no text
 static EditResult Replay(MapEditor *E, bool undo, MS_EntityId **outSel, int *outSelCount, char *msg, int msgSize)
 {
     *outSel = NULL;
@@ -2081,29 +2411,42 @@ static EditResult Replay(MapEditor *E, bool undo, MS_EntityId **outSel, int *out
     int *fromCount = undo ? &E->undoCount : &E->redoCount;
     if (*fromCount == 0) { snprintf(msg, msgSize, undo ? "nothing to undo" : "nothing to redo"); return EDIT_FAILED; }
     EditStep *step = &from[*fromCount - 1];
-    int size, outSize;
+    int size, outSize = 0;
     bool live = E->work != NULL;
     unsigned long long expect = undo ? step->hashAfter : step->hashBefore;
     if (live && (E->workHash != expect || E->workHash != scene->hash || E->loadVersion != scene->loadVersion)) {
         snprintf(msg, msgSize, "%s does not apply to the map any more", undo ? "undo" : "redo");
         return EDIT_FAILED;
     }
-    char *disk = live ? E->work : ReadLoadedMap(expect, &size, msg, msgSize);
-    if (!disk) return EDIT_FAILED;
-    if (live) size = E->workSize;
-    char *text = ApplyHunks(disk, size, step, undo, &outSize);
-    EditResult res = EDIT_FAILED;
-    if (!text || Fnv1a64(text, outSize) != (undo ? step->hashBefore : step->hashAfter)) {
-        snprintf(msg, msgSize, "%s does not apply to the map any more", undo ? "undo" : "redo");
-        goto done;
+    if (step->paint && (!live || !E->paintHooks.undo || !E->paintHooks.redo)) {
+        snprintf(msg, msgSize, "%s: painting needs the draw mode's working copy", undo ? "undo" : "redo");
+        return EDIT_FAILED;
     }
+    bool textual = step->hunkCount > 0;
+    char *disk = NULL, *text = NULL;
+    EditResult res = EDIT_FAILED;
     EditStep **toArr = undo ? &E->redo : &E->undo;
     int *toCount = undo ? &E->redoCount : &E->undoCount, *toCap = undo ? &E->redoCap : &E->undoCap;
-    if (!MS_RESERVE(*toArr, *toCap, *toCount + 1)) { snprintf(msg, msgSize, "out of memory"); goto done; }
-    if (live) {
+    if (!MS_RESERVE(*toArr, *toCap, *toCount + 1)) { snprintf(msg, msgSize, "out of memory"); return EDIT_FAILED; }
+    if (textual) {
+        disk = live ? E->work : ReadLoadedMap(expect, &size, msg, msgSize);
+        if (!disk) return EDIT_FAILED;
+        if (live) size = E->workSize;
+        text = ApplyHunks(disk, size, step, undo, &outSize);
+        if (!text || Fnv1a64(text, outSize) != (undo ? step->hashBefore : step->hashAfter)) {
+            snprintf(msg, msgSize, "%s does not apply to the map any more", undo ? "undo" : "redo");
+            goto done;
+        }
+    }
+    if (step->paint && !(undo ? E->paintHooks.undo : E->paintHooks.redo)(E->paintHooks.user, step->paint)) {
+        snprintf(msg, msgSize, "%s: the paint can't be swapped (out of memory?)", undo ? "undo" : "redo");
+        goto done;
+    }
+    if (textual && live) {
         char err[512];
         if (MS_EditSetText(scene, text, outSize, &E->lastStats, err, sizeof(err)) != MS_RELOADED) {
             snprintf(msg, msgSize, "%s would break the map: %s", undo ? "undo" : "redo", err);
+            if (step->paint) (undo ? E->paintHooks.redo : E->paintHooks.undo)(E->paintHooks.user, step->paint);
             goto done;
         }
         free(E->work);
@@ -2112,7 +2455,7 @@ static EditResult Replay(MapEditor *E, bool undo, MS_EntityId **outSel, int *out
         E->workHash = undo ? step->hashBefore : step->hashAfter;
         text = NULL;
         disk = NULL;
-    } else if (!WriteAndReload(text, outSize, disk, size, msg, msgSize)) goto done;
+    } else if (textual && !WriteAndReload(text, outSize, disk, size, msg, msgSize)) goto done;
     const MS_EntityId *ids = undo ? step->selBefore : step->selAfter;
     int n = undo ? step->selBeforeCount : step->selAfterCount;
     *outSel = CopyIds(ids, n);
@@ -2154,22 +2497,23 @@ bool MapEditBegin(MapEditor *E)
     if (!copy) return false;
     memcpy(copy, text, (size_t)size);
     copy[size] = '\0';
-    ClearStack(E->undo, &E->undoCount);
-    ClearStack(E->redo, &E->redoCount);
-    ClearStack(E->lost, &E->lostCount);
+    ClearStack(E, E->undo, &E->undoCount);
+    ClearStack(E, E->redo, &E->redoCount);
+    ClearStack(E, E->lost, &E->lostCount);
     free(E->work);
     E->work = copy;
     E->workSize = size;
     E->workHash = E->diskHash = E->knownHash = scene->hash;
     E->loadVersion = scene->loadVersion;
     E->savedAt = 0;
+    E->droppedUnsaved = 0;
     return true;
 }
 
 int MapEditUnsaved(const MapEditor *E)
 {
     if (!E->work) return 0;
-    int n = (E->savedAt < 0 ? E->undoCount : abs(E->undoCount - E->savedAt)) + E->lostCount;
+    int n = (E->savedAt < 0 ? E->undoCount : abs(E->undoCount - E->savedAt)) + E->lostCount + E->droppedUnsaved;
     if (n == 0 && E->workHash != E->diskHash) n = 1;
     return n;
 }
@@ -2203,16 +2547,23 @@ bool MapEditSave(MapEditor *E, char *msg, int msgSize)
     E->diskHash = E->workHash;
     E->knownHash = E->workHash;
     E->savedAt = E->undoCount;
-    ClearStack(E->lost, &E->lostCount);
+    E->droppedUnsaved = 0;
+    ClearStack(E, E->lost, &E->lostCount);
     snprintf(msg, msgSize, "saved %d edit%s to %s", n, n == 1 ? "" : "s", scene->path);
     return true;
 }
 
 // Auto save mode: the edit / undo / redo just made is written at once (msg gets the outcome)
+bool MapEditSaveAll(MapEditor *E, char *msg, int msgSize)
+{
+    if (E->paintHooks.save) return E->paintHooks.save(E->paintHooks.user, msg, msgSize);
+    return MapEditSave(E, msg, msgSize);
+}
+
 static void AutoSave(MapEditor *E, char *msg, int msgSize)
 {
     char m[512];
-    bool ok = MapEditSave(E, m, sizeof(m));
+    bool ok = MapEditSaveAll(E, m, sizeof(m));
     if (!ok) {
         size_t l = strlen(msg);
         snprintf(msg + l, (size_t)msgSize > l ? (size_t)msgSize - l : 0, " (auto save: %s)", m);
@@ -2221,7 +2572,7 @@ static void AutoSave(MapEditor *E, char *msg, int msgSize)
 
 void MapEditClearFailed(MapEditor *E)
 {
-    ClearStack(E->failed, &E->failedCount);
+    ClearStack(E, E->failed, &E->failedCount);
 }
 
 // Entity ids a re-applied step gave its objects anew (a line's new `id N` can differ from the one
@@ -2250,9 +2601,12 @@ static void RebaseFail(MapEditor *E, EditStep *st, const char *why)
     char what[512];
     snprintf(what, sizeof(what), "could not re-apply: %s (%s)", st->what, why);
     snprintf(st->what, sizeof(st->what), "%.*s", (int)sizeof(st->what) - 1, what);     // (cut to the field)
+    // (its paint goes now: the list only names the step)
+    if (st->paint && E->paintHooks.release) E->paintHooks.release(E->paintHooks.user, st->paint);
+    st->paint = NULL;
     EditStep *slot = MS_PUSH(E->failed, E->failedCount, E->failedCap);
     if (slot) { *slot = *st; memset(st, 0, sizeof(*st)); }
-    else FreeStep(st);
+    else FreeStep(E, st);
 }
 
 int MapEditRebase(MapEditor *E, MS_EntityId **outSel, int *outSelCount, char *msg, int msgSize)
@@ -2289,7 +2643,7 @@ int MapEditRebase(MapEditor *E, MS_EntityId **outSel, int *outSelCount, char *ms
     // The new base: the file as it is now (the scene shows it)
     E->undoCount = from;
     if (!MapEditBegin(E)) {
-        for (int i = 0; i < pendingCount; i++) FreeStep(&pending[i]);
+        for (int i = 0; i < pendingCount; i++) FreeStep(E, &pending[i]);
         free(pending);
         snprintf(msg, msgSize, "the map can't be edited any more (compiled? out of memory): %d unsaved edit%s dropped",
                  pendingCount, pendingCount == 1 ? "" : "s");
@@ -2304,7 +2658,7 @@ int MapEditRebase(MapEditor *E, MS_EntityId **outSel, int *outSelCount, char *ms
         // The selection and the anchor in the current scene, by entity id
         if (!MS_RESERVE(sel, selCap, st->selBeforeCount + 1)) { RebaseFail(E, st, "out of memory"); continue; }
         int n = 0;
-        char why[96] = "";
+        char why[300] = "";
         for (int k = 0; k < st->selBeforeCount && !why[0]; k++) {
             MS_EntityId orig = st->selBefore[k], id = MapId(map, mapCount, orig);
             int e = id.stmt ? MS_FindEntity(scene, id) : -1;
@@ -2314,17 +2668,34 @@ int MapEditRebase(MapEditor *E, MS_EntityId **outSel, int *outSelCount, char *ms
         }
         EditOp op = st->op;
         op.modelPath = st->modelPath;
+        op.matName = st->matName;
+        op.matKeys = st->matKeys;
         if (!why[0] && op.kind == EDIT_ADD) {
             MS_EntityId id = MapId(map, mapCount, st->anchorId);
             int e = id.stmt ? MS_FindEntity(scene, id) : -1;
             if (e < 0) snprintf(why, sizeof(why), "what it stood on (entity %08x:%d) is gone", st->anchorId.stmt, st->anchorId.index);
             else op.anchor = scene->entityObjects[e];
         }
+        // Paint (docs/painting.md 12): the draw mode provides the canvas again, or replays the strokes
+        // onto a PNG that changed on disk; a step of paint alone goes back onto the stack as it is
+        if (!why[0] && st->paint && (!E->paintHooks.rebase || !E->paintHooks.rebase(E->paintHooks.user, st->paint, why, sizeof(why))))
+            if (!why[0]) snprintf(why, sizeof(why), "the paint can't be re-applied");
         if (why[0]) { MapDead(&map, &mapCount, &mapCap, st); RebaseFail(E, st, why); continue; }
+        if (st->paint && st->hunkCount == 0) {
+            EditStep *slot = MS_RESERVE(E->undo, E->undoCap, E->undoCount + 1) ? &E->undo[E->undoCount] : NULL;
+            if (!slot) { RebaseFail(E, st, "out of memory"); continue; }
+            st->hashBefore = st->hashAfter = E->workHash;
+            PushStep(E, slot, st);
+            applied++;
+            continue;
+        }
         MS_EntityId *ids;
         int count;
         char m[512];
-        if (MapEditApply(E, sel, n, &op, &ids, &count, m, sizeof(m)) != EDIT_DONE) {
+        PaintStep *paint = st->paint;
+        st->paint = NULL;
+        if (ApplyStep(E, sel, n, &op, paint ? &paint : NULL, &ids, &count, m, sizeof(m)) != EDIT_DONE) {
+            st->paint = paint;      // (not taken: RebaseFail releases it)
             MapDead(&map, &mapCount, &mapCap, st);
             RebaseFail(E, st, m);
             continue;
@@ -2338,7 +2709,7 @@ int MapEditRebase(MapEditor *E, MS_EntityId **outSel, int *outSelCount, char *ms
         *outSel = ids;
         *outSelCount = count;
         applied++;
-        FreeStep(st);
+        FreeStep(E, st);
     }
     free(sel);
     free(map);
@@ -2560,9 +2931,11 @@ static int RunScript(MapEditor *E, const char *scriptPath, bool live)
         if (nl) { *nl = '\0'; save = nl + 1; } else save = NULL;
         lineNo++;
         char *w[12];
+        char *raw = MS_StrDup(line);     // (paint-material / material-set read their keys as written)
         int n = ScriptWords(line, w, 12);
-        if (n == 0) continue;
+        if (n == 0 || !raw) { free(raw); continue; }
         char msg[512] = "";
+        char matName[256] = "";
         bool ok = false, wentLive = false;
         EditOp op = { 0 };
         bool isEdit = false;
@@ -2641,6 +3014,39 @@ static int RunScript(MapEditor *E, const char *scriptPath, bool live)
             isEdit = n == 5 && ScriptNum(w[2], &op.pos[0]) && ScriptNum(w[3], &op.pos[1]) && ScriptNum(w[4], &op.pos[2]) && sel.n > 0;
             if (isEdit) op.anchor = sel.v[0];
             else snprintf(msg, sizeof(msg), "add \"<model file>\" <x> <y> <z> (after the first selected object's line)");
+        } else if (strcmp(w[0], "paint-material") == 0 || strcmp(w[0], "material-set") == 0) {
+            // paint-material "<name>" [slot <N>] <keys...> / material-set "<name>" <keys...> (docs/painting.md 10.3)
+            bool paint = w[0][0] == 'p';
+            op.kind = paint ? EDIT_PAINT_MATERIAL : EDIT_MATERIAL_SET;
+            op.slot = -1;
+            char *p = raw + strspn(raw, " \t");
+            p += strcspn(p, " \t");
+            p += strspn(p, " \t");
+            char *q = *p == '"' ? strchr(p + 1, '"') : NULL;
+            if (q && q - p - 1 < (int)sizeof(matName)) {
+                memcpy(matName, p + 1, (size_t)(q - p - 1));
+                matName[q - p - 1] = '\0';
+                p = q + 1;
+            }
+            p += strspn(p, " \t");
+            long slot = -1;
+            if (paint && strncmp(p, "slot", 4) == 0 && (p[4] == ' ' || p[4] == '\t')) {
+                char *end;
+                slot = strtol(p + 5, &end, 10);
+                p = end + strspn(end, " \t");
+            }
+            // the keys: to the end of the line, without a comment outside "quotes" and trailing blanks
+            bool quoted = false;
+            char *e = p;
+            for (; *e && (quoted || *e != '#'); e++) if (*e == '"') quoted = !quoted;
+            while (e > p && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\r')) e--;
+            *e = '\0';
+            op.slot = (int)slot;
+            op.matName = matName;
+            op.matKeys = p;
+            isEdit = matName[0] && slot >= -1 && slot < 1000000 && (paint || p[0]);
+            if (!isEdit) snprintf(msg, sizeof(msg), paint ? "paint-material \"<name>\" [slot <N>] <keys...> (on the selection: one object)"
+                                                          : "material-set \"<name>\" <keys...> (\"-key\" removes one)");
         } else if (strcmp(w[0], "id") == 0 && n == 2 && strcmp(w[1], "remove") == 0) {
             op.kind = EDIT_ID_REMOVE;
             isEdit = true;
@@ -2709,7 +3115,7 @@ static int RunScript(MapEditor *E, const char *scriptPath, bool live)
                  ScriptPreview(&sel, delta, NULL, &previewing, &previewFrom);
             snprintf(msg, sizeof(msg), ok ? "preview: %d object%s shifted" : "preview move <dx> <dy> <dz> (needs a selection; refused?)",
                      sel.n, sel.n == 1 ? "" : "s");
-        } else snprintf(msg, sizeof(msg), "unknown command '%s' (select also move turn rotation scale size remove duplicate add id undo redo print%s)", w[0],
+        } else snprintf(msg, sizeof(msg), "unknown command '%s' (select also move turn rotation scale size remove duplicate add id paint-material material-set undo redo print%s)", w[0],
                         live ? " save disk preview" : "");
 
         if (isEdit && previewOp) {
@@ -2733,6 +3139,7 @@ static int RunScript(MapEditor *E, const char *scriptPath, bool live)
             printf("monolith: live edit %s\n", stats);
         }
         if (!ok) status = 1;
+        free(raw);
     }
     fflush(stdout);
     free(previewFrom);
@@ -2756,6 +3163,113 @@ int MapEditRunLiveScript(MapEditor *E, const char *scriptPath)
         return 1;
     }
     return RunScript(E, scriptPath, true);
+}
+
+// #endregion
+
+// ======================================================================================
+// #region Paint steps (docs/painting.md 10)
+// ======================================================================================
+
+#define PAINT_HISTORY_CAP (512LL * 1024 * 1024)
+
+// The paint in the history over PAINT_HISTORY_CAP: the oldest steps go from the bottom of the undo
+// stack (text steps with them, so the order stays right); the save point moves with them. Returns
+// how many went
+static int TrimPaintHistory(MapEditor *E)
+{
+    if (!E->paintHooks.bytes) return 0;
+    long long total = MapEditPaintBytes(E);
+    int dropped = 0;
+    while (total > PAINT_HISTORY_CAP && E->undoCount - dropped > 1) {
+        EditStep *s = &E->undo[dropped];
+        if (s->paint) total -= E->paintHooks.bytes(E->paintHooks.user, s->paint);
+        // (a step the file has: the save point is one lower; one it doesn't: it stays unsaved)
+        if (E->savedAt > 0) E->savedAt--;
+        else { E->savedAt = -1; E->droppedUnsaved++; }
+        FreeStep(E, s);
+        dropped++;
+    }
+    if (dropped == 0) return 0;
+    memmove(E->undo, E->undo + dropped, sizeof(EditStep) * (size_t)(E->undoCount - dropped));
+    E->undoCount -= dropped;
+    memset(E->undo + E->undoCount, 0, sizeof(EditStep) * (size_t)dropped);
+    E->droppedSteps += dropped;
+    return dropped;
+}
+
+EditResult MapEditPushPaint(MapEditor *E, const MS_ObjRef *sel, int selCount, const EditOp *op, PaintStep *paint,
+                            const char *what, MS_EntityId **outSel, int *outSelCount, char *msg, int msgSize)
+{
+    *outSel = NULL;
+    *outSelCount = 0;
+    EditResult res = EDIT_FAILED;
+    if (!E->work) snprintf(msg, msgSize, "painting needs the working copy (the map's text)");
+    else if (E->workHash != scene->hash || E->loadVersion != scene->loadVersion)
+        snprintf(msg, msgSize, "the map was reloaded from disk: wait until the edits are re-applied");
+    else if (op) {
+        res = ApplyStep(E, sel, selCount, op, &paint, outSel, outSelCount, msg, msgSize);
+        if (res == EDIT_DONE && what && what[0]) {
+            EditStep *top = &E->undo[E->undoCount - 1];
+            char both[512];
+            snprintf(both, sizeof(both), "%s, %s", what, top->what);
+            snprintf(top->what, sizeof(top->what), "%.*s", (int)sizeof(top->what) - 1, both);
+            snprintf(msg, msgSize, "%s", top->what);
+        }
+    } else {
+        // Paint alone: no text, the step only keeps the order with the text steps around it
+        EditStep step = { 0 };
+        EditStep *slot = MS_RESERVE(E->undo, E->undoCap, E->undoCount + 1) ? &E->undo[E->undoCount] : NULL;
+        step.selBefore = malloc(sizeof(MS_EntityId) * (selCount > 0 ? (size_t)selCount : 1));
+        step.selAfter = malloc(sizeof(MS_EntityId) * (selCount > 0 ? (size_t)selCount : 1));
+        if (!slot || !step.selBefore || !step.selAfter) {
+            FreeStep(E, &step);
+            snprintf(msg, msgSize, "out of memory");
+        } else {
+            for (int i = 0; i < selCount; i++) {
+                int e = MS_ObjectEntity(scene, sel[i]);
+                if (e >= 0) step.selBefore[step.selBeforeCount++] = step.selAfter[step.selAfterCount++] = scene->entityIds[e];
+            }
+            step.hashBefore = step.hashAfter = E->workHash;
+            snprintf(step.what, sizeof(step.what), "%s", what && what[0] ? what : "painted");
+            step.paint = paint;
+            paint = NULL;
+            *outSel = CopyIds(step.selAfter, step.selAfterCount);
+            *outSelCount = *outSel ? step.selAfterCount : 0;
+            PushStep(E, slot, &step);
+            snprintf(msg, msgSize, "%s", E->undo[E->undoCount - 1].what);
+            res = EDIT_DONE;
+        }
+    }
+    if (paint && E->paintHooks.release) E->paintHooks.release(E->paintHooks.user, paint);
+    if (res == EDIT_DONE) {
+        int dropped = TrimPaintHistory(E);
+        if (dropped > 0) {
+            size_t l = strlen(msg);
+            snprintf(msg + l, (size_t)msgSize > l ? (size_t)msgSize - l : 0, " (oldest %d undo step%s dropped: paint history over 512 MiB)",
+                     dropped, dropped == 1 ? "" : "s");
+        }
+    }
+    return res;
+}
+
+long long MapEditPaintBytes(const MapEditor *E)
+{
+    long long total = 0;
+    if (!E->paintHooks.bytes) return 0;
+    for (int i = 0; i < E->undoCount; i++) if (E->undo[i].paint) total += E->paintHooks.bytes(E->paintHooks.user, E->undo[i].paint);
+    for (int i = 0; i < E->redoCount; i++) if (E->redo[i].paint) total += E->paintHooks.bytes(E->paintHooks.user, E->redo[i].paint);
+    for (int i = 0; i < E->lostCount; i++) if (E->lost[i].paint) total += E->paintHooks.bytes(E->paintHooks.user, E->lost[i].paint);
+    return total;
+}
+
+bool MapEditDiskUnchanged(const MapEditor *E)
+{
+    int size;
+    char *disk = ReadFileBytes(scene->path, &size);
+    bool same = disk && Fnv1a64(disk, size) == E->diskHash;
+    free(disk);
+    return same;
 }
 
 // #endregion

@@ -106,6 +106,30 @@ Editing one copy of a `repeat` row (a single pillar of a row of eight) splits th
 
 **Picking the model.** The game chooses a fast, default or heavy Claude model per request from its wording and context. Start the prompt with `@fast`, `@default` or `@heavy` to choose yourself.
 
+### Painting (B)
+
+Marks, signs, decals and pixel art don't need a request either: press **B** in spectator mode and paint straight onto any box or model. As in edit mode the cursor is free and **holding the right mouse button flies**. The **draw panel** on the left shows what the cursor last rested on (the object, the face, the canvas it paints into, or why it can't be painted), the pen, the colour and the canvas settings; a ring on the surface shows exactly which texels the brush will cover (at size 1, the one texel).
+
+**Where the paint goes.** The first stroke on an object gives it a texture of its own: a copy of its material named `paint_<id>` with `albedo_map "textures/paint/paint_<id>.png"`, so painting one crate doesn't paint the others. The copy looks the same as before (a flat colour becomes a canvas of that colour; a texture is copied in, with its tint and tiling baked in). On a box line the line is wrapped in `use "paint_<id>"` … `use "<its old material>"` (split out of its `repeat` like other edits); on a model it is `material.N`. With **Shared** on (**H**) you paint the texture the material already has instead, and every object using it changes. Painted boxes get a canvas with a cell per face (`uv_faces 0 1 2 3 4 5`, [map format](map-format.md)); the panel's **Faces** buttons group faces that should share paint (e.g. the four sides), then **Apply**. **Texels / m** sets how big a texel is for new canvases (64 by default; **Resize to density** resamples the canvas under the cursor), **Pixel look** keeps texels crisp up close (`filter nearest`).
+
+| In draw mode | Action |
+|---|---|
+| left mouse drag | paint (fill: fill the face or the model's UV island under the cursor) |
+| Alt+click | pick the colour of the texture under the cursor |
+| 1 – 5 | pen: hard round, square (pixel-exact), soft round, eraser (back to how the canvas was when you started), fill; the effect toggles wait while draw mode is on |
+| [ / ], Ctrl+wheel | brush size in texels (1 – 256) |
+| Shift+wheel | brush alpha |
+| X | swap to the colour before |
+| H | shared: paint the material's own texture |
+| Tab | hide / show the panel |
+| Ctrl+Z / Ctrl+Shift+Z | undo / redo strokes, in the same history as the edits |
+| Ctrl+S | save |
+| B or Esc | leave draw mode (M, V and C switch modes); with unsaved paint the first press only reminds you |
+
+In the panel, drag a slider or click a number to type it (Enter or a click elsewhere applies, Esc cancels); the colour also takes a hex value (`#C83232` or `#C8323280`) and the last colours are one click away.
+
+**Saving** works as for edits: **Ctrl+S** writes each changed canvas as a PNG under the package's `textures/paint/`, its `ASSETS.md` row and sidecar (a new canvas is recorded as made in monolith; one copied from a texture or a model keeps that asset's licence and attribution), then the map. A request needs everything saved first. Closing the game with unsaved paint writes the canvases next to the unsaved map under `unsaved/`. When the map or a painted PNG changes on disk, your unsaved strokes are painted again on top. A box whose material has a surface shader is **baked** on its first stroke: what the shader shows (colour, roughness and metal, its surface relief) is rendered into the box's own canvas plus an ORM and, when the shader bends the normals, a normal map, and the copy has no shader any more. Its look can change a little: detail finer than the canvas density softens, and anything the shader animates or computes per view freezes. A short pause (up to a few tenths of a second) on that first click is the bake. Model parts with a shader material can't be painted, nor can a shader material in shared mode.
+
 ### What happens next
 
 The game saves the request with screenshots and everything it knows about the spot into `requests/<date>_<slug>/` and puts it in a queue. The first request opens the **coordinator**: one Claude Code terminal that stays open, takes the requests from the queue one by one (several at once when they are on different maps) and hands each to a helper agent. You don't have to do anything in that terminal; the edit appears in the running game when it is saved.

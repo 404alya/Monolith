@@ -1307,6 +1307,13 @@ static void VolumeModeEnd(Designer *d)
 
 void DesignerVolumeModeEnd(Designer *d) { VolumeModeEnd(d); }
 
+void DesignerVolumeModeBegin(Designer *d)
+{
+    if (d->snipping || d->volumeMode) return;
+    d->volumeMode = true;
+    d->volumeStep = VOLUME_STEP_FIRST;
+}
+
 // Arrows / PgUp / PgDn on the active volume. The horizontal arrows follow the world axis
 // nearest to the camera's forward / right, so "up" pushes the volume away from the eye.
 static void VolumeEdit(Designer *d)
@@ -1568,10 +1575,7 @@ DesignerAction DesignerUpdate(Designer *d, float dt)
     if (IsKeyPressed(KEY_V)) {
         if (IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT)) VolumeFromSelection(d);
         else if (d->volumeMode) VolumeModeEnd(d);
-        else {
-            d->volumeMode = true;
-            d->volumeStep = VOLUME_STEP_FIRST;
-        }
+        else DesignerVolumeModeBegin(d);
         return DESIGNER_NONE;
     }
     if (d->volumeMode) {
@@ -1837,6 +1841,9 @@ static void EndOverlay3D(void)
     rlDisableDepthTest();
     EndMode3D();
 }
+
+void DesignerBeginOverlay3D(Camera3D cam) { BeginOverlay3D(cam); }
+void DesignerEndOverlay3D(void) { EndOverlay3D(); }
 
 void DesignerDrawOverlay(const Designer *d, Camera3D cam, bool hover)
 {

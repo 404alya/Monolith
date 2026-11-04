@@ -116,7 +116,8 @@ void EditModeScanModels(EditMode *m)
     DirScanStats stats;
     if (DirectoryExists(path)) DirScan(path, true, ScanModel, &s, &stats);
     if (assets) UnloadFileText(assets);
-    qsort(m->models, (size_t)m->modelCount, sizeof(char *), CompareStrings);
+    // (qsort with a NULL array is undefined even for 0 elements: a package without models)
+    if (m->modelCount > 1) qsort(m->models, (size_t)m->modelCount, sizeof(char *), CompareStrings);
 }
 
 // #endregion
@@ -145,6 +146,8 @@ static bool Confirmed(EditMode *m, int key)
                             key == KEY_S ? "save" : "edit"));
     return false;
 }
+
+bool EditModeConfirm(EditMode *m, int key) { return Confirmed(m, key); }
 
 // The working copy starts at the first edit (the map as loaded); false for a compiled map
 static bool EnsureWork(EditMode *m)
@@ -503,7 +506,7 @@ int EditModeUnsaved(const EditMode *m)
 
 bool EditModeSave(EditMode *m, char *msg, int msgSize)
 {
-    bool ok = MapEditSave(&m->ed, msg, msgSize);
+    bool ok = MapEditSaveAll(&m->ed, msg, msgSize);     // (with the draw mode's canvases)
     Say(m, !ok, msg);
     TraceLog(ok ? LOG_INFO : LOG_WARNING, "monolith: %s", msg);
     return ok;

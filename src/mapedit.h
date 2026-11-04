@@ -12,6 +12,13 @@ typedef enum {
     EDIT_ID_REMOVE,         // the selection's lines lose their `id N` prefix (objects stay)
     EDIT_SET_ROTATION,      // ypr[] absolute, each object about its own centre / origin (reset: 0 0 0;
                             // docs/live-editing.md 11.9)
+    EDIT_PAINT_MATERIAL,    // one object gets a new material matName with matKeys (docs/painting.md 3.1,
+                            // 10.3): a box line is split out of its repeat and wrapped in use "matName"
+                            // ... use "<its material>"; a model gets material.N (slot) or material (slot
+                            // -1); an id is added. The material line goes after the file's last material
+                            // line when that is before the object's line, else right before the use
+    EDIT_MATERIAL_SET,      // material matName: the keys in matKeys replace the same keys on its first
+                            // line or are added there; "-key" removes a key (uv_faces, filter, albedo_map)
 } EditOpKind;
 
 typedef struct {
@@ -40,6 +47,10 @@ typedef struct {
     MS_ObjRef anchor;       // EDIT_ADD: the new line goes right after this object's line (its group)
     int id;                 // EDIT_ID: the id the selected objects' line gets (1..2147483647, unique in
                             // the file; one line only); 0 = each line without an id gets the next free one
+    const char *matName;    // EDIT_PAINT_MATERIAL, EDIT_MATERIAL_SET: the material
+    const char *matKeys;    // its keys as written, e.g. "albedo 255 255 255 albedo_map
+                            // \"textures/paint/paint_12.png\" uv_faces 0 1 2 3 4 5"
+    int slot;               // EDIT_PAINT_MATERIAL on a model: the slot (material.N), -1: every slot
 } EditOp;
 
 // One part of an edit: bytes [offset, offset + oldLen) of the file before it became newText
@@ -48,6 +59,10 @@ typedef struct {
     char *oldText, *newText;
     int oldLen, newLen;
 } EditHunk;
+
+// A step's paint (docs/painting.md 10): the saved tiles of the strokes and the canvases they
+// belong to. Owned by drawmode.c; mapedit.c only keeps it in the history and calls the hooks.
+typedef struct PaintStep PaintStep;
 
 // One manual edit, reversible: the hunks against the file as it was, the file hashes before
 // and after, and the selection (entity ids) to restore on undo / redo; the op, so a rebase can
@@ -62,7 +77,26 @@ typedef struct {
     MS_EntityId *selBefore, *selAfter;
     int selBeforeCount, selAfterCount, selAfterCap;
     char what[200];         // "moved 2 objects +0.5 m x (line 120 split into 3 lines)"
+    char *matName, *matKeys;    // EDIT_PAINT_MATERIAL / EDIT_MATERIAL_SET: op.matName / matKeys point here
+    PaintStep *paint;       // NULL for text edits; strokes (no hunks), or a first stroke (hunks + paint)
 } EditStep;
+
+// What mapedit.c calls for a step with paint (drawmode.c sets them; NULL: no draw mode). undo /
+// redo swap the step's tiles (or images) with the canvas; they run before the step's text goes
+// live, so the canvas the text's material loads is provided by then (and the other one runs when
+// the text can't go live). rebase runs before a rebase applies the step again (the canvas provided
+// again, or its strokes replayed onto a PNG that changed on disk; false: the step failed, why in
+// msg); release frees the paint when the step leaves the history; save writes the canvases and
+// the map (CTRL+S anywhere and auto save: MapEditSaveAll).
+typedef struct {
+    void *user;
+    bool (*undo)(void *user, PaintStep *p);
+    bool (*redo)(void *user, PaintStep *p);
+    bool (*rebase)(void *user, PaintStep *p, char *msg, int msgSize);
+    void (*release)(void *user, PaintStep *p);
+    long long (*bytes)(void *user, const PaintStep *p);    // its memory, for the history cap
+    bool (*save)(void *user, char *msg, int msgSize);
+} MapEditPaintHooks;
 
 typedef struct {
     EditStep *undo, *redo;  // heap stacks, top = last
@@ -86,6 +120,9 @@ typedef struct {
     int failedCount, failedCap;
     bool autoSave;          // edit_save = auto: every edit, undo and redo is also written at once
     MS_EditStats lastStats; // what the last live edit / undo / redo cost (MS_EditSetText)
+    MapEditPaintHooks paintHooks;   // the draw mode's (docs/painting.md 10.2)
+    int droppedSteps;       // steps the paint history cap took from the bottom of the undo stack
+    int droppedUnsaved;     // ... of them the file doesn't have (they count as unsaved until a save)
 } MapEditor;
 
 typedef enum {
@@ -101,6 +138,14 @@ typedef enum {
 // *outSel is a heap array of entity ids to select (free it), and msg says what changed.
 EditResult MapEditApply(MapEditor *E, const MS_ObjRef *sel, int selCount, const EditOp *op,
                         MS_EntityId **outSel, int *outSelCount, char *msg, int msgSize);
+// A paint step: the stroke's tiles (no text), or with op (EDIT_PAINT_MATERIAL / EDIT_MATERIAL_SET)
+// the text edit and the paint as one step. paint is the history's from then on (even on
+// EDIT_FAILED: released through the hooks). what: the HUD text ("painted 3 tiles of paint_12.png").
+// Never auto-saved here (the draw mode saves at LMB up). The paint in the history is capped at 512
+// MiB: beyond it the oldest steps are dropped (msg says so; MapEditor.droppedSteps counts them).
+EditResult MapEditPushPaint(MapEditor *E, const MS_ObjRef *sel, int selCount, const EditOp *op, PaintStep *paint,
+                            const char *what, MS_EntityId **outSel, int *outSelCount, char *msg, int msgSize);
+
 // Undo / redo the last step (only while the file, or the working copy, is the one the step left / found)
 EditResult MapEditUndo(MapEditor *E, MS_EntityId **outSel, int *outSelCount, char *msg, int msgSize);
 EditResult MapEditRedo(MapEditor *E, MS_EntityId **outSel, int *outSelCount, char *msg, int msgSize);
@@ -122,6 +167,12 @@ void MapEditFree(MapEditor *E);
 // selection (free it).
 bool MapEditBegin(MapEditor *E);
 bool MapEditSave(MapEditor *E, char *msg, int msgSize);
+// CTRL+S: the draw mode's canvases and the map (paintHooks.save), else MapEditSave
+bool MapEditSaveAll(MapEditor *E, char *msg, int msgSize);
+// The paint memory of the history (undo, redo and lost steps)
+long long MapEditPaintBytes(const MapEditor *E);
+// The map file on disk is the one the working copy was last read from or written to
+bool MapEditDiskUnchanged(const MapEditor *E);
 int MapEditUnsaved(const MapEditor *E);
 int MapEditRebase(MapEditor *E, MS_EntityId **outSel, int *outSelCount, char *msg, int msgSize);
 void MapEditClearFailed(MapEditor *E);

@@ -126,6 +126,20 @@
 //                  first selected object's map line and entity id, the last edit. With a request
 //                  of this run queued or running on the map, the first edit after the last save
 //                  (and a save) only warns (again within 3 s: go ahead)
+//   B              draw mode (drawmode.c, drawpanel.c; docs/painting.md): paint on boxes and
+//                  models. The cursor is free; RMB held flies as in edit mode. LMB drags paint
+//                  with the pen under the cursor (fill: the face's cell / the UV island), ALT+LMB
+//                  picks the texture's colour, 1..5 the pen (hard round, square, soft round,
+//                  eraser, fill; the effect toggles wait), [ / ] or CTRL+wheel the size in texels
+//                  (1..256), SHIFT+wheel the alpha, X swaps to the colour before, H paints the
+//                  material's own texture (shared) instead of the object's own canvas, TAB hides
+//                  the panel (docked left: target, pen, colour sliders / hex / recent colours,
+//                  texels per metre + Resize to density + Pixel look, the box's face groups +
+//                  Apply). The first stroke on an object gives it its own material (a copy) with
+//                  albedo_map textures/paint/paint_<id>.png, one live edit. Strokes are undone
+//                  with CTRL+Z in the same history as the edits; CTRL+S writes the canvases (and
+//                  their ASSETS.md rows and sidecars), then the map. B / ESC (and M, V, C) leave;
+//                  with unsaved edits the first B only says so
 //   CTRL+S         write the working copy to the map file (spectator mode; the settings' Editor
 //                  row "Save edits" = auto writes every edit, undo and redo at once instead).
 //                  "N unsaved edits" shows in every spectator mode while there are any; ENTER in
@@ -342,6 +356,14 @@
 //                  with a dump it runs right after the load (hidden window), then the dump. The
 //                  result must equal --apply-edits on a copy of the map. Exit 1 if a command failed
 //   --edit-save <manual|auto>   the edit save mode for this run (settings: edit_save)
+//   --paint-script <script>   strokes of the draw mode (docs/painting.md 14; the commands: the
+//                  header comment of DrawModeRunScript in src/drawmode.c): with --shot after 10
+//                  frames, after --edit-script, live (nothing written unless it says save); with
+//                  --apply-edits after that script, in a hidden window (its save writes the PNGs
+//                  and the map). Exit 1 if a command failed
+//   --draw-mode    with --shot: open the draw mode (B); with --shot-hud its HUD line and the brush
+//                  cursor at --cursor (default: the middle of the shot)
+//   --cursor x y   with --draw-mode / --draw-panel: where the cursor is (shot pixels)
 //
 // Designer debug flags (for testing without a visible window):
 //   --pick         with --shot: print what the crosshair (screen centre) hits on the shot
@@ -424,7 +446,9 @@
 //   MONOLITH_TERMINAL   terminal to open for Claude Code: program name or path + optional
 //                       args, e.g. "kitty --single-instance"
 //   TERMINAL            used if MONOLITH_TERMINAL is unset; else the first of alacritty,
-//                       kitty, foot, wezterm, xterm in PATH
+//                       kitty, foot, wezterm, xterm in PATH. In an AI agent's shell (CLAUDECODE /
+//                       AI_AGENT) no terminal opens unless MONOLITH_TERMINAL is set (a stub) or
+//                       MONOLITH_ALLOW_WINDOW: the request stays queued
 //   MONOLITH_CLAUDE_ARGS   extra Claude Code flags, split on whitespace (default none), after
 //                       --allow-dangerously-skip-permissions --dangerously-skip-permissions
 //                       --model <name>, on the coordinator's (per-request: the request's)
@@ -472,6 +496,7 @@
 #include "idpanel.h"
 #include "keyspanel.h"
 #include "modelpicker.h"
+#include "drawpanel.h"
 #include "ui.h"
 #include "png.h"
 #include <errno.h>
@@ -664,6 +689,7 @@ typedef struct {
     int width, height;      // R3D resolution = window size
     int outputMode;             // the render inspector's buffer view (R3D_SetOutputMode, F4)
     unsigned int filterGeneration;  // and its draw filter (+1 on every hide / show / isolate)
+    unsigned int textureGeneration; // painted texels (MS_TextureUpdate: no new scene version)
 } FrameKey;
 
 typedef struct {
@@ -690,6 +716,20 @@ static void MakeFrameKey(FrameKey *k, Camera3D camera, const GfxSettings *gfx, c
     k->height = GetScreenHeight();
     k->outputMode = (int)R3D_GetOutputMode();
     k->filterGeneration = in->filterGeneration;
+    k->textureGeneration = MS_TextureGeneration(scene);
+}
+
+// --pick / --pick-at: where on the surface the ray hits (MS_RaycastSurface: the face or the model
+// triangle, the texture coordinate; docs/painting.md 6), after DesignerPrintHit's lines
+static void PrintSurfaceHit(Vector3 origin, Vector3 dir)
+{
+    MS_SurfaceHit h;
+    if (!MS_RaycastSurface(scene, origin, dir, 0.0f, &h)) return;
+    static const char *const FACE[] = { "+x", "-x", "+y", "-y", "+z", "-z" };
+    printf("pick: surface material %d \"%s\"  face %s  slot %d  mesh %d  triangle %d  faceUv %.4f %.4f  uv %.4f %.4f"
+           "  bary %.3f %.3f %.3f\n", h.material, h.material >= 0 && h.material < scene->materialCount ? scene->materials[h.material].name
+           : "(own)", h.face >= 0 && h.face < 6 ? FACE[h.face] : "-", h.slot, h.mesh, h.triangle, h.faceUv.x, h.faceUv.y, h.uv.x,
+           h.uv.y, h.bary.x, h.bary.y, h.bary.z);
 }
 
 static RenderTexture LoadSceneCache(int w, int h)
@@ -959,6 +999,12 @@ static int Run(int argc, char **argv)
     const char *dumpEntitiesPath = NULL;    // --dump-entities
     const char *applyEditsPath = NULL;      // --apply-edits
     const char *editScriptPath = NULL;      // --edit-script
+    const char *paintScriptPath = NULL;     // --paint-script (docs/painting.md 14)
+    bool drawModeFlag = false;              // --draw-mode
+    Vector2 cursorArg = { 0 };              // --cursor x y
+    bool cursorSet = false;
+    bool drawPanelFlag = false;             // --draw-panel [section]
+    const char *drawPanelSection = NULL;
     int editSaveArg = -1;                   // --edit-save: 0 manual, 1 auto, -1 the settings'
     bool dumpSceneDiff = false;         // --dump-scene-diff: no indices or lines
     const char *reloadTestPath = NULL;
@@ -1156,6 +1202,19 @@ static int Run(int argc, char **argv)
         }
         else if (strcmp(a, "--reload-test") == 0) { NEED(1); reloadTestPath = argv[++i]; }
         else if (strcmp(a, "--edit-script") == 0) { NEED(1); editScriptPath = argv[++i]; }
+        else if (strcmp(a, "--paint-script") == 0) { NEED(1); paintScriptPath = argv[++i]; }
+        else if (strcmp(a, "--draw-mode") == 0) drawModeFlag = true;
+        else if (strcmp(a, "--cursor") == 0) {
+            NEED(2);
+            NUM(1, -ARG_COORD_LIMIT, ARG_COORD_LIMIT, cursorArg.x);
+            NUM(2, -ARG_COORD_LIMIT, ARG_COORD_LIMIT, cursorArg.y);
+            cursorSet = true;
+            i += 2;
+        }
+        else if (strcmp(a, "--draw-panel") == 0) {
+            drawPanelFlag = true;       // (the section is optional)
+            if (i + 1 < argc && strncmp(argv[i + 1], "--", 2) != 0) drawPanelSection = argv[++i];
+        }
         else if (strcmp(a, "--edit-save") == 0) {
             NEED(1);
             const char *v = argv[++i];
@@ -1315,6 +1374,29 @@ static int Run(int argc, char **argv)
         fprintf(stderr, "monolith: --edit-script runs before --shot or --dump-boxes / --dump-scene(-diff) / --dump-entities: give one of them\n");
         return 1;
     }
+    // --paint-script runs inside --shot (live, after --edit-script) or --apply-edits; --draw-mode and
+    // --draw-panel are for --shot (--shot-hud) images (docs/painting.md 14)
+    if (paintScriptPath && !shotPath && !applyEditsPath) {
+        fprintf(stderr, "monolith: --paint-script runs inside --shot or --apply-edits: give one of them\n");
+        return 1;
+    }
+    if ((drawModeFlag || drawPanelFlag) && !shotPath) {
+        fprintf(stderr, "monolith: --draw-mode / --draw-panel need --shot\n");
+        return 1;
+    }
+    if (cursorSet && !drawModeFlag && !drawPanelFlag) {
+        fprintf(stderr, "monolith: --cursor goes with --draw-mode or --draw-panel\n");
+        return 1;
+    }
+    // --apply-edits with --paint-script: the edits on the text, then the strokes in a hidden window
+    bool paintApply = applyEditsPath && paintScriptPath;
+    // --draw-panel [section]: the draw panel over the shot (phase 3a: on DrawModeInit's state)
+    static DrawPanel drawPanel;
+    DrawPanelInit(&drawPanel);
+    if (drawPanelFlag && !DrawPanelSetOnly(&drawPanel, drawPanelSection)) {
+        fprintf(stderr, "monolith: --draw-panel %s: no such section (all, target, pen, color, canvas, faces)\n", drawPanelSection);
+        return 1;
+    }
     // --input-script: the input of a --shot run (input.c), from frame 10 on (every cache drawn)
     if (inputScriptPath && !shotPath) {
         fprintf(stderr, "monolith: --input-script needs --shot\n");
@@ -1427,9 +1509,11 @@ static int Run(int argc, char **argv)
             // after every edit like the game's
             scene = peek;
             signed char status = (signed char)MapEditRunScript(applyEditsPath);
-            MS_Unload(peek);
             scene = NULL;
-            return status;
+            if (status != 0 || !paintScriptPath) {
+                MS_Unload(peek);
+                return status;
+            }
         }
         if (dumpPath && !editScriptPath) {
             bool ok = DumpBoxes(peek, dumpPath);
@@ -1492,7 +1576,7 @@ static int Run(int argc, char **argv)
     // --bench --headless too: then nothing ever appears on screen
     // --dump-scene of a map with models: model files load through R3D, which needs GL
     // --edit-script with a dump: the edits go live on the GPU scene first (a hidden window)
-    bool hidden = shotPath || (bench && headless) || dumpScenePath || editDump;
+    bool hidden = shotPath || (bench && headless) || dumpScenePath || editDump || paintApply;
     windowFlags |= hidden ? FLAG_WINDOW_HIDDEN : FLAG_WINDOW_RESIZABLE;
     if (!hidden && gfx.vsync) windowFlags |= FLAG_VSYNC_HINT;     // (settings: Performance)
     SetConfigFlags(windowFlags);
@@ -1502,7 +1586,7 @@ static int Run(int argc, char **argv)
     // their numbers line up with the visible runs.
     bool headlessBench = bench && headless;
     InitWindow(headlessBench ? 1920 : shotPath ? shotW : 1600, headlessBench ? 1006 : shotPath ? shotH : 900,
-               bench ? "monolith-bench" : (shotPath || dumpScenePath || editDump) ? "monolith-shot" : "monolith");
+               bench ? "monolith-bench" : (shotPath || dumpScenePath || editDump || paintApply) ? "monolith-shot" : "monolith");
     SetTargetFPS(hidden || bench ? 0 : FpsTarget(gfx.fpsCap));
     // Esc closes the prompt box, snip mode, the panel and request-close prompts; it no longer
     // quits (the window's close button ends WindowShouldClose()). Raylib's default Esc exit
@@ -1554,6 +1638,25 @@ static int Run(int argc, char **argv)
             R3D_Close();
             CloseWindow();
             return 1;
+        }
+        if (paintApply) {
+            // --apply-edits ran; now --paint-script on the live scene (its `save` writes the package)
+            static EditMode pe;
+            static DrawMode pd;
+            static Designer pdes;
+            DrawModeInit(&pd, &pe);
+            DesignerSync(&pdes);
+            signed char status = (signed char)DrawModeRunScript(&pd, &pe, &pdes, PlayerCamera(&player), GetScreenWidth(),
+                                                                GetScreenHeight(), paintScriptPath);
+            int unsaved = EditModeUnsaved(&pe);
+            if (unsaved > 0) TraceLog(LOG_INFO, "monolith: %d unsaved edit%s dropped (the paint script did not save)", unsaved, unsaved == 1 ? "" : "s");
+            EditModeFree(&pe);
+            DrawModeFree(&pd);
+            DesignerFree(&pdes);
+            MS_Unload(scene);
+            R3D_Close();
+            CloseWindow();
+            return status;
         }
         if (editDump) {
             // --edit-script, then the dumps of the live scene
@@ -1652,6 +1755,20 @@ static int Run(int argc, char **argv)
     static ModelPicker picker;
     int pickerThumbFrame = 0, pickerShotFrame = 30;
     bool pickerKeyDone = false;
+    // The draw mode (B; drawmode.c, docs/painting.md) shares the edit mode's history. --draw-mode /
+    // --draw-panel open it for --shot-hud images (the panel with a few recent colours; a scripted
+    // shot frees the cursor and plays clicks on the panel)
+    static DrawMode drawMode;
+    DrawModeInit(&drawMode, &edit);
+    drawPanel.interactive = !hidden || scripted;
+    if (drawModeFlag || drawPanelFlag) DrawModeOpen(&drawMode, &edit, &designer);
+    if (drawPanelFlag) {
+        drawPanel.interactive = scripted;
+        static const Color recent[] = { { 200, 50, 50, 255 }, { 40, 40, 44, 255 }, { 236, 220, 180, 255 }, { 90, 140, 70, 255 },
+                                        { 60, 110, 200, 128 } };
+        drawMode.recentCount = (int)(sizeof(recent) / sizeof(recent[0]));
+        memcpy(drawMode.recent, recent, sizeof(recent));
+    }
     if (modelPickerFlag && shotPath) {
         if (!edit.active) EditModeOpen(&edit, &designer);
         ModelPickerOpen(&picker, &edit, modelPickerFilter);
@@ -1663,6 +1780,11 @@ static int Run(int argc, char **argv)
     }
 
     if (!hidden || scripted) DisableCursor();
+    if (drawPanelFlag && scripted) EnableCursor();     // (the draw panel takes clicks: a free cursor)
+    // A scripted --draw-mode / --draw-panel shot is the draw mode's alone: its input never reaches the
+    // designer, even after B leaves the mode (an ENTER there once opened the prompt box and sent a
+    // real request)
+    bool drawShotLocked = shotPath && scripted && (drawModeFlag || drawPanelFlag);
     // The edit mode's cursor (main loop): 0 not the mode's, 1 free, 2 hidden (RMB flying, the
     // modal); where it was when it was hidden; the RMB press a click may clear the selection with
     int editCursor = 0;
@@ -1763,11 +1885,12 @@ static int Run(int argc, char **argv)
         // While the prompt box is open (and a couple of frames after it closed) every
         // game key and the camera are frozen: the keys are text now
         bool typing = DesignerCapturesInput(&designer) || EditModeCapturesInput(&edit) || EditModeModalRunning(&edit) ||
-                      InspectorCapturesInput(&inspector) || IdPanelCapturesInput(&idPanel) || ModelPickerCapturesInput(&picker);
+                      InspectorCapturesInput(&inspector) || IdPanelCapturesInput(&idPanel) || ModelPickerCapturesInput(&picker) ||
+                      (drawMode.active && drawPanel.typing);     // (the draw panel: a field has the keys)
         // ESC with nothing else to close: the menu with the keybindings button (keyspanel.c);
         // while it or the panel is open every game key and the camera are frozen
         if ((!shotPath || scripted) && !bench) {
-            bool escFree = !typing && !PanelCapturesInput(&panel) && !(spec.active && edit.active) && !designer.snipping &&
+            bool escFree = !typing && !PanelCapturesInput(&panel) && !(spec.active && (edit.active || drawMode.active)) && !designer.snipping &&
                            !designer.volumeMode && closePickTime <= 0.0f;
             KeysUpdate(&keys, escFree);
         }
@@ -1827,7 +1950,9 @@ static int Run(int argc, char **argv)
                     idPanel.scene = NULL;                   // (and the id panel's rows)
                     ModelPickerDropThumbs(&picker);         // (rendered again while it is open)
                     reuse.keyValid = reuse.cacheValid = false;
+                    DrawModeBeforeSync(&drawMode);          // (the canvases, for the working copy)
                     EditModeSync(&edit, &designer, true);  // (the working copy goes live again)
+                    DrawModeSync(&drawMode, &edit, true);
                 } else if (fatal) {
                     fprintf(stderr, "monolith: %s\n", msg);
                     exitStatus = 1;
@@ -1905,7 +2030,8 @@ static int Run(int argc, char **argv)
         // 4 SSIL, 5 bloom, 6 sun; --off applies them on the first frame)
         bool first = !offApplied, toggled = false;
         for (int k = 0; k < 6; k++) {
-            if ((!typing && !picking && IsKeyPressed(KEY_ONE + k)) || (first && strchr(offKeys, '1' + k))) {
+            bool pens = spec.active && drawMode.active;     // (1..5: the draw mode's pens)
+            if ((!typing && !picking && !pens && IsKeyPressed(KEY_ONE + k)) || (first && strchr(offKeys, '1' + k))) {
                 effects.flip[k] = !effects.flip[k];
                 toggled = true;
             }
@@ -1927,7 +2053,7 @@ static int Run(int argc, char **argv)
             TraceLog(exported ? LOG_INFO : LOG_WARNING, "monolith: %s", mapMessage);
         }
 
-        if (!typing && IsKeyPressed(KEY_TAB)) {
+        if (!typing && !(spec.active && drawMode.active) && IsKeyPressed(KEY_TAB)) {     // (draw mode: the panel)
             spec.active = !spec.active;
             if (spec.active) {
                 // Start from the player's eyes
@@ -1961,9 +2087,11 @@ static int Run(int argc, char **argv)
                 mapMessageTime = 3.0f;
                 mapMessageError = false;
                 TraceLog(LOG_INFO, "monolith: %s", mapMessage);
-                // A change made elsewhere: unsaved manual edits are applied again on top of it
-                // (else the undo history ends)
+                // A change made elsewhere: unsaved manual edits (and paint) are applied again on top
+                // of it (else the undo history ends)
+                DrawModeBeforeSync(&drawMode);
                 EditModeSync(&edit, &designer, false);
+                DrawModeSync(&drawMode, &edit, false);
             } else if (r == MS_RELOAD_FAILED) {
                 snprintf(mapMessage, sizeof(mapMessage), "%s", MS_Error(scene));
                 mapMessageError = true;
@@ -1977,6 +2105,14 @@ static int Run(int argc, char **argv)
         if (shotPath && editScriptPath && frame == 10) {
             if (MapEditRunLiveScript(&edit.ed, editScriptPath) != 0) exitStatus = 1;
             ApplyEnvironment(&effects);     // (a `disk` command may have changed it)
+        }
+        // --paint-script with --shot: then the strokes, live (docs/painting.md 14)
+        if (shotPath && paintScriptPath && frame == 10) {
+            DesignerSync(&designer);
+            Camera3D cam = spec.active ? SpectatorCamera(&spec) : PlayerCamera(&player);
+            if (DrawModeRunScript(&drawMode, &edit, &designer, cam, GetScreenWidth(), GetScreenHeight(), paintScriptPath) != 0) exitStatus = 1;
+            if (!drawModeFlag && !drawPanelFlag) DrawModeClose(&drawMode);
+            ApplyEnvironment(&effects);
         }
         // --edit-modal: the transform modal opens on the selection after 10 frames (every cache
         // drawn), as G / ALT+R / S or a gizmo drag would (r90, reset, rot: that edit now);
@@ -2024,13 +2160,18 @@ static int Run(int argc, char **argv)
             if (!benchStill) spec.yaw += 2.0f * PI * (float)(benchFrame > 0 ? benchFrame : 0) / benchFrames;
             R3D_SetProfilerTag(benchFrame >= 0 ? BENCH_TAG(benchView, benchFrame) : -1);
         }
+        // (a scripted --draw-mode / --draw-panel shot goes through the draw mode's own input; its keys
+        // and clicks never reach the designer, even once the mode is left: see drawShotLocked)
         else if (!shotPath || scripted) {
             DesignerAction action = DESIGNER_NONE;
             // Edit mode: the camera flies only while RMB is held; an RMB click (released within
             // 0.25 s, moved less than 4 px) clears the selection (DesignerUpdate doesn't then)
             bool editKeys = spec.active && edit.active;
-            designer.editMode = editKeys;
-            spec.rmbFly = editKeys;
+            // Draw mode (B, drawmode.c): the cursor is free and RMB flies, as in edit mode; the
+            // designer never sees its keys and clicks (no selection, no prompt box)
+            bool drawKeys = spec.active && drawMode.active;
+            designer.editMode = editKeys || drawKeys;
+            spec.rmbFly = editKeys || drawKeys;
             if (editKeys && !EditModeModalRunning(&edit) && IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) {
                 rmbDownTime = GetTime();
                 rmbMoved = 0.0f;
@@ -2041,7 +2182,26 @@ static int Run(int argc, char **argv)
                 rmbClick = false;
                 if (editKeys && !typing && GetTime() - rmbDownTime < 0.25 && rmbMoved < 4.0f) DesignerClearSelection(&designer);
             }
-            if (spec.active && !PanelCapturesInput(&panel) && !InspectorCapturesInput(&inspector) && !IdPanelCapturesInput(&idPanel) &&
+            if (drawKeys && !PanelCapturesInput(&panel) && !InspectorCapturesInput(&inspector) && !IdPanelCapturesInput(&idPanel) &&
+                !KeysCapturesInput(&keys)) {
+                // The draw panel first: while the cursor is over it, LMB is its and nothing is painted
+                DrawPanelAction act = DRAWPANEL_ACT_NONE;
+                bool onPanel = !drawMode.panelHidden && editCursor == 1 && DrawPanelUpdate(&drawPanel, &drawMode, &act);
+                drawMode.keysBlocked = typing || drawPanel.typing;
+                DrawModeResult dr = DrawModeUpdate(&drawMode, &edit, &designer, SpectatorCamera(&spec), onPanel, dt);
+                if (act != DRAWPANEL_ACT_NONE && DrawModePanelAction(&drawMode, &edit, (int)act, drawPanel.faces) == DRAWMODE_RELOADED)
+                    dr = DRAWMODE_RELOADED;
+                if (dr == DRAWMODE_RELOADED) {
+                    ApplyEnvironment(&effects);
+                    mapMessageError = false;
+                }
+                typing = typing || drawPanel.typing;
+            } else if (drawShotLocked) {
+                // A scripted --draw-mode / --draw-panel shot that left the mode: B opens it again, and
+                // nothing else reaches the designer (no selection, no prompt box, no request)
+                if (spec.active && !typing && !KeysCapturesInput(&keys) && !PanelCapturesInput(&panel) && IsKeyPressed(KEY_B))
+                    DrawModeOpen(&drawMode, &edit, &designer);
+            } else if (spec.active && !PanelCapturesInput(&panel) && !InspectorCapturesInput(&inspector) && !IdPanelCapturesInput(&idPanel) &&
                 !KeysCapturesInput(&keys) && ModelPickerCapturesInput(&picker)) {
                 // The model picker takes every key while open (ENTER places a model: a live edit)
                 if (ModelPickerUpdate(&picker, &edit, &designer) == EDITMODE_RELOADED) {
@@ -2058,14 +2218,18 @@ static int Run(int argc, char **argv)
                 bool gizmoOk = editKeys && editCursor == 1 && !idPanel && !modal && !typing && !IsMouseButtonDown(MOUSE_BUTTON_RIGHT);
                 bool gizmoClick = EditModeGizmoHover(&edit, &designer, SpectatorCamera(&spec), GetMousePosition(), gizmoOk) && gizmoOk &&
                                   IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
-                if (!idPanel && !modal && !gizmoClick) {
+                bool drawKey = !idPanel && !modal && !typing && !designer.promptOpen && !designer.snipping && IsKeyPressed(KEY_B) &&
+                               !IsKeyDown(KEY_LEFT_CONTROL) && !IsKeyDown(KEY_RIGHT_CONTROL) && !IsKeyDown(KEY_LEFT_ALT) && !IsKeyDown(KEY_RIGHT_ALT);
+                if (drawKey) {
+                    DrawModeOpen(&drawMode, &edit, &designer);      // (B: the draw mode, edit / volume mode end; nothing else this frame)
+                } else if (!idPanel && !modal && !gizmoClick) {
                     action = DesignerUpdate(&designer, dt);
                     typing = DesignerCapturesInput(&designer);
                     if (designer.snipping || designer.volumeMode) edit.active = false;   // C and V leave the edit mode
                 }
                 // Manual edits rewrite and reload the map: then the environment applies again,
                 // as after a hot reload (the selection already follows the edited objects)
-                if ((idPanel || modal || !typing) && action == DESIGNER_NONE &&
+                if (!drawKey && (idPanel || modal || !typing) && action == DESIGNER_NONE &&
                     EditModeUpdate(&edit, &designer, SpectatorCamera(&spec), dt) == EDITMODE_RELOADED) {
                     ApplyEnvironment(&effects);
                     mapMessageError = false;
@@ -2078,11 +2242,11 @@ static int Run(int argc, char **argv)
                     ModelPickerOpen(&picker, &edit, NULL);
                 typing = typing || EditModeCapturesInput(&edit) || EditModeModalRunning(&edit) || ModelPickerCapturesInput(&picker);
             }
-            spec.holdMove = edit.active && (IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL));
+            spec.holdMove = (edit.active || drawMode.active) && (IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL));
             // The cursor: free in edit mode (hidden while RMB flies or the modal runs), unless the
             // prompt box, snip mode or the settings panel own it (they show and hide it themselves)
             if (!hidden || scripted) {
-                int want = !(spec.active && edit.active) || designer.promptOpen || designer.snipping || panel.open || idPanel.open ||
+                int want = !(spec.active && (edit.active || drawMode.active)) || designer.promptOpen || designer.snipping || panel.open || idPanel.open ||
                            keys.open || keys.menu ? 0
                          : EditModeModalRunning(&edit) || IsMouseButtonDown(MOUSE_BUTTON_RIGHT) ? 2 : 1;
                 if (want != editCursor) {
@@ -2131,10 +2295,20 @@ static int Run(int argc, char **argv)
         if (cursorPick) DesignerPickCursor(&designer, camera, GetScreenWidth(), GetScreenHeight(), GetMousePosition());
         else if (spec.active || shotPath) DesignerPickCamera(&designer, camera);
         InspectorApply(&inspector);     // buffer view and draw filter (nothing while it is off)
+        if (shotPath && drawMode.active && !scripted && (drawPanelFlag || drawModeFlag)) {
+            // --draw-mode / --draw-panel shots without a script: the cursor at --cursor (default: the
+            // middle of the shot) is what the HUD, the brush cursor and the panel show (a scripted one
+            // goes through the draw mode's own input above)
+            Vector2 at = cursorSet ? cursorArg : (Vector2){ GetScreenWidth() * 0.5f, GetScreenHeight() * 0.5f };
+            DrawModeHover(&drawMode, camera, at, GetScreenWidth(), GetScreenHeight());
+        }
         // Model picker thumbnails: a few per frame, outside R3D_Begin/End (the render leaves the
         // environment and every cache as they were); dropped when the map is loaded again
         if (picker.open && !shotPath && !(spec.active && edit.active)) ModelPickerClose(&picker);   // (left the mode)
         if (!bench && (!shotPath || frame >= pickerThumbFrame)) ModelPickerRenderThumbs(&picker, PICKER_THUMBS_PER_FRAME);
+        // The draw mode's shader bake (a first stroke on a box with a surface shader, docs/painting.md
+        // 3.6): the same pattern, outside R3D_Begin/End; its stroke begins in the next frame
+        DrawModeRunBake(&drawMode);
 
         // Frame reuse (see its region): same key as the last frame -> composite the cache
         bool reused = false;
@@ -2195,20 +2369,29 @@ static int Run(int argc, char **argv)
                 InspectorDrawOverlay(&inspector, camera, GetScreenWidth(), GetScreenHeight(), drawUi && hud);
                 if (!uiToTarget && shotTarget.id) EndTextureMode();
             }
+            // Draw mode: the brush cursor and the panel say what is under the cursor; the designer's
+            // hover outline, hit marker and HUD lines (it doesn't select in the mode) stay away
+            bool drawing = drawMode.active && (spec.active || drawPanelFlag);
+            bool drawPanelShown = drawUi && hud && drawing && !drawMode.panelHidden && (drawPanelFlag || !shotPath || scripted);
             if (drawUi && hud && designerUi) {
-                DesignerDrawOverlay(&designer, camera, true);
+                if (!drawing) DesignerDrawOverlay(&designer, camera, true);
                 EditModeDrawGuides(&edit, camera);
                 DesignerDrawVolumes(&designer, camera, GetScreenWidth(), GetScreenHeight(), false);
                 if (spec.active) EditModeDrawGizmo(&edit, &designer, camera);     // (the rotate gizmo, 2D)
+                if (spec.active || shotPath) DrawModeDrawCursor(&drawMode, camera);    // (the brush footprint, 3D)
                 // (no crosshair while the edit mode's cursor is free or the modal runs)
-                if (!cursorPick && !(EditModeModalRunning(&edit) && (!hidden || scripted))) DesignerDrawCrosshair(GetScreenWidth(), GetScreenHeight());
+                if (!cursorPick && !(spec.active && drawMode.active) && !(EditModeModalRunning(&edit) && (!hidden || scripted)))
+                    DesignerDrawCrosshair(GetScreenWidth(), GetScreenHeight());
             }
             // Snip mode (screen regions) shows even with the HUD off, like the prompt box
             if (drawUi && designerUi) DesignerDrawRegions(&designer, GetScreenWidth(), GetScreenHeight(), false);
+            int hudBottom = 10 + UI_HUD_LINE + 8;   // below the HUD lines (the draw panel's top)
             if (drawUi && hud) {
                 // The status line: fps | mode | effect toggles (on / off by colour) | preset
 #define TOGGLE_TEXT(on, name) ((on) ? "^" name "^" : "~" name "~")
-                UiHudHints(TextFormat("%d fps%s|%s|{1} %s  {2} %s  {3} %s  {4} %s  {5} %s  {6} %s|{F2} settings: %s",
+                // (draw mode: 1..5 are the pens, so the toggles show without their keys)
+                UiHudHints(TextFormat(drawing ? "%d fps%s|%s|%s  %s  %s  %s  %s  %s|{F2} settings: %s"
+                                              : "%d fps%s|%s|{1} %s  {2} %s  {3} %s  {4} %s  {5} %s  {6} %s|{F2} settings: %s",
                            GetFPS(), reused ? " (cached)" : "",
                            spec.active ? TextFormat("SPECTATOR  %.1f m/s", spec.speed) : player.fly ? "FLY" : "WALK",
                            TOGGLE_TEXT(env->volumetricFog.enabled, "volFog"), TOGGLE_TEXT(env->fog.mode, "fog"),
@@ -2221,16 +2404,29 @@ static int Run(int argc, char **argv)
                 if (spec.active) {
                     // (no key lists here: ESC opens the keybindings, keyspanel.c)
                     int y = 10 + UI_HUD_LINE + 8;
-                    y += DesignerDrawHud(&designer, 12, y);
-                    y += EditModeDrawHud(&edit, &designer, 12, y);
+                    if (!drawing) y += DesignerDrawHud(&designer, 12, y);
+                    y += DrawModeDrawHud(&drawMode, &edit, 12, y);
+                    // (draw mode: the DRAW line has the unsaved count; the edit mode's lines only
+                    // for the edits a rebase could not apply)
+                    if (!drawing || edit.ed.failedCount > 0) y += EditModeDrawHud(&edit, &designer, 12, y);
                     if (!otherPanel) y += InspectorDrawHud(&inspector, 12, y);
-                    LauncherDrawHud(12, y + 4);
+                    hudBottom = y + 6;
+                    if (drawPanelShown) {
+                        // The panel's top stays put: the refusal, the draw mode's message and the
+                        // requests go to the right of it
+                        int my = hudBottom + DrawModeDrawMessages(&drawMode, DRAWPANEL_RIGHT + 12, hudBottom);
+                        LauncherDrawHud(DRAWPANEL_RIGHT + 12, my + 4);
+                    } else {
+                        y += DrawModeDrawMessages(&drawMode, 12, y);
+                        LauncherDrawHud(12, y + 4);
+                    }
                     if (spec.messageTime > 0.0f && !designer.promptOpen)
                         UiToast(spec.message, GetScreenWidth() / 2, GetScreenHeight() - 76, UI_XL, UI_INK, fminf(spec.messageTime, 1.0f));
                 } else if (!shotPath) {
                     LauncherDrawHud(12, 10 + UI_HUD_LINE + 4);  // finished requests also show while walking
                 }
             }
+            if (drawPanelShown) DrawPanelDraw(&drawPanel, &drawMode, hudBottom);
             if (drawUi && (mapMessageError || mapMessageTime > 0.0f) && !designer.promptOpen) {
                 float a = mapMessageError ? 1.0f : fminf(mapMessageTime, 1.0f);
                 int y = GetScreenHeight() - 36;
@@ -2271,13 +2467,22 @@ static int Run(int argc, char **argv)
             Image img = ReadTarget(shotTarget);
             if (!PngWrite(img, shotPath)) TraceLog(LOG_ERROR, "monolith: failed to save %s", shotPath);
             UnloadImage(img);
-            if (pickFlag) DesignerPrintHit(designer.hit);
+            if (pickFlag) {
+                DesignerPrintHit(designer.hit);
+                Camera3D cam = spec.active ? SpectatorCamera(&spec) : PlayerCamera(&player);
+                PrintSurfaceHit(cam.position, Vector3Normalize(Vector3Subtract(cam.target, cam.position)));
+                fflush(stdout);
+            }
             if (pickAtCount > 0) {
                 // The same camera and ray frame as the shot (and as screen regions)
                 Camera3D cam = spec.active ? SpectatorCamera(&spec) : PlayerCamera(&player);
                 for (int k = 0; k < pickAtCount; k++) {
                     printf("pick-at %g %g (of %d x %d):\n", pickAtArgs[k].x, pickAtArgs[k].y, shotW, shotH);
-                    DesignerPrintHit(DesignerPickAt(cam, shotW, shotH, pickAtArgs[k].x, pickAtArgs[k].y));
+                    DesignerHit dh = DesignerPickAt(cam, shotW, shotH, pickAtArgs[k].x, pickAtArgs[k].y);
+                    DesignerPrintHit(dh);
+                    // (the ray through the point it hit: the same surface)
+                    if (dh.obj.kind != MS_OBJ_NONE)
+                        PrintSurfaceHit(cam.position, Vector3Normalize(Vector3Subtract(dh.point, cam.position)));
                 }
                 fflush(stdout);
             }
@@ -2338,13 +2543,22 @@ static int Run(int argc, char **argv)
     if (unsavedAtExit > 0 && !hidden) {
         char path[1400];
         bool ok = GfxUnsavedPath(scene->path, path, sizeof(path)) && MapEditWriteWork(&edit.ed, path);
+        // (and each unsaved canvas under <map>-<time>/<package path>, docs/painting.md 11.3)
+        if (ok && DrawModeUnsavedCanvases(&drawMode) > 0) {
+            char dir[1400];
+            snprintf(dir, sizeof(dir), "%s", path);
+            char *dot = strrchr(dir, '.');
+            if (dot && strcmp(dot, ".map") == 0) *dot = '\0';
+            DrawModeWriteUnsaved(&drawMode, dir);
+        }
         TraceLog(ok ? LOG_WARNING : LOG_ERROR, ok ? "monolith: %d unsaved edit%s written to %s (the map file is unchanged)"
                  : "monolith: %d unsaved edit%s could not be written (%s)", unsavedAtExit, unsavedAtExit == 1 ? "" : "s",
                  ok ? path : "no settings folder");
     } else if (unsavedAtExit > 0) TraceLog(LOG_INFO, "monolith: %d unsaved edit%s dropped (automated run)", unsavedAtExit,
                                            unsavedAtExit == 1 ? "" : "s");
     ModelPickerFree(&picker);
-    EditModeFree(&edit);
+    EditModeFree(&edit);            // (the history releases its paint through the draw mode's hooks)
+    DrawModeFree(&drawMode);
     free(editModalText);
     InputScriptFree();
     InspectorFree(&inspector);

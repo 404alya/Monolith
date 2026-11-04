@@ -119,6 +119,20 @@
 //         inherit albedo|normal|orm|emission|all   (model overrides: keep the model's own map)
 //         wrap repeat|clamp|mirror   wrapping of this material's textures and samplers
 //                                    (default repeat, so uv_scale > 1 tiles; trilinear + mipmaps)
+//         filter trilinear|nearest   magnification of its albedo / normal / orm / emission maps:
+//                                    trilinear (default), or nearest (crisp texels up close, for
+//                                    pixel art; nearest texels of the two nearest mipmaps blended
+//                                    at a distance). A file used with both filters is two textures
+//         uv_faces a b c d e f       box faces +x -x +y -y +z -z (a turned box: its own axes) in
+//                                    cells of the texture: faces with the same number (0..5; every
+//                                    number from 0 to the largest used) share a cell. k cells lie in
+//                                    a grid of ceil(sqrt(k)) x ceil(k / cols), cell n at column
+//                                    n % cols, row n / cols; a face keeps the cube's UV orientation
+//                                    inside its cell, inset by 1/64 cell (the first few mipmap
+//                                    levels don't bleed from the next cell; far smaller ones do).
+//                                    Needs uv_scale 1 1 and uv_offset 0 0. Boxes only (merged,
+//                                    instanced and turned); models ignore it. Without the key every
+//                                    face shows the whole texture
 //         instanced on|off   [off] keep this material's boxes as instanced unit cubes. Off: boxes
 //                                    are drawn as one mesh per cell of the faces no other box hides
 //                                    (see UploadBoxes). On is for shaders that read INSTANCE_* or the
@@ -258,8 +272,14 @@ typedef struct {
     int shaderLine, mapLine[MAP_COUNT];  // map lines of the keys, for load errors
     int wrap;                           // texture wrapping: 0 repeat (default), 1 clamp, 2 mirror
     bool instanced;                     // `instanced on`: boxes stay instanced cubes
+    bool hasFaces;                      // `uv_faces`: uvFaces[f] is the texture cell of box face f (+x -x +y -y +z -z)
+    unsigned char uvFaces[6];
+    unsigned char filter;               // `filter`: TEX_TRILINEAR (default) or TEX_NEAREST, for its four maps
     bool merge, occluder;               // set at upload: boxes become a visible-face mesh / may hide other boxes' faces
+    int faceCube;                       // set at upload: 1 + its entry in faceCubes[] (hasFaces), 0 = R3D's cube
 } MatDef;
+
+enum { TEX_TRILINEAR, TEX_NEAREST };
 
 typedef struct {
     bool enabled, shadow;
@@ -291,7 +311,15 @@ typedef struct {
     BoundingBox fogRegion;
 } EnvDef;
 
-typedef struct { char *path; bool isColor, data; int wrap; Texture2D tex; } TexEntry;
+typedef struct { char *path; bool isColor, data; int wrap, filter; Texture2D tex; } TexEntry;
+
+// The unit cube of one face layout (`uv_faces`): R3D's cube with each face's UVs moved into its
+// cell (FaceLayoutData), as mesh data for the merged meshes and as a mesh for instanced draws
+typedef struct {
+    unsigned char cells[6];
+    R3D_MeshData data;
+    R3D_Mesh mesh;
+} FaceCube;
 
 // A surface shader file of the map, compiled once: every material that uses it draws with an
 // alias of it (its own uniforms and samplers, the shared program and shader variants)
@@ -316,6 +344,13 @@ typedef struct {
     int triCount;
     BvhNode *nodes;
     int nodeCount;
+#ifdef MONOLITH_EDITOR
+    Vector2 *uv;                // per vertex: its texture coordinate (NULL: the file has none)
+    unsigned int *triSrc;       // per triangle (BVH order): its index in file order (the meshes' triangles in turn)
+    unsigned int *triAt;        //   and back: per triangle in file order, its place in tri[]
+    int *meshTri;               // per mesh + 1: the first triangle of each mesh in file order (meshCount + 1)
+    int meshCount;
+#endif
 } ModelPick;
 
 // One draw: instances [first, first + count) of a buffer (group = the material for boxes, the
@@ -440,6 +475,8 @@ typedef struct {
     LoadTimes times;
     TexEntry *textures;
     int textureCount, textureCap;
+    FaceCube *faceCubes;                // one per distinct `uv_faces` layout of the materials (BuildFaceCubes)
+    int faceCubeCount, faceCubeCap;
     ShaderFile *shaderFiles;
     int shaderFileCount, shaderFileCap;
     R3D_Cubemap sky;
@@ -454,6 +491,11 @@ typedef struct {
     const char *shaderDefines, *shaderDefinesFile;  // MS_LoadOptions (not owned)
     // Live edits (MS_EditSetText): what the next edit compares with and keeps
     unsigned long long lookHash;        // the statements that are no objects (materials, env, format)
+    unsigned long long restLookHash;    // the same without the materials (env, format)
+    unsigned long long *matLookHash;    // per material: its `material` lines (parallel to materials[])
+    unsigned long long *matShapeHash;   //   and the same without its uv_faces, filter and albedo_map keys
+    int matLookHashCap, matShapeHashCap;
+    struct MS_Private *live;            // MS_EditSetText: the scene whose provided textures it may use
     unsigned char *hidden;              // per box: its hidden faces (UploadBoxes), NULL = none merged
     int *boxOrder;                      // the boxes in draw order (material, cell; UploadBoxes)
     int boxOrderCount;
@@ -489,6 +531,13 @@ typedef struct {
 } SunShadowCache;
 
 #ifdef MONOLITH_EDITOR
+// An image provided for a package path (MS_TextureProvide): what an upload from memory uses
+// instead of the file (RGBA8, owned)
+typedef struct ProvidedTex {
+    char *rel;
+    Image img;
+} ProvidedTex;
+
 // A transform preview (MS_EditPreviewBegin .. End): the objects, what they were at Begin, and how
 // the selected boxes are drawn meanwhile (out of their merged meshes and instanced buffers, as
 // instanced cubes from buf)
@@ -548,6 +597,20 @@ struct MS_Private {
     BoundingBox aoRegion;
     float aoVoxel, aoIntensity;
     struct EditPreview *pv;
+
+    // Painting (region "Painting"): images provided for package paths (MS_TextureProvide), the
+    // texture generation (+1 on every MS_TextureUpdate) and the scratch a sub-rectangle upload
+    // packs its rows into (grown to the largest rectangle seen)
+    struct ProvidedTex *provided;
+    int providedCount, providedCap;
+    unsigned int textureGeneration;
+    unsigned char *texScratch;
+    int texScratchCap;
+
+    // Meshes a live edit replaced, freed by the next MS_DrawGeometry (after a frame drew the new ones):
+    // see LiveRetire
+    R3D_Mesh *retired;
+    int retiredCount, retiredCap;
 
     // The render inspector (region "Draw ranges"): per draw range the objects it draws, built on
     // the first query after a version change (rangeObj: box indices of the box ranges, then model
@@ -1301,6 +1364,83 @@ static void TurnedBoxMake(BoundingBox written, Vector3 rotationDeg, MS_TurnedBox
 // #endregion
 
 // ======================================================================================
+// #region Small helpers: box face layouts (a material's `uv_faces`)
+// ======================================================================================
+// A layout gives each face of a box (+x -x +y -y +z -z, the box's own axes when it is turned) a
+// cell number 0..5; faces with the same number share a cell of the texture. k cells (the largest
+// number + 1) lie in a grid of ceil(sqrt(k)) columns and ceil(k / cols) rows, cell n at column
+// n % cols, row n / cols. A face keeps the orientation R3D's unit cube gives it, inset by a gutter
+// of 1/64 cell on each side, so the first few mipmap levels don't bleed from the next cell (a gutter
+// of g texels covers about log2(g) + 1 levels; at a distance the smaller levels do mix in the next
+// cell at the face's edges).
+
+#define FACE_GUTTER (1.0f / 64.0f)
+
+// A valid layout: every number 0..5, and every number from 0 to the largest one used
+static bool FaceCellsValid(const unsigned char cells[6])
+{
+    int top = 0;
+    for (int f = 0; f < 6; f++) {
+        if (cells[f] > 5) return false;
+        if (cells[f] > top) top = cells[f];
+    }
+    for (int n = 0; n <= top; n++) {
+        bool used = false;
+        for (int f = 0; f < 6; f++) used = used || cells[f] == n;
+        if (!used) return false;
+    }
+    return true;
+}
+
+// The grid of a layout: cols x rows cells
+static void FaceGrid(const unsigned char cells[6], int *cols, int *rows)
+{
+    int k = 1;
+    for (int f = 0; f < 6; f++)
+        if (cells[f] + 1 > k) k = cells[f] + 1;
+    int c = 1;
+    while (c * c < k) c++;
+    *cols = c;
+    *rows = (k + c - 1) / c;
+}
+
+// The rectangle of face f's cell in 0..1 texture space (inset: with the gutter)
+static Rectangle FaceCellRect(const unsigned char cells[6], int face, bool inset)
+{
+    int cols, rows;
+    FaceGrid(cells, &cols, &rows);
+    int n = face >= 0 && face < 6 ? cells[face] : 0;
+    float g = inset ? FACE_GUTTER : 0.0f;
+    float cw = 1.0f / (float)cols, ch = 1.0f / (float)rows;
+    return (Rectangle){ ((float)(n % cols) + g) * cw, ((float)(n / cols) + g) * ch,
+                        (1.0f - 2.0f * g) * cw, (1.0f - 2.0f * g) * ch };
+}
+
+// The layout face (+x -x +y -y +z -z = 0..5) of a unit normal along one axis
+static int FaceOfNormal(Vector3 n)
+{
+    int axis = fabsf(n.x) > 0.5f ? 0 : fabsf(n.y) > 0.5f ? 1 : 2;
+    float v = axis == 0 ? n.x : axis == 1 ? n.y : n.z;
+    return 2 * axis + (v < 0.0f);
+}
+
+// R3D's unit cube (24 vertices, 4 per face, in its own face order) with each face's UVs moved into
+// its cell of the layout: u' = x + u * w, v' = y + v * h of the face's inset cell rectangle
+static void FaceLayoutData(R3D_MeshData *md, const unsigned char cells[6])
+{
+    for (int f = 0; f < 6; f++) {
+        Rectangle r = FaceCellRect(cells, FaceOfNormal(R3D_UnpackNormal(md->vertices[f * 4].normal)), true);
+        for (int c = 0; c < 4; c++) {
+            R3D_Vertex *vx = &md->vertices[f * 4 + c];
+            Vector2 uv = R3D_UnpackTexCoord(vx->texcoord);
+            R3D_PackTexCoord(vx->texcoord, (Vector2){ r.x + uv.x * r.width, r.y + uv.y * r.height });
+        }
+    }
+}
+
+// #endregion
+
+// ======================================================================================
 // #region Parser
 // ======================================================================================
 // The text parser exists only in editor builds: games read compiled maps (see "Compiled maps").
@@ -1429,6 +1569,17 @@ static bool Tokenize(Parser *P, char *line, int *count)
     return true;
 }
 
+// Tokens into a running hash (each with its kind, quoted or not)
+static unsigned long long HashTokens(unsigned long long h, const Token *tok, int n)
+{
+    for (int i = 0; i < n; i++) {
+        unsigned char q = tok[i].quoted ? 1 : 2;
+        h = Fnv1a64Update(h, &q, 1);
+        h = Fnv1a64Update(h, tok[i].s, strlen(tok[i].s) + 1);
+    }
+    return h;
+}
+
 // Adds a file to the scene's dependencies (hot reload watches them)
 static bool AddDep(Parser *P, const char *full)
 {
@@ -1449,6 +1600,14 @@ static bool Dup(Parser *P, const char *s, char **out)
     return true;
 }
 
+// The image provided for package path `rel` (MS_TextureProvide), NULL if none (or no scene)
+static const Image *ProvidedImage(const MS_Private *p, const char *rel)
+{
+    for (int i = 0; p && i < p->providedCount; i++)
+        if (strcmp(p->provided[i].rel, rel) == 0) return &p->provided[i].img;
+    return NULL;
+}
+
 // Package-relative path -> full path; rejects anything that could leave the package
 static bool PackagePath(Parser *P, Token t, char *full, int fullSize)
 {
@@ -1459,7 +1618,9 @@ static bool PackagePath(Parser *P, Token t, char *full, int fullSize)
     // Watched before the existence check: after a failed load the watch list is this attempt's
     // dependencies, so a file that is still missing reloads the package once it appears
     if (!AddDep(P, full)) return false;
-    if (!FileExists(full)) return Fail(P, "file not found: \"%s\" (paths are relative to the package folder)", s);
+    // (a live edit may name a texture that exists only in memory so far: MS_TextureProvide)
+    if (!FileExists(full) && !ProvidedImage(P->d->live, s))
+        return Fail(P, "file not found: \"%s\" (paths are relative to the package folder)", s);
     return true;
 }
 
@@ -1947,9 +2108,15 @@ static int AddMaterial(SceneData *d, const char *name)
         free(copy);
         return -1;
     }
+    if (!MS_RESERVE(d->matLookHash, d->matLookHashCap, d->materialCount + 1) ||
+        !MS_RESERVE(d->matShapeHash, d->matShapeHashCap, d->materialCount + 1)) {
+        free(copy);
+        return -1;
+    }
     int mi = d->materialCount++;
     d->materials[mi] = (MS_Material){ .name = copy, .material = R3D_MATERIAL_BASE };
     d->matDefs[mi] = (MatDef){ 0 };
+    d->matLookHash[mi] = d->matShapeHash[mi] = FNV_OFFSET;
     if (!MatHashInsert(d, mi)) return -1;   // (the entry stays; FreeData frees its name)
     return mi;
 }
@@ -1976,6 +2143,9 @@ static bool ParseMaterial(Parser *P, Token *tok, int n)
     MatDef *D = &d->matDefs[mi];
     R3D_Material *m = &M->material;
     if (M->line == 0) M->line = P->line;
+    // (each line starts with its keyword and name in both hashes, so two lines never hash as one)
+    d->matLookHash[mi] = HashTokens(d->matLookHash[mi], tok, 2);
+    d->matShapeHash[mi] = HashTokens(d->matShapeHash[mi], tok, 2);
 
     for (int t = 2; t < n; ) {
         const char *k = tok[t].s;
@@ -2077,6 +2247,25 @@ static bool ParseMaterial(Parser *P, Token *tok, int n)
         } else if (strcmp(k, "instanced") == 0) {
             ONE_WORD();
             if (!OnOff(P, v[0], &D->instanced)) return false;
+        } else if (strcmp(k, "uv_faces") == 0) {
+            NEED(6);
+            unsigned char cells[6];
+            for (int f = 0; f < 6; f++) {
+                int c;
+                if (!NumI(P, v[f], 0, 5, &c)) return false;
+                cells[f] = (unsigned char)c;
+            }
+            if (!FaceCellsValid(cells))
+                return Fail(P, "uv_faces: the cell numbers must use every number from 0 to the largest one (e.g. 0 1 2 3 4 5, "
+                               "0 0 1 1 2 2)", NULL);
+            memcpy(D->uvFaces, cells, sizeof(cells));
+            D->hasFaces = true;
+        } else if (strcmp(k, "filter") == 0) {
+            static const char *const FI[] = { "trilinear", "nearest" };   // = TEX_*
+            int e;
+            ONE_WORD();
+            if (!Keyword(P, v[0], FI, 2, "texture filter", &e)) return false;
+            D->filter = (unsigned char)e;
         } else if (strcmp(k, "priority") == 0) {
             NEED(1);
             if (!NumI(P, v[0], -1000000, 1000000, &m->priority)) return false;
@@ -2101,8 +2290,16 @@ static bool ParseMaterial(Parser *P, Token *tok, int n)
         }
         #undef NEED
         #undef ONE_WORD
+        // The key into the material's hashes (the shape hash leaves out what a live edit can change
+        // without a full upload: the face layout, the filter and the albedo map)
+        d->matLookHash[mi] = HashTokens(d->matLookHash[mi], &tok[t], 1 + used);
+        if (strcmp(k, "uv_faces") != 0 && strcmp(k, "filter") != 0 && strcmp(k, "albedo_map") != 0)
+            d->matShapeHash[mi] = HashTokens(d->matShapeHash[mi], &tok[t], 1 + used);
         t += 1 + used;
     }
+    // A face layout puts each face in a cell of the texture: tiling would cross the cells
+    if (D->hasFaces && (m->uvScale.x != 1.0f || m->uvScale.y != 1.0f || m->uvOffset.x != 0.0f || m->uvOffset.y != 0.0f))
+        return Fail(P, "uv_faces needs uv_scale 1 1 and uv_offset 0 0", NULL);
     return true;
 }
 
@@ -2647,16 +2844,13 @@ static bool AddStatement(Parser *P, const Placement *pl, const Token *tok, int n
 }
 
 // A statement that is not an object, group, use, spawn or viewpoint (format, material, env): its
-// tokens go into d->lookHash, so a live edit knows whether the text changed anything but objects
+// tokens go into d->lookHash, so a live edit knows whether the text changed anything but objects.
+// The format and env lines also go into restLookHash (a material line into its own hashes:
+// ParseMaterial), so it can tell materials appended or changed from anything else.
 static void HashLook(SceneData *d, const Token *tok, int n)
 {
-    unsigned long long h = d->lookHash;
-    for (int i = 0; i < n; i++) {
-        unsigned char q = tok[i].quoted ? 1 : 2;
-        h = Fnv1a64Update(h, &q, 1);
-        h = Fnv1a64Update(h, tok[i].s, strlen(tok[i].s) + 1);
-    }
-    d->lookHash = h;
+    d->lookHash = HashTokens(d->lookHash, tok, n);
+    if (strcmp(tok[0].s, "material") != 0) d->restLookHash = HashTokens(d->restLookHash, tok, n);
 }
 
 // One statement (already tokenized, at least one token)
@@ -2821,8 +3015,9 @@ static bool ParseText(Parser *P, const char *text, int size)
 // reader (CmRead*) in ReadCompiled's list after the sections its records point into, and the
 // matching section writer (CmPut*). The layout goes into docs/compiled-map.md.
 
-#define CM_VERSION          3           // MS_COMPILED_VERSION: bump on any change to a record or section
-#define CM_VERSION_OLDEST   2           // the oldest version still read (2: no box turns section)
+#define CM_VERSION          4           // MS_COMPILED_VERSION: bump on any change to a record or section
+#define CM_VERSION_OLDEST   2           // the oldest version still read (2: no box turns section; 2 and 3:
+                                        // materials without uvFaces and filter)
 #define CM_BYTE_ORDER       0x01020304u
 #define CM_NONE             0xFFFFFFFFu // a string field without a string
 #define CM_MAX_ENV          4096        // env records (the key tables have ~120 keys)
@@ -2865,6 +3060,8 @@ typedef struct {
 // cull, transparency, blend: R3D's enums; inherit: INHERIT_* bits (`inherit`, model overrides);
 // unlit / instanced: 0 or 1; uniformFirst / samplerFirst: the material's first record in the
 // uniforms / samplers sections (each material's ranges follow the previous material's).
+// Version 4: uvFaces: the box face layout (`uv_faces`, a cell per face +x -x +y -y +z -z; all
+// 255 = none); filter: TEX_* (`filter`); pad: 0. A version 2 or 3 record ends before uvFaces.
 typedef struct {
     uint32_t name, shader, maps[MAP_COUNT];     // maps: albedo, normal, orm, emission
     int32_t line, shaderLine, mapLine[MAP_COUNT];
@@ -2874,7 +3071,10 @@ typedef struct {
     int32_t cull, transparency, blend, priority, wrap;
     uint32_t inherit, unlit, instanced;
     uint32_t uniformFirst, uniformCount, samplerFirst, samplerCount;
+    uint8_t uvFaces[6], filter, pad;            // version 4
 } CmMaterial;
+
+#define CM_MATERIAL_V3_SIZE ((uint32_t)offsetof(CmMaterial, uvFaces))  // a version 2 / 3 material record
 
 // A material's shader uniform (`uniform <name> f [f f f]`): count: how many of v are used (1 to 4); the
 // others are 0
@@ -3008,6 +3208,7 @@ typedef struct {
     const unsigned char *bytes;
     uint32_t size;
     CmSection sec[CM_SECTIONS + 1]; // by section id, from the checked section table (empty: not in the file)
+    uint32_t version;               // the file's CM_VERSION
     const char *str;                // the string table (NUL-terminated: checked)
     uint32_t strSize;
     char *err;                      // the message buffer: "<file>: <message>"
@@ -3026,10 +3227,19 @@ static bool CmFail(CmReader *R, const char *fmt, ...)
 }
 
 // Record i of section `id` (in range: checked by the caller's loop over the section's count),
-// copied out (sections are aligned, but a copy keeps the reads free of aliasing questions)
+// copied out (sections are aligned, but a copy keeps the reads free of aliasing questions). A record
+// of an older version that is shorter (CmRecordSize) leaves the newer fields zero.
 static void CmRecord(const CmReader *R, int id, uint32_t i, void *out)
 {
-    memcpy(out, R->bytes + R->sec[id].offset + (size_t)i * CM_SECTION[id].size, CM_SECTION[id].size);
+    uint32_t size = R->sec[id].recordSize;
+    memset(out, 0, CM_SECTION[id].size);
+    memcpy(out, R->bytes + R->sec[id].offset + (size_t)i * size, size);
+}
+
+// The record size of section `id` in a file of `version` (a material had no uvFaces before 4)
+static uint32_t CmRecordSize(uint32_t version, uint32_t id)
+{
+    return id == CM_MATERIALS && version < 4 ? CM_MATERIAL_V3_SIZE : CM_SECTION[id].size;
 }
 
 // A string field: *out = the string (NULL for CM_NONE when `optional`), false with a message otherwise
@@ -3144,6 +3354,7 @@ static bool CmReadHeader(CmReader *R, CmHeader *h)
                       h->version, CM_VERSION_OLDEST, CM_VERSION);
     // The sections of this version (a section's id is its place in this list)
     uint32_t sections = h->version == 2 ? CM_SECTIONS_V2 : CM_SECTIONS;
+    R->version = h->version;
     if (h->headerSize != sizeof(CmHeader) || h->flags != 0) return CmFail(R, "compiled map: bad header");
     if (h->fileSize != R->size)
         return CmFail(R, "compiled map: the header says %llu bytes, the file has %u (truncated or damaged)",
@@ -3167,9 +3378,9 @@ static bool CmReadHeader(CmReader *R, CmHeader *h)
         if (s.id < 1 || s.id > sections) return CmFail(R, "compiled map: unknown section %u", s.id);
         const char *name = CM_SECTION[s.id].name;
         if (R->sec[s.id].id) return CmFail(R, "compiled map: section '%s' appears twice", name);
-        if (s.recordSize != CM_SECTION[s.id].size)
+        if (s.recordSize != CmRecordSize(h->version, s.id))
             return CmFail(R, "compiled map: section '%s' has %u-byte records, expected %u",
-                          name, s.recordSize, CM_SECTION[s.id].size);
+                          name, s.recordSize, CmRecordSize(h->version, s.id));
         if (s.count > CM_SECTION[s.id].max)
             return CmFail(R, "compiled map: section '%s' has too many records (%u)", name, s.count);
         if (s.offset < sizeof(CmHeader) ||
@@ -3282,7 +3493,20 @@ static bool CmMaterialInRange(const CmMaterial *c)
            c->wrap >= 0 && c->wrap <= 2 &&
            c->inherit <= 15 &&
            c->unlit <= 1 &&
-           c->instanced <= 1;
+           c->instanced <= 1 &&
+           c->filter <= TEX_NEAREST &&
+           c->pad == 0;
+}
+
+// A material's face layout: none (all 255), or a layout the parser accepts (FaceCellsValid) on a
+// material with uv_scale 1 1 and uv_offset 0 0
+static bool CmMaterialFaces(const CmMaterial *c)
+{
+    static const uint8_t NONE[6] = { 255, 255, 255, 255, 255, 255 };
+    if (memcmp(c->uvFaces, NONE, sizeof(NONE)) == 0) return true;
+    return FaceCellsValid(c->uvFaces) &&
+           c->uvScale[0] == 1.0f && c->uvScale[1] == 1.0f &&
+           c->uvOffset[0] == 0.0f && c->uvOffset[1] == 0.0f;
 }
 
 // A checked material record into its MS_Material and MatDef (names and paths are already there)
@@ -3314,6 +3538,9 @@ static void CmFillMaterial(const CmMaterial *c, MS_Material *M, MatDef *D)
     D->wrap = c->wrap;
     D->inherit = c->inherit;
     D->instanced = c->instanced == 1;
+    D->hasFaces = c->uvFaces[0] != 255;
+    if (D->hasFaces) memcpy(D->uvFaces, c->uvFaces, sizeof(D->uvFaces));
+    D->filter = c->filter;
 }
 
 // A material's uniforms and samplers. Each material's ranges start where the previous material's
@@ -3369,6 +3596,7 @@ static bool CmReadMaterial(CmReader *R, uint32_t i, uint32_t *uniformsUsed, uint
     SceneData *d = R->d;
     CmMaterial c;
     CmRecord(R, CM_MATERIALS, i, &c);
+    if (R->version < 4) memset(c.uvFaces, 255, sizeof(c.uvFaces));     // (no layout, filter 0: trilinear)
 
     // Counted first: the strings below are heap copies FreeData must find
     MS_Material *M = &d->materials[i];
@@ -3395,6 +3623,7 @@ static bool CmReadMaterial(CmReader *R, uint32_t i, uint32_t *uniformsUsed, uint
     };
     if (!FiniteN(f, COUNT(f))) return CmFail(R, "material \"%s\": number out of range", name);
     if (!CmMaterialInRange(&c)) return CmFail(R, "material \"%s\": value out of range", name);
+    if (!CmMaterialFaces(&c)) return CmFail(R, "material \"%s\": bad uv_faces", name);
 
     CmFillMaterial(&c, M, D);
     return CmReadMaterialParams(R, &c, D, name, uniformsUsed, samplersUsed);
@@ -4091,7 +4320,9 @@ static void CmPutMaterials(CmWriter *W, const SceneData *d)
             .wrap = D->wrap, .inherit = D->inherit, .unlit = m->unlit, .instanced = D->instanced,
             .uniformFirst = W->count[CM_UNIFORMS], .uniformCount = (uint32_t)D->uniformCount,
             .samplerFirst = W->count[CM_SAMPLERS], .samplerCount = (uint32_t)D->samplerCount,
+            .uvFaces = { 255, 255, 255, 255, 255, 255 }, .filter = D->filter,
         };
+        if (D->hasFaces) memcpy(c.uvFaces, D->uvFaces, sizeof(c.uvFaces));
         for (int k = 0; k < MAP_COUNT; k++) {
             c.maps[k] = CmStr(W, D->maps[k]);
             c.mapLine[k] = D->mapLine[k];
@@ -5088,13 +5319,26 @@ static bool ParseScene(SceneData *d, const char *text, int size, char *err, int 
 }
 #endif
 
-static Texture2D GetTexture(SceneData *d, const char *rel, bool isColor, bool data, int wrap, int line, char *err, int errSize)
+// A material's texture (or a sampler's: filter TEX_TRILINEAR), loaded once per path, colour space,
+// kind, wrap and filter
+static Texture2D GetTexture(SceneData *d, const char *rel, bool isColor, bool data, int wrap, int filter, int line,
+                            char *err, int errSize)
 {
     char full[MS_PATH_MAX + MS_PATH_MAX];
     snprintf(full, sizeof(full), "%s%s", d->root, rel);
+#ifdef MONOLITH_EDITOR
+    // (a canvas provided at another size than the cached texture, docs/painting.md 5.2 / 5.3: a
+    // texture of the new size; the old one stays in the cache until the next load)
+    const Image *prov = ProvidedImage(d->live, rel);
+#endif
     for (int i = 0; i < d->textureCount; i++)
         if (strcmp(d->textures[i].path, full) == 0 && d->textures[i].isColor == isColor && d->textures[i].data == data &&
-            d->textures[i].wrap == wrap) return d->textures[i].tex;
+            d->textures[i].wrap == wrap && d->textures[i].filter == filter) {
+#ifdef MONOLITH_EDITOR
+            if (prov && (d->textures[i].tex.width != prov->width || d->textures[i].tex.height != prov->height)) continue;
+#endif
+            return d->textures[i].tex;
+        }
     char *path = MS_StrDup(full);
     if (!path || !MS_RESERVE(d->textures, d->textureCap, d->textureCount + 1)) {
         free(path);
@@ -5107,7 +5351,20 @@ static Texture2D GetTexture(SceneData *d, const char *rel, bool isColor, bool da
     // --bake-surface, read with texelFetch): linear (no sRGB decode), nearest, no mipmaps.
     static const TextureWrap WRAPS[] = { TEXTURE_WRAP_REPEAT, TEXTURE_WRAP_CLAMP, TEXTURE_WRAP_MIRROR_REPEAT };
     double t0 = GetTime();
-    Texture2D tex = R3D_LoadTextureEx(full, WRAPS[wrap % 3], data ? TEXTURE_FILTER_POINT : TEXTURE_FILTER_TRILINEAR, isColor && !data);
+    TextureFilter tf = data ? TEXTURE_FILTER_POINT : TEXTURE_FILTER_TRILINEAR;
+    Texture2D tex;
+#ifdef MONOLITH_EDITOR
+    // A live edit uses the pixels provided for the path (a canvas in memory) instead of the file
+    if (prov) tex = R3D_LoadTextureFromImageEx(*prov, WRAPS[wrap % 3], tf, isColor && !data);
+    else
+#endif
+    tex = R3D_LoadTextureEx(full, WRAPS[wrap % 3], tf, isColor && !data);
+    // `filter nearest`: crisp texels up close (nearest magnification), and nearest texels of the
+    // two nearest mipmaps blended at a distance (no shimmer); the mipmaps are the trilinear load's
+    if (tex.id && filter == TEX_NEAREST && !data) {
+        rlTextureParameters(tex.id, RL_TEXTURE_MAG_FILTER, RL_TEXTURE_FILTER_NEAREST);
+        rlTextureParameters(tex.id, RL_TEXTURE_MIN_FILTER, RL_TEXTURE_FILTER_NEAREST_MIP_LINEAR);
+    }
     d->times.textures += (GetTime() - t0) * 1000.0;
     if (tex.id == 0) {
         free(path);
@@ -5119,6 +5376,7 @@ static Texture2D GetTexture(SceneData *d, const char *rel, bool isColor, bool da
     e->isColor = isColor;
     e->data = data;
     e->wrap = wrap;
+    e->filter = filter;
     e->tex = tex;
     return tex;
 }
@@ -5166,6 +5424,13 @@ static void BvhBuild(ModelPick *mp, int ni, int first, int count, int depth)
                 mp->tri[3 * i + k] = mp->tri[3 * j + k];
                 mp->tri[3 * j + k] = s;
             }
+#ifdef MONOLITH_EDITOR
+            if (mp->triSrc) {
+                unsigned int s = mp->triSrc[i];
+                mp->triSrc[i] = mp->triSrc[j];
+                mp->triSrc[j] = s;
+            }
+#endif
             j--;
         }
     }
@@ -5184,8 +5449,53 @@ static void FreeModelPick(ModelPick *mp)
     free(mp->pos);
     free(mp->tri);
     free(mp->nodes);
+#ifdef MONOLITH_EDITOR
+    free(mp->uv);
+    free(mp->triSrc);
+    free(mp->triAt);
+    free(mp->meshTri);
+#endif
     memset(mp, 0, sizeof(*mp));
 }
+
+#ifdef MONOLITH_EDITOR
+// What surface picking needs besides (MS_RaycastSurface): each vertex's texture coordinate (none
+// when no triangle mesh of the file has any: R3D's importer leaves them 0 then), each triangle's
+// index in file order, and where each mesh's triangles start. Out of memory: none of it (the
+// model still picks, without texture coordinates).
+static void BuildModelPickUv(const R3D_Model *m, ModelPick *mp)
+{
+    mp->uv = malloc(sizeof(Vector2) * (size_t)mp->vertCount);
+    mp->triSrc = malloc(sizeof(unsigned int) * (size_t)mp->triCount);
+    mp->triAt = malloc(sizeof(unsigned int) * (size_t)mp->triCount);
+    mp->meshTri = malloc(sizeof(int) * (size_t)(m->meshCount + 1));
+    if (!mp->uv || !mp->triSrc || !mp->triAt || !mp->meshTri) {
+        free(mp->uv); free(mp->triSrc); free(mp->triAt); free(mp->meshTri);
+        mp->uv = NULL; mp->triSrc = mp->triAt = NULL; mp->meshTri = NULL;
+        return;
+    }
+    mp->meshCount = m->meshCount;
+    bool any = false;
+    int v0 = 0, t = 0;
+    for (int i = 0; i < m->meshCount; i++) {
+        mp->meshTri[i] = t;
+        if (m->meshes[i].primitiveType != R3D_PRIMITIVE_TRIANGLES) continue;
+        const R3D_MeshData *md = &m->meshData[i];
+        for (int k = 0; k < md->vertexCount; k++) {
+            mp->uv[v0 + k] = R3D_UnpackTexCoord(md->vertices[k].texcoord);
+            any = any || mp->uv[v0 + k].x != 0.0f || mp->uv[v0 + k].y != 0.0f;
+        }
+        t += md->indexCount > 0 ? md->indexCount / 3 : md->vertexCount / 3;
+        v0 += md->vertexCount;
+    }
+    mp->meshTri[m->meshCount] = t;
+    for (int k = 0; k < mp->triCount; k++) mp->triSrc[k] = (unsigned int)k;
+    if (!any) {
+        free(mp->uv);
+        mp->uv = NULL;
+    }
+}
+#endif
 
 // Copies the triangles of a loaded model (R3D_IMPORT_RETAIN_MESH_DATA) into a ModelPick
 // with a BVH, then frees R3D's CPU mesh data
@@ -5215,7 +5525,13 @@ static void BuildModelPick(MS_ModelFile *F, ModelPick *mp)
         mp->triCount = tris;
         mp->vertCount = verts;
         mp->nodeCount = 1;
+#ifdef MONOLITH_EDITOR
+        BuildModelPickUv(m, mp);        // (before the BVH, which reorders triSrc with tri)
+#endif
         BvhBuild(mp, 0, 0, tris, 0);
+#ifdef MONOLITH_EDITOR
+        for (int k = 0; mp->triSrc && k < tris; k++) mp->triAt[mp->triSrc[k]] = (unsigned int)k;
+#endif
     } else if (tris > 0) FreeModelPick(mp);
     if (m->meshData) {
         for (int i = 0; i < m->meshCount; i++) {
@@ -5593,10 +5909,56 @@ static bool BuildModelGroups(SceneData *d, char *err, int errSize)
     return ok;
 }
 
+// The unit cubes of the materials' face layouts (`uv_faces`): one per distinct layout, in material
+// order; each material with a layout gets its cube (MatDef.faceCube). Materials without one draw
+// R3D's cube as before. False when out of memory.
+static bool BuildFaceCubes(SceneData *d)
+{
+    for (int i = 0; i < d->materialCount; i++) {
+        MatDef *D = &d->matDefs[i];
+        D->faceCube = 0;
+        if (!D->hasFaces) continue;
+        int c = 0;
+        while (c < d->faceCubeCount && memcmp(d->faceCubes[c].cells, D->uvFaces, 6) != 0) c++;
+        if (c == d->faceCubeCount) {
+            FaceCube *F = MS_PUSH(d->faceCubes, d->faceCubeCount, d->faceCubeCap);
+            if (!F) return false;
+            *F = (FaceCube){ .data = R3D_GenMeshDataCube(1.0f, 1.0f, 1.0f) };
+            memcpy(F->cells, D->uvFaces, 6);
+            if (F->data.vertexCount != 24 || F->data.indexCount != 36) return false;
+            FaceLayoutData(&F->data, F->cells);
+            BoundingBox aabb = { { -0.5f, -0.5f, -0.5f }, { 0.5f, 0.5f, 0.5f } };   // (R3D_GenMeshCube's)
+            F->mesh = R3D_LoadMesh(R3D_PRIMITIVE_TRIANGLES, F->data, &aabb);
+            if (F->mesh.vertexCount == 0) return false;
+        }
+        D->faceCube = c + 1;
+    }
+    return true;
+}
+
+static void FreeFaceCubes(SceneData *d)
+{
+    for (int c = 0; c < d->faceCubeCount; c++) {
+        R3D_UnloadMeshData(d->faceCubes[c].data);
+        R3D_UnloadMesh(d->faceCubes[c].mesh);
+    }
+    free(d->faceCubes);
+    d->faceCubes = NULL;
+    d->faceCubeCount = d->faceCubeCap = 0;
+}
+
+// The unit cube data material m's boxes are meshed from: its face layout's, else R3D's (`cube`)
+static inline const R3D_MeshData *MaterialCube(const SceneData *d, int m, const R3D_MeshData *cube)
+{
+    int c = d->matDefs[m].faceCube;
+    return c > 0 ? &d->faceCubes[c - 1].data : cube;
+}
+
 static void FreeGpu(SceneData *d)
 {
     if (!d->gpu) return;
     FreeModelGroups(d);
+    FreeFaceCubes(d);
     for (int i = 0; i < d->modelFileCount; i++)
         if (d->modelFiles[i].model.meshes) {
             R3D_UnloadModel(d->modelFiles[i].model, true);
@@ -5993,9 +6355,11 @@ static void TurnedFaces(R3D_MeshData *md, const MS_TurnedBox *t, const R3D_MeshD
 
 // One mesh of the visible faces of the boxes items[0..R->count): R3D's own unit-cube faces (vertex
 // format, UVs, normals, winding), each corner placed the way the GPU placed an instanced cube's,
-// local * scale + position with the same position and scale floats
+// local * scale + position with the same position and scale floats. A material with a face layout
+// uses its own cube (the same, UVs in their cells: MaterialCube).
 static bool BuildBoxMesh(SceneData *d, DrawRange *R, const CellItem *items, const unsigned char *hidden, const R3D_MeshData *cube)
 {
+    cube = MaterialCube(d, R->group, cube);
     int visible = 0;
     for (int k = 0; k < R->count; k++)
         for (int f = 0; f < 6; f++) visible += !(hidden[items[k].index] >> f & 1);
@@ -6242,6 +6606,75 @@ static ShaderFile *GetShaderFile(SceneData *d, const MS_Material *M, const MatDe
     return f;
 }
 
+// Material i's textures (its four maps, with the material's wrap and filter); an unset map keeps
+// R3D's default. On failure err says why.
+static bool BuildMaterialMaps(SceneData *d, int i, char *err, int errSize)
+{
+    MatDef *D = &d->matDefs[i];
+    R3D_Material *m = &d->materials[i].material;
+    static const bool IS_COLOR[MAP_COUNT] = { true, false, false, true };
+    Texture2D *slot[MAP_COUNT] = { &m->albedo.texture, &m->normal.texture, &m->orm.texture, &m->emission.texture };
+    for (int k = 0; k < MAP_COUNT; k++) {
+        if (!D->maps[k]) continue;
+        *slot[k] = GetTexture(d, D->maps[k], IS_COLOR[k], false, D->wrap, D->filter, D->mapLine[k], err, errSize);
+        if (!slot[k]->id) return false;
+    }
+    return true;
+}
+
+// Material i's GPU state: its shader alias (with its uniforms and samplers) and its textures. On
+// failure err says why (what it made stays in d: FreeGpu frees it).
+static bool BuildMaterial(SceneData *d, int i, char *err, int errSize)
+{
+    MS_Material *M = &d->materials[i];
+    MatDef *D = &d->matDefs[i];
+    R3D_Material *m = &M->material;
+    m->shader = NULL;
+    if (M->shader) {
+        // One compiled shader per file (a compile is ~2 ms, and the first frame compiles each
+        // shader's variants again); the materials' aliases are created in material order, so
+        // R3D's draw sort, which orders shaders by creation, sees the same order as with one
+        // compiled shader per material
+        ShaderFile *f = GetShaderFile(d, M, D, err, errSize);
+        if (f) m->shader = R3D_LoadSurfaceShaderAlias(f->shader);
+        if (f && !m->shader) snprintf(err, errSize, "%s:%d: out of memory", d->srcPath, D->shaderLine);
+        if (!m->shader) return false;
+        for (int u = 0; u < D->uniformCount; u++)
+            R3D_SetSurfaceShaderUniform(m->shader, D->uniforms[u].name, D->uniforms[u].v);
+        for (int s = 0; s < D->samplerCount; s++) {
+            Texture2D tex = GetTexture(d, D->samplers[s].path, true, D->samplers[s].data, D->wrap, TEX_TRILINEAR,
+                                       D->samplers[s].line, err, errSize);
+            if (!tex.id) return false;
+            R3D_SetSurfaceShaderSampler(m->shader, D->samplers[s].name, tex);
+        }
+    }
+    return BuildMaterialMaps(d, i, err, errSize);
+}
+
+// How material i's boxes are drawn (after BuildMaterial loaded its shader)
+static void MaterialDrawMode(SceneData *d, int i, char *err, int errSize)
+{
+    MS_Material *M = &d->materials[i];
+    MatDef *D = &d->matDefs[i];
+    R3D_Material *m = &M->material;
+    bool needsCube = false, cutout = false;
+    if (M->shader) {
+        const ShaderFile *f = GetShaderFile(d, M, D, err, errSize);     // (loaded by BuildMaterial)
+        needsCube = !f || f->needsCube;
+        cutout = !f || f->cutout;
+        if (f && f->scanned && f->needsCube && !D->instanced)
+            TraceLog(LOG_WARNING, "monolith_scene: %s:%d: material \"%s\": shader \"%s\" reads the box instance (INSTANCE_*, "
+                     "or POSITION in vertex()): add `instanced on` to the material", d->srcPath, D->shaderLine, M->name, M->shader);
+    }
+    // Boxes are merged into a visible-face mesh unless the shader needs the instanced cubes. Only
+    // opaque materials: R3D picks the lights of a blended (forward) draw by the mesh's own bounds,
+    // which for the instanced unit cube are the cube at the origin, so a mesh would be lit differently.
+    // Those that also never discard can hide another box's face (see FindHiddenFaces)
+    D->merge = !D->instanced && !needsCube && m->cullMode == R3D_CULL_BACK && m->transparencyMode == R3D_TRANSPARENCY_OPAQUE;
+    D->occluder = D->merge && !cutout && m->billboardMode == R3D_BILLBOARD_DISABLED && m->albedo.color.a == 255 &&
+                  !D->maps[MAP_ALBEDO] && m->alphaCutoff <= 1.0f;
+}
+
 // Creates every GPU resource of `d` (a previous load's are still alive: new before old, see
 // the instance-buffer note in LoadBytes). On failure everything created so far is freed.
 static bool UploadGpu(SceneData *d, char *err, int errSize)
@@ -6256,61 +6689,18 @@ static bool UploadGpu(SceneData *d, char *err, int errSize)
         FreeGpu(d);
         return false;
     }
-    for (int i = 0; i < d->materialCount; i++) {
-        MS_Material *M = &d->materials[i];
-        MatDef *D = &d->matDefs[i];
-        R3D_Material *m = &M->material;
-        m->shader = NULL;
-        if (M->shader) {
-            // One compiled shader per file (a compile is ~2 ms, and the first frame compiles each
-            // shader's variants again); the materials' aliases are created in material order, so
-            // R3D's draw sort, which orders shaders by creation, sees the same order as with one
-            // compiled shader per material
-            ShaderFile *f = GetShaderFile(d, M, D, err, errSize);
-            if (f) m->shader = R3D_LoadSurfaceShaderAlias(f->shader);
-            if (f && !m->shader) snprintf(err, errSize, "%s:%d: out of memory", d->srcPath, D->shaderLine);
-            if (!m->shader) {
-                FreeGpu(d);
-                return false;
-            }
-            for (int u = 0; u < D->uniformCount; u++)
-                R3D_SetSurfaceShaderUniform(m->shader, D->uniforms[u].name, D->uniforms[u].v);
-            for (int s = 0; s < D->samplerCount; s++) {
-                Texture2D tex = GetTexture(d, D->samplers[s].path, true, D->samplers[s].data, D->wrap, D->samplers[s].line, err, errSize);
-                if (!tex.id) { FreeGpu(d); return false; }
-                R3D_SetSurfaceShaderSampler(m->shader, D->samplers[s].name, tex);
-            }
+    for (int i = 0; i < d->materialCount; i++)
+        if (!BuildMaterial(d, i, err, errSize)) {
+            FreeGpu(d);
+            return false;
         }
-        static const bool IS_COLOR[MAP_COUNT] = { true, false, false, true };
-        Texture2D *slot[MAP_COUNT] = { &m->albedo.texture, &m->normal.texture, &m->orm.texture, &m->emission.texture };
-        for (int k = 0; k < MAP_COUNT; k++) {
-            if (!D->maps[k]) continue;
-            *slot[k] = GetTexture(d, D->maps[k], IS_COLOR[k], false, D->wrap, D->mapLine[k], err, errSize);
-            if (!slot[k]->id) { FreeGpu(d); return false; }
-        }
-    }
 
-    // How the boxes of each material are drawn
-    for (int i = 0; i < d->materialCount; i++) {
-        MS_Material *M = &d->materials[i];
-        MatDef *D = &d->matDefs[i];
-        R3D_Material *m = &M->material;
-        bool needsCube = false, cutout = false;
-        if (M->shader) {
-            const ShaderFile *f = GetShaderFile(d, M, D, err, errSize);     // (loaded above)
-            needsCube = !f || f->needsCube;
-            cutout = !f || f->cutout;
-            if (f && f->scanned && f->needsCube && !D->instanced)
-                TraceLog(LOG_WARNING, "monolith_scene: %s:%d: material \"%s\": shader \"%s\" reads the box instance (INSTANCE_*, "
-                         "or POSITION in vertex()): add `instanced on` to the material", d->srcPath, D->shaderLine, M->name, M->shader);
-        }
-        // Boxes are merged into a visible-face mesh unless the shader needs the instanced cubes. Only
-        // opaque materials: R3D picks the lights of a blended (forward) draw by the mesh's own bounds,
-        // which for the instanced unit cube are the cube at the origin, so a mesh would be lit differently.
-        // Those that also never discard can hide another box's face (see FindHiddenFaces)
-        D->merge = !D->instanced && !needsCube && m->cullMode == R3D_CULL_BACK && m->transparencyMode == R3D_TRANSPARENCY_OPAQUE;
-        D->occluder = D->merge && !cutout && m->billboardMode == R3D_BILLBOARD_DISABLED && m->albedo.color.a == 255 &&
-                      !D->maps[MAP_ALBEDO] && m->alphaCutoff <= 1.0f;
+    // How the boxes of each material are drawn, and the unit cubes of the face layouts
+    for (int i = 0; i < d->materialCount; i++) MaterialDrawMode(d, i, err, errSize);
+    if (!BuildFaceCubes(d)) {
+        snprintf(err, errSize, "%s: out of memory", d->path);
+        FreeGpu(d);
+        return false;
     }
 
     double tBoxes = GetTime();
@@ -6417,6 +6807,8 @@ static void FreeData(SceneData *d)
     free(d->brief);
     free(d->text);
     free(d->lineStarts);
+    free(d->matLookHash);
+    free(d->matShapeHash);
 #endif
     free(d);
 }
@@ -6560,6 +6952,10 @@ static void LogLoadTimes(const SceneData *d, bool again, double total)
              t->hidden, t->meshes, rest);
 }
 
+#ifdef MONOLITH_EDITOR
+static void FreeProvided(MS_Private *p);
+#endif
+
 // Loads a map from its file's bytes (takes ownership): fills a SceneData from them, finishes the
 // load and swaps it in on success
 static bool LoadBytes(MS_Scene *s, const char *mapPath, char *bytes, int size, char *err, int errSize)
@@ -6621,6 +7017,7 @@ static bool LoadBytes(MS_Scene *s, const char *mapPath, char *bytes, int size, c
     // so the new map was drawn with the old boxes.
 #ifdef MONOLITH_EDITOR
     if (p->pv) MS_EditPreviewEnd(s);    // (puts the old scene back together before it goes)
+    FreeProvided(p);                    // (the files are the truth again; the editor provides anew)
 #endif
     SceneData *old = p->d;
     p->d = d;
@@ -6713,6 +7110,11 @@ void MS_Unload(MS_Scene *s)
         free(p->drawHidden);
         free(p->filterObj);
         free(p->filterObjNew);
+        FreeProvided(p);
+        free(p->provided);
+        free(p->texScratch);
+        for (int i = 0; p->gpu && i < p->retiredCount; i++) R3D_UnloadMesh(p->retired[i]);
+        free(p->retired);
 #endif
         FreeData(p->d);
 #ifdef MS_PATCHED_R3D
@@ -7149,6 +7551,9 @@ typedef struct {
     int meshFromCap;
     bool *instFrom;             // per material: d took old's instance buffer
     bool materials, unit;       // d took old's material GPU state (shaders, textures, sky) / unit buffer
+    bool faceCubes;             // d took old's face layout cubes (the same layouts)
+    int textureCount;           // with materials: old's textures (d's list may have grown past them)
+    const unsigned char *matRebuild;    // LiveMaterialPlan's (not owned): the materials d built again
 } LiveBorrow;
 
 static void LiveBorrowFree(LiveBorrow *B)
@@ -7185,6 +7590,106 @@ static void LiveRelease(SceneData *x, bool isNew, const SceneData *d, const Live
         x->ambientMap = (R3D_AmbientMap){ 0 };
     }
     if (B->unit) x->unit = (R3D_InstanceBuffer){ 0 };
+    if (B->faceCubes) {
+        x->faceCubes = NULL;            // (one array: moved, not copied)
+        x->faceCubeCount = x->faceCubeCap = 0;
+    }
+}
+
+// The box meshes and face cubes old still owns after an edit are not freed yet: they go to
+// p->retired, freed by the next MS_DrawGeometry. Freed at once, their vertex ranges in R3D's shared
+// buffer were handed out again to the next edit; with several edits before a frame (an edit script)
+// a range filled by one edit, freed by the next and filled again by a third was sometimes drawn
+// with its first contents on the GPU (a box drawn as another mesh, a shadow drawn from old
+// geometry). After a frame has drawn the new meshes, their ranges are reused safely. On out of
+// memory they are freed at once (as before).
+static void LiveRetire(MS_Private *p, SceneData *old)
+{
+    for (int r = 0; r < old->boxRangeCount; r++) {
+        if (old->boxRanges[r].mesh.vertexCapacity <= 0) continue;
+        R3D_Mesh *slot = MS_PUSH(p->retired, p->retiredCount, p->retiredCap);
+        if (!slot) return;
+        *slot = old->boxRanges[r].mesh;
+        old->boxRanges[r].mesh = (R3D_Mesh){ 0 };
+    }
+    for (int c = 0; c < old->faceCubeCount; c++) {
+        R3D_Mesh *slot = MS_PUSH(p->retired, p->retiredCount, p->retiredCap);
+        if (!slot) return;
+        *slot = old->faceCubes[c].mesh;
+        old->faceCubes[c].mesh = (R3D_Mesh){ 0 };
+    }
+}
+
+// The face layout cubes of d: old's when d's materials have the same layouts in the same order (the
+// list BuildFaceCubes would make is old's), else built. An edit then doesn't free and allocate them
+// again (see LiveRetire). False when out of memory.
+static bool LiveFaceCubes(SceneData *old, SceneData *d, LiveBorrow *B)
+{
+    int n = 0;
+    bool same = true;
+    for (int i = 0; i < d->materialCount && same; i++) {
+        const MatDef *D = &d->matDefs[i];
+        if (!D->hasFaces) continue;
+        int c = 0;
+        while (c < n && memcmp(old->faceCubes[c].cells, D->uvFaces, 6) != 0) c++;
+        if (c < n) continue;
+        same = n < old->faceCubeCount && memcmp(old->faceCubes[n].cells, D->uvFaces, 6) == 0;
+        n++;
+    }
+    if (!same || n != old->faceCubeCount) return BuildFaceCubes(d);
+    d->faceCubes = old->faceCubes;
+    d->faceCubeCount = old->faceCubeCount;
+    d->faceCubeCap = old->faceCubeCap;
+    B->faceCubes = true;
+    for (int i = 0; i < d->materialCount; i++) {
+        MatDef *D = &d->matDefs[i];
+        D->faceCube = 0;
+        for (int c = 0; D->hasFaces && c < d->faceCubeCount && !D->faceCube; c++)
+            if (memcmp(d->faceCubes[c].cells, D->uvFaces, 6) == 0) D->faceCube = c + 1;
+    }
+    return true;
+}
+
+// After a failed edit that took old's material GPU state: what d added to it is freed (the
+// shader aliases of its new materials, the shader files and textures it loaded), and the texture
+// list, which may have moved while it grew, goes back to old
+static void LiveMaterialsBack(SceneData *old, SceneData *d, const LiveBorrow *B)
+{
+    for (int i = 0; B->matRebuild && i < d->materialCount; i++)
+        if (B->matRebuild[i] == 2 && d->materials[i].material.shader) {
+            R3D_UnloadSurfaceShader(d->materials[i].material.shader);
+            d->materials[i].material.shader = NULL;
+        }
+    for (int f = old->shaderFileCount; f < d->shaderFileCount; f++) R3D_UnloadSurfaceShader(d->shaderFiles[f].shader);
+    for (int i = B->textureCount; i < d->textureCount; i++) {
+        R3D_UnloadTexture(d->textures[i].tex);
+        free(d->textures[i].path);
+    }
+    old->textures = d->textures;
+    old->textureCap = d->textureCap;
+}
+
+// Whether old's materials can stay (docs/painting.md 9.4): the rest of the look the same, each of
+// old's materials the same (0), or changed only in uv_faces, filter or albedo_map (1: its textures
+// and meshes again), and the others appended at the end (2: built). *plan: per material of d (heap,
+// the caller frees it). False: a full upload.
+static bool LiveMaterialPlan(const SceneData *old, const SceneData *d, unsigned char **plan)
+{
+    if (old->restLookHash != d->restLookHash || d->materialCount < old->materialCount || !old->matLookHash ||
+        !d->matLookHash) return false;
+    unsigned char *w = calloc((size_t)d->materialCount, 1);
+    if (!w) return false;
+    for (int i = 0; i < old->materialCount; i++) {
+        if (old->matLookHash[i] == d->matLookHash[i]) continue;
+        if (old->matShapeHash[i] != d->matShapeHash[i]) {
+            free(w);
+            return false;
+        }
+        w[i] = 1;
+    }
+    for (int i = old->materialCount; i < d->materialCount; i++) w[i] = 2;
+    *plan = w;
+    return true;
 }
 
 // --- Boxes: the draws of d, keeping old's meshes and instance buffers where nothing changed
@@ -7205,10 +7710,12 @@ static long long HideTotal(const SceneData *d)
 // Old ranges of material m: [first[m], end[m]) in old->boxRanges; items of m start at at[m]
 typedef struct { int *first, *end, *at, *oldAt; } RangeIndex;
 
+// rebuild: per material of d, nonzero when it was built again (its boxes' meshes are not kept:
+// their UVs or textures changed) or is new (beyond old's materials); NULL: none
 static bool UploadBoxesLive(MS_Private *p, SceneData *old, SceneData *d, const int *boxFrom, int dirtyBoxes, LiveBorrow *B,
-                            MS_EditStats *st, char *err, int errSize)
+                            const unsigned char *rebuild, MS_EditStats *st, char *err, int errSize)
 {
-    int mc = d->materialCount;
+    int mc = d->materialCount, oldMc = old->materialCount;
     CellItem *items = malloc(sizeof(CellItem) * (d->boxCount > 0 ? d->boxCount : 1));
     RangeIndex ri = { calloc(mc + 1, sizeof(int)), calloc(mc + 1, sizeof(int)), calloc(mc + 1, sizeof(int)),
                       calloc(mc + 1, sizeof(int)) };
@@ -7235,7 +7742,7 @@ static bool UploadBoxesLive(MS_Private *p, SceneData *old, SceneData *d, const i
         ri.at[m] = at;
         ri.oldAt[m] = oat;
         at += d->instCount[m];
-        oat += old->instCount ? old->instCount[m] : 0;
+        oat += old->instCount && m < oldMc ? old->instCount[m] : 0;
         ri.first[m] = ri.end[m] = 0;
     }
     for (int r = old->boxRangeCount - 1; r >= 0; r--) ri.first[old->boxRanges[r].group] = r;
@@ -7328,7 +7835,7 @@ static bool UploadBoxesLive(MS_Private *p, SceneData *old, SceneData *d, const i
         int count = d->instCount[m], at = ri.at[m], oat = ri.oldAt[m];
         if (count == 0) continue;
         // The same boxes in the same order as old's draws of m (and, merged, the same faces)
-        bool sameList = canKeep && old->instCount[m] == count;
+        bool sameList = canKeep && m < oldMc && old->instCount[m] == count;
         for (int k = 0; sameList && k < count; k++) sameList = boxFrom[items[at + k].index] == old->boxOrder[oat + k];
         int first = d->boxRangeCount;
         if (!d->matDefs[m].merge) {
@@ -7346,7 +7853,8 @@ static bool UploadBoxesLive(MS_Private *p, SceneData *old, SceneData *d, const i
         for (int r = first; ok && r < d->boxRangeCount; r++) B->meshFrom[r] = -1;
         if (!ok || !d->matDefs[m].merge) continue;
         // Merged: walk old's ranges of m alongside (both sorted by big, cell)
-        int o = canKeep ? ri.first[m] : 0, oEnd = canKeep ? ri.end[m] : 0;
+        bool keepable = canKeep && m < oldMc && !(rebuild && rebuild[m]);
+        int o = keepable ? ri.first[m] : 0, oEnd = keepable ? ri.end[m] : 0;
         for (int r = first; ok && r < d->boxRangeCount; r++) {
             DrawRange *R = &d->boxRanges[r];
             const CellItem *it = &items[at + R->first];
@@ -7541,6 +8049,7 @@ MS_ReloadResult MS_EditSetText(MS_Scene *s, const char *text, int size, MS_EditS
     bool ok = d && InitData(d, old->path);
     if (!ok) snprintf(err, errSize, "%s: out of memory", old->path);
     if (ok) {
+        d->live = p;                    // (the provided textures count as files: MS_TextureProvide)
         memcpy(bytes, text, (size_t)size);
         bytes[size] = '\0';
         ok = ParseScene(d, bytes, size, err, errSize);
@@ -7558,8 +8067,13 @@ MS_ReloadResult MS_EditSetText(MS_Scene *s, const char *text, int size, MS_EditS
         snprintf(err, errSize, "%s: out of memory", d->path);
         ok = false;
     }
-    // Anything but objects changed (a material, env, the format): uploaded in full, from memory
-    bool full = !old->gpu || old->compiled || old->lookHash != d->lookHash || old->materialCount != d->materialCount;
+    // Anything but objects changed (a material, env, the format): uploaded in full, from memory.
+    // Except materials appended at the end, or changed only in uv_faces, filter or albedo_map: those
+    // are built again and everything else is kept (LiveMaterialPlan)
+    unsigned char *matRebuild = NULL;
+    bool full = !old->gpu || old->compiled;
+    if (ok && !full && (old->lookHash != d->lookHash || old->materialCount != d->materialCount))
+        full = !LiveMaterialPlan(old, d, &matRebuild);
     st.full = full;
     if (ok && !p->gpu) ok = CheckModelFiles(d, err, errSize);
     else if (ok) {
@@ -7622,9 +8136,21 @@ MS_ReloadResult MS_EditSetText(MS_Scene *s, const char *text, int size, MS_EditS
         if (!ok) snprintf(err, errSize, "%s: out of memory", d->path);
         for (int i = 0; ok && i < old->boxCount; i++) if (!oldBoxUsed[i]) DirtyAdd(p, old->boxes[i]);
         for (int j = 0; ok && j < d->boxCount; j++) if (boxFrom[j] < 0) DirtyAdd(p, d->boxes[j]);
+        // A material built again (a new texture or filter: its alpha may cut other shadows; an
+        // albedo map also makes it no occluder) changes what its unmoved objects do too
+        for (int j = 0; ok && matRebuild && j < d->boxCount; j++)
+            if (boxFrom[j] >= 0 && matRebuild[d->boxRefs[j].material]) DirtyAdd(p, d->boxes[j]);
         dirtyBoxes = p->dirtyCount;
         for (int i = 0; ok && i < old->modelCount; i++) if (!oldModelUsed[i]) DirtyAdd(p, old->models[i].bounds);
         for (int j = 0; ok && j < d->modelCount; j++) if (modelFrom[j] < 0) DirtyAdd(p, d->models[j].bounds);
+        for (int j = 0; ok && matRebuild && j < d->modelCount; j++) {
+            bool uses = false;
+            for (int sl = 0; modelFrom[j] >= 0 && sl < d->modelFiles[d->models[j].file].materialCount && !uses; sl++) {
+                int m = SlotMaterial(d, &d->models[j], sl);
+                uses = m >= 0 && matRebuild[m];
+            }
+            if (uses) DirtyAdd(p, d->models[j].bounds);
+        }
         if (DirtyAll(p)) dirtyBoxes = 0;
     }
 
@@ -7642,12 +8168,7 @@ MS_ReloadResult MS_EditSetText(MS_Scene *s, const char *text, int size, MS_EditS
         ok = d->inst && d->instCount && d->lightShadow && d->lightShadowDrawn && d->shaderFiles;
         if (!ok) snprintf(err, errSize, "%s: out of memory", d->path);
         if (ok) {
-            // Materials, shaders, textures, sky: the same statements, so old's GPU state as it is
-            for (int i = 0; i < d->materialCount; i++) {
-                d->materials[i].material = old->materials[i].material;
-                d->matDefs[i].merge = old->matDefs[i].merge;
-                d->matDefs[i].occluder = old->matDefs[i].occluder;
-            }
+            // Shaders, textures, sky: the same statements, so old's GPU state as it is
             d->shaderFileCount = d->shaderFileCap = old->shaderFileCount;
             for (int f = 0; f < old->shaderFileCount; f++) {
                 ShaderFile *F = &d->shaderFiles[f];
@@ -7661,7 +8182,36 @@ MS_ReloadResult MS_EditSetText(MS_Scene *s, const char *text, int size, MS_EditS
             d->sky = old->sky;
             d->ambientMap = old->ambientMap;
             B.materials = true;
-            ok = UploadBoxesLive(p, old, d, boxFrom, dirtyBoxes, &B, &st, err, errSize);
+            B.textureCount = old->textureCount;
+            B.matRebuild = matRebuild;
+            // Materials: old's as they are; one changed in uv_faces, filter or albedo_map keeps old's
+            // shader and gets its textures again; an appended one is built (in material order, so
+            // its shader alias comes after old's, as in a load)
+            for (int i = 0; ok && i < d->materialCount; i++) {
+                int how = matRebuild ? matRebuild[i] : 0;
+                if (how == 0) {
+                    d->materials[i].material = old->materials[i].material;
+                    d->matDefs[i].merge = old->matDefs[i].merge;
+                    d->matDefs[i].occluder = old->matDefs[i].occluder;
+                    continue;
+                }
+                if (how == 1) {
+                    R3D_Material m = old->materials[i].material, fresh = d->materials[i].material;
+                    m.albedo.texture = fresh.albedo.texture;
+                    m.normal.texture = fresh.normal.texture;
+                    m.orm.texture = fresh.orm.texture;
+                    m.emission.texture = fresh.emission.texture;
+                    d->materials[i].material = m;
+                    ok = BuildMaterialMaps(d, i, err, errSize);
+                } else ok = BuildMaterial(d, i, err, errSize);
+                if (ok) MaterialDrawMode(d, i, err, errSize);
+                st.materialsRebuilt++;
+            }
+            if (ok && !LiveFaceCubes(old, d, &B)) {
+                snprintf(err, errSize, "%s: out of memory", d->path);
+                ok = false;
+            }
+            if (ok) ok = UploadBoxesLive(p, old, d, boxFrom, dirtyBoxes, &B, matRebuild, &st, err, errSize);
         }
         // Lights: an identical light keeps its shadow map (drawn again below if a change reaches it)
         for (int j = 0; ok && j < d->lightCount; j++) {
@@ -7686,8 +8236,10 @@ MS_ReloadResult MS_EditSetText(MS_Scene *s, const char *text, int size, MS_EditS
     free(oldLightUsed);
     free(bytes);
     if (!ok) {
+        if (d && B.materials) LiveMaterialsBack(old, d, &B);
         if (d) LiveRelease(d, true, d, &B);
         FreeData(d);
+        free(matRebuild);
         LiveBorrowFree(&B);
         p->dirtyCount = 0;
         return MS_RELOAD_FAILED;
@@ -7700,11 +8252,13 @@ MS_ReloadResult MS_EditSetText(MS_Scene *s, const char *text, int size, MS_EditS
     Publish(s, d);
     if (p->gpu) {
         LiveRelease(old, false, d, &B);
+        LiveRetire(p, old);
         if (full) {
             // a reload from memory: every cache is drawn again (they key on the version)
         } else Restamp(s, oldVersion, old, dirtyBoxes, true, &st);
     }
     FreeData(old);
+    free(matRebuild);
     LiveBorrowFree(&B);
     st.ms = (GetTime() - t0) * 1000.0;
     if (stats) *stats = st;
@@ -7863,7 +8417,7 @@ static void PreviewBoxBuffer(SceneData *d, struct EditPreview *v)
             MS_TurnedBox t;
             BoundingBox a;
             TurnedBoxMake((BoundingBox){ Vector3Subtract(et->position, h), Vector3Add(et->position, h) }, et->rotationDeg, &t, &a);
-            TurnedFaces(&md, &t, &v->cube);
+            TurnedFaces(&md, &t, MaterialCube(d, v->drawMat[r], &v->cube));
             tb = BoundsUnion(tb, d->boxes[box]);
         }
         if (md.vertices && md.indices) {
@@ -8241,8 +8795,10 @@ static void PreviewDraw(MS_Private *p)
     const struct EditPreview *v = p->pv;
     const SceneData *d = p->d;
     for (int r = 0; v && r < v->drawRanges; r++) {
+        int c = d->matDefs[v->drawMat[r]].faceCube;     // (a face layout's cube, else R3D's)
         R3D_BeginCluster(v->drawBounds[r]);
-        R3D_DrawMeshInstancedEx(p->cube, d->materials[v->drawMat[r]].material, v->buf, v->drawFirst[r], v->drawCount[r]);
+        R3D_DrawMeshInstancedEx(c > 0 ? d->faceCubes[c - 1].mesh : p->cube, d->materials[v->drawMat[r]].material, v->buf,
+                                v->drawFirst[r], v->drawCount[r]);
         R3D_EndCluster();
         if (v->turnMesh[r].vertexCount > 0) {
             R3D_BeginCluster(v->turnBounds[r]);
@@ -8390,6 +8946,448 @@ void MS_SetDrawFilter(MS_Scene *s, const bool *hidden, int count)
     p->drawHiddenCount = any ? count : 0;
     if (changed) FilterInvalidate(p);
     p->filterOn = any;
+}
+
+// #endregion
+
+// ======================================================================================
+// #region Painting (docs/painting.md): surface picking, face layouts, textures
+// ======================================================================================
+
+static bool RaycastModelTri(const MS_Scene *s, int mi, Vector3 origin, Vector3 dir, float maxDist, MS_Hit *hit, int *tri,
+                            Vector3 *bary);
+
+// Where on face f (+x -x +y -y +z -z) of a unit cube a point in its local -0.5..0.5 coordinates
+// lies, as R3D_GenMeshDataCube maps the face's corners (linear in the two face axes, so exact):
+// u along the face's tangent, v up for the side faces
+static Vector2 CubeFaceUv(int f, Vector3 l)
+{
+    switch (f) {
+    case 0:  return (Vector2){ 0.5f - l.z, l.y + 0.5f };    // +x
+    case 1:  return (Vector2){ l.z + 0.5f, l.y + 0.5f };    // -x
+    case 2:  return (Vector2){ l.x + 0.5f, 0.5f - l.z };    // +y
+    case 3:  return (Vector2){ l.x + 0.5f, l.z + 0.5f };    // -y
+    case 4:  return (Vector2){ l.x + 0.5f, l.y + 0.5f };    // +z
+    default: return (Vector2){ 0.5f - l.x, l.y + 0.5f };    // -z
+    }
+}
+
+// A face UV (0..1) in its cell of the layout, as the GPU interpolates it between the cube's corners:
+// their UVs as FaceLayoutData writes them (half floats, R3D's vertex format), then linear
+static Vector2 FaceCellUv(const unsigned char cells[6], int f, Vector2 fu)
+{
+    Rectangle r = FaceCellRect(cells, f, true);
+    uint16_t h0[2], h1[2];
+    R3D_PackTexCoord(h0, (Vector2){ r.x + 0.0f * r.width, r.y + 0.0f * r.height });
+    R3D_PackTexCoord(h1, (Vector2){ r.x + 1.0f * r.width, r.y + 1.0f * r.height });
+    Vector2 c0 = R3D_UnpackTexCoord(h0), c1 = R3D_UnpackTexCoord(h1);
+    return (Vector2){ c0.x + fu.x * (c1.x - c0.x), c0.y + fu.y * (c1.y - c0.y) };
+}
+
+// The mesh of the file whose triangles (in file order) hold triangle `src`
+static int MeshOfTriangle(const ModelPick *mp, int src)
+{
+    int lo = 0, hi = mp->meshCount - 1;
+    while (lo < hi) {               // the last mesh whose first triangle is <= src
+        int mid = (lo + hi + 1) / 2;
+        if (mp->meshTri[mid] <= src) lo = mid;
+        else hi = mid - 1;
+    }
+    return lo;
+}
+
+// A box hit: its face in its own frame, where on the face, the cell (uv_faces), the material's
+// uv_scale / uv_offset
+static void SurfaceOfBox(const SceneData *d, MS_SurfaceHit *out)
+{
+    int b = out->hit.obj.index;
+    const MS_TurnedBox *T = TurnedOf(d, b);
+    Vector3 local, nrm;
+    if (T) {
+        Vector3 rel = Vector3Subtract(out->hit.point, T->center);
+        float l[3], n[3];
+        for (int a = 0; a < 3; a++) {
+            float size = ((const float *)&T->size)[a];
+            l[a] = size > 0.0f ? Vector3DotProduct(rel, T->axis[a]) / size : 0.0f;
+            n[a] = Vector3DotProduct(out->hit.normal, T->axis[a]);
+        }
+        local = (Vector3){ l[0], l[1], l[2] };
+        nrm = (Vector3){ n[0], n[1], n[2] };
+    } else {
+        const BoundingBox *B = &d->boxes[b];
+        Vector3 c = Vector3Scale(Vector3Add(B->min, B->max), 0.5f), size = Vector3Subtract(B->max, B->min);
+        Vector3 rel = Vector3Subtract(out->hit.point, c);
+        local = (Vector3){ size.x > 0.0f ? rel.x / size.x : 0.0f, size.y > 0.0f ? rel.y / size.y : 0.0f,
+                           size.z > 0.0f ? rel.z / size.z : 0.0f };
+        nrm = out->hit.normal;
+    }
+    int m = d->boxRefs[b].material;
+    out->material = m;
+    out->face = FaceOfNormal(nrm);
+    Vector2 fu = CubeFaceUv(out->face, local);
+    fu.x = fu.x < 0.0f ? 0.0f : fu.x > 1.0f ? 1.0f : fu.x;
+    fu.y = fu.y < 0.0f ? 0.0f : fu.y > 1.0f ? 1.0f : fu.y;
+    out->faceUv = fu;
+    Vector2 uv = fu;
+    if (m >= 0 && m < d->materialCount) {
+        const MatDef *D = &d->matDefs[m];
+        const R3D_Material *M = &d->materials[m].material;
+        if (D->hasFaces) uv = FaceCellUv(D->uvFaces, out->face, fu);
+        uv = (Vector2){ M->uvOffset.x + uv.x * M->uvScale.x, M->uvOffset.y + uv.y * M->uvScale.y };
+    }
+    out->uv = uv;
+}
+
+// A model hit: the triangle the BVH hit, its mesh, slot and texture coordinates, the slot's material
+static void SurfaceOfModel(const MS_Scene *s, Vector3 origin, Vector3 dir, float maxDist, MS_SurfaceHit *out)
+{
+    const SceneData *d = s->priv->d;
+    int mi = out->hit.obj.index;
+    const MS_ModelInstance *M = &d->models[mi];
+    const ModelPick *mp = &d->modelPick[M->file];
+    const R3D_Model *model = &d->modelFiles[M->file].model;
+    MS_Hit h;
+    int tri = -1;
+    Vector3 bary = { 0 };
+    // (the same ray and the model's nearest triangle: MS_Raycast took this model's)
+    if (!RaycastModelTri(s, mi, origin, dir, maxDist, &h, &tri, &bary) || tri < 0 || !mp->triSrc) return;
+    int src = (int)mp->triSrc[tri];
+    out->mesh = MeshOfTriangle(mp, src);
+    out->triangle = src - mp->meshTri[out->mesh];
+    out->bary = bary;
+    out->slot = model->meshMaterials && out->mesh < model->meshCount ? model->meshMaterials[out->mesh] : 0;
+    Vector2 tc = { 0 };
+    if (mp->uv) {
+        const unsigned int *v = &mp->tri[3 * tri];
+        Vector2 a = mp->uv[v[0]], b = mp->uv[v[1]], c = mp->uv[v[2]];
+        tc = (Vector2){ bary.x * a.x + bary.y * b.x + bary.z * c.x, bary.x * a.y + bary.y * b.y + bary.z * c.y };
+    }
+    out->faceUv = tc;
+    int m = out->slot >= 0 ? SlotMaterial(d, M, out->slot) : -1;
+    out->material = m;
+    // The uv_scale / uv_offset the slot is drawn with: the override's, else the file's own material's
+    const R3D_Material *R = m >= 0 ? &d->materials[m].material
+                          : out->slot >= 0 && out->slot < model->materialCount && model->materials ? &model->materials[out->slot]
+                          : NULL;
+    out->uv = R ? (Vector2){ R->uvOffset.x + tc.x * R->uvScale.x, R->uvOffset.y + tc.y * R->uvScale.y } : tc;
+}
+
+bool MS_RaycastSurface(const MS_Scene *s, Vector3 origin, Vector3 dir, float maxDist, MS_SurfaceHit *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->hit = MS_Raycast(s, origin, dir, maxDist);
+    out->material = out->face = out->slot = out->mesh = out->triangle = -1;
+    const SceneData *d = s->priv->d;
+    if (out->hit.obj.kind == MS_OBJ_BOX) SurfaceOfBox(d, out);
+    else if (out->hit.obj.kind == MS_OBJ_MODEL) SurfaceOfModel(s, origin, dir, maxDist, out);
+    return out->hit.obj.kind != MS_OBJ_NONE;
+}
+
+int MS_ModelSlotTriangleCount(const MS_Scene *s, int file, int slot)
+{
+    if (!s || file < 0 || file >= s->modelFileCount) return 0;
+    const SceneData *d = s->priv->d;
+    const ModelPick *mp = &d->modelPick[file];
+    const R3D_Model *model = &d->modelFiles[file].model;
+    if (!mp->meshTri || !model->meshMaterials) return 0;
+    int n = 0;
+    for (int i = 0; i < mp->meshCount && i < model->meshCount; i++)
+        if (model->meshMaterials[i] == slot) n += mp->meshTri[i + 1] - mp->meshTri[i];
+    return n;
+}
+
+bool MS_ModelSlotTriangle(const MS_Scene *s, int file, int slot, int k, Vector2 uv[3], Vector3 pos[3])
+{
+    if (!s || file < 0 || file >= s->modelFileCount || k < 0) return false;
+    const SceneData *d = s->priv->d;
+    const ModelPick *mp = &d->modelPick[file];
+    const R3D_Model *model = &d->modelFiles[file].model;
+    if (!mp->uv || !mp->meshTri || !mp->triAt || !model->meshMaterials) return false;
+    for (int i = 0; i < mp->meshCount && i < model->meshCount; i++) {
+        if (model->meshMaterials[i] != slot) continue;
+        int n = mp->meshTri[i + 1] - mp->meshTri[i];
+        if (k >= n) {
+            k -= n;
+            continue;
+        }
+        const unsigned int *v = &mp->tri[3 * mp->triAt[mp->meshTri[i] + k]];
+        for (int c = 0; c < 3; c++) {
+            uv[c] = mp->uv[v[c]];
+            pos[c] = mp->pos[v[c]];
+        }
+        return true;
+    }
+    return false;
+}
+
+int MS_ModelSlotTriangleIndex(const MS_Scene *s, int file, int mesh, int triangle)
+{
+    if (!s || file < 0 || file >= s->modelFileCount || mesh < 0 || triangle < 0) return -1;
+    const SceneData *d = s->priv->d;
+    const ModelPick *mp = &d->modelPick[file];
+    const R3D_Model *model = &d->modelFiles[file].model;
+    if (!mp->meshTri || !model->meshMaterials || mesh >= mp->meshCount || mesh >= model->meshCount) return -1;
+    if (triangle >= mp->meshTri[mesh + 1] - mp->meshTri[mesh]) return -1;
+    int slot = model->meshMaterials[mesh], k = triangle;
+    for (int i = 0; i < mesh; i++)
+        if (model->meshMaterials[i] == slot) k += mp->meshTri[i + 1] - mp->meshTri[i];
+    return k;
+}
+
+bool MS_MaterialFaceLayout(const MS_Scene *s, int material, unsigned char cells[6], int *cols, int *rows)
+{
+    const SceneData *d = s ? s->priv->d : NULL;
+    if (!d || material < 0 || material >= d->materialCount || !d->matDefs[material].hasFaces) return false;
+    memcpy(cells, d->matDefs[material].uvFaces, 6);
+    FaceGrid(cells, cols, rows);
+    return true;
+}
+
+// (the meshes' own function, so the editor and the meshes agree bit for bit)
+Rectangle MS_FaceCellRect(const unsigned char cells[6], int face, bool inset)
+{
+    return FaceCellRect(cells, face, inset);
+}
+
+// What DrawBoxRange draws box b with: instanced, its slot in the material's buffer (the order of
+// LoadBoxInstances: boxOrder's run of the material); merged, the unit cube placed where
+// BuildBoxMesh / TurnedFaces put its faces (local * size, turned, + centre)
+bool MS_BoxDrawOf(const MS_Scene *s, int box, MS_BoxDraw *out)
+{
+    memset(out, 0, sizeof(*out));
+    const MS_Private *p = s ? s->priv : NULL;
+    const SceneData *d = p ? p->d : NULL;
+    if (!d || !d->gpu || box < 0 || box >= d->boxCount) return false;
+    int m = d->boxRefs[box].material;
+    if (m < 0 || m >= d->materialCount) return false;
+    int c = d->matDefs[m].faceCube;
+    out->material = d->materials[m].material;
+    out->cube = c > 0 ? d->faceCubes[c - 1].mesh : p->cube;
+    if (!d->matDefs[m].merge) {
+        if (!d->boxOrder || !d->instCount) return false;
+        int at = 0;
+        for (int k = 0; k < m; k++) at += d->instCount[k];
+        out->index = -1;
+        for (int k = 0; k < d->instCount[m] && out->index < 0; k++)
+            if (d->boxOrder[at + k] == box) out->index = k;
+        out->instanced = true;
+        out->instances = d->inst[m];
+        return out->index >= 0;
+    }
+    const MS_TurnedBox *t = TurnedOf(d, box);
+    const BoundingBox *B = &d->boxes[box];
+    Vector3 ctr = t ? t->center : Vector3Scale(Vector3Add(B->min, B->max), 0.5f);
+    Vector3 size = t ? t->size : Vector3Subtract(B->max, B->min);
+    Vector3 ax[3] = { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } };
+    if (t) memcpy(ax, t->axis, sizeof(ax));
+    // (raylib's Matrix: m0 m1 m2 is the first column, the box's x axis times its size)
+    Matrix M = { 0 };
+    M.m0 = ax[0].x * size.x; M.m1 = ax[0].y * size.x; M.m2 = ax[0].z * size.x;
+    M.m4 = ax[1].x * size.y; M.m5 = ax[1].y * size.y; M.m6 = ax[1].z * size.y;
+    M.m8 = ax[2].x * size.z; M.m9 = ax[2].y * size.z; M.m10 = ax[2].z * size.z;
+    M.m12 = ctr.x;
+    M.m13 = ctr.y;
+    M.m14 = ctr.z;
+    M.m15 = 1.0f;
+    out->transform = M;
+    return true;
+}
+
+Texture2D MS_TextureFind(const MS_Scene *s, const char *rel)
+{
+    const SceneData *d = s && s->priv ? s->priv->d : NULL;
+    if (!d || !rel) return (Texture2D){ 0 };
+    char full[MS_PATH_MAX + MS_PATH_MAX];
+    snprintf(full, sizeof(full), "%s%s", d->root, rel);
+    for (int i = 0; i < d->textureCount; i++)
+        if (strcmp(d->textures[i].path, full) == 0) return d->textures[i].tex;
+    return (Texture2D){ 0 };
+}
+
+Texture2D MS_ModelSlotTexture(const MS_Scene *s, int file, int slot)
+{
+    if (!s || file < 0 || file >= s->modelFileCount) return (Texture2D){ 0 };
+    const R3D_Model *m = &s->modelFiles[file].model;
+    if (slot < 0 || slot >= m->materialCount || !m->materials) return (Texture2D){ 0 };
+    return m->materials[slot].albedo.texture;
+}
+
+bool MS_TextureRead(Texture2D tex, Image *out)
+{
+    *out = (Image){ 0 };
+    if (tex.id == 0) return false;
+    Image img = LoadImageFromTexture(tex);
+    if (!img.data) return false;
+    if (img.format != PIXELFORMAT_UNCOMPRESSED_R8G8B8A8) ImageFormat(&img, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
+    *out = img;
+    return out->data != NULL;
+}
+
+// Forgets every provided image (a load or reload from disk, MS_Unload)
+static void FreeProvided(MS_Private *p)
+{
+    for (int i = 0; i < p->providedCount; i++) {
+        free(p->provided[i].rel);
+        UnloadImage(p->provided[i].img);
+    }
+    p->providedCount = 0;
+}
+
+bool MS_TextureProvide(MS_Scene *s, const char *rel, const Image *img)
+{
+    MS_Private *p = s->priv;
+    if (!rel) return false;
+    int i = 0;
+    while (i < p->providedCount && strcmp(p->provided[i].rel, rel) != 0) i++;
+    if (!img || !img->data || img->width <= 0 || img->height <= 0) {
+        // forget it (the last entry takes its place)
+        if (i < p->providedCount) {
+            free(p->provided[i].rel);
+            UnloadImage(p->provided[i].img);
+            p->provided[i] = p->provided[--p->providedCount];
+        }
+        return true;
+    }
+    Image copy = ImageCopy(*img);
+    if (copy.data && copy.format != PIXELFORMAT_UNCOMPRESSED_R8G8B8A8) ImageFormat(&copy, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
+    if (!copy.data || copy.format != PIXELFORMAT_UNCOMPRESSED_R8G8B8A8) {
+        UnloadImage(copy);
+        return false;
+    }
+    if (i < p->providedCount) {
+        UnloadImage(p->provided[i].img);
+        p->provided[i].img = copy;
+        return true;
+    }
+    char *name = MS_StrDup(rel);
+    ProvidedTex *e = name ? MS_PUSH(p->provided, p->providedCount, p->providedCap) : NULL;
+    if (!e) {
+        free(name);
+        UnloadImage(copy);
+        return false;
+    }
+    *e = (ProvidedTex){ name, copy };
+    return true;
+}
+
+// Rows y0..y0+h of columns x0..x0+w of the RGBA8 image, in pixel format `format` (RGBA8, RGB8,
+// grey, grey + alpha), into the scratch buffer; NULL for another format or out of memory
+static const void *PackRect(MS_Private *p, const Image *img, int x0, int y0, int w, int h, int format)
+{
+    int bpp = format == PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 ? 4 : format == PIXELFORMAT_UNCOMPRESSED_R8G8B8 ? 3
+            : format == PIXELFORMAT_UNCOMPRESSED_GRAY_ALPHA ? 2 : format == PIXELFORMAT_UNCOMPRESSED_GRAYSCALE ? 1 : 0;
+    if (bpp == 0 || !MS_RESERVE(p->texScratch, p->texScratchCap, w * h * bpp)) return NULL;
+    const unsigned char *src = img->data;
+    unsigned char *dst = p->texScratch;
+    for (int y = 0; y < h; y++) {
+        const unsigned char *row = src + ((size_t)(y0 + y) * (size_t)img->width + (size_t)x0) * 4;
+        if (bpp == 4) {
+            memcpy(dst, row, (size_t)w * 4);
+            dst += (size_t)w * 4;
+            continue;
+        }
+        for (int x = 0; x < w; x++, row += 4) {
+            if (bpp >= 3) { *dst++ = row[0]; *dst++ = row[1]; *dst++ = row[2]; }
+            else *dst++ = row[0];
+            if (bpp == 2) *dst++ = row[3];
+        }
+    }
+    return p->texScratch;
+}
+
+// After an update of the texture at full path `full`: the shadows of the objects of every material
+// whose albedo map it is and that may discard or blend (alpha_cutoff > 0, transparency) can change,
+// so the sun tiles and light shadows their bounds reach are drawn again (nothing else is re-stamped)
+static void TextureShadowsInvalidate(MS_Private *p, const char *full)
+{
+    SceneData *d = p->d;
+    size_t rootLen = strlen(d->root);
+    if (strncmp(full, d->root, rootLen) != 0) return;
+    const char *rel = full + rootLen;
+    p->dirtyCount = 0;
+    for (int m = 0; m < d->materialCount; m++) {
+        const MatDef *D = &d->matDefs[m];
+        const R3D_Material *M = &d->materials[m].material;
+        if (!D->maps[MAP_ALBEDO] || strcmp(D->maps[MAP_ALBEDO], rel) != 0 ||
+            (M->alphaCutoff <= 0.0f && M->transparencyMode == R3D_TRANSPARENCY_OPAQUE)) continue;
+        BoundingBox u = { { INFINITY, INFINITY, INFINITY }, { -INFINITY, -INFINITY, -INFINITY } };
+        for (int b = 0; b < d->boxCount; b++)
+            if (d->boxRefs[b].material == m) u = BoundsUnion(u, d->boxes[b]);
+        for (int i = 0; i < d->modelCount; i++) {
+            const MS_ModelInstance *I = &d->models[i];
+            bool uses = false;
+            for (int sl = 0; sl < d->modelFiles[I->file].materialCount && !uses; sl++) uses = SlotMaterial(d, I, sl) == m;
+            if (uses) u = BoundsUnion(u, I->bounds);
+        }
+        if (u.min.x <= u.max.x) DirtyAdd(p, u);
+    }
+    int nd = DirtyAll(p) ? 0 : p->dirtyCount;
+    if (nd == 0 && !DirtyAll(p)) return;
+#ifdef MS_PATCHED_R3D
+    for (int i = 0; i < SUN_TILE_COUNT; i++)
+        if (p->tiles.tile[i].valid && (DirtyAll(p) || DirtyHitsMap(p, 0, nd, p->tiles.tile[i].viewProj))) p->tiles.tile[i].valid = false;
+#endif
+    if (p->camCache.valid && (DirtyAll(p) || DirtyHitsMap(p, 0, nd, p->camCache.viewProj))) p->camCache.valid = false;
+    for (int i = 0; d->lightShadowDrawn && i < d->lightCount; i++) {
+        const R3D_Light *L = &d->lights[i].light;
+        if (!d->lights[i].shadow || !d->lightShadowDrawn[i] || L->type == R3D_LIGHT_DIR) continue;
+        if (DirtyAll(p) || DirtyHitsSphere(p, 0, nd, L->position, L->range)) d->lightShadowDrawn[i] = false;
+    }
+    p->dirtyCount = 0;
+}
+
+bool MS_TextureUpdate(MS_Scene *s, const char *rel, const Image *img, Rectangle rect)
+{
+    MS_Private *p = s->priv;
+    SceneData *d = p->d;
+    if (!d || !d->gpu || !rel || !img || !img->data || img->format != PIXELFORMAT_UNCOMPRESSED_R8G8B8A8) return false;
+    char full[MS_PATH_MAX + MS_PATH_MAX];
+    snprintf(full, sizeof(full), "%s%s", d->root, rel);
+
+    // The rectangle in whole texels, inside the image
+    int x0 = (int)floorf(rect.x), y0 = (int)floorf(rect.y);
+    int x1 = (int)ceilf(rect.x + rect.width), y1 = (int)ceilf(rect.y + rect.height);
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > img->width) x1 = img->width;
+    if (y1 > img->height) y1 = img->height;
+
+    // Every cached texture of the path (one per wrap, filter, ...) of the image's size (a canvas
+    // resized live leaves its old texture in the cache, unused), then the rows
+    bool any = false;
+    for (int i = 0; i < d->textureCount; i++) {
+        const TexEntry *e = &d->textures[i];
+        if (strcmp(e->path, full) == 0 && e->tex.width == img->width && e->tex.height == img->height) any = true;
+    }
+    if (!any) return false;
+    for (int i = 0; x1 > x0 && y1 > y0 && i < d->textureCount; i++) {
+        const TexEntry *e = &d->textures[i];
+        if (strcmp(e->path, full) != 0 || e->tex.width != img->width || e->tex.height != img->height) continue;
+        const void *rows = PackRect(p, img, x0, y0, x1 - x0, y1 - y0, e->tex.format);
+        if (!rows) continue;
+        rlUpdateTexture(e->tex.id, x0, y0, x1 - x0, y1 - y0, e->tex.format, rows);
+        if (!e->data) {
+            int mipmaps;
+            rlGenTextureMipmaps(e->tex.id, e->tex.width, e->tex.height, e->tex.format, &mipmaps);
+        }
+    }
+
+    // The provided copy follows, so a later upload from memory shows the same pixels
+    for (int i = 0; i < p->providedCount; i++) {
+        Image *P = &p->provided[i].img;
+        if (strcmp(p->provided[i].rel, rel) != 0 || P->width != img->width || P->height != img->height) continue;
+        for (int y = y0; y < y1; y++)
+            memcpy((unsigned char *)P->data + ((size_t)y * (size_t)P->width + (size_t)x0) * 4,
+                   (const unsigned char *)img->data + ((size_t)y * (size_t)img->width + (size_t)x0) * 4, (size_t)(x1 - x0) * 4);
+    }
+    p->textureGeneration++;
+    TextureShadowsInvalidate(p, full);
+    return true;
+}
+
+unsigned int MS_TextureGeneration(const MS_Scene *s)
+{
+    return s->priv->textureGeneration;
 }
 
 // #endregion
@@ -8738,8 +9736,9 @@ static inline void DrawBoxRange(const MS_Private *p, const SceneData *d, const D
 {
     const R3D_Material mat = d->materials[R->group].material;
     if (!d->matDefs[R->group].merge) {
+        int c = d->matDefs[R->group].faceCube;     // (a face layout's cube, else R3D's)
         R3D_BeginCluster(R->bounds);
-        R3D_DrawMeshInstancedEx(p->cube, mat, d->inst[R->group], R->first, R->count);
+        R3D_DrawMeshInstancedEx(c > 0 ? d->faceCubes[c - 1].mesh : p->cube, mat, d->inst[R->group], R->first, R->count);
         R3D_EndCluster();
     } else if (R->mesh.vertexCount > 0) {
         // A merged range is its mesh drawn as one instance at the origin: it stays in R3D's
@@ -8779,6 +9778,9 @@ void MS_DrawGeometry(MS_Scene *s)
     MS_Private *p = s->priv;
     SceneData *d = p->d;
 #ifdef MONOLITH_EDITOR
+    // (the meshes the live edits since the last frame replaced: this frame draws their successors)
+    for (int i = 0; i < p->retiredCount; i++) R3D_UnloadMesh(p->retired[i]);
+    p->retiredCount = 0;
     if (p->filterOn) DrawFiltered(p, d);    // the render inspector's draw filter
     else {
 #endif
@@ -8840,6 +9842,8 @@ bool MS_Draw(MS_Scene *s, Camera3D camera, RenderTexture target)
 // ======================================================================================
 
 static bool RayBox(Vector3 o, Vector3 d, Vector3 mn, Vector3 mx, float *tNear, float *tFar, int *axis);
+static bool RaycastModelTri(const MS_Scene *s, int mi, Vector3 origin, Vector3 dir, float maxDist, MS_Hit *hit, int *tri,
+                            Vector3 *bary);
 
 MS_Hit MS_Raycast(const MS_Scene *s, Vector3 origin, Vector3 dir, float maxDist)
 {
@@ -8949,6 +9953,16 @@ static bool RayBox(Vector3 o, Vector3 d, Vector3 mn, Vector3 mx, float *tNear, f
 
 bool MS_RaycastModel(const MS_Scene *s, int mi, Vector3 origin, Vector3 dir, float maxDist, MS_Hit *hit)
 {
+    return RaycastModelTri(s, mi, origin, dir, maxDist, hit, NULL, NULL);
+}
+
+// MS_RaycastModel, plus the triangle hit (*tri: its place in the file's ModelPick.tri[], -1 when
+// the model has no triangles) and the barycentric coordinates of the hit in it (of its vertices
+// 0, 1, 2); tri and bary may be NULL
+static bool RaycastModelTri(const MS_Scene *s, int mi, Vector3 origin, Vector3 dir, float maxDist, MS_Hit *hit, int *tri,
+                            Vector3 *bary)
+{
+    if (tri) *tri = -1;
     if (mi < 0 || mi >= s->modelCount) return false;
     const SceneData *d = s->priv->d;
     const MS_ModelInstance *M = &s->models[mi];
@@ -8972,7 +9986,7 @@ bool MS_RaycastModel(const MS_Scene *s, int mi, Vector3 origin, Vector3 dir, flo
     Vector3 o = Vector3Transform(origin, inv);
     Vector3 dd = { inv.m0 * dir.x + inv.m4 * dir.y + inv.m8 * dir.z, inv.m1 * dir.x + inv.m5 * dir.y + inv.m9 * dir.z,
                    inv.m2 * dir.x + inv.m6 * dir.y + inv.m10 * dir.z };
-    float best = limit;
+    float best = limit, bestU = 0.0f, bestV = 0.0f;
     int bestTri = -1;
     int stack[128], sp = 0;
     stack[sp++] = 0;
@@ -8999,7 +10013,7 @@ bool MS_RaycastModel(const MS_Scene *s, int mi, Vector3 origin, Vector3 dir, flo
             float v = Vector3DotProduct(dd, qv) * inv_det;
             if (v < 0.0f || u + v > 1.0f) continue;
             float tt = Vector3DotProduct(e2, qv) * inv_det;
-            if (tt > 1e-5f && tt < best) { best = tt; bestTri = t; }
+            if (tt > 1e-5f && tt < best) { best = tt; bestTri = t; bestU = u; bestV = v; }
         }
     }
     if (bestTri < 0) return false;
@@ -9011,6 +10025,8 @@ bool MS_RaycastModel(const MS_Scene *s, int mi, Vector3 origin, Vector3 dir, flo
     n = Vector3Normalize(n);
     if (Vector3DotProduct(n, dir) > 0.0f) n = Vector3Negate(n);
     *hit = (MS_Hit){ { MS_OBJ_MODEL, mi }, Vector3Add(origin, Vector3Scale(dir, best)), n, best };
+    if (tri) *tri = bestTri;
+    if (bary) *bary = (Vector3){ 1.0f - bestU - bestV, bestU, bestV };
     return true;
 }
 

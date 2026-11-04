@@ -608,3 +608,280 @@ void UiListFree(UiList *l)
 }
 
 // #endregion
+
+// #region Mouse widgets (docs/painting.md 13.2)
+// Immediate mode: every call lays out, handles and draws one widget. The state that outlives a
+// frame is the caller's (UiDrag: the slider being dragged; UiEdit: the field being typed into,
+// its text and cursor), named by the widget's id. A panel that reads its input before the frame
+// is drawn runs its layout twice (UiWidgetsBegin: an input pass, then a draw pass). Fields take
+// ASCII only (numbers, a hex colour); nothing here allocates.
+
+#define WIDGET_FONT     UI_M
+#define THUMB_W         10      // slider thumb
+#define FIELD_PAD       7       // field edge to text
+#define WIDGET_HOVER    CLITERAL(Color){ 52, 52, 57, 255 }
+#define WIDGET_ON       CLITERAL(Color){ 70, 64, 56, 255 }      // a pressed toggle (the settings panel's)
+
+static struct {
+    UiWidgetPass pass;
+    bool noMouse;           // (all zero = the default: input and drawing, the mouse everywhere)
+    Rectangle clip;
+} wp;
+
+void UiWidgetsBegin(UiWidgetPass pass, bool mouse, Rectangle clip)
+{
+    wp.pass = pass;
+    wp.noMouse = !mouse;
+    wp.clip = clip;
+}
+
+void UiWidgetsEnd(void) { memset(&wp, 0, sizeof(wp)); }
+
+static bool WInput(void) { return wp.pass != UI_WIDGETS_DRAW; }
+static bool WDraw(void) { return wp.pass != UI_WIDGETS_INPUT; }
+static bool WMouse(void) { return !wp.noMouse; }
+
+static bool WHover(Rectangle r)
+{
+    if (wp.noMouse) return false;
+    Vector2 m = GetMousePosition();
+    if (wp.clip.width > 0.0f && !CheckCollisionPointRec(m, wp.clip)) return false;
+    return CheckCollisionPointRec(m, r);
+}
+
+static bool WPressed(void) { return WInput() && WMouse() && IsMouseButtonPressed(MOUSE_BUTTON_LEFT); }
+
+// UI_M, or UI_S when the text doesn't fit in w
+static int FitSize(const char *text, int w)
+{
+    return Measure(text, WIDGET_FONT, false) <= w ? WIDGET_FONT : UI_S;
+}
+
+void UiRoundRect(Rectangle r, int radius, Color fill, Color border)
+{
+    if (fill.a) Rounded(r, radius, fill, false);
+    if (border.a) Rounded(r, radius, border, true);
+}
+
+static float Snap(float v, float lo, float hi, float step)
+{
+    if (step > 0.0f) v = lo + roundf((v - lo) / step) * step;
+    return v < lo ? lo : v > hi ? hi : v;
+}
+
+bool UiSlider(UiDrag *drag, int id, Rectangle r, float *value, float lo, float hi, float step)
+{
+    float x0 = r.x + THUMB_W / 2, x1 = r.x + r.width - THUMB_W / 2, span = x1 - x0 > 1.0f ? x1 - x0 : 1.0f;
+    float range = hi > lo ? hi - lo : 1.0f;
+    float old = *value, v = old;
+    bool hover = WHover(r);
+    if (WInput()) {
+        Vector2 m = GetMousePosition();
+        float thumbX = x0 + (Snap(v, lo, hi, 0.0f) - lo) / range * span;
+        if (drag->active == id) {
+            if (WMouse() && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) v = lo + (m.x - drag->grab - x0) / span * range;
+            else drag->active = 0;
+        } else if (drag->active == 0 && hover && WPressed()) {
+            drag->active = id;
+            // on the thumb: it keeps its offset to the cursor; elsewhere it jumps there
+            drag->grab = fabsf(m.x - thumbX) <= THUMB_W / 2 + 1 ? m.x - thumbX : 0.0f;
+            v = lo + (m.x - drag->grab - x0) / span * range;
+        }
+        float wheel = hover && (drag->active == 0 || drag->active == id) ? GetMouseWheelMove() : 0.0f;
+        if (wheel != 0.0f) v += (wheel > 0.0f ? 1.0f : -1.0f) * (step > 0.0f ? step : range / 50.0f);
+        if (v != old) *value = Snap(v, lo, hi, step);
+    }
+    if (WDraw()) {
+        bool held = drag->active == id;
+        float t = (Snap(*value, lo, hi, 0.0f) - lo) / range;
+        int cy = (int)(r.y + r.height / 2);
+        int tx = (int)(x0 + t * span + 0.5f);
+        Rounded((Rectangle){ r.x, (float)(cy - 2), r.width, 4 }, 2, UI_RAISED, false);
+        if (tx > (int)r.x) Rounded((Rectangle){ r.x, (float)(cy - 2), (float)tx - r.x, 4 }, 2, Fade(UI_ACCENT, 0.55f), false);
+        Rectangle thumb = { (float)(tx - THUMB_W / 2), (float)(cy - 8), THUMB_W, 16 };
+        Rounded((Rectangle){ thumb.x - 1, thumb.y - 1, thumb.width + 2, thumb.height + 2 }, 4, (Color){ 0, 0, 0, 140 }, false);
+        Rounded(thumb, 3, held ? UI_ACCENT : hover ? (Color){ 255, 255, 255, 255 } : UI_INK, false);
+    }
+    return *value != old;
+}
+
+// Opens field id with text (all selected)
+static void EditOpen(UiEdit *e, int id, const char *text)
+{
+    e->active = id;
+    e->claim = 0;
+    snprintf(e->buf, sizeof(e->buf), "%s", text);
+    e->len = (int)strlen(e->buf);
+    e->cursor = e->len;
+    e->all = e->len > 0;
+}
+
+// The open field's keys and typed characters: 1 ENTER, -1 ESC, 0 still typing. accept: the
+// characters it takes (NULL: any printable ASCII); max: the longest text
+static int EditKeys(UiEdit *e, const char *accept, int max)
+{
+    if (max > (int)sizeof(e->buf) - 1) max = (int)sizeof(e->buf) - 1;
+    for (int c = GetCharPressed(); c > 0; c = GetCharPressed()) {
+        if (c < 32 || c > 126 || (accept && !strchr(accept, c))) continue;
+        if (e->all) { e->len = e->cursor = 0; e->all = false; }
+        if (e->len >= max) continue;
+        memmove(e->buf + e->cursor + 1, e->buf + e->cursor, (size_t)(e->len - e->cursor));
+        e->buf[e->cursor++] = (char)c;
+        e->buf[++e->len] = 0;
+    }
+    if (Pressed(KEY_BACKSPACE)) {
+        if (e->all) { e->len = e->cursor = 0; e->all = false; }
+        else if (e->cursor > 0) {
+            memmove(e->buf + e->cursor - 1, e->buf + e->cursor, (size_t)(e->len - e->cursor));
+            e->cursor--;
+            e->len--;
+        }
+        e->buf[e->len] = 0;
+    }
+    if (Pressed(KEY_DELETE)) {
+        if (e->all) { e->len = e->cursor = 0; e->all = false; }
+        else if (e->cursor < e->len) {
+            memmove(e->buf + e->cursor, e->buf + e->cursor + 1, (size_t)(e->len - e->cursor - 1));
+            e->len--;
+        }
+        e->buf[e->len] = 0;
+    }
+    if (Pressed(KEY_LEFT)) { e->cursor = e->all ? 0 : e->cursor > 0 ? e->cursor - 1 : 0; e->all = false; }
+    if (Pressed(KEY_RIGHT)) { e->cursor = e->all ? e->len : e->cursor < e->len ? e->cursor + 1 : e->len; e->all = false; }
+    if (IsKeyPressed(KEY_HOME)) { e->cursor = 0; e->all = false; }
+    if (IsKeyPressed(KEY_END)) { e->cursor = e->len; e->all = false; }
+    if (IsKeyPressed(KEY_A) && IsDown2(KEY_LEFT_CONTROL, KEY_RIGHT_CONTROL)) e->all = e->len > 0;
+    if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) return 1;
+    if (IsKeyPressed(KEY_ESCAPE)) return -1;
+    return 0;
+}
+
+// What a field does this frame: 1 apply, -1 cancel (it closed), 0 nothing (or still typing). A
+// click on it opens it with `shown`; with another field open, that one applies on the same
+// click (it sees a click elsewhere) and this one opens the next frame, in either call order.
+static int FieldInput(UiEdit *e, int id, Rectangle r, const char *shown, const char *accept, int max)
+{
+    if (!WInput()) return 0;
+    if (e->claim == id && e->active == 0) EditOpen(e, id, shown);
+    if (e->active == id) {
+        if (WPressed() && !WHover(r)) { e->active = 0; return 1; }
+        int k = EditKeys(e, accept, max);
+        if (k) e->active = 0;
+        return k;
+    }
+    if (WPressed() && WHover(r)) {
+        if (e->active == 0) EditOpen(e, id, shown);
+        else e->claim = id;
+    }
+    return 0;
+}
+
+// The field's box and its text: while open the typed text with the cursor (or the selection),
+// else `shown`, centred
+static void FieldDraw(const UiEdit *e, int id, Rectangle r, const char *shown, Color ink)
+{
+    bool open = e->active == id, hover = WHover(r);
+    UiPanel(r, open ? (Color){ 30, 30, 33, 255 } : hover ? WIDGET_HOVER : UI_RAISED,
+            open ? UI_ACCENT : hover ? Fade(UI_INK, 0.30f) : UI_LINE);
+    const char *text = open ? e->buf : shown;
+    int size = FitSize(text, (int)r.width - 2 * FIELD_PAD);
+    int lh = UiLineHeight(size);
+    int ty = (int)r.y + ((int)r.height - lh) / 2;
+    int tw = Measure(text, size, false);
+    int tx = open ? (int)r.x + FIELD_PAD : (int)(r.x + (r.width - tw) / 2);
+    if (open && e->all && e->len > 0) DrawRectangle(tx - 1, ty + 2, tw + 2, lh - 4, Fade(UI_ACCENT, 0.35f));
+    if (text[0]) Text(text, tx, ty, size, false, open ? UI_INK : ink);
+    if (open && !e->all && fmod(GetTime(), 1.0) < 0.6) {
+        char head[32];
+        snprintf(head, sizeof(head), "%.*s", e->cursor, e->buf);
+        DrawRectangle(tx + Measure(head, size, false), ty + 2, 2, lh - 4, UI_CURSOR);
+    }
+}
+
+static void FormatNumber(char *out, int outSize, float v, int decimals)
+{
+    if (decimals <= 0) snprintf(out, (size_t)outSize, "%d", (int)roundf(v));
+    else snprintf(out, (size_t)outSize, "%.*f", decimals, v);
+}
+
+bool UiNumberField(UiEdit *edit, int id, Rectangle r, float *value, float lo, float hi, float step, int decimals)
+{
+    char shown[32];
+    FormatNumber(shown, sizeof(shown), *value, decimals);
+    float old = *value;
+    if (FieldInput(edit, id, r, shown, "0123456789.-+", 12) == 1 && edit->len > 0) {
+        char *end = NULL;
+        float v = strtof(edit->buf, &end);
+        if (end != edit->buf && isfinite(v)) {
+            float scale = powf(10.0f, (float)(decimals > 0 ? decimals : 0));
+            v = roundf(v * scale) / scale;
+            *value = v < lo ? lo : v > hi ? hi : v;
+        }
+    }
+    if (WInput() && edit->active != id && WHover(r)) {
+        float wheel = GetMouseWheelMove();
+        float s = step > 0.0f ? step : 1.0f;
+        if (wheel != 0.0f) *value = Snap(*value + (wheel > 0.0f ? s : -s), lo, hi, 0.0f);
+    }
+    if (WDraw()) {
+        FormatNumber(shown, sizeof(shown), *value, decimals);
+        FieldDraw(edit, id, r, shown, UI_INK);
+    }
+    return *value != old;
+}
+
+bool UiTextField(UiEdit *edit, int id, Rectangle r, char *text, int textSize)
+{
+    bool applied = false;
+    if (FieldInput(edit, id, r, text, NULL, textSize - 1) == 1) {
+        snprintf(text, (size_t)textSize, "%s", edit->buf);
+        applied = true;
+    }
+    if (WDraw()) FieldDraw(edit, id, r, text, UI_INK);
+    return applied;
+}
+
+bool UiSwatch(Rectangle r, Color c, bool selected)
+{
+    bool hover = WHover(r);
+    if (WDraw()) {
+        if (c.a < 255) {
+            // the checker the alpha shows over: 6 px squares, cut at the swatch's edges
+            const int q = 6;
+            DrawRectangleRec(r, (Color){ 205, 205, 205, 255 });
+            for (int yy = 0; yy * q < (int)r.height; yy++)
+                for (int xx = yy & 1; xx * q < (int)r.width; xx += 2) {
+                    float w = fminf((float)q, r.width - (float)(xx * q)), h = fminf((float)q, r.height - (float)(yy * q));
+                    DrawRectangleRec((Rectangle){ r.x + (float)(xx * q), r.y + (float)(yy * q), w, h }, (Color){ 125, 125, 125, 255 });
+                }
+        }
+        DrawRectangleRec(r, c);
+        if (selected) DrawRectangleLinesEx((Rectangle){ r.x - 2, r.y - 2, r.width + 4, r.height + 4 }, 2.0f, UI_ACCENT);
+        else DrawRectangleLinesEx(r, 1.0f, hover ? Fade(UI_INK, 0.6f) : UI_LINE);
+    }
+    return hover && WPressed();
+}
+
+bool UiButton(Rectangle r, const char *label, bool active)
+{
+    bool hover = WHover(r);
+    if (WDraw()) {
+        bool held = hover && IsMouseButtonDown(MOUSE_BUTTON_LEFT);
+        Color fill = active || held ? WIDGET_ON : hover ? WIDGET_HOVER : UI_RAISED;
+        UiPanel(r, fill, active ? UI_ACCENT : hover ? Fade(UI_INK, 0.30f) : UI_LINE);
+        if (label && label[0]) {
+            int size = FitSize(label, (int)r.width - 8);
+            int tw = Measure(label, size, false);
+            Text(label, (int)(r.x + (r.width - tw) / 2), (int)r.y + ((int)r.height - UiLineHeight(size)) / 2, size, false,
+                 active ? UI_ACCENT : UI_INK);
+        }
+    }
+    return hover && WPressed();
+}
+
+bool UiWidgetsBusy(const UiDrag *drag, const UiEdit *edit)
+{
+    return (drag && drag->active) || (edit && (edit->active || edit->claim));
+}
+
+// #endregion

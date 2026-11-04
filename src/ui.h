@@ -98,4 +98,47 @@ int UiListDraw(UiList *l, Rectangle r, const char *title, int rowH, UiListDrawRo
 void UiListClear(UiList *l);        // empty filter, first row
 void UiListFree(UiList *l);
 
+// Mouse widgets (the draw panel; docs/painting.md 13.2). Immediate mode: each call draws the
+// widget and handles its input this frame; `id` names it (unique within its panel, > 0) so a drag
+// or an edit in progress stays with it. Text is UI_M (UI_S where UI_M doesn't fit), fields
+// UI_RAISED with a UI_LINE border. Nothing is allocated.
+typedef struct { int active; float grab; } UiDrag;     // the slider being dragged (0: none)
+typedef struct {
+    int active;                     // the field being typed into (0: none)
+    int claim;                      // a field clicked while another was open: it opens next frame
+    char buf[32];                   // what is typed (one number or a hex colour: stack-sized)
+    int len, cursor;
+    bool all;                       // the whole text is selected (just opened): typing replaces it
+} UiEdit;
+
+// A panel that handles its input in an update step and draws later (the draw panel: before the
+// draw mode, then with the HUD) lays itself out twice: once with UI_WIDGETS_INPUT (nothing is
+// drawn), once with UI_WIDGETS_DRAW (no input is read; the values only show). mouse false: the
+// mouse isn't the panel's (no hover, no clicks; an open field still takes the typing). Hover
+// counts only inside clip (width 0: anywhere), so widgets scrolled out of a panel take nothing.
+// UiWidgetsEnd goes back to the default: input and drawing in one call, the mouse everywhere.
+typedef enum { UI_WIDGETS_BOTH = 0, UI_WIDGETS_INPUT, UI_WIDGETS_DRAW } UiWidgetPass;
+void UiWidgetsBegin(UiWidgetPass pass, bool mouse, Rectangle clip);
+void UiWidgetsEnd(void);
+
+// A horizontal slider of *value in lo..hi (step > 0: snapped to it); LMB drags, the wheel steps
+// (step, or 1/50 of the range). True when the value changed this frame.
+bool UiSlider(UiDrag *drag, int id, Rectangle r, float *value, float lo, float hi, float step);
+// A number field: a click starts typing (the whole value selected), ENTER or a click elsewhere
+// applies (clamped to lo..hi, rounded to `decimals`), ESC cancels, the wheel steps while hovered.
+// True when the value changed.
+bool UiNumberField(UiEdit *edit, int id, Rectangle r, float *value, float lo, float hi, float step, int decimals);
+// A text field with the same editing rules: true when ENTER (or a click elsewhere) applied it.
+bool UiTextField(UiEdit *edit, int id, Rectangle r, char *text, int textSize);
+// A colour swatch (alpha shown over a checker), outlined in UI_ACCENT when selected; true when clicked
+bool UiSwatch(Rectangle r, Color c, bool selected);
+// A button in the panel's look (active: drawn on, as a pressed toggle); true when clicked
+// (LMB pressed on it). label NULL or "": no text (the caller draws an icon on it).
+bool UiButton(Rectangle r, const char *label, bool active);
+// A widget had the mouse this frame (a drag, a field being typed into): the panel keeps it
+bool UiWidgetsBusy(const UiDrag *drag, const UiEdit *edit);
+// Rounded rectangle of any radius (radius >= half the shorter side: a disc or a pill), filled,
+// with an optional 1 px border (border.a == 0: none); from the atlas, like UiPanel
+void UiRoundRect(Rectangle r, int radius, Color fill, Color border);
+
 #endif

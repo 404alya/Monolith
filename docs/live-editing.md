@@ -97,7 +97,9 @@ void MS_EditPreviewEnd(MS_Scene *s);
    `use`, `viewpoint`, `spawn` or `id` line (materials, `env`, `sky`, `sun`, `shadow`, cache
    hints, `monolith`). When it differs from the current load's, the text changed something
    edit mode never changes: the new `SceneData` is uploaded in full (`UploadGpu`; still no
-   read of the map file), i.e. a reload from memory. `stats->full` says so.
+   read of the map file), i.e. a reload from memory. `stats->full` says so. (Since the painting
+   round, materials **appended** at the end, and a material whose only change is `uv_faces`,
+   `filter` or `albedo_map`, are built alone on the live path instead: `docs/painting.md` §9.4.)
 3. **Move over** the GPU resources that don't depend on objects: textures, shader files and
    aliases, materials, sky, ambient map. Light shadow maps go to the light with the same
    content (`R3D_Light` bytes, shadow, clip); a light without a match gets a new one.

@@ -16,8 +16,9 @@
 //   press <key>           key down this frame, up the next one (a printable key types its char)
 //   down <key> / up <key> hold / release a key (SHIFT, CTRL, ALT, ...)
 //   click <left|right>    a button down this frame, up the next one
+//   down lmb|rmb / up lmb|rmb   hold / release a mouse button (a drag: down lmb, move ..., up lmb)
 // Keys: A-Z, 0-9, ENTER, KP_ENTER, ESCAPE, BACKSPACE, TAB, DELETE, SPACE, MINUS, PERIOD,
-// SHIFT, RSHIFT, CTRL, RCTRL, ALT, RALT, UP, DOWN, LEFT, RIGHT.
+// SHIFT, RSHIFT, CTRL, RCTRL, ALT, RALT, UP, DOWN, LEFT, RIGHT, LBRACKET, RBRACKET.
 #define MONOLITH_INPUT_IMPL
 #include "input.h"
 #include "monolith_scene.h"
@@ -28,7 +29,7 @@
 
 #define INPUT_KEYS 512
 
-typedef enum { STEP_WAIT, STEP_AT, STEP_MOVE, STEP_PRESS, STEP_DOWN, STEP_UP, STEP_CLICK } StepKind;
+typedef enum { STEP_WAIT, STEP_AT, STEP_MOVE, STEP_PRESS, STEP_DOWN, STEP_UP, STEP_CLICK, STEP_BDOWN, STEP_BUP } StepKind;
 
 typedef struct {
     StepKind kind;
@@ -55,6 +56,7 @@ static const struct { const char *name; int key; } KEY_NAMES[] = {
     { "MINUS", KEY_MINUS }, { "PERIOD", KEY_PERIOD }, { "SHIFT", KEY_LEFT_SHIFT }, { "RSHIFT", KEY_RIGHT_SHIFT },
     { "CTRL", KEY_LEFT_CONTROL }, { "RCTRL", KEY_RIGHT_CONTROL }, { "ALT", KEY_LEFT_ALT }, { "RALT", KEY_RIGHT_ALT },
     { "UP", KEY_UP }, { "DOWN", KEY_DOWN }, { "LEFT", KEY_LEFT }, { "RIGHT", KEY_RIGHT },
+    { "LBRACKET", KEY_LEFT_BRACKET }, { "RBRACKET", KEY_RIGHT_BRACKET },
 };
 
 static int KeyByName(const char *w)
@@ -129,6 +131,9 @@ bool InputScriptLoad(const char *path, int startFrame, int screenW, int screenH)
                 st.frames = (int)strtol(w[3], &end, 10);
                 bad = bad || *end || st.frames < 1 || st.frames > 100000;
             }
+        } else if ((strcmp(w[0], "down") == 0 || strcmp(w[0], "up") == 0) && n == 2 && (strcmp(w[1], "lmb") == 0 || strcmp(w[1], "rmb") == 0)) {
+            st.kind = w[0][0] == 'd' ? STEP_BDOWN : STEP_BUP;
+            st.key = w[1][0] == 'l' ? MOUSE_BUTTON_LEFT : MOUSE_BUTTON_RIGHT;
         } else if ((strcmp(w[0], "press") == 0 || strcmp(w[0], "down") == 0 || strcmp(w[0], "up") == 0) && n == 2) {
             st.kind = w[0][0] == 'p' ? STEP_PRESS : w[0][0] == 'd' ? STEP_DOWN : STEP_UP;
             st.key = KeyByName(w[1]);
@@ -206,6 +211,8 @@ void InputFrame(int frame)
         S.button[st->key] = true;
         S.releaseButton[st->key] = true;
         break;
+    case STEP_BDOWN: S.button[st->key] = true; break;
+    case STEP_BUP: S.button[st->key] = false; break;
     }
     if (++S.done >= st->frames) { S.at++; S.done = 0; }
 }
