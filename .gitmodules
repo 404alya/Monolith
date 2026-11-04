@@ -1,0 +1,3 @@
+[submodule "maps/monolith"]
+	path = maps/monolith
+	url = git@github.com:404alya/Monolith-map1.git
