@@ -4989,3 +4989,38 @@ Files: `shaders/deferred/ambient.frag`, `src/r3d_draw.c`, `src/modules/r3d_shade
 | frame | 64.99 / 65.44 | 61.84 / 62.63 | **−2.97 (−4.6%), 15.3 → 16.1 fps** |
 
 The other passes moved by less than 0.15 ms. Less than the ~5 ms estimated from the bytes: reading RADIANCE and SPECULAR back (16 B per pixel) costs ~2 ms inside the fused pass. At the developer's window (1366 × 768) expect about half.
+
+## Patch 27: a caller-set draw sort key for surface shaders (2026-11-04)
+
+**Symptom.** monolith's paint layer (`docs/painting.md`) draws a painted material with a generated paint version of its shader (or of an empty shader when the material has none). With that swap, an alpha-0 paint entry on a Kenney tree's bark in `maps/pine_forest` changed 157 pixels at viewpoint 1 (3–185 per view), all where trunks meet the ground, including unpainted trees; and after four live paint edits on `maps/monolith` view 2 differed by 11 pixels from a fresh load of the same text (weed / ground contact). Nothing of the paint itself showed: the winner of coplanar or equal-depth fragments had changed.
+
+**Cause.** Draws are sorted by priority, then by the custom shader's creation serial (patch 17; 0 without a shader), then by textures and state, and at equal depth the first draw wins. A material without a shader (serial 0) that gets a paint shader moves behind every material without one; a live edit that makes a material's alias again gives it a new, larger serial than a fresh load would.
+
+**Change.** `r3d_shader_custom_t` gains `sortKey`, set to the serial when a shader or alias is made (so nothing changes for a caller that never sets it), and `shader_sort_key()` returns it. A new public function sets it:
+
+Files: `include/r3d/r3d_surface_shader.h`, `src/r3d_surface_shader.c`, `src/modules/r3d_shader.h`, `src/modules/r3d_shader.c`, `src/modules/r3d_render.c`.
+
+```diff
+--- include/r3d/r3d_surface_shader.h
++R3DAPI void R3D_SetSurfaceShaderSortKey(R3D_SurfaceShader* shader, unsigned int key);
+--- src/r3d_surface_shader.c
++void R3D_SetSurfaceShaderSortKey(R3D_SurfaceShader* shader, unsigned int key)
++{
++    if (shader) shader->sortKey = key;  // (local patch 27)
++}
+--- src/modules/r3d_shader.h  (r3d_shader_custom_t)
+     uint32_t serial;
++    uint32_t sortKey;   // the draw sort key: serial unless R3D_SetSurfaceShaderSortKey set it (local patch 27)
+--- src/modules/r3d_shader.c  (r3d_shader_custom_alloc, r3d_shader_custom_clone)
+     shader->serial = ++r3d_shader_custom_serial;
++    shader->sortKey = shader->serial;
+     clone->serial = ++r3d_shader_custom_serial;
++    clone->sortKey = clone->serial;
+--- src/modules/r3d_render.c  (shader_sort_key)
+-    return shader ? (uintptr_t)shader->serial : 0;
++    return shader ? (uintptr_t)shader->sortKey : 0;
+```
+
+monolith's runtime (`ShaderSortKey` in `runtime/monolith_scene.c`) gives every scene material's alias the key `material index + 1`, and a paint alias of a material without a shader (or of a model slot's own material) the key 0, so the draw order is the unpainted load's whatever is painted and in whatever order live edits made the aliases. Without `MS_PATCHED_R3D` it keeps the earlier workaround (live edits make the later materials' aliases again).
+
+**Verification.** Against the build before the patch (the round's phase-0 base): every map in `maps/` and `tests/models`, `tests/rotated`: `--dump-boxes` identical, 49 shot pairs (every viewpoint, yaw 0–300) 0 pixels. The two repros above: 0 pixels (bark entry at all 5 pine_forest viewpoints; live vs fresh load on monolith view 2). Alpha-0 paint entries on every kind of surface (the verifiers' packages: 7 views; monolith's six shader surfaces: 7 views; pine_forest ground + Kenney tree: 5 views): 0 pixels. `./build.sh`, `--win`, `examples/build.sh` (+ `test`) without warnings; `tools/leakcheck.sh` (+ `--asan`): zero leaks of ours.

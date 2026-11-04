@@ -11,6 +11,8 @@
 # with -include tests/examples/harness.h: the same program then needs --shot <file>, renders 30
 # frames in a hidden window, saves the image and exits (it never opens a visible window), e.g.
 # examples/build/linux-test/01_minimal/minimal --shot /tmp/x.png --view 2
+# or, as a benchmark of the runtime as a game builds it (the harness's bench mode; one at a time,
+# __GL_SYNC_TO_VBLANK=0): examples/build/linux-test/01_minimal/minimal --bench report.md <package>
 #
 # Builds against monolith's R3D copy (submodules/r3d, with -DMS_PATCHED_R3D) and its static
 # libraries, which ../build.sh builds (run it once first, or ../build.sh --win for --win).

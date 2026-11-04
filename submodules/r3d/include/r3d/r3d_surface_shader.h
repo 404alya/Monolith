@@ -86,6 +86,20 @@ R3DAPI R3D_SurfaceShader* R3D_LoadSurfaceShaderAlias(R3D_SurfaceShader* shader);
 R3DAPI void R3D_UnloadSurfaceShader(R3D_SurfaceShader* shader);
 
 /**
+ * @brief Sets where draws with this shader go in the draw sort (local patch 27).
+ *
+ * Draws are sorted by priority, then by this key, then by textures and state. By default the key
+ * is the shader's creation serial (1, 2, ... in the order shaders and aliases are made); a draw
+ * without a custom shader has key 0. Setting a key lets the caller keep the draw order when it
+ * swaps a material's shader (key 0: sort as if the material had no custom shader). Draws with
+ * equal keys and state may come in either order relative to each other.
+ *
+ * @param shader Surface shader or alias.
+ * @param key The sort key.
+ */
+R3DAPI void R3D_SetSurfaceShaderSortKey(R3D_SurfaceShader* shader, unsigned int key);
+
+/**
  * @brief Sets a uniform value for the current frame.
  *
  * Once a uniform is set, it remains valid for the all frames.

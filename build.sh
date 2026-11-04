@@ -24,6 +24,8 @@
 # the build dir is re-configured in place (a full R3D rebuild). Delete those
 # directories to force a fresh configure.
 # R3D_DIR can be overridden: R3D_DIR=/path/to/r3d ./build.sh
+# The vendored xatlas (src/vendor/xatlas/, MIT; C++, the paint unwrap) is compiled once per build
+# folder into <build folder>-obj/xatlas.o with its own flags (Xatlas below) and linked in.
 # The runtime (runtime/monolith_scene.c) is built with -DMONOLITH_EDITOR: hot reload, source
 # lines and the writers; --export writes it without them (src/export.c).
 # R3D_BUILD_TYPE (Linux only): CMake build type of R3D/raylib/assimp, default Release.
@@ -62,6 +64,26 @@ BuildR3D() {
   cmake --build "$dir" -j"$(nproc)" >> "$log" 2>&1 || { tail -50 "$log"; exit 1; }
 }
 
+# Xatlas <c++ compiler> <object> <flags...>: compiles the vendored xatlas (src/vendor/xatlas/, MIT;
+# the editor's paint unwrap, src/paintunwrap.c, through its C API) into <object> when the object is
+# missing, older than the source or this script, or was built with other flags. It is not our code:
+# it gets -w (no warnings of its own), -DNDEBUG (no debug checks or debug files),
+# XA_MULTITHREADED=0 (no threads: the same model always gives the same unwrap) and its C API.
+Xatlas() {
+  local cxx="$1" obj="$2"
+  shift 2
+  local dir="$ROOT/src/vendor/xatlas"
+  local flags=(-std=c++14 -w -DNDEBUG -DXATLAS_C_API=1 -DXA_MULTITHREADED=0 "$@")
+  local stamp="$obj.flags"
+  mkdir -p "$(dirname "$obj")"
+  if [[ ! -f "$obj" || "$dir/xatlas.cpp" -nt "$obj" || "$dir/xatlas.h" -nt "$obj" || "$dir/xatlas_c.h" -nt "$obj" ||
+        "$ROOT/build.sh" -nt "$obj" || ! -f "$stamp" || "$(cat "$stamp")" != "$cxx ${flags[*]}" ]]; then
+    echo "compiling xatlas ($cxx) ..."
+    "$cxx" "${flags[@]}" -c "$dir/xatlas.cpp" -o "$obj"
+    printf '%s\n' "$cxx ${flags[*]}" > "$stamp"
+  fi
+}
+
 WIN=0
 if [[ "${1:-}" == "--win" ]]; then
   WIN=1
@@ -88,6 +110,8 @@ if [[ $WIN == 1 ]]; then
     -DR3D_BUILD_EXAMPLES=OFF -DR3D_GPU_PROFILER=ON
 
   mkdir -p "$OUT"
+  XATLAS_OBJ="$ROOT/build/win-obj/xatlas.o"
+  Xatlas x86_64-w64-mingw32-g++ "$XATLAS_OBJ" -O2
   # -static: libgcc, libstdc++ (assimp) and winpthread are linked in as well,
   # leaving only system DLLs (opengl32, gdi32, winmm, kernel32, ...) as imports.
   "$WIN_CC" -std=c11 -Wall -Wextra -Wno-missing-field-initializers -O2 \
@@ -98,7 +122,7 @@ if [[ $WIN == 1 ]]; then
     -I"$R3D_DIR/external/assimp/contrib/zlib" -I"$R3D_WIN/external/assimp/contrib/zlib" \
     -DR3D_BUILD_TYPE_NAME='"Release"' \
     -I"$ROOT/runtime" -DMS_PATCHED_R3D -DMONOLITH_EDITOR \
-    "$ROOT"/src/*.c "$ROOT"/runtime/*.c -o "$OUT/monolith.exe" \
+    "$ROOT"/src/*.c "$ROOT"/runtime/*.c "$XATLAS_OBJ" -o "$OUT/monolith.exe" \
     -s -static -L"$R3D_WIN/lib" -lr3d -lraylib -lassimp -lzlibstatic -lstdc++ \
     -lopengl32 -lgdi32 -lwinmm -lshell32 -lm
 
@@ -175,6 +199,19 @@ elif [[ "$MODE" == "profile" ]]; then
 fi
 
 mkdir -p "$OUT"
+# xatlas (C++) with this build's optimisation and sanitizer flags, one object per build folder
+case "$CC" in
+  *clang*) CXX="${CXX:-${CC/clang/clang++}}" ;;
+  *gcc*) CXX="${CXX:-${CC/gcc/g++}}" ;;
+  *) CXX="${CXX:-c++}" ;;
+esac
+XATLAS_FLAGS=()
+for f in "${CFLAGS[@]}"; do [[ "$f" == -std=* || "$f" == -W* ]] || XATLAS_FLAGS+=("$f"); done
+# (UBSan's -fsanitize=function would stop at xatlas's OpenNL part, which calls matrix destructors
+# through a pointer of the base struct type: UB by the letter, ABI-compatible; clang only)
+[[ "$MODE" == debug && "$CXX" == *clang* ]] && XATLAS_FLAGS+=(-fno-sanitize=function)
+XATLAS_OBJ="$OUT-obj/xatlas.o"
+Xatlas "$CXX" "$XATLAS_OBJ" "${XATLAS_FLAGS[@]}"
 # libstdc++ (needed by assimp) is linked statically as well: the host's libstdc++ is
 # usually newer than other distros' and would fail to load there. libgcc_s stays
 # shared (every distro has it; the static unwinder would need glibc 2.35).
@@ -187,7 +224,7 @@ GLIBC_WRAP=acosf,asinf,atan2f,sqrtf,fmod,fmodf,hypot,hypotf,__isoc23_strtoul,__i
   -DMAPS_PATH="\"$ROOT/maps/\"" -DPROJECT_PATH="\"$ROOT/\"" -DR3D_SOURCE_PATH="\"$R3D_DIR/\"" \
   -DR3D_BUILD_TYPE_NAME="\"$R3D_BUILD_TYPE\"" \
   -I"$ROOT/runtime" -DMS_PATCHED_R3D -DMONOLITH_EDITOR \
-  "$ROOT"/src/*.c "$ROOT"/runtime/*.c -o "$OUT/monolith" \
+  "$ROOT"/src/*.c "$ROOT"/runtime/*.c "$XATLAS_OBJ" -o "$OUT/monolith" \
   -L"$R3D_LINUX/lib" -lr3d -lraylib -lassimp -lzlibstatic \
   -l:libstdc++.a -lgcc_s -lGL -lm -lpthread -ldl -Wl,--wrap="${GLIBC_WRAP//,/,--wrap=}"
 

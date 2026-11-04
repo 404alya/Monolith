@@ -12,14 +12,31 @@ typedef enum {
     EDIT_ID_REMOVE,         // the selection's lines lose their `id N` prefix (objects stay)
     EDIT_SET_ROTATION,      // ypr[] absolute, each object about its own centre / origin (reset: 0 0 0;
                             // docs/live-editing.md 11.9)
-    EDIT_PAINT_MATERIAL,    // one object gets a new material matName with matKeys (docs/painting.md 3.1,
-                            // 10.3): a box line is split out of its repeat and wrapped in use "matName"
-                            // ... use "<its material>"; a model gets material.N (slot) or material (slot
-                            // -1); an id is added. The material line goes after the file's last material
-                            // line when that is before the object's line, else right before the use
     EDIT_MATERIAL_SET,      // material matName: the keys in matKeys replace the same keys on its first
-                            // line or are added there; "-key" removes a key (uv_faces, filter, albedo_map)
+                            // line or are added there; "-key" removes a key (uv_faces, filter, albedo_map,
+                            // paint_filter)
+    // The paint layer (docs/painting.md 4.2, 10.3), on the selection (one object; EDIT_PAINT_SET with
+    // a kept rectangle: several). ADD and SET take their faces away from the object's other entries
+    // in the same material (an entry left without faces goes), so a face that joins a group leaves
+    // its old one
+    EDIT_PAINT_ADD,         // a `paint` statement in the file's paint block (sorted by material, entity,
+                            // face / slot; the block is appended under `# paint (draw mode)` when the
+                            // file has none): paint.material (NULL: the model's own, `paint own`),
+                            // paint.faces or paint.slot, paint.rect; the material gets `paint
+                            // "<paint.atlas>"` (and `paint_filter nearest` with paint.nearest) when it has
+                            // no paint key (the built-in "default" without a line: a material line at the
+                            // top of the block); the line gets an id when it has none (nothing is split)
+    EDIT_PAINT_SET,         // the object's entry in paint.material with the rectangle paint.rect, else the
+                            // one holding the first face of paint.faces (or paint.slot), gets paint.faces
+                            // and paint.rect (rect[2] <= 0: kept); a
+                            // `paint own` entry also takes paint.filter (-1 kept, 0 trilinear, 1 nearest)
+    EDIT_PAINT_REMOVE,      // the object's entries in paint.material lose the faces of paint.faces (an
+                            // entry left without faces goes) or the entry of paint.slot goes (faces 0 and
+                            // slot -1: every entry of the object in that material)
 } EditOpKind;
+
+// Faces of a paint entry (bits of EditOp.paint.faces): +x -x +y -y +z -z
+#define EDIT_PAINT_ALL_FACES 0x3F
 
 typedef struct {
     EditOpKind kind;
@@ -47,10 +64,18 @@ typedef struct {
     MS_ObjRef anchor;       // EDIT_ADD: the new line goes right after this object's line (its group)
     int id;                 // EDIT_ID: the id the selected objects' line gets (1..2147483647, unique in
                             // the file; one line only); 0 = each line without an id gets the next free one
-    const char *matName;    // EDIT_PAINT_MATERIAL, EDIT_MATERIAL_SET: the material
-    const char *matKeys;    // its keys as written, e.g. "albedo 255 255 255 albedo_map
-                            // \"textures/paint/paint_12.png\" uv_faces 0 1 2 3 4 5"
-    int slot;               // EDIT_PAINT_MATERIAL on a model: the slot (material.N), -1: every slot
+    const char *matName;    // EDIT_MATERIAL_SET: the material
+    const char *matKeys;    // its keys as written, e.g. "paint_filter nearest" ("-key" removes one)
+    struct {                // EDIT_PAINT_ADD / SET / REMOVE
+        const char *material;   // the material's name; NULL: the model slot's own material
+        const char *atlas;      // EDIT_PAINT_ADD: the atlas path the material gets if it has no paint key
+        unsigned char faces;    // boxes: EDIT_PAINT_* face bits; models: 0
+        int slot;               // models: the slot; boxes: -1
+        int rect[4];            // x y w h, texels of the atlas
+        bool nearest;           // EDIT_PAINT_ADD: paint_filter nearest (on the own entry, or with the
+                                // material's new paint key)
+        signed char filter;     // EDIT_PAINT_SET on own entries: -1 kept, 0 trilinear, 1 nearest
+    } paint;
 } EditOp;
 
 // One part of an edit: bytes [offset, offset + oldLen) of the file before it became newText
@@ -77,9 +102,20 @@ typedef struct {
     MS_EntityId *selBefore, *selAfter;
     int selBeforeCount, selAfterCount, selAfterCap;
     char what[200];         // "moved 2 objects +0.5 m x (line 120 split into 3 lines)"
-    char *matName, *matKeys;    // EDIT_PAINT_MATERIAL / EDIT_MATERIAL_SET: op.matName / matKeys point here
+    char *matName, *matKeys;    // EDIT_MATERIAL_SET: op.matName / matKeys point here
+    char *paintMaterial, *paintAtlas;   // EDIT_PAINT_*: op.paint.material / atlas point here
     PaintStep *paint;       // NULL for text edits; strokes (no hunks), or a first stroke (hunks + paint)
+    // More paint ops amended onto this step (MapEditAmendPaint: a stroke that went on onto a new face,
+    // the panel's face groups): its hunks are the text of all of them, a rebase applies op then these
+    struct EditMore *more;
+    int moreCount, moreCap;
 } EditStep;
+
+// One amended op of a step (its strings owned here; op.paint.material / atlas point at them)
+typedef struct EditMore {
+    EditOp op;
+    char *material, *atlas;
+} EditMore;
 
 // What mapedit.c calls for a step with paint (drawmode.c sets them; NULL: no draw mode). undo /
 // redo swap the step's tiles (or images) with the canvas; they run before the step's text goes
@@ -138,13 +174,19 @@ typedef enum {
 // *outSel is a heap array of entity ids to select (free it), and msg says what changed.
 EditResult MapEditApply(MapEditor *E, const MS_ObjRef *sel, int selCount, const EditOp *op,
                         MS_EntityId **outSel, int *outSelCount, char *msg, int msgSize);
-// A paint step: the stroke's tiles (no text), or with op (EDIT_PAINT_MATERIAL / EDIT_MATERIAL_SET)
-// the text edit and the paint as one step. paint is the history's from then on (even on
+// A paint step: the stroke's tiles (no text), or with op (EDIT_PAINT_ADD / SET / REMOVE /
+// EDIT_MATERIAL_SET) the text edit and the paint as one step. paint is the history's from then on (even on
 // EDIT_FAILED: released through the hooks). what: the HUD text ("painted 3 tiles of paint_12.png").
 // Never auto-saved here (the draw mode saves at LMB up). The paint in the history is capped at 512
 // MiB: beyond it the oldest steps are dropped (msg says so; MapEditor.droppedSteps counts them).
 EditResult MapEditPushPaint(MapEditor *E, const MS_ObjRef *sel, int selCount, const EditOp *op, PaintStep *paint,
                             const char *what, MS_EntityId **outSel, int *outSelCount, char *msg, int msgSize);
+
+// One more paint op onto the top step of the undo stack, which must be a paint step the working copy
+// shows (a stroke going on onto a new face, the panel's face groups): the op goes live, the step's
+// hunks become the text of both (one undo), and a rebase applies it after the step's own op.
+// EDIT_FAILED (msg says why) leaves the step and the text as they were.
+EditResult MapEditAmendPaint(MapEditor *E, const MS_ObjRef *sel, int selCount, const EditOp *op, char *msg, int msgSize);
 
 // Undo / redo the last step (only while the file, or the working copy, is the one the step left / found)
 EditResult MapEditUndo(MapEditor *E, MS_EntityId **outSel, int *outSelCount, char *msg, int msgSize);

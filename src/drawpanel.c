@@ -1,9 +1,10 @@
 // The draw panel (docs/painting.md 13.2): docked at the left edge below the HUD lines, 300 px
 // wide, in the ui.h look. From top to bottom: Target (the surface the cursor rested on last, what
-// paint there goes into or why it can't be painted; the shared switch), Pen (five pens, size,
-// hardness), Colour (R G B A, a swatch, the hex field, the recent colours), Canvas (density, Resize
-// to density, the texel size, pixel look) and Faces (boxes only: the face groups of a box canvas).
-// The target, its canvas and its lines come from the draw mode (dm->target); the actions act on it.
+// paint there goes into or why it can't be painted), Pen (five pens, size, hardness), Colour
+// (R G B A, a swatch, the hex field, the recent colours), Density (texels per metre, the texel size
+// there, Resize to density, Pixel look, Clear paint) and Faces (boxes only: the face groups of the
+// box's paint). The target, its rectangle and its lines come from the draw mode (dm->target); the
+// actions act on it.
 //
 // One layout function serves three passes: a measure pass (the height, no widget runs), the input
 // pass (DrawPanelUpdate, before the draw mode reads the mouse: the widgets change the DrawMode,
@@ -156,35 +157,26 @@ static bool TargetBox(const DrawMode *dm)
     return TargetSet(dm) && dm->target.ok && h->hit.obj.kind == MS_OBJ_BOX && h->face >= 0 && h->face < 6;
 }
 
-// The target's box canvas with a face layout (NULL: none)
-static const Canvas *TargetLayoutCanvas(const DrawMode *dm)
-{
-    int ci = TargetBox(dm) ? dm->target.canvas : -1;
-    if (ci < 0 || ci >= dm->canvasCount) return NULL;
-    const Canvas *c = &dm->canvases[ci];
-    return c->layout && c->file < 0 ? c : NULL;
-}
-
-// The face buttons follow the target canvas's layout; the user's unapplied changes stay until the
-// target is another canvas (and an undo or an apply brings them in step again)
+// The face buttons follow the target box's groups; the user's unapplied changes stay until the
+// target is another box (and an undo or an apply brings them in step again)
 static void SyncFaces(DrawPanel *p, const DrawMode *dm)
 {
     static const unsigned char separate[6] = { 0, 1, 2, 3, 4, 5 };
-    const Canvas *c = TargetLayoutCanvas(dm);
-    int key = c ? dm->target.canvas : -1;
-    const unsigned char *now = c ? c->cells : separate;
+    bool box = TargetBox(dm) && dm->target.facesOk;
+    int key = box ? dm->target.faceKey : -1;
+    const unsigned char *now = box ? dm->target.groups : separate;
     bool edited = memcmp(p->faces, p->facesLoaded, 6) != 0;
-    if (key != p->facesCanvas || (!edited && memcmp(p->facesLoaded, now, 6) != 0)) {
+    if (key != p->facesKey || (!edited && memcmp(p->facesLoaded, now, 6) != 0)) {
         memcpy(p->faces, now, 6);
         memcpy(p->facesLoaded, now, 6);
-        p->facesCanvas = key;
+        p->facesKey = key;
     } else if (memcmp(p->faces, now, 6) == 0) memcpy(p->facesLoaded, now, 6);
 }
 
-// The pixel look of the target (its material's filter), or of new canvases
+// The pixel look of the target (its atlas's paint_filter), or of new atlases
 static bool PixelLookShown(const DrawMode *dm)
 {
-    return TargetSet(dm) && dm->target.ok && dm->target.geom.ok && !dm->target.geom.fresh ? dm->target.geom.nearest : dm->pixelLook;
+    return TargetSet(dm) && dm->target.ok && dm->target.geom.ok ? dm->target.geom.nearest : dm->pixelLook;
 }
 
 // #endregion
@@ -205,16 +197,12 @@ static void SectionTarget(Ctx *c)
 {
     DrawMode *dm = c->dm;
     Header(c, "Target", NULL);
-    // The shared switch, on the header line (docs/painting.md 3.2)
-    Rectangle sr = { (float)(c->x + c->w - 82), (float)(c->y - HEAD_H + 7), 82, 22 };
-    if (Button(c, sr, "Shared", dm->shared)) dm->shared = !dm->shared;
-    if (Drawing(c)) UiHints("{H}", (int)sr.x - UiHintsWidth("{H}", UI_XS) - 4, (int)sr.y + (22 - UiLineHeight(UI_XS)) / 2, UI_XS, UI_DIM);
     // What the cursor rested on last (dm->target), and what paint there goes into, or why it can't
     const DrawTarget *t = &dm->target;
     bool none = !TargetSet(dm) || t->hit.hit.obj.kind == MS_OBJ_NONE;
     c->y += Wrapped(c, none ? "point at a box or a model" : t->what, UI_S, none ? UI_DIM : UI_INK, 2);
     if (!none && !t->ok && t->refusal[0]) c->y += Wrapped(c, t->refusal, UI_S, UI_ERROR, 3);
-    else if (!none && t->into[0]) c->y += Wrapped(c, t->into, UI_S, UI_DIM, 2);
+    else if (!none && t->into[0]) c->y += Wrapped(c, t->into, UI_S, UI_DIM, 3);
     c->y += GAP;
 }
 
@@ -371,11 +359,11 @@ static void SectionColor(Ctx *c)
     c->y += 22 + GAP;
 }
 
-static void SectionCanvas(Ctx *c)
+static void SectionDensity(Ctx *c)
 {
     DrawMode *dm = c->dm;
-    Header(c, "Canvas", NULL);
-    // Density in texels per metre: the slider over log2 (8 .. 512: 64 in the middle)
+    Header(c, "Density", NULL);
+    // Texels per metre of new paint: the slider over log2 (8 .. 512: 64 in the middle)
     Rectangle sr, fr;
     Row(c, "Texels / m", LABEL_W, UI_TEXT, &sr, &fr);
     float d = dm->density > 0.0f ? dm->density : DRAW_DENSITY_DEFAULT;
@@ -384,18 +372,20 @@ static void SectionCanvas(Ctx *c)
     float fv = d;
     if (Field(c, W_DENS_F, fr, &fv, 8.0f, 512.0f, 1.0f, 0)) dm->density = fv;
     c->y += ROW_H + ROW_GAP;
-    // The texel size on the target (the canvas's, or the one its first stroke makes), else at the density
+    // The texel size on the target (its rectangle's, or the one its first stroke gets), else at the density
     const char *texel = TargetSet(dm) && dm->target.ok && dm->target.texel[0] ? dm->target.texel
-                      : TextFormat("new canvases: a texel is about %.1f mm", 1000.0f / d);
+                      : TextFormat("new paint: a texel is about %.1f mm", 1000.0f / d);
     c->y += Wrapped(c, texel, UI_S, UI_DIM, 2) + GAP - 1;
     int bw = (c->w - GAP) / 2;
     if (Button(c, (Rectangle){ (float)c->x, (float)c->y, (float)bw, BUTTON_H }, "Resize to density", false)) c->act = DRAWPANEL_ACT_RESIZE;
-    // (the target's own filter when it has a texture; else what new canvases get)
+    // (the target atlas's filter when it has one; else what new atlases get)
     bool pixel = PixelLookShown(dm);
     if (Button(c, (Rectangle){ (float)(c->x + bw + GAP), (float)c->y, (float)(c->w - bw - GAP), BUTTON_H }, "Pixel look", pixel)) {
         dm->pixelLook = !pixel;
         c->act = DRAWPANEL_ACT_PIXEL_LOOK;
     }
+    c->y += BUTTON_H + GAP;
+    if (Button(c, (Rectangle){ (float)c->x, (float)c->y, (float)bw, BUTTON_H }, "Clear paint", false)) c->act = DRAWPANEL_ACT_CLEAR;
     c->y += BUTTON_H + GAP;
 }
 
@@ -416,25 +406,21 @@ static void SectionFaces(Ctx *c)
 {
     DrawPanel *p = c->p;
     const DrawMode *dm = c->dm;
-    // (boxes only: a box canvas with a face layout has the buttons; the others say why not)
+    // (boxes only; the others say why not)
     if (!TargetBox(dm) && c->p->only != DRAWPANEL_FACES) return;
-    Header(c, "Faces", "same number: one cell");
-    const Canvas *cv = TargetLayoutCanvas(dm);
-    if (!cv) {
-        const char *why = !TargetBox(dm) ? "point at a box: its canvas's faces are grouped here"
-                        : dm->target.canvas < 0 && dm->target.geom.fresh ? "the first stroke gives every face its own cell; then group them here"
-                        : dm->target.geom.layout ? "paint it once, then its faces are grouped here"
-                                                : "this texture has no face layout (uv_faces): every face shows all of it";
-        c->y += Wrapped(c, why, UI_S, UI_DIM, 2) + GAP;
+    Header(c, "Faces", "same number: one rectangle");
+    if (!TargetBox(dm) || !dm->target.facesOk) {
+        c->y += Wrapped(c, "point at a box: its faces' paint is grouped here", UI_S, UI_DIM, 2) + GAP;
         return;
     }
+    const unsigned char *cells = dm->target.groups;
     // A button per face: its name (dim) and its cell number; a click counts the number on (lit:
     // changed, not applied yet)
     int bw = (c->w - 5 * GAP) / 6;
     int left = c->x + (c->w - (6 * bw + 5 * GAP)) / 2;
     for (int f = 0; f < 6; f++) {
         Rectangle r = { (float)(left + f * (bw + GAP)), (float)c->y, (float)bw, BUTTON_H };
-        if (Button(c, r, NULL, p->faces[f] != cv->cells[f])) p->faces[f] = (unsigned char)((p->faces[f] + 1) % 6);
+        if (Button(c, r, NULL, p->faces[f] != cells[f])) p->faces[f] = (unsigned char)((p->faces[f] + 1) % 6);
         if (Drawing(c)) {
             const char *n = TextFormat("%d", p->faces[f] < 6 ? p->faces[f] : 0);
             int nw = UiMeasureBold(n, UI_M), fw = UiMeasure(FACE_NAMES[f], UI_XS);
@@ -452,7 +438,7 @@ static void SectionFaces(Ctx *c)
     for (int k = 0; k < 3; k++) {
         int w = k < 2 ? tw[k] * room / total : c->x + c->w - x;
         Rectangle r = { (float)x, (float)c->y, (float)w, BUTTON_H };
-        if (Button(c, r, labels[k], k == 0 && memcmp(p->faces, cv->cells, 6) != 0)) {
+        if (Button(c, r, labels[k], k == 0 && memcmp(p->faces, cells, 6) != 0)) {
             if (k == 0) {
                 CloseUp(p->faces);
                 c->act = DRAWPANEL_ACT_FACES;
@@ -480,7 +466,7 @@ static void Layout(Ctx *c)
     if (only == DRAWPANEL_ALL || only == DRAWPANEL_TARGET) SectionTarget(c);
     if (only == DRAWPANEL_ALL || only == DRAWPANEL_PEN) SectionPen(c);
     if (only == DRAWPANEL_ALL || only == DRAWPANEL_COLOR) SectionColor(c);
-    if (only == DRAWPANEL_ALL || only == DRAWPANEL_CANVAS) SectionCanvas(c);
+    if (only == DRAWPANEL_ALL || only == DRAWPANEL_DENSITY) SectionDensity(c);
     if (only == DRAWPANEL_ALL || only == DRAWPANEL_FACES) SectionFaces(c);
     c->y += PAD - GAP;
     c->p->contentH = c->y - top;
@@ -506,7 +492,7 @@ void DrawPanelInit(DrawPanel *p)
 {
     memset(p, 0, sizeof(*p));
     for (int f = 0; f < 6; f++) p->faces[f] = p->facesLoaded[f] = (unsigned char)f;
-    p->facesCanvas = -2;
+    p->facesKey = -2;
     p->interactive = true;
 }
 
@@ -514,7 +500,8 @@ bool DrawPanelSetOnly(DrawPanel *p, const char *section)
 {
     static const struct { const char *name; DrawPanelSection s; } names[] = {
         { "all", DRAWPANEL_ALL }, { "target", DRAWPANEL_TARGET }, { "pen", DRAWPANEL_PEN }, { "color", DRAWPANEL_COLOR },
-        { "colour", DRAWPANEL_COLOR }, { "canvas", DRAWPANEL_CANVAS }, { "faces", DRAWPANEL_FACES },
+        { "colour", DRAWPANEL_COLOR }, { "density", DRAWPANEL_DENSITY }, { "canvas", DRAWPANEL_DENSITY },
+        { "faces", DRAWPANEL_FACES },
     };
     p->only = DRAWPANEL_ALL;
     if (!section) return true;

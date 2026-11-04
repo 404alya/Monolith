@@ -8,7 +8,7 @@ Measurement history and the reasoning behind the engine's caches and trade-off k
 
 | Machine | Hardware | Sections |
 |---|---|---|
-| **A** | Laptop: NVIDIA GeForce RTX 4050 Laptop GPU, driver 615.71, AMD Ryzen 7 7435HS (CPU recorded 2026-10-24, same GPU and driver), CachyOS (Linux), picom compositor | everything up to 2026-10-13, editor UI font, CPU profile (2026-10-25), nsys geometry pass (2026-10-27) |
+| **A** | Laptop: NVIDIA GeForce RTX 4050 Laptop GPU, driver 615.71, AMD Ryzen 7 7435HS (CPU recorded 2026-10-24, same GPU and driver), CachyOS (Linux), picom compositor | everything up to 2026-10-13, editor UI font, CPU profile (2026-10-25), nsys geometry pass (2026-10-27), paint layer (2026-11-04) |
 | **B** | NVIDIA GeForce GTX 1660 Ti, Intel i5-10400F (desktop) | box culling, collider BVH (2026-10-20) |
 | **C** | Laptop (plugged in): Intel HD Graphics 5500 (Broadwell GT2, integrated, unified memory), Mesa 25.0.7, Intel i5-5300U, Ubuntu 24.04 (Linux 6.8), 1366 × 768 display | integrated-GPU diagnosis (2026-10-26), GPU per program (2026-10-27) |
 
@@ -435,3 +435,13 @@ Turned boxes (`box … rot`) and the rotate gizmo (`docs/live-editing.md` §11);
 | test1 | 2.165 / 2.170 / 2.167 | 2.165 / 2.193 / 2.183 | 0.000 / +0.023 / +0.016 | +0.013 ms (+0.6 %) |
 
 Within noise on every map (the first monolith base run is a clock-state outlier, §"Run-to-run noise"). *CPU until finish*: monolith 0.712 → 0.736, pine_forest 0.365 → 0.344, test1 0.231 → 0.241 ms (noise level). Shots and dumps of every map: 0 changed pixels, identical. Reports: `benchmark/2026-10-28_23*` on machine A.
+
+## Paint layer: exported game and editor (2026-11-04, machine A)
+
+Machine A (RTX 4050 Laptop, driver 615.71.09, Ryzen 7 7435HS, Linux 7.2.5, on AC), headless 1920 × 1006, full runs (600 frames per viewpoint), `__GL_SYNC_TO_VBLANK=0`. The exported game measured with the examples' harness bench (`tools/bench-export-ab.sh`: each export's own `viewer.c` + runtime, same R3D libraries on both sides). Noise: the base export against itself, 3 pairs: mean −0.17 %, pairs −0.040 … +0.053 ms (±1 %), per viewpoint ±2 %; single runs that fell into a slow clock state were up to +5–18 %.
+
+**Unpainted, round base vs paint layer (exported, 4 interleaved pairs each):** monolith −0.66 % (paired −0.115 … +0.057 ms, base 4.43 ms), pine_forest +0.28 % (−0.105 … +0.097, base 3.96), test1 −0.64 % (−0.069 … +0.042, base 2.48): within noise, as expected (no paint code runs).
+
+**Painted monolith vs the same map unpainted (exported, paint-layer binary)**, opaque fills on 5 faces per object (density 16): N = 10 objects / 10 materials: −2.1 % (4 pairs, within noise); N = 100 / 100 materials: +0.4 % mean, +0.7 % median (4 pairs); N = 1000 / 105 materials (17 without a shader): 12 pairs, median +0.79 %, mean +3.1 % (the mean from runs whose first viewpoint fell into a slow clock state; a rerun of 8 pairs was positive in every pair, per-viewpoint medians +0.03 … +0.10 ms). Draw counts identical for every N (359 box draws: 328 merged, 31 instanced). Reports: `benchmark/export-ab/agentD-*`.
+
+**Editor per-pass table, N = 1000 vs unpainted (11 pairs, medians):** geometry +0.025 ms (+4.1 % of 0.60; 11/11 pairs positive), CPU in `R3D_End` +0.056 ms (+7 %), frame +0.065 ms (+1.5 % of 4.36). Every other pass < 0.02 ms. Variants: 100 objects / 100 materials: geometry +0.025, CPU +0.074; 10 / 10: +0.017, +0.017; only the 88 shader materials' entries: +0.023, +0.034; only the 17 shader-less ones: +0.004, −0.008. **The cost scales with the number of painted surface-shader materials, not with the number of painted objects**; the per-pixel atlas sample on a fully painted 800 m ground box is ~0.008 ms. Not yet profiled: which part of the CPU submission grows (the two extra samplers per painted material, a distinct atlas texture per material breaking the binding cache, the larger programs); a CPU profile of the N = 100 copy (`./build.sh profile`, `profile spin`) is the next step. Ideas, not tried: shared atlas pages across materials (fewer texture switches); the rectangle in merged meshes' vertex data instead of the paint table's `texelFetch`.

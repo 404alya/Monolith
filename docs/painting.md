@@ -1,558 +1,636 @@
 # Painting
 
-Draw mode (**B**) lets the developer paint on any box or model in the editor and edit the
-textures the scene uses, without a request and without leaving the game. This is the design the
-development round works from, written in the same way as `docs/live-editing.md` (the working
-copy, live edits, undo, panels and verification flags that this round builds on). Implementation
-notes follow at the end, one per stream as it merges.
+Draw mode (**B**) lets the developer paint on any box or model in the editor without a request and
+without leaving the game. This is the design the development rounds work from, written in the same
+way as `docs/live-editing.md` (the working copy, live edits, undo, panels and verification flags that
+painting builds on). Implementation notes follow at the end, one per stream as it merges.
+
+Two rounds built it. The first (commit `3bc1bc4`) gave every painted object a copy of its material
+with a canvas of its own and baked surface shaders into that canvas; its notes are at the end. The
+second, the **paint layer** (§1–§9 below), replaces where paint lives and how it is drawn, and keeps
+the first round's strokes, undo, saving, panel and verification flags (§7, §10–§14).
 
 ## 1. Why, and what stays the same
 
-The developer wants to put marks, signs, decals and pixel art on objects by hand instead of
-describing them in a request. Painting writes **package files** (PNGs under `textures/paint/`)
-plus the **smallest change to the map text** (a material and where it is used), so requests, hot
-reload, the export and the AI keep reading the package as they do now.
+The developer wants to put marks, signs, decals and pixel art on the real map by hand, and the real
+map is 97 % surface-shader boxes. In the first round a first stroke changed how the object looked
+(the bake blurred it, froze its animation, lost its glow and specular; a copied flat colour shifted
+the light nearby by 1–2 levels) and many surfaces were refused. Paint is now a **layer over the
+material**: the material, its shader and its textures stay exactly as they are, and a last stage of
+the material's fragment shader composites the paint over what the material computed.
 
 What stays the same:
 
-- **A map that nobody painted looks and behaves exactly as before.** Every new path in the
-  runtime is taken only for a material with one of the new keys (§4). Every map in `maps/` gives
-  pixel-identical `--shot`s and an identical `--dump-boxes`.
-- Model files on disk are never changed. A model is restyled through material overrides only
-  (`material.N`).
-- Boxes of materials without the new keys merge into meshes exactly as now.
-- Only **albedo** is painted this round. Roughness, metalness and emission painting is left for a
-  later round.
+- **A map that nobody painted runs nothing new.** No new shader, texture, vertex data, instance
+  attribute or draw. Every map in `maps/` gives pixel-identical `--shot`s, an identical
+  `--dump-boxes` and the same bench results, in the editor and in the exported game.
+- **A painted object looks pixel-identical wherever it isn't painted**, including before its first
+  stroke: no resampling, no bake, no frozen animation, no lost emission, specular or view-dependent
+  shading, no copied colour.
+- **Painted objects stay in their material's draws.** No per-object materials, ranges or draw calls:
+  merged box meshes and instance buffers carry which paint each face uses (§4.4).
+- **Per-pixel work only where it is needed.** Materials without paint compile and draw as before.
+  A painted material adds a vertex fetch and, per pixel, one test and one texture sample where the
+  face has paint (§4.3).
+- Model files on disk are never changed.
+- Only **albedo** is painted (with the coat rule of §4.3). Roughness, metalness and emission
+  painting is left for a later round.
 
 ## 2. Decisions
 
-The developer decided these before phase 0:
+The developer decided these before the first round (they still hold):
 
-1. **Pixel size means both controls.** One is the **brush size** in texels (1 = one texel, for
-   pixel art). The other is the **canvas density** in texels per metre, which sets how big a
-   texel looks in the world. New canvases use the density. An existing canvas can be resized to
-   it (§5.3).
-2. **Each object gets a texture of its own.** The first stroke on an object gives it its own
-   material and canvas (§3). A **shared** switch on the panel paints into the material's existing
-   `albedo_map` instead, so every object using it changes.
-3. **Box faces: the developer says which faces share texture space.** This is a per-material
-   face-group key, `uv_faces` (§4.1): faces with the same number share one cell of the canvas.
-   Leaving the key out keeps today's UVs, where all six faces show the whole texture.
+1. **Pixel size means both controls.** The **brush size** in texels (1 = one texel, for pixel art)
+   and the **density** in texels per metre, which sets how big a texel of new paint looks in the
+   world (§5.2).
+2. **Box faces: the developer says which faces share texture space.** Now a property of the paint
+   itself: faces of one box in one group share one rectangle of the atlas (§3.2), set on the panel.
 
-Defaults chosen in phase 0 (each can change; the final summary lists them again):
+The developer decided these before the paint-layer round (2026-11-04):
 
-- Key **B** in spectator mode, next to M / V / C.
-- The panel is docked on the **left**, so it doesn't collide with the inspector, id and picker
-  panels on the right. It is mouse-driven (§13.2).
-- Pens: hard round, square (pixel-exact), soft round, eraser, fill (face / UV island).
-- Eyedropper on **ALT+LMB**.
-- Canvas density 64 texels/m, at most 2048 px per side, at least 16.
-- Folder `textures/paint/`, PNG only (RGBA8).
-- One shared undo history with the map edits.
-- New box canvases get `uv_faces 0 1 2 3 4 5`: every face has its own cell.
-- The eraser restores the canvas's **base image**: what the canvas held when it was made or
-  first opened in this session (§7.4).
-- Paint on a material with a surface `shader` is refused this round (§3.5). Changed after the round:
-  a box's first stroke bakes its shader into the canvas (§3.6); model slots are still refused.
+3. The first round was committed as it stood (`3bc1bc4`, branch `paint-layer`); this round builds on
+   it and history keeps the bake.
+4. **Models whose UVs overlap or repeat** (Kenney kits with UVs up to ~30, mirrored halves) get a
+   **generated paint unwrap** per model file when it is first painted, stored as a package sidecar
+   (§4.5). The unwrap is made with xatlas (MIT), vendored with its licence, in the editor only.
+5. **"No slower"** means: within measurement noise in the exported game, with one extra texture
+   sample per pixel only on painted materials (§4.3, §15 phase 3).
+
+Defaults chosen in phase 0 of the paint-layer round (each can change; the final summary lists them
+again):
+
+- **One paint atlas per material** that has paint: `textures/paint/<material>.png` (the material's
+  name kept to letters, digits, `-`, `_`), RGBA8, straight alpha, transparent where unpainted, at most
+  4096 × 4096 (§5).
+- **Density** 64 texels/m (the panel's control, 8–512), now only the paint's own resolution; each
+  side of a rectangle is clamped to 4..2048 texels (§5.2).
+- **Pixel look** is per atlas: `paint_filter nearest` on the material (§4.1).
+- **Compositing** (§4.3): the paint is a matte coat. Painted texels take the paint's colour over
+  the material's albedo, and cover its emission and metalness in proportion to their alpha;
+  roughness, normal, occlusion and specular stay the material's.
+- **`transparency alpha`** materials: paint is opaque paint on the surface (alpha rises with the
+  paint's alpha). **Cutout** materials (`alpha_cutoff`, `discard`): holes stay holes.
+- **The eraser** is a true erase (alpha 0).
+- **Shared mode goes** (and its key H): painting a material's own texture in place is no longer part
+  of draw mode. Paint never changes a file the material reads.
+- **`uv_faces`** stays a map key (first round) that the painter no longer writes; paint doesn't
+  depend on it.
+- Key **B**, the panel on the left, the pens, the eyedropper on **ALT+LMB**, one undo history with the
+  map edits: as in the first round.
 
 ## 3. Where paint lands
 
-### 3.1 An object's own material (the default)
+### 3.1 The atlas of a material
 
-The first stroke on an object that has no canvas of its own is **one undoable edit** that:
+Every material with paint names its **atlas**, a PNG in the package (`paint` key, §4.1). Every
+painted surface drawn with the material has a **rectangle** in that atlas, in texels. Rectangles
+never overlap, never move once allocated (the map text holds them), and keep a 2-texel transparent
+border (§5.1).
 
-1. Makes a **copy of the object's current material** under a new name, `paint_<id>` (a model
-   slot: `paint_<id>_s<N>`). `<id>` is the object's line id. A line without one gets the next
-   free id, as CTRL+I does (`mapedit.c`). If the name already exists, `-2`, `-3`, … is appended.
-2. Gives the copy `albedo_map "textures/paint/paint_<id>.png"` (a model slot:
-   `…/paint_<id>_s<N>.png`), plus the keys the canvas needs (§3.3).
-3. Points the object at the copy:
-   - **A box line**: the line is split out of its `repeat` as the other edits do (one copy
-     painted). It is then wrapped as `use "paint_<id>"` … `use "<the material it had>"`, so the
-     lines after it keep their material.
-   - **A model**: `material.N "paint_<id>_s<N>"` is added to its line (or replaced), also split
-     out of a `repeat`.
-   - **Several boxes from one statement** (`stairs`, `waffle`, a `block` with a repeat that can't
-     be split): every box of the statement uses the material. They share one canvas, because they
-     share one layout (§4.1).
-4. Makes the canvas (§5) in memory. Nothing is written to disk before CTRL+S (§11).
+A surface is painted **in the atlas of the material it is drawn with**: a box's material, or the
+material a model slot is drawn with (its override `material.N` / `material` / `use`, or the model's
+own material for that slot). A model's own material counts as a material of its own for this:
+its atlas is named after the model file and slot (`textures/paint/<file>_s<N>.png`, §4.1).
 
-The **material line** goes after the last `material` statement of the file when that comes
-before the object's line. Then the new material is appended to `materials[]`, which the live
-path keeps cheap (§9.4). Otherwise it goes right before the `use` line, and that edit is a full
-upload from memory (§9.4; it happens once per object).
+### 3.2 Paint entries
 
-### 3.2 The shared texture
+A **paint entry** (one `paint` statement, §4.2) gives one object's surface a rectangle:
 
-With the panel's **shared** switch on, a stroke paints into the texture the surface already shows
-(the material's `albedo_map`, or a model slot's own albedo, §3.4), in place, so every object that
-uses it changes. The map text changes only when the source must be extracted first (§3.4). Saving
-writes the PNG over the package file it came from. If that file is a recorded asset, its
-`ASSETS.md` row gets "modified in monolith" (§11.2). A texture that lives outside the package
-can't be painted.
+- **A box face, or a group of faces of one box.** Every box counts on its own: a `stairs` step, a
+  `waffle` piece, one copy of a `repeat`. The entity is the box's `id N:i`. Faces in one entry
+  share the rectangle and show the same paint, each in its own orientation (the face's u along its
+  tangent, v up for side faces, as R3D's unit cube maps it). By default each face has an entry of its
+  own; the panel's Faces section groups them (§13.2).
+- **A model slot of one instance**: the slot's triangles in their **paint UV domain**, 0..1 (§4.5),
+  mapped onto the rectangle.
 
-### 3.3 What the copy holds
+An entry exists only for what was painted: the first stroke on a face (or a group, or a slot)
+allocates its rectangle, nothing else of the object.
 
-| The object's material has | Copy and canvas |
-|---|---|
-| a flat colour, no `albedo_map` | albedo `255 255 255 A`; the canvas is filled with the old colour (sRGB bytes as written) |
-| an `albedo_map`, `uv_scale 1 1`, `uv_offset 0 0` | the canvas is the texture's pixels (a box: resampled into each face's cell, §5.1), times the albedo colour (the tint is baked in); albedo `255 255 255 A` |
-| an `albedo_map` with any other `uv_scale` / `uv_offset` | the tiling is baked: the canvas samples the texture as the surface showed it (bilinear, wrap as the material's), then `uv_scale 1 1`, `uv_offset 0 0` |
-| a model slot drawn with its own material | the slot's albedo texture read back from the GPU (§3.4) times its colour; the copy gets `inherit normal orm emission` and writes the scalar values of the slot's `R3D_Material` that the map format can express (roughness, metalness, occlusion, normal scale, emission colour and energy, cull, transparency, blend, alpha cutoff, unlit) |
+### 3.3 The first stroke
 
-Every other key of the source material is copied as written (`normal_map`, `orm_map`,
-`roughness`, `wrap`, `priority`, …). So the object looks the same before the first stroke, up to
-the resampling. A flat colour is the same up to the 8-bit sRGB round trip: in phase 2's shots
-often 0 changed pixels, but the final verification measured a texture-sampled colour lighting its
-surroundings slightly differently from the constant one (up to 1–2 levels on ~45–57 k pixels of
-one view, mostly on a neighbouring box, through indirect light), deterministic and the same after a
-save and reload.
+The first stroke on a surface without an entry is **one undoable edit** (`EDIT_PAINT_ADD`, §10.3):
 
-Baking the tint means the colour you pick is the colour you see (lighting aside), and the
-eyedropper reads what is shown.
+1. The object's line gets an `id N` if it has none (as CTRL+I does), so the entry has a stable
+   entity. Nothing is split out of a `repeat`, and the object's material is not touched: the entry
+   names the box's index within the line (`N:i`).
+2. The material gets its `paint "textures/paint/<name>.png"` key if it has none (and its atlas is
+   made in memory, transparent).
+3. A `paint` statement is appended to the file's paint block (§4.2) with the rectangle the packer
+   chose (§5.1). If the atlas has no room it grows (§5.1).
+4. The stroke paints into the atlas in memory. Nothing is written to disk before CTRL+S (§11).
 
-### 3.4 Textures embedded in a model
+A first stroke of alpha 0 therefore changes no pixel of the image (§15, the verification).
 
-A model slot's albedo can be embedded in a GLB, or be an external file the `.gltf` names. In both
-cases it is read back from its GPU texture (`MS_TextureRead` with a model slot, §8.2; mip level
-0, RGBA8). The model file is not touched. In shared mode the readback is extracted to
-`textures/paint/<model file name>_s<N>.png`. Every instance of that file that draws the slot with
-its own material gets `material.N` of a new material `paint_<file>_s<N>` (`inherit normal orm
-emission`, the slot's albedo map extracted). That is one edit and changes those lines only.
+### 3.4 What can't be painted
 
-### 3.5 What can't be painted (this round)
-
-- A **model slot** drawn with a surface-shader material (a bake of a model would have to render
-  in UV space; no map in `maps/` has one). Boxes with a shader material are baked (§3.6).
+- A model slot without texture coordinates **and** without an unwrap: an unwrap is made for it on the
+  first stroke (§4.5), so this only refuses when the unwrap fails (degenerate geometry).
+- A **skinned** model file (one with a skeleton): its vertices' bone channels carry the skinning,
+  which the paint keys need (§4.4). No map in `maps/` has one.
+- A material whose surface shader already declares **3 or more samplers**: R3D allows 4 per material
+  and the paint stage needs 2 (§4.3). No shader in `maps/` uses more than 2.
+- A surface shader whose comment-stripped source plus the paint stage exceeds R3D's 16 KB limit
+  (§4.3). The largest in `maps/` is ~12 KB stripped.
+- An atlas that is full at 4096 × 4096 (§5.1): "the paint atlas of x is full: lower the density".
 - Lights, the sky, and textures of the environment.
-- A model slot without UVs: refused ("this model has no texture coordinates").
-- A `data_sampler` texture: it holds data, not colour.
 
-### 3.6 Surface-shader materials on boxes: baked into the canvas (decided after the round)
+Every refusal of the first round (surface-shader model slots, `transparency alpha` / `unlit` shader
+materials, sampler textures without a licence row, face groups on a baked canvas, shared mode on a
+flat colour) is gone.
 
-On the default map 97 % of the boxes (50 688 of 52 290) use a surface-shader material (concrete,
-the weeds, the tower, porcelain …), so refusing them made draw mode useless there. The developer
-decided: **bake the shader into the canvas** on the first stroke and drop the shader from the copy.
-The object can look different after its first stroke (that is accepted): detail finer than the
-canvas density blurs, animation (`TIME`, vertex sway) freezes at the frame of the bake, and light
-the shader computes per view is lost.
+## 4. Map format and drawing
 
-- **What is baked**, per face of the box (each into its cell of the layout, §4.1), all from R3D's
-  G-buffer views of one offscreen frame per output (no light, fog or post: the bytes the shader
-  wrote):
-  - `R3D_OUTPUT_ALBEDO` → the canvas (`albedo_map`, the painted image). The G-buffer is linear,
-    the canvas sRGB: converted. The copy's `albedo` becomes `255 255 255`.
-  - `R3D_OUTPUT_ORM` → `textures/paint/paint_<id>_orm.png` (`orm_map`; occlusion, roughness,
-    metalness as the shader wrote them; not painted). The copy's `roughness` / `metalness` /
-    `occlusion` become 1 so the map's values pass through as written.
-  - `R3D_OUTPUT_NORMAL` → `textures/paint/paint_<id>_normal.png` (`normal_map`), converted from
-    world space into each face's tangent space (the unit cube's tangent and normal for that face,
-    turned with a turned box). Only when the shader changes the normal (else no normal map).
-  - **Coverage**: a shader that discards (cutout weeds) leaves holes. The albedo pass is drawn
-    twice over two different backdrops (black, then white); a texel that shows the backdrop in both
-    is uncovered and gets alpha 0, and the copy keeps the material's `alpha_cutoff` (0.5 when it was
-    0). (Implemented with a backdrop slab, not clear colours: R3D clears the G-buffer to 0 whatever
-    the background colour.)
-  - The shader's `EMISSION` is not baked (no G-buffer view of it); the copy keeps the material's
-    own `emission` keys.
-- **How**: the box is drawn alone, the way the scene draws it (a merged material: R3D's unit cube
-  with the transform that puts it where its merged faces lie, so the fragment stage sees the same
-  world positions, normals and UVs; an instanced one, `instanced on` or a shader that needs it: the
-  material's own instance buffer at the box's slot, so a shader that reads model-space `POSITION`
-  or `INSTANCE_*` sees what it sees in the scene), with the material's own shader alias, uniforms
-  and samplers. For each face an orthographic camera looks at it from outside along its normal and
-  covers the face (a convex box: the other faces are edge-on), with pixels no larger than the
-  cell's texels (the target has R3D's internal resolution, one pixel per G-buffer texel; implemented
-  notes below). It runs between two game frames, outside `R3D_Begin` / `End`, with R3D's
-  environment, output mode and depth-output flag saved and restored byte for byte (the model
-  picker's thumbnail pattern), so the scene's frame and caches are unchanged.
-- **Where it lands**: the copy (§3.1) without `shader`, `uniform`, `sampler`, `data_sampler` and
-  `instanced` keys (and without `orm_map`, `occlusion`, `roughness`, `metalness`; with a baked
-  normal map also without `normal_map` and `normal_scale`), with the three maps above (`normal_scale
-  1`), `uv_faces 0 1 2 3 4 5`. One undoable edit with the first stroke, as for any first stroke; the
-  stroke itself is applied in the frame after the bake.
-- **Licence**: the baked PNGs derive from the shader file (made in the package: its `ASSETS.md`
-  row if it has one, else "made in monolith") and from any texture its samplers read (their rows'
-  licences and attributions); a sampler texture without a licence row refuses the bake.
-- **Shared mode** on a shader material is refused (there is no texture to share). So is a shader
-  material that R3D draws in the forward pass (`transparency alpha`, `unlit on`): the G-buffer has no
-  view of it.
-- **Verification**: before/after shots of a first stroke of alpha 0 on boxes of each kind of
-  shader material in `maps/monolith` (concrete, a weed, the tower, porcelain, a poster), on a
-  scratch copy: the difference is reported as a trade-off (pixel counts and images), not
-  required to be 0; the baked albedo vs the live shader's G-buffer albedo of the same face seen
-  head-on (`--output-mode albedo`), which should agree up to the texel resampling.
+All additions are opt-in. A map without them parses, meshes, compiles and draws exactly as now.
 
-## 4. Map format additions
-
-Both keys are material keys of format 2, opt-in. A map without them parses, meshes, compiles and
-draws exactly as now.
-
-### 4.1 `uv_faces`: which box faces share texture space
+### 4.1 Material keys
 
 ```
-material "paint_12" albedo 255 255 255 albedo_map "textures/paint/paint_12.png" uv_faces 0 1 2 3 4 5
+material "concrete" shader "shaders/concrete.glsl" ... paint "textures/paint/concrete.png" paint_filter nearest
 ```
 
-- `uv_faces a b c d e f`: one cell number per face, in the order **+x −x +y −y +z −z** (the box's
-  own axes for a turned box). Faces with the same number share one cell of the texture. The numbers
-  are 0..5, and every number from 0 to the largest one is used (so `0 0 1 1 2 2` and `0 0 0 0 1 2`
-  are fine, `0 0 3 3 3 3` is an error).
-- `k` cells (the largest number + 1) are laid out in a grid of `cols = ceil(sqrt(k))` ×
-  `rows = ceil(k / cols)` cells: 1 → 1×1, 2 → 2×1, 3 → 2×2, 4 → 2×2, 5 and 6 → 3×2. Cell `n` is
-  at column `n % cols`, row `n / cols`.
-- Within its cell, a face keeps the orientation the unit cube gives it today (R3D's
-  `R3D_GenMeshDataCube`: u along the face's tangent, v up for the side faces), inset by a
-  **gutter** of 1/64 of the cell on each side, so mipmaps don't bleed from the next cell (§5.1).
-- A face of a box is `u, v` in 0..1. It is sampled at
-  `((col + g + u (1 − 2g)) / cols, (row + g + v (1 − 2g)) / rows)` with `g = 1/64`.
-- **Where it applies:** every box drawn with the material: merged meshes (`BuildBoxMesh`,
-  `TurnedFaces`), instanced cubes (one unit cube mesh per distinct layout, §9.3), the transform
-  preview's cubes. Models ignore it.
-- It needs `uv_scale 1 1` and `uv_offset 0 0` (the defaults). Any other value is a parse error
-  ("uv_faces needs uv_scale 1 1 and uv_offset 0 0"), since tiling would cross the cells.
-- The texture keeps its wrap (`wrap`); the gutter keeps samples inside the cell.
-- **All faces alike** (today's mapping, no gutter) is the material without the key. `uv_faces 0 0
-  0 0 0 0` is the same layout with a gutter.
+- `paint "<path>"`: the material's atlas, a package-relative PNG (RGBA8; any other format is converted
+  on load). The material compiles with the paint stage (§4.3) only when at least one paint entry
+  uses it; a `paint` key without entries changes nothing.
+- `paint_filter trilinear | nearest`: how the atlas is sampled (`trilinear`, the default: mipmapped;
+  `nearest`: nearest magnification and nearest-mipmap-linear minification, the panel's *Pixel look*).
+- **A model's own material** has no line to put the key on. Its atlas is named by the entries
+  themselves (§4.2, `own`) and is always `textures/paint/<model file name>_s<N>.png`, the file name kept
+  to letters, digits, `-`, `_`. Its filter is `paint_filter` written on the entry.
 
-Every face of one material uses the same layout. So all boxes of one material share it, and
-painted boxes (one material each, §3.1) choose freely. Changing the layout of a painted material
-from the panel moves its paint (§5.2).
-
-### 4.2 `filter`: how a texture is magnified
+### 4.2 The `paint` statement
 
 ```
-filter trilinear | nearest
+# paint (draw mode)
+paint "concrete" 120:0 +x 0 0 96 64
+paint "concrete" 120:3 +y,-y 100 0 48 48
+paint "crate" 40:0 slot 1 0 0 512 512
+paint own 41:0 slot 0 0 0 256 256 paint_filter nearest
 ```
 
-- `trilinear` (default, today): linear magnification, trilinear minification with mipmaps.
-- `nearest`: nearest magnification (crisp texels up close, for pixel art) and
-  nearest-mipmap-linear minification (no shimmer at a distance). It applies to the material's
-  `albedo_map`, `normal_map`, `orm_map` and `emission_map`.
-- The texture cache (`TexEntry`) keys on the filter as well as the path, colour, data and wrap,
-  so one file used with both filters is two textures.
-- The draw panel's **pixel look** switch writes `filter nearest` on the painted material.
+- `paint "<material>" <entity> <faces> <x> <y> <w> <h>` for a box: `<entity>` is `N:i` (the line's
+  `id N`, the box's index within the line, as `select` writes it); `<faces>` a comma-separated list of
+  `+x -x +y -y +z -z` (the box's own axes for a turned box), at least one; `x y w h` the rectangle
+  in texels of the material's atlas.
+- `paint "<material>" <entity> slot <N> <x> <y> <w> <h>` for a model instance: slot N of the model file
+  drawn with `<material>` (its override). `paint own <entity> slot <N> …` when the slot is drawn with
+  the model's own material, optionally followed by `paint_filter nearest`.
+- **Rules** (parse errors with the line): the material exists and has a `paint` key; the line `N`
+  exists; `i` is below its object count; the faces are valid and not repeated; no two entries of
+  one material overlap (the 2-texel borders may touch); no face or slot of an entity is in two
+  entries of the same material; `w`, `h` ≥ 1.
+- **When the entity doesn't draw that face or slot with that material** (its line was edited, its
+  material changed), the entry is kept but inactive: it draws nothing and the load logs one line
+  ("paint: 120:0 +x is not drawn with concrete; inactive"). So editing geometry never breaks a map.
+  A rectangle outside its atlas's size is the same (inactive, logged).
+- The painter appends entries to a **paint block** at the end of the file, under the comment
+  `# paint (draw mode)`, sorted by material, then entity, then face or slot. The developer may move
+  them anywhere after the material's line.
+- `paint` is a statement of format 2; `MS_FORMAT_VERSION` doesn't change (an older runtime refuses an
+  unknown statement, as for any new one).
 
-### 4.3 Compiled maps, the export, the docs
+### 4.3 The paint stage
 
-- `CmMaterial` gains `uint8_t uvFaces[6]` (255 = no key) and `uint8_t filter` (0 trilinear, 1
-  nearest), plus padding to keep 4-byte alignment. `CM_VERSION` 4. The reader checks the parser's
-  rules and accepts versions 2–4: an older file has neither key. The writer always writes 4.
-  Changes: `docs/compiled-map.md` and its version history.
-- The export copies a package's files as now, so `textures/paint/*.png` go with it (they are
-  dependencies). Nothing else changes.
-- The keys go into the header comment of `runtime/monolith_scene.c` ("Materials") and
+Every material with at least one active entry draws with a **paint shader**, generated by the
+runtime at load from the material's own surface shader (or, for a material without one, from an
+empty one). The source R3D gets is:
+
+1. the material's shader source with its comments stripped (so the paint stage fits R3D's 16 KB);
+2. its `varying` declarations turned into `out` (under `STAGE_VERT`) / `in` declarations in place, so
+   the user's functions can use them in global code;
+3. its `void vertex()` and `void fragment()` renamed to `ms_userVertex()` / `ms_userFragment()`, each
+   under `#ifdef STAGE_VERT` / `STAGE_FRAG` (R3D copies global code into both stages);
+4. the paint stage, as below.
+
+```glsl
+uniform sampler2D ms_paint;        // the material's atlas (premultiplied alpha on the GPU)
+uniform sampler2D ms_paintTable;   // RGBA32F, one texel per paint key: u0 v0 u1 v1 in the atlas
+#ifdef STAGE_VERT
+flat out vec4 ms_rect;             // the face's rectangle; all 0: no paint
+out vec2 ms_uv;                    // 0..1 in the face or the slot's paint domain
+void vertex() {
+    ms_userVertex();
+#if !defined(DEPTH) && !defined(DEPTH_CUBE)
+    // which paint key and where in its domain (4.4); ms_rect = texelFetch(ms_paintTable, key)
+#endif
+}
+#endif
+#ifdef STAGE_FRAG
+flat in vec4 ms_rect;
+in vec2 ms_uv;
+void fragment() {
+    ms_userFragment();
+#if !defined(DEPTH) && !defined(DEPTH_CUBE)
+    if (ms_rect.z > ms_rect.x) {
+        vec4 p = texture(ms_paint, mix(ms_rect.xy, ms_rect.zw, ms_uv));  // clamped half a texel inside
+        ALBEDO = ALBEDO * (1.0 - p.a) + p.rgb;
+        EMISSION *= 1.0 - p.a;
+        METALNESS *= 1.0 - p.a;
+        // transparency alpha: ALPHA += p.a * (1.0 - ALPHA); cutout materials: ALPHA unchanged
+    }
+#endif
+}
+#endif
+```
+
+- **Only painted materials** get it. A shader file used by painted and unpainted materials is compiled
+  twice (the original and the paint version); the unpainted ones keep the original.
+- **A material without a shader** gets the paint shader around an empty `vertex()` / `fragment()`. R3D
+  runs the same template (`SceneFragment`'s automatic fetch, then `fragment()`), so outside the paint
+  it computes the same values; phase 1 proves the pixels identical (alpha-0 entries on every kind of
+  surface, §15). If they are not, the difference is reported (draw path, variant, sort order) before
+  anything else.
+- **Cost:** in the vertex stage, one `texelFetch` (not in the depth and shadow variants). In the
+  fragment stage, one test of a flat varying, uniform over a face, and one bilinear or trilinear
+  sample where the face has paint. Unpainted faces of a painted material pay the test only.
+- **The depth pre-pass** is kept: the paint stage doesn't touch `ALPHA` on opaque materials and
+  doesn't `discard`, and the pre-pass eligibility depends only on `alpha_cutoff`, depth and stencil
+  state (R3D patch 6).
+- **Sampling:** `ms_uv` is clamped half a texel inside the rectangle, so level 0 never reads the
+  border. The atlas is uploaded premultiplied (filtering transparent texels adds no dark fringe); the
+  PNG keeps straight alpha.
+
+### 4.4 Paint keys in vertices and instances
+
+A **paint key** is an index into the paint table (key 0: no paint). The runtime gives each active
+entry's faces or slots keys at load (and on a live edit, §9) and writes them where each draw kind can
+read them in its vertex stage, without new draws:
+
+| Draw kind | Key | Domain coordinate `ms_uv` |
+|---|---|---|
+| **merged box meshes** (axis-aligned and turned) | per vertex: `boneIndices[0..3]` as a 32-bit little-endian key | per vertex: `boneWeights` as two unorm16 (u, v) = the face corner's 0 / 1 |
+| **instanced boxes** (`instanced on`, a shader that needs it) | per instance: `INSTANCE_CUSTOM.x` = the first of 6 consecutive keys (faces +x −x +y −y +z −z; an unpainted face's key holds a zero rectangle), `INSTANCE_CUSTOM.y` = 1 | from the unit cube's model-space position and normal (the same mapping as R3D's cube UVs) |
+| **model instances** | per instance: `INSTANCE_CUSTOM.x` = the first of the file's `materialCount` consecutive keys (one per slot), `.y` = 2; per vertex: `boneIndices[0]` = the slot | per vertex: `boneWeights` as two unorm16 = the paint UV (§4.5) |
+
+- The vertex stage tells the kinds apart by `INSTANCE_CUSTOM.y` (0: a merged mesh, drawn with the
+  runtime's one-instance buffer, which has no custom attribute: R3D sets it to 0).
+- **Only what has paint carries keys:** the merged meshes of cells holding a painted box of a painted
+  material (other boxes in them get key 0), the instance buffers of painted instanced materials (with
+  `R3D_INSTANCE_CUSTOM`; other materials' buffers are unchanged), the instance buffers of model groups
+  with a painted instance, and the meshes of painted model files (rebuilt in memory with slot and
+  paint UV; the file on disk is untouched).
+- The bone channels are free on every mesh the runtime makes and on every unskinned model (R3D
+  binds them always and reads them only for skinned draws). Skinned files are refused (§3.4).
+- **The paint table** is one RGBA32F texture per scene, 1024 texels wide, as many rows as needed,
+  bound to every paint shader. Texel `key` holds the rectangle normalised to its atlas (u0 v0 u1 v1).
+  It changes when entries or atlas sizes change (a small upload), never during a stroke.
+- **Precision:** the face corners (0 and 1) and the keys are exact; a model's paint UV has 16 bits
+  (1/16 texel of a 4096 atlas). The rectangle is float32. R3D's half-float texture coordinate is not
+  used for paint.
+
+### 4.5 Model paint UVs and the unwrap sidecar
+
+A model slot's **paint domain** is 0..1 in each axis, mapped onto its rectangle:
+
+- **Its own UVs**, when every texture coordinate of the slot's triangles is within 0..1 and no two of
+  them overlap in UV space (a conservative raster test at 1024², §7.3). Most scanned and hand-unwrapped
+  models.
+- **Otherwise an unwrap**: tiled UVs (Kenney's 0..30), mirrored halves, overlapping trims, or no UVs.
+  On the first stroke on such a slot the editor unwraps **the whole file** (each slot packed into its
+  own 0..1 domain) with xatlas and stores it as `models/<file>.paintuv` beside the model. The runtime
+  reads it in the editor and in the game; xatlas is in the editor only.
+
+The sidecar is binary, little-endian:
+
+```
+"MSPAINTUV" 0x1A, uint32 version (1), uint32 meshCount, uint64 the model file's FNV-1a 64 (a stale
+sidecar is ignored, logged), then per mesh: uint32 slot, uint32 vertexCount, uint32 indexCount,
+vertexCount × { uint32 source vertex, uint16 u, uint16 v }, indexCount × uint32 index
+```
+
+The unwrap splits vertices at chart seams, so a painted file's mesh is rebuilt from it: each new
+vertex is a copy of its source vertex (position, normal, tangent, colour, original UV) with the slot
+and paint UV in its bone channels, and the triangles keep their order. The same triangles with the
+same attributes rasterise to the same pixels. A file with an unwrap uses it for every slot; a file
+without one uses its own UVs.
+
+The sidecar is a package file: the export copies it, and it gets an `ASSETS.md` row and sidecar
+derived from the model's ("paint unwrap of `models/x.glb`, generated in monolith", the model's licence
+and attribution).
+
+### 4.6 Compiled maps and the export
+
+- `CmMaterial` gains `uint32_t paint` (the atlas path, `CM_NONE`) and `uint8_t paintFilter` (plus
+  padding). A new section **paint** holds one `CmPaint` per entry, resolved at compile time from the
+  entity to the object: `{ uint32 material (CM_NONE: a model's own), uint32 kind (0 box, 1 model),
+  uint32 object (boxes[] or models[] index), uint32 faces (bits +x −x +y −y +z −z) or slot, uint32
+  x, y, w, h, uint32 filter, int32 line }`. Inactive entries are written too (the runtime decides
+  activity the same way). `CM_VERSION` 5; the reader accepts 2–5 (older files have no paint). Changes:
+  `docs/compiled-map.md` and its version history.
+- The export copies a package's dependencies as now; atlases and `.paintuv` sidecars are dependencies,
+  so they go with it. The exported runtime generates the paint shaders and keys like the editor.
+- The keys and the statement go into the header comment of `runtime/monolith_scene.c` and
   `docs/map-format.md` §2.
 
-## 5. The canvas
+## 5. The atlas
 
-A canvas is an RGBA8 image in memory with the package path of its PNG, the GPU texture(s) that
-show it, its layout and its base image (§7.4). The draw mode owns it (`drawmode.c`). The runtime
-only receives pixels (§8.2).
+The draw mode owns each atlas's pixels in memory (`drawmode.c`) while it paints; the runtime receives
+them (§8.2).
 
-### 5.1 Size
+### 5.1 Packing and growth
 
-The **density** `ρ` is in texels per metre (the panel's *Canvas* control, default 64).
+- A new atlas starts at the smallest power-of-two square, at least 256, that holds its first
+  rectangle (the atlas's edges need no border: the sampler clamps there).
+- Rectangles are placed **bottom-left on 4-texel cells** (so mip levels 1 and 2 stay inside each
+  rectangle's border): the lowest row, then the leftmost cell, where the rectangle fits. Each
+  rectangle owns the cells from its corner to 4 texels past its far edges (its 2-texel border and the
+  next one's), so a placed rectangle starts on the grid and keeps a 2-texel transparent border on every
+  side. The packer starts from every rectangle the map text holds in that atlas (active or not: they
+  never move), whatever their position (a hand-written one off the grid is avoided conservatively).
+- When a rectangle doesn't fit, the atlas **grows**: its width doubles when it is not wider than tall,
+  else its height, up to 4096 × 4096. Growing keeps every texel where it is (the image is extended with
+  transparent texels), so the text doesn't change; only the table (normalised rectangles) and the
+  texture are rebuilt (the atlas is provided at its new size before the edit goes live).
+- Full at 4096 × 4096: the stroke is refused (§3.4). Open question (§16): a second atlas per material.
+- A new rectangle is cleared to transparent (with its border) where an earlier text left pixels; a
+  rectangle no entry uses any more (clear, a face group that joined another) is cleared too.
 
-- **A box** (a layout of `cols × rows` cells): the cell side is
-  `c = clamp(pow2ceil(ρ · L), 16, 2048 / max(cols, rows))`. `L` is the longest edge of any face
-  in any cell of the material's boxes (all boxes of a multi-box statement share it). The canvas is
-  `cols · c × rows · c` (e.g. 3 × 2 cells of 256 = 768 × 512).
-  - Cells are square. A face that isn't square stretches its texels along its longer side, as
-    textures on boxes do now. The panel shows the face's texel size in mm on both axes (§13.2).
-    Open question (§16).
-- **A model slot**: the side is `clamp(pow2ceil(ρ · sqrt(A)), 16, 2048)`, square. `A` is the world
-  surface area of the slot's triangles in this instance (scale applied). For a slot whose own
-  texture is copied (§3.3), that texture's size is kept, so its pixels stay as they are.
-- **An existing texture** (shared mode, §3.2) keeps its size.
+### 5.2 Size of a rectangle
 
-### 5.2 Changing the layout of a painted box
+The **density** `ρ` (texels per metre, the panel's *Density*, default 64):
 
-The panel's face-group control rewrites `uv_faces` on the painted material: an undoable edit,
-`EDIT_MATERIAL_SET` (§10.3). The canvas is laid out anew, and each new cell takes its content from
-the old cell of its **first** face (in +x −x +y −y +z −z order), resampled nearest when the cell
-size changed. Faces that become one cell therefore show the paint of the first of them. Undo
-restores both the key and the old canvas.
+- **A box face group**: `w = ceil(ρ · a)`, `h = ceil(ρ · b)` for the largest face of the group (`a`
+  along the face's u, `b` along its v), each clamped to 4..2048. A face smaller than the rectangle in
+  one axis stretches over it. pine_forest's ground (a 572 m face) at 64 texels/m is clamped to 2048: 28
+  cm texels, said on the panel; the ground itself is untouched (`uv_scale 286` keeps its look).
+- **A model slot**: a square of `clamp(pow2ceil(ρ · sqrt(A)), 16, 2048)`, `A` the world surface area
+  of the slot's triangles in this instance.
+- The panel's *Resize to density* (§5.3) gives an entry a new rectangle.
 
-### 5.3 Changing the density of a canvas
+### 5.3 Changing an entry
 
-*Resize to density* on the panel resamples the canvas to the size §5.1 gives for the current
-density: nearest when `filter nearest` is set, bilinear otherwise. This is one undoable step that
-keeps the whole image from before.
+- **Faces** (the panel's face groups): one undoable step of `EDIT_PAINT_SET` / `EDIT_PAINT_ADD` ops
+  (amended onto one history step) with the tiles they wrote. Each new group that has paint keeps the
+  entry holding most of its faces (an entry kept by an earlier group doesn't count): `EDIT_PAINT_SET`
+  gives it the group's faces, which leave the entries they were in (an entry left without faces goes,
+  its rectangle is cleared). A group split from an entry another group kept gets a new rectangle of the
+  same size with a copy of that entry's paint (`EDIT_PAINT_ADD`). A group whose faces have no paint
+  stays without (its faces get rectangles with their first strokes).
+- **Resize to density**: a new rectangle of the size §5.2 gives (packed without the entry's old one),
+  the old paint resampled into it (nearest with `paint_filter nearest`, else bilinear with
+  premultiplied alpha), the old rectangle cleared. One `EDIT_PAINT_SET` with the tiles.
+- **Clear**: the panel's *Clear paint* removes the target's entry (`EDIT_PAINT_REMOVE`, all its faces)
+  and clears its rectangle. A material's `paint` key and atlas file stay when its last entry goes (the
+  atlas is transparent there).
 
 ## 6. Finding the texel under the cursor
 
-`MS_RaycastSurface` (§8.1) gives the object, the material it is drawn with, and the texture
-coordinate:
+`MS_RaycastSurface` (§8.1) gives the object, the material it is drawn with, the face or slot, and now
+the **paint coordinate**:
 
-- **An axis-aligned box**: the face from the hit normal's axis and sign. `u, v` come from the hit
-  point's position on the face: the box's local coordinates in −0.5..0.5, mapped as R3D's cube
-  vertices map them (linear in the two face axes, so this is exact). Then the cell transform of
-  §4.1 when the material has `uv_faces`.
-- **A turned box**: the same in the box's own frame (the hit point minus the centre, dotted with
-  its three axes; the face from the local normal).
-- **A model**: the triangle the BVH hit, its barycentric coordinates, and the triangle's three
-  texture coordinates. `ModelPick` keeps those, plus each triangle's mesh (§8.1). The slot is
-  `R3D_Model.meshMaterials[mesh]`. The material is the slot's override (`material.N`, `material`,
-  `use`), else the model's own (-1).
-- Then the material's `uv_scale` / `uv_offset` (models: whatever their material says), wrapped
-  as the material wraps (repeat: `fract`, clamp: clamp to 0..1, mirror). The texel is
-  `floor(u · W), floor(v · H)` of the canvas (row 0 is `v = 0`, as raylib uploads an image; a PNG
-  of a wall therefore looks upside down in an image viewer, which doesn't matter here).
+- **A box (axis-aligned or turned)**: the face from the hit normal in the box's own frame; `paintUv`
+  is the hit's position on the face, 0..1, oriented as R3D's unit cube maps that face (exactly the
+  `ms_uv` the vertex stage gives the GPU, §4.4).
+- **A model**: the triangle the BVH hit, its barycentric coordinates, and the triangle's paint UVs
+  (own or unwrap, §4.5), interpolated. A slot that needs an unwrap that doesn't exist yet gives
+  `paintUv` −1 −1 (the first stroke makes the unwrap, then casts again).
+- `paintEntry`: the active entry of that face or slot in that material, or −1. The texel is the
+  rectangle's `x + floor(u · w)`, `y + floor(v · h)` (row 0 at `v = 0`).
 
-A model's UVs can overlap (mirrored halves, tiled trims). Painting one place then paints every
-place that shares those texels, which is what the texture really is. The HUD says "shared UVs"
-when the hit triangle's UV area overlaps another triangle of the slot (known from the island
-mask, §7.3).
+A model's own UVs can't overlap where they are used for paint (§4.5), so a stroke never shows up in
+two places any more.
 
 ## 7. Strokes
 
 ### 7.1 The stroke model
 
-- A stroke runs from LMB down to LMB up. It is one undo step (§10).
-- **Samples**: every frame, the segment from the last cursor position to the current one is
-  subdivided in screen space until consecutive surface hits lie at most `spacing` texels apart on
-  the same canvas (`spacing = max(1, size / 4)` texels; hard round and square at size 1–2:
-  every texel). The bisection depth is at most 10 per frame and reuses the frame's scratch, so it
-  allocates nothing. Where the cursor crosses onto another face, cell, triangle or object, the
-  stroke goes on there. A canvas jump (another object) never interpolates across.
-- **Stamps** are applied in texel space at each sample, clipped to the hit's **region**: the cell
-  of a box face (§4.1), or the UV island of a model triangle (§7.3). So a brush never leaks into
-  another face's cell or another island. A stroke along a box edge stops at the edge and goes on
-  on the next face as the cursor moves over. Open question (§16): a brush projected across edges.
-- Colour: RGBA 0–255 from the panel, composited **source-over** in 8-bit sRGB bytes (as the
-  PNG stores them), with alpha = colour alpha × the pen's coverage. Within one stroke a texel takes
-  the **maximum coverage** any stamp gave it (a stroke mask), not the sum, so an alpha-128 stroke
-  that crosses itself stays alpha 128. The mask is a byte per texel of the canvas's dirty tiles
-  (§10.1).
+As in the first round (its implementation notes): a stroke runs from LMB down to LMB up and is one
+undo step; samples are subdivided in screen space; stamps are applied in texel space, clipped to the
+hit's **region**. The region is now the entry's rectangle (a box face group), or the UV island of a
+model triangle inside the slot's rectangle (§7.3). A stroke stays on the surface of its LMB down; on
+another face of the same box it goes on in that face's entry (allocating it at once, which is the
+first stroke of that face: its `EDIT_PAINT_ADD` is amended onto the stroke's step, so the stroke stays
+one undo step, §10.2).
+
+Colour: RGBA 0–255 from the panel, composited **source-over** in 8-bit sRGB bytes (as the PNG stores
+them), alpha = colour alpha × the pen's coverage, with the per-stroke maximum-coverage mask of the
+first round.
 
 ### 7.2 Pens
 
-| Pen | Footprint at size s (texels) | Coverage |
-|---|---|---|
-| hard round | texels whose centre is within s / 2 of the sample's texel centre (s = 1: one texel) | 1 |
-| square | the s × s texels with the sample's texel at `floor(s / 2)`, axis-aligned in texture space (pixel-exact) | 1 |
-| soft round | within s / 2 | `1 − smoothstep(0.5, 1, d / (s / 2))` (a solid core, a soft rim) |
-| eraser | the hard-round footprint | puts back the base image's texel (§7.4) with the pen's coverage; ignores the colour |
-| fill | the whole region (the box face's cell, or the UV island) on LMB down; no drag | 1, flat colour (the colour's alpha) |
+As in the first round, except:
 
-Size 1..256 texels: `[` / `]` step by 1 below 8, then ×1.25, and CTRL+wheel does the same.
+| Pen | Change |
+|---|---|
+| eraser | **true erase**: lowers the texel's alpha by the pen's coverage (`a · (1 − coverage)`), colour kept for an anti-aliased edge; at full coverage the texel becomes 0 0 0 0 |
+| fill | fills the region: the entry's rectangle, or the UV island |
 
 ### 7.3 UV islands (models)
 
-When a model slot's canvas opens, its triangles (`MS_ModelSlotTriangles`, §8.1) are rasterised
-into an **island mask** at the canvas size: an `int` per texel, with triangles joined into an
-island when they share an edge with the same UVs (a union-find on vertex UV pairs) and each texel
-labelled with the island of the triangle covering it. A texel covered by several islands is marked
-**shared**. A stamp only touches texels of the hit triangle's island, so a big brush doesn't paint
-the unrelated island next to it in the texture. Fill fills one island. Texels outside every
-island (the empty space of the atlas) are never painted.
+As in the first round, in **paint UV** space: triangles joined over shared paint-UV edges, rasterised
+into an island mask at the rectangle's size. With own UVs that don't overlap and with an unwrap, no
+texel is shared between islands, so a texel belongs to at most one island; texels outside every island
+(the slot's empty paint space) are never painted. The same raster at 1024² decides whether own UVs
+can be used (§4.5).
 
-The mask is built on the CPU once per canvas open (a few ms for 20 k triangles at 1024²) and
-rebuilt when the canvas is resized.
+### 7.4 The eyedropper
 
-### 7.4 The base image and the eraser
-
-The **base image** is a copy of the canvas when it was made (§3.3) or first opened in this
-session (the PNG as read). The eraser restores it. Erasing paint from an earlier session isn't
-possible, because the saved PNG is the new base. Open question (§16): keep a
-`textures/paint/<name>.base.png` instead.
-
-### 7.5 The eyedropper
-
-**ALT+LMB** samples the **texture**, not the lit screen: the texel `MS_RaycastSurface` names, from
-the canvas when the surface has one, else from a CPU copy of the material's albedo texture
-(`MS_TextureRead`, cached by path until the next load) times the albedo colour, else the albedo
-colour alone. The colour goes into the picker and the recent colours.
+**ALT+LMB** samples what the surface shows under the paint: the paint texel when its alpha is 255;
+otherwise the material's G-buffer albedo at the cursor (paint composited), so a procedural shader's
+colour can be picked too: the view is rendered once more into a texture of the window's size in R3D's
+`R3D_OUTPUT_ALBEDO` mode (the scene's own lights and geometry, `MS_PushLights` + `MS_DrawGeometry`), the
+pixel read back and turned from linear to sRGB bytes. One extra scene render per click.
 
 ## 8. The runtime API (editor builds only)
 
-These are declared in `runtime/monolith_scene.h`, in a new `MONOLITH_EDITOR` block ("Painting").
-The game build and `--export` don't have them, and `tests/unit/export_strip_test.sh` checks that.
+Declared in `runtime/monolith_scene.h`, in the `MONOLITH_EDITOR` block "Painting". The game build and
+`--export` don't have them (`tests/unit/export_strip_test.sh`). The game build reads and draws paint
+(§4) without any of these functions.
 
 ### 8.1 Surface picking
 
+`MS_SurfaceHit` keeps the first round's fields and gains:
+
+```c
+Vector2 paintUv;        // 0..1 in the face (boxes) or the slot's paint domain (models, 4.5);
+                        // -1 -1: a model slot that needs an unwrap that doesn't exist yet
+int paintEntry;         // MS_PaintEntryAt index of the active entry for this face / slot and
+                        // material, -1: none yet
+```
+
+`MS_ModelSlotPaintTriangle(scene, file, slot, k, Vector2 puv[3], Vector3 pos[3])` gives a slot
+triangle's paint UVs, like `MS_ModelSlotTriangle` gives its texture coordinates.
+
+### 8.2 Entries and atlases
+
 ```c
 typedef struct {
-    MS_Hit hit;             // as MS_Raycast (the same object, point, normal and distance)
-    int material;           // materials[] index the surface is drawn with; -1: a model slot's own material
-    int face;               // boxes: 0..5 = +x -x +y -y +z -z (a turned box: its own axes); models: -1
-    int slot;               // models: the file's material slot of the triangle; boxes: -1
-    int mesh, triangle;     // models: the mesh of the file and the triangle in it; boxes: -1
-    Vector2 faceUv;         // boxes: where on the face, 0..1 (before uv_faces); models: the texcoord
-    Vector2 uv;             // the texture coordinate the albedo map is sampled at: after uv_faces,
-                            // uv_scale and uv_offset, before the wrap
-    Vector3 bary;           // models: barycentric coordinates of the hit in the triangle
-} MS_SurfaceHit;
+    int material;           // materials[] index; -1: the model's own material (atlas named by file + slot)
+    int line;               // map line of the paint statement
+    MS_EntityId entity;
+    MS_ObjRef obj;          // the box or model instance it resolved to (kind MS_OBJ_NONE: unresolved)
+    unsigned char faces;    // boxes: bit f for each face +x -x +y -y +z -z; models: 0
+    int slot;               // models: the slot; boxes: -1
+    int x, y, w, h;         // texels of the atlas
+    bool active;            // drawn (4.2: the entity draws that face / slot with that material and
+                            // the rectangle is inside the atlas)
+} MS_PaintEntry;
 
-// MS_Raycast, plus where on the surface it hit. False when nothing is hit (out->hit.obj.kind
-// MS_OBJ_NONE). A model without texture coordinates is still hit, with uv 0 0 and slot set.
-bool MS_RaycastSurface(const MS_Scene *scene, Vector3 origin, Vector3 dir, float maxDist,
-                       MS_SurfaceHit *out);
+int MS_PaintEntryCount(const MS_Scene *scene);
+const MS_PaintEntry *MS_PaintEntryAt(const MS_Scene *scene, int i);
 
-// The triangles of model file `file` drawn with its material slot `slot`: count, then each
-// one's three texture coordinates and model-space positions. False when out of range or the file
-// has no texture coordinates.
-int MS_ModelSlotTriangleCount(const MS_Scene *scene, int file, int slot);
-bool MS_ModelSlotTriangle(const MS_Scene *scene, int file, int slot, int k, Vector2 uv[3], Vector3 pos[3]);
+typedef struct {
+    const char *rel;        // package path of the atlas PNG (NULL: the material has no paint key)
+    int width, height;      // of the loaded or provided image (0: none yet)
+    bool nearest;           // paint_filter nearest
+} MS_PaintAtlas;
+// The atlas of material (-1 with file and slot: a model's own material)
+bool MS_PaintAtlasOf(const MS_Scene *scene, int material, int file, int slot, MS_PaintAtlas *out);
 
-// A material's face layout (uv_faces): false when it has none. cells[f] for the faces +x -x +y
-// -y +z -z, the grid size, and the cell rectangle of face f in 0..1 texture space with the gutter
-// inset (MS_FaceCellRect, shared by the meshes and the editor so they agree bit for bit)
-bool MS_MaterialFaceLayout(const MS_Scene *scene, int material, unsigned char cells[6], int *cols, int *rows);
-Rectangle MS_FaceCellRect(const unsigned char cells[6], int face, bool inset);
+// Straight-alpha RGBA8 pixels for an atlas path that the next MS_EditSetText (and any upload from
+// memory) uses instead of the file, also when the file doesn't exist yet (a new or grown atlas).
+// Same lifetime as the first round's MS_TextureProvide (kept across live edits, dropped by a load
+// from disk and by MS_Unload). NULL forgets it.
+bool MS_PaintAtlasProvide(MS_Scene *scene, const char *rel, const Image *img);
+
+// A stroke: MS_TextureUpdate(scene, rel, img, rect) as in the first round, on the atlas path; for an
+// atlas it premultiplies the rectangle on upload (the image stays straight alpha).
+
+// Model paint UVs (4.5)
+typedef enum {
+    MS_PAINTUV_OWN,         // the slot's own UVs are used
+    MS_PAINTUV_UNWRAP,      // the file's .paintuv sidecar (or a provided unwrap) is used
+    MS_PAINTUV_NEEDS_UNWRAP,// own UVs overlap, repeat or are missing, and there is no unwrap yet
+    MS_PAINTUV_SKINNED,     // refused: a skinned file
+} MS_PaintUvKind;
+MS_PaintUvKind MS_ModelPaintUv(const MS_Scene *scene, int file, int slot);
+
+// An unwrap of a whole model file, the sidecar's contents (4.5): per mesh of the file in R3D's order
+typedef struct {
+    int slot, vertexCount, indexCount;
+    unsigned int *source;   // per new vertex: its vertex in the mesh as loaded
+    unsigned short *uv;     // per new vertex: u, v (unorm16)
+    unsigned int *indices;
+} MS_PaintUnwrapMesh;
+typedef struct {
+    int meshCount;
+    MS_PaintUnwrapMesh *meshes;
+    unsigned long long fileHash;    // FNV-1a 64 of the model file
+} MS_PaintUnwrap;
+// The editor's unwrap of model file `file`, used by the next MS_EditSetText as if read from the
+// sidecar (provided like an atlas; NULL forgets it). Copied.
+bool MS_PaintUnwrapProvide(MS_Scene *scene, int file, const MS_PaintUnwrap *u);
+// The sidecar file: written by the editor on save, read by the runtime at load
+bool MS_PaintUnwrapWrite(const char *path, const MS_PaintUnwrap *u);
+bool MS_PaintUnwrapRead(const char *path, MS_PaintUnwrap *out);   // MS_PaintUnwrapFree it
+void MS_PaintUnwrapFree(MS_PaintUnwrap *u);
+// The mesh data of model file `file` as loaded (positions, UVs, indices; for the unwrap). False when
+// out of range or not loaded.
+bool MS_ModelMeshData(const MS_Scene *scene, int file, int mesh, R3D_MeshData *out);    // not owned
 ```
 
-`ModelPick` gains texture coordinates per vertex (`Vector2 *uv`, NULL when the file has none) and
-the mesh per triangle (`unsigned short *triMesh`, in BVH order). These live **in editor builds
-only** (`#ifdef MONOLITH_EDITOR` around the fields and their copies in `BuildModelPick`), so the
-game build's memory and picking stay as they are. `MS_Raycast` itself doesn't change.
-`MS_RaycastModel` gets a static helper that also returns the triangle and the barycentric
-coordinates. `MS_RaycastSurface` calls it.
-
-### 8.2 Textures
-
-```c
-// The GPU texture the scene loaded for this package path (the first cache entry with it;
-// id 0 = none). Model slots: MS_ModelSlotTexture.
-Texture2D MS_TextureFind(const MS_Scene *scene, const char *rel);
-// The albedo texture of model file `file`'s material slot `slot` as the file has it (id 0: none)
-Texture2D MS_ModelSlotTexture(const MS_Scene *scene, int file, int slot);
-// Reads a GPU texture's level 0 back as an RGBA8 image (UnloadImage it). False if id is 0.
-bool MS_TextureRead(Texture2D tex, Image *out);
-
-// Pixels for a package path that the next MS_EditSetText (and any upload from memory) uses
-// instead of reading the file, also when the file doesn't exist yet (a new canvas). Copied
-// (RGBA8). NULL / 0 x 0 forgets it. Kept across live edits, dropped by a load or reload from disk
-// and by MS_Unload (the editor provides again after its rebase).
-bool MS_TextureProvide(MS_Scene *scene, const char *rel, const Image *img);
-
-// Uploads the rectangle `rect` (texels) of `img` into every cached texture with this package
-// path, then regenerates their mipmaps. The image must have the texture's size and be RGBA8.
-// MS_TextureGeneration + 1. A material of alpha_cutoff > 0 or transparency that uses the texture
-// invalidates the sun shadow tiles and light shadows its objects reach (their shadow can change);
-// nothing else is re-stamped. False if no texture has that path or the size differs.
-bool MS_TextureUpdate(MS_Scene *scene, const char *rel, const Image *img, Rectangle rect);
-// +1 on every MS_TextureUpdate (frame reuse keys on it, so a still camera sees the stroke)
-unsigned int MS_TextureGeneration(const MS_Scene *scene);
-```
+Phase 2 removed what only the first round's code used: `MS_TextureProvide` (now
+`MS_PaintAtlasProvide` itself), `MS_TextureFind`, `MS_ModelSlotTexture`, `MS_TextureRead`,
+`MS_BoxDrawOf`, `MS_MaterialFaceLayout` and `MS_FaceCellRect`.
 
 ### 8.3 Hot reload
 
-`MS_EditMarkSaved` already sets the watch list to the current text's dependencies and their
-mtimes, so a save that writes the PNGs **first**, then the map, then calls `MS_EditMarkSaved`
-doesn't trigger a reload. Phase 1 checks two cases and fixes them if needed:
-
-- a dependency that doesn't exist yet (a new canvas before its first save) must not make `MS_Poll`
-  reload every frame or fail;
-- a write of a PNG alone (auto save of a stroke, §11.1, with the map unchanged) must not reload.
-  The editor calls `MS_EditMarkSaved` after it.
+As in the first round: a dependency that doesn't exist yet (a new atlas or sidecar before its first
+save) is watched with mtime 0, and a save that writes PNGs and sidecars first, then the map, then calls
+`MS_EditMarkSaved`, doesn't reload.
 
 ## 9. Live updates
 
 ### 9.1 A stroke
 
-A stroke changes only pixels: dirty rectangle → `MS_TextureUpdate` once per frame per canvas
-(the union of the frame's stamps, so one sub-image upload and one mipmap regeneration). No text,
-no `s->version` bump: the selection indices, the caches and the merged meshes stay as they are.
+Only pixels change: the dirty rectangle of each atlas goes to `MS_TextureUpdate` once per frame
+(premultiplied on upload, mipmaps regenerated). No text, no `scene->version` bump, no table or mesh
+change. `MS_TextureGeneration` + 1, which frame reuse keys on (`FrameKey`).
 
-### 9.2 Frame reuse
+### 9.2 A paint edit (first stroke, faces, resize, clear, undo of those)
 
-`FrameKey` (main.c) gains `textureGeneration` (`MS_TextureGeneration`), so a still camera with
-frame reuse on shows the stroke on the next frame.
+A text edit whose only differences are `paint` statements and `paint` / `paint_filter` keys is a
+**cheap live edit**: it must not re-upload the scene. Phase 1 adds it to `LiveMaterialPlan`:
 
-### 9.3 `uv_faces` on instanced cubes and the preview
+- `paint` statements are not part of any material's look hash; the parser keeps a hash of them.
+- A material whose only change is its `paint` / `paint_filter` keys, or whose set of active entries
+  went from none to some (or back), is rebuilt as a "changed" material (kind 1 of the first round's
+  plan): its shader alias becomes the paint shader (compiled once per shader file and load, then
+  aliased) or the original again, its atlas loads (from the provided image).
+- The paint table is rebuilt and uploaded. The merged meshes of the cells holding a box whose keys
+  changed are rebuilt (through `LiveRetire`), the instance buffers of the materials and model groups
+  whose keys changed are refilled (gaining or losing `R3D_INSTANCE_CUSTOM`), and a model file whose
+  meshes gain or lose paint keys is rebuilt in memory. Nothing else changes.
+- `MS_EditStats` reports what was rebuilt; a first stroke on a material that already has paint should
+  cost one table upload and one cell mesh or instance buffer.
 
-Instanced materials draw R3D's unit cube. A material with `uv_faces` and `instanced on` draws a
-unit cube of its own, made by `FaceLayoutCube` (the cube's vertices with the cell transform of
-§4.1 applied to the UVs), one per distinct layout, freed with the scene. The transform preview's
-cubes (`MS_EditPreviewBegin`) use the same per-layout cube for those materials. Materials without
-the key draw `p->cube` exactly as now.
+### 9.3 What a stroke must not do
 
-### 9.4 Adding a material live
-
-A new material changes the look hash (`lookHash`), so `MS_EditSetText` would upload everything
-from memory (~520 ms on the largest map in `maps/`). Phase 1 adds one cheap case. When the new
-text's materials are the old ones, **in the same order with the same definitions**, plus
-materials **appended** at the end, and nothing else in the look hash changed:
-
-- the old materials' GPU state is moved over as now;
-- each new material is built (`BuildMaterial`, its textures through `GetTexture`, which consults
-  the provided images, §8.2);
-- `materials[]`, `matDefs[]`, `inst[]` and `instCount[]` grow;
-- box and model ranges are rebuilt as an object edit does (the painted object's boxes moved to the
-  new material: changed boxes, dirty regions).
-
-For this, the parser records a look hash **per material** (`matLookHash[]`) and a look hash of the
-rest. A text where a material was inserted, removed or changed is a full upload as now. The same
-cheap path covers `EDIT_MATERIAL_SET` on a material that only changes `uv_faces`, `filter` or
-`albedo_map`: that material's ranges are rebuilt (their UVs or textures change), and every other
-GPU resource is kept.
-
-### 9.5 What a stroke must not do
-
-A stroke must not allocate per frame. The scratch (subdivision points, the dirty rectangle, the
-stroke mask's tiles) grows to the largest size seen. The canvas and its undo tiles are allocated
-on LMB down and when a tile is first touched (an input event). This follows the memory rules of
-the `engine-code` skill.
+As in the first round: no allocation per frame, scratch grown to the largest size seen, tiles
+allocated on LMB down and when first touched.
 
 ## 10. Undo
 
 ### 10.1 Tiles
 
-A canvas is divided into **64 × 64 texel tiles**. The first time a stroke touches a tile, the
-tile's pixels are copied into the step (`PaintTile { canvas, tx, ty, pixels }`). Undo **swaps**
-each saved tile with the canvas's current pixels and uploads it. Redo swaps again with the same
-buffer. One copy per touched tile serves both directions.
+As in the first round, on the atlas: **64 × 64 texel tiles**, copied into the step the first time a
+stroke touches them, swapped on undo and redo.
 
 ### 10.2 One history
 
-The draw mode shares the edit mode's `MapEditor`: one history, ordered across text edits and
-strokes, CTRL+Z / CTRL+SHIFT+Z (CTRL+Y) in both modes. `EditStep` gains:
+The draw mode shares the edit mode's `MapEditor`: one history across text edits and strokes,
+CTRL+Z / CTRL+SHIFT+Z (CTRL+Y) in both modes, `EditStep.paint` and `MapEditPaintHooks` as in the
+first round.
+
+- A stroke on surfaces that have entries: a step with no hunks and `paint` set.
+- A stroke that allocates (the first stroke on a face, a group or a slot, §3.3; a stroke that goes on
+  onto a new face, §7.1): **one** step with the text hunks (the `paint` statements, the material's
+  `paint` key, the id) **and** `paint` (the tiles it touched, and the atlas's old size when it grew).
+  Undo removes the text live; an atlas that the step created leaves `MS_PaintAtlasProvide` (it stays
+  in memory for redo). **Undoing the first stroke on a map gives back its bytes exactly, and no atlas
+  is written** (nothing is on disk before a save).
+- Face groups, resize and clear (§5.3): one step with the hunks and the tiles of the rectangles they
+  wrote.
+- The 512 MiB cap on paint in the history, as in the first round.
+
+### 10.3 Edit ops (`mapedit.c`)
+
+`EDIT_PAINT_MATERIAL` (the first round's copy of a material) and its script syntax are gone. New:
 
 ```c
-struct PaintStep *paint;    // NULL for text edits; the strokes' tiles and their canvas (drawmode.c)
+EDIT_PAINT_ADD,     // the selected object (one) gets a paint statement (4.2) in the file's paint block
+                    // (appended at the end under `# paint (draw mode)` when there is none; sorted by
+                    // material (named, then own), entity, face / slot): paint.material (NULL: the
+                    // model's own), paint.faces or paint.slot, paint.rect; the material gets
+                    // `paint "<paint.atlas>"` (with paint.nearest: and `paint_filter nearest`) when it
+                    // has no paint key (the built-in "default" without a line of its own gets a
+                    // `material "default" paint ...` line at the top of the block); the line gets an
+                    // id when it has none (nothing is split out of a repeat)
+EDIT_PAINT_SET,     // the selected object's entry in paint.material with the rectangle paint.rect, else
+                    // the one holding the first face of paint.faces (or paint.slot), gets paint.faces
+                    // and paint.rect (rect w <= 0: kept); an own entry takes paint.filter (-1 kept,
+                    // 0 trilinear, 1 nearest). Several objects selected: each one's entry, the
+                    // rectangle kept (the pixel look of an own atlas)
+EDIT_PAINT_REMOVE,  // the selected object's entries in paint.material lose the faces of paint.faces
+                    // (an entry left without faces goes) or the entry of paint.slot goes; faces 0 and
+                    // slot -1: every entry of the object in that material
+EDIT_MATERIAL_SET,  // as in the first round (paint_filter goes through it)
 ```
 
-- A stroke on an existing canvas: a step with no hunks (`hashBefore == hashAfter`) and `paint`
-  set. Undo / redo swap its tiles and call no `MS_EditSetText`.
-- The first stroke on an object (§3.1): **one** step with the text hunks (material, `use` /
-  `material.N`, id, split) **and** `paint` (canvas creation plus the stroke's tiles). Undo removes
-  the text live, and the canvas leaves `MS_TextureProvide` but stays in memory for redo.
-- Layout changes and resizes (§5.2, §5.3): one step with the hunks and the whole old image.
-- `mapedit.c` calls back into the draw mode for `paint` steps (`MapEditPaintHooks`: undo, redo,
-  free, rebase), so `mapedit.c` doesn't depend on canvases.
-- **Memory cap:** paint tiles in the history are capped at 512 MiB. Beyond that the oldest steps
-  are dropped from the bottom of the undo stack (text steps with them, so the order stays right),
-  and the HUD says "oldest N undo steps dropped (paint history over 512 MiB)". The save point
-  goes with them: those steps count as saved or not as before.
+ADD and SET take their faces away from the object's other entries in the same material (an entry left
+without faces goes), so each op keeps the rules of §4.2 by itself and a face that joins a group leaves
+its old one. `EditOp.paint` is as specified plus `signed char filter`; `EditStep` keeps its own copies of
+`paint.material` / `paint.atlas` (`paintMaterial`, `paintAtlas`) and a list of ops amended onto it
+(`more[]`, `EditMore`): `MapEditAmendPaint(E, sel, n, op, msg)` applies one more paint op live onto the
+top step (it must be an unsaved paint step the working copy shows), turns the step's hunks into the
+one hunk from the text before it to the text after both (undo gives the bytes back exactly), and a
+rebase applies the step's op and then each amended op on the objects it selected.
 
-### 10.3 New edit ops (`mapedit.c`)
-
-```c
-EDIT_PAINT_MATERIAL,    // one object (box, or model + slot) gets a new material: matName, matKeys
-                        // (the copy's keys, written as given); boxes: split out of a repeat, wrapped
-                        // in use "matName" ... use "<its material>"; models: material.N; id added
-EDIT_MATERIAL_SET,      // material matName: set the keys in matKeys (replacing the same keys,
-                        // adding the others) on its first line; "-key" removes a key
-...
-const char *matName;    // EDIT_PAINT_MATERIAL, EDIT_MATERIAL_SET
-const char *matKeys;    // e.g. "albedo 255 255 255 albedo_map \"textures/paint/paint_12.png\" uv_faces 0 1 2 3 4 5"
-int slot;               // EDIT_PAINT_MATERIAL on a model: the slot (-1: every slot, `material`)
-```
-
-Edit-script syntax (`--apply-edits` and `--edit-script`), so phase 2 can test the text without
-the painting:
+Edit-script syntax (`--apply-edits` and `--edit-script`), on the selection (one object):
 
 ```
-paint-material "<name>" <keys...>         on the selection (one object)
-paint-material "<name>" slot <N> <keys...>
+paint-add "<material>"|own ["<atlas>"] faces <+x,-x,...>|slot <N> <x> <y> <w> <h> [nearest]
+paint-set "<material>"|own faces <+x,...>|slot <N> [<x> <y> <w> <h>] [nearest|trilinear]
+paint-remove "<material>"|own [faces <+x,...>|slot <N>]
 material-set "<name>" <keys...>
 ```
 
-A rebase re-applies them like any op. Its selection is resolved by entity id. The material name is
-kept; if a material of that name exists on disk with other keys, the step fails ("material
-paint_12 exists on disk").
+(`own` takes no atlas: its path follows from the file.) A rebase re-applies them like any op; the
+selection is resolved by entity id. An `EDIT_PAINT_ADD` whose rectangle now overlaps one that appeared
+on disk fails with the parser's message ("paint: the rectangle ... overlaps line N's ... in the atlas
+of concrete"); the stroke's tiles go with it to `failed[]`. With `--apply-edits` (no working copy, the
+file is written and loaded from disk) the atlas a `paint` key names must exist as a file: the loader's
+path check is strict for files loaded from disk (open question, §16).
 
 ## 11. Saving
 
@@ -560,185 +638,494 @@ paint_12 exists on disk").
 
 CTRL+S (in draw or edit mode) writes:
 
-1. every canvas with unsaved paint to its PNG (`PngWrite`, RGBA8; folder `textures/paint/`
-   created when missing);
-2. the working text, as now (`MapEditSave`);
-3. the licence records of new or derived PNGs (§11.2);
-4. then `MS_EditMarkSaved`.
+1. every atlas with unsaved paint to its PNG (RGBA8 straight alpha; `textures/paint/` made when
+   missing), at the atlas's current size;
+2. every unwrap made in this session to its `.paintuv` sidecar (§4.5);
+3. the working text (`MapEditSave`);
+4. the licence records of new files (§11.2);
+5. then `MS_EditMarkSaved`.
 
-A canvas is unsaved when its pixels differ from what its PNG has (a hash of the pixels as last
-written or read). The HUD's "N unsaved edits" counts paint steps like text steps.
-
-In **auto save** mode (`edit_save = auto`) every stroke writes its canvas at LMB up, and every
-first stroke also writes the map. Each is followed by `MS_EditMarkSaved`.
+Unsaved state, auto save (`edit_save = auto`) and the HUD's count as in the first round.
 
 ### 11.2 Licences (`ASSETS.md`, sidecars)
 
-Every PNG under `textures/paint/` gets an `ASSETS.md` row and a sidecar
-(`textures/paint/<name>.png.asset.md`), written on the save that first writes it, in the format
-the `assets-and-licences` skill describes (`tools/record_asset.py`'s columns; the draw mode writes
-the same text from C):
-
-- **A new canvas from a flat colour**: "made in monolith (painted by hand)", licence **CC0 1.0**,
-  author the package (the developer can change it).
-- **Derived** from a texture or a model's embedded texture: the source's licence and attribution
-  are kept ("derived from `textures/x.png` (CC-BY 4.0, …), painted in monolith"). A source without
-  an `ASSETS.md` row is refused at the first stroke ("textures/x.png has no licence row in
-  ASSETS.md"), as the picker refuses unrecorded models.
-- **Shared mode** on a recorded file: its row gains "modified in monolith" once.
+- **A paint atlas** is "made in monolith (painted by hand)", licence **CC0 1.0**, author the package
+  (the developer can change it): one row and one `.asset.md` sidecar per atlas, written on the save
+  that first writes it. The material's own assets are untouched: paint never derives from them.
+- **A `.paintuv` sidecar** derives from its model: "paint unwrap of `models/x.glb`, generated in
+  monolith", the model's row's author, licence and attribution. A model without an `ASSETS.md` row
+  is refused at the first stroke that would make its unwrap ("models/x.glb has no licence row").
 
 ### 11.3 Closing the game with unsaved paint
 
-As for unsaved edits (`docs/live-editing.md` §4.2), the working text goes to
-`<settings folder>/unsaved/<map>-<YYYYMMDD-HHMMSS>.map`, and each unsaved canvas to
-`<settings folder>/unsaved/<map>-<YYYYMMDD-HHMMSS>/<package path>`. The package isn't touched.
-Automated runs only log that the paint was dropped.
+As in the first round, with atlases and sidecars under `<settings folder>/unsaved/<map>-<time>/`.
 
 ## 12. Conflicts
 
-- **The map file or a painted PNG changes on disk** while paint is unsaved. `MS_Poll` reloads,
-  and `EditModeSync` rebases the text steps as now. Each canvas then goes through its paint rebase
-  hook:
-  - Its material still names the same PNG, and the PNG on disk is unchanged: the canvas's pixels
-    are provided again (`MS_TextureProvide`) and go live with the rebase's `MS_EditSetText`.
-  - The PNG changed on disk (a request repainted it): its unsaved **strokes are replayed** onto the
-    new image. Each paint step keeps its stroke as input (pen, size, colour, the samples in UV
-    space), so the replay works like a rebase of ops. They are reported ("re-applied 3 strokes onto
-    textures/paint/paint_12.png, which changed on disk").
-  - The material or the object is gone: the steps go to `failed[]` in red, as text steps do.
-- **A request is submitted with unsaved paint**: refused until saved, as with unsaved edits
-  ("N unsaved edits: CTRL+S saves and sends"). A request session never sees in-memory paint.
-- **A stroke while a request runs on the map**: today's warning (the first stroke after the last
-  save warns, the same key again within 3 s paints anyway).
-- **A request edits a painted object's line**: the line's id keeps its entity. The canvas follows
-  the material, not the line, so it stays.
+As in the first round, per atlas instead of per canvas: on a reload with unsaved paint, an atlas whose
+PNG is unchanged on disk is provided again; one that changed on disk gets its unsaved strokes replayed
+(each step keeps its samples in paint-UV space and its entry); a step whose entry or material is gone
+fails into `failed[]`. A request that edits a painted object's line keeps its `id`, so its entries
+stay; a request that removes the object leaves its entries inactive (§4.2).
 
 ## 13. Draw mode
 
 ### 13.1 Keys
 
-Draw mode (**B** in spectator mode) works like edit mode (`docs/live-editing.md` §6): the cursor is
-free, **RMB held** flies (mouse look, WASD / E / Q / SPACE, wheel speed), and an RMB click does
-nothing. B, M, V and C switch between the modes. Leaving draw mode keeps unsaved paint (it is
-live), with the same first-press warning as edit mode.
-
-| Key | In draw mode |
-|---|---|
-| LMB (drag) | paint with the pen; fill: fill the face / island |
-| ALT+LMB | eyedropper (the texture) |
-| `[` / `]`, CTRL+wheel | brush size (§7.2) |
-| SHIFT+wheel | brush alpha ±8 |
-| 1 … 5 | pen: hard round, square, soft round, eraser, fill (the effect toggles 1–6 wait while draw mode is on) |
-| X | swap the colour with the last one |
-| H | shared switch (paint the material's own texture, §3.2) |
-| CTRL+Z / CTRL+SHIFT+Z (CTRL+Y) | undo / redo (shared with edit mode) |
-| CTRL+S | save |
-| TAB | hide / show the panel |
-| B / ESC | leave draw mode |
-
-The keybindings panel (`keyspanel.c`) gets a *Draw mode* section.
+As in the first round, except: **H** (shared mode) is gone; ALT+LMB samples what the surface shows
+(§7.4).
 
 ### 13.2 The panel (`src/drawpanel.c`)
 
-The panel is docked on the left edge, below the HUD lines, 300 px wide, and uses the `ui.h` look
-(`UI_PANEL`, `UI_LINE` border, `UI_L` bold title in `UI_ACCENT`). It is mouse-driven. While the
-cursor is over it, LMB is the panel's and the scene isn't painted. From top to bottom:
+As in the first round (its implementation notes give the layout), except:
 
-1. **Target**: what the cursor is over ("box line 120, face +z, paint_12.png 768×512", "model
-   barrel.glb slot 1, own texture 1024²", or the refusal in `UI_ERROR`) and the shared switch.
-2. **Pen**: five buttons (icons drawn with shapes), the size slider + number field (1–256
-   texels), and for soft round the hardness.
-3. **Colour**: R, G, B and A sliders (0–255), each with a number field; a swatch (on a checker
-   for alpha); a hex field (`#RRGGBB` or `#RRGGBBAA`); 8 recent colours (a click picks); the
-   eyedropper hint.
-4. **Canvas**: the density slider + field (texels / m, 8–512, default 64), *Resize to density*
-   (§5.3), the texel size of the face under the cursor (mm × mm), and the **pixel look** switch
-   (`filter nearest`).
-5. **Faces** (boxes): the six faces +x −x +y −y +z −z, each with a cell number button (a click
-   cycles 0..5). An unused number in between is closed up on apply. Below it: *Apply* (§5.2),
-   *All separate* (0 1 2 3 4 5) and *Sides together* (0 0 1 2 0 0).
-
-New `ui.h` widgets (`src/ui.c`), all immediate-mode, one state struct per drag or edit:
-
-```c
-// A horizontal slider of value in lo..hi at r; true while it changed this frame
-bool UiSlider(UiDrag *drag, int id, Rectangle r, float *value, float lo, float hi, float step);
-// A number field: click to type, ENTER / clicking elsewhere applies, ESC cancels, the wheel steps
-bool UiNumberField(UiEdit *edit, int id, Rectangle r, float *value, float lo, float hi, float step, int decimals);
-// A text field (the hex input): the same editing rules, true when ENTER applied it
-bool UiTextField(UiEdit *edit, int id, Rectangle r, char *text, int textSize);
-// A colour swatch (alpha on a checker); true when clicked
-bool UiSwatch(Rectangle r, Color c, bool selected);
-// A button and a toggle in the panel's look; true when clicked
-bool UiButton(Rectangle r, const char *label, bool active);
-// typedef struct { int active; float grab; } UiDrag;  typedef struct { int active; char buf[32]; int len, cursor; } UiEdit;
-```
+1. **Target**: what the cursor rests on and where its paint goes: "box line 120 #3, face +z: concrete
+   atlas 1024×512, 96×64 at 0 0", "model barrel.glb slot 1: crate atlas, a new 512² rectangle", "the
+   first stroke adds 96×64 to concrete's atlas", or the refusal in `UI_ERROR` (§3.4). No shared switch.
+2. **Pen**, 3. **Colour**: unchanged.
+4. **Density** (was *Canvas*): texels / m, the texel size the target's paint has (or will have; "the
+   rectangle is clamped to 2048" when it is), *Resize to density* (§5.3), *Pixel look* (the atlas's
+   `paint_filter`: `EDIT_MATERIAL_SET` on the material, or every `paint own` entry of an own atlas), and
+   *Clear paint* (§5.3).
+5. **Faces** (boxes): the six faces, each with a group number button (0..5); faces with the same
+   number share one rectangle. *Apply* rewrites the target box's entries (§5.3); *All separate* and
+   *Sides together* set the buttons.
 
 ### 13.3 The brush cursor
 
-Under the cursor, the pen's **texel footprint** is drawn on the surface: the outline of the
-footprint's texels around the hit texel, mapped back to the world through the hit face's (or
-triangle's) UV → position mapping (a box face: exact; a model: the triangle's affine map, clipped
-to the triangle's plane). It is drawn as a ring for round pens and a quad for square, depth-tested
-with the designer overlay's bias. At size 1 it is the texel's own square, so pixel art shows
-which texel is next. Fill outlines the face. The HUD line:
-`DRAW  hard round 4 px  #C83232 a255  | paint_12.png 768×512 face +z  | 2 unsaved edits`.
+As in the first round, in paint-UV space: the footprint mapped through the face (exact) or the
+triangles of the island (affine). Fill outlines the entry's faces or the island.
 
 ## 14. Verification flags
 
-- `--paint-script <file>`: strokes applied **live**, after `--edit-script` and before `--shot` or
-  any `--dump-*` (after 10 frames with `--shot`, as `--edit-script`), or written to the package
-  with `--apply-edits` semantics (`save` in the script). One command per line:
+As in the first round (`--paint-script`, `--draw-mode`, `--draw-panel`, `--input-script`), except:
 
-  ```
-  pen <round|square|soft|eraser|fill>      size <n>     color <r> <g> <b> [<a>]     density <n>
-  shared <on|off>                          faces <a b c d e f>   (EDIT_MATERIAL_SET, §5.2)
-  stroke px <x0> <y0> <x1> <y1> [...]      screen pixels of the shot's camera, interpolated as LMB drags
-  stroke uv <entity> <face|slot> <u0> <v0> [<u1> <v1> ...]   texture space of that object's surface
-  dab px <x> <y>   /   dab uv <entity> <face|slot> <u> <v>     one stamp (fill: fills there)
-  pick px <x> <y>                          the eyedropper (prints the colour)
-  undo / redo / save / print               (print: the canvases, their sizes, unsaved state, pixel hashes)
-  ```
+- `shared` is gone; `faces <a b c d e f>` sets group numbers and applies them (§5.3); `clear`;
+  `resize`; `pixel on|off` (these on the surface of the last stroke's LMB down);
+  `stroke uv` / `dab uv` take **paint** coordinates (a box face 0..5 and its face uv, or a model slot
+  and its paint uv); `print` lists the atlases (size, rectangles, unsaved state, pixel hashes) and the
+  entries.
+- Every flag stays windowless with `--shot` / `--dump-*` / `--apply-edits` and refused otherwise;
+  scripted input never reaches the prompt box (`drawShotLocked`, the launcher guard).
 
-  Entities are written as `select` writes them (`id 12:0`, `entity a7d95ba7:0`).
-- `--draw-mode`: open draw mode (with `--shot --shot-hud`: the HUD line and the brush cursor at
-  `--cursor <x> <y>`).
-- `--draw-panel [section]`: draw mode with the panel, for HUD shots.
-- `--input-script` gains `b` and mouse `down` / `up` on LMB (for drags through the real input
-  path).
+The examples' test harness gains a **headless bench mode** for the exported runtime (§15, phase 3):
 
-All of these are windowless with `--shot` / `--dump-*` / `--apply-edits`, and refused otherwise.
+```
+<example> --bench <report.md> [--bench-frames N] [--note "what changed"]
+```
 
-## 15. Phases and ownership
+It opens the same hidden window as `--shot`, and for each viewpoint of the scene spins the camera as
+`monolith --bench` does for `N` frames (default 600) with `glFinish` per frame, then writes a report
+with the same statistics as `--bench` (per viewpoint and overall: mean, median, p95, p99 frame time,
+frames) and the machine's *Setup* table (GPU, driver, CPU, system, resolution, the note). It refuses
+to run without `--bench` or `--shot`, like the test build always does.
+
+## 15. Phases and ownership (the paint-layer round)
 
 | Phase | Who | Files | Done when |
 |---|---|---|---|
-| 0 | lead | this note; headers and stubs (`monolith_scene.h`, `drawmode.h/.c`, `drawpanel.h/.c`, `mapedit.h`, `ui.h`, flags in `main.c`) | both builds 0 warnings with the stubs |
-| 1 | agent A | `runtime/monolith_scene.c/.h`, `docs/compiled-map.md`, `src/export.c` if needed, `FrameKey` in `main.c` | §4, §8, §9.2–9.4; every map unchanged; a scratch map with an atlas box, a turned atlas box and a model: hits give the expected uv / face, known texels in shots; compiled round trip; `examples/build.sh test`; leak check |
-| 3a | agent B (beside A) | `src/ui.c/.h` widgets, `src/drawpanel.c` laid out on dummy state | `--draw-panel` shots at 1280×720 and 1920×1080 |
-| 2 | agent C (after A) | `src/drawmode.c`, `src/mapedit.c/.h`, the draw-mode wiring in `main.c`, `designer.c`, `editmode.c` | §3, §5–7, §10–12; `--paint-script` shots of each pen at size 1 / 16, alpha 255 / 128, eraser, fill; `--apply-edits` diff minimal; undo byte-identical PNG; hot-reload round trip; leak check |
-| 3b | agent D (after B, C) | `drawpanel.c` wiring, the brush cursor, HUD, `keyspanel.c` | panel shots with real state; hand-test steps |
-| 4 | verifier, then lead | docs | every claim re-checked; docs updated |
+| 0 | lead | this note §1–§16; headers and stubs (`monolith_scene.h` and its stubs, `mapedit.h`, `harness.h`'s interface) | both builds 0 warnings with the stubs |
+| 1 | agent A | `runtime/monolith_scene.c/.h`, `docs/compiled-map.md`, `src/export.c` if needed | §4, §6, §8, §9; every map unchanged (shots, dumps); a scratch package with an alpha-0 entry on a box of each draw kind (merged, instanced, turned, a `stairs` step) and model slots (own material, shader override, tiled UVs with an unwrap, `transparency alpha`, `unlit`, emissive): **0 changed pixels** against the unpainted package at every view; a known rectangle painted: changes only inside its mask (light bounced by the paint reported separately); compiled round trip; `examples/build.sh test`; leak check |
+| 3a | agent B (beside A) | `tests/examples/harness.h` bench mode; `src/paintunwrap.c/.h` (xatlas, vendored under `src/vendor/xatlas/` with its licence), `build.sh` | the harness bench on every exported map; base numbers for every map in `maps/` (benches through the lead); an unwrap of each Kenney model in `maps/` written and read back (`MS_PaintUnwrapRead`), no overlapping charts |
+| 2 | agent C (after A) | `src/drawmode.c/.h`, `src/drawpanel.c/.h`, `src/mapedit.c/.h`, the draw-mode wiring in `src/main.c`; `src/surfacebake.c/.h` to the trash | §3, §5, §7, §10–§14; `--paint-script` shots of every pen on every kind of phase 1, including the monolith map's concrete, weeds, tower, porcelain, poster and ivy, and pine_forest's ground; alpha-0 first stroke: 0 pixels; undo restores the map bytes and leaves no atlas; minimal `--apply-edits` diff; save → reload identical; leak check, `--asan` |
+| 3b | agent D (after C) | benches through the lead; a fix if needed | painted monolith (N = 10, 100, 1000 objects over its materials) against the same map unpainted, exported, interleaved pairs; draw counts; per-pass GPU table |
+| 4 | verifier, then lead | the docs (§15 of the task prompt) | every claim re-checked |
 
-`monolith_scene.c` belongs to A only, and `mapedit.c` to C only. Nothing here needs a benchmark
-unless phase 1 changes how boxes merge for existing materials. If it does, one A/B check goes
-through the lead.
+`monolith_scene.c` belongs to A only; `drawmode.c` and `mapedit.c` to C only. Only one benchmark at a
+time, through the lead.
 
 ## 16. Open questions (for the final summary)
 
-- **Non-square faces** stretch their texels (§5.1). An alternative is cells sized per face
-  (a packed atlas that depends on the box's size, re-laid out when it is resized).
-- **Brushes across box edges** (§7.1): a stamp is clipped to its face. Projecting it across the
-  edge is possible later (stamp in 3D and splat into every face it reaches).
-- **Materials with a surface shader**: boxes are baked (§3.6, with the losses its implementation
-  notes list); model slots are refused (§3.5).
-- **The eraser** restores only this session's base (§7.4). Keeping a `.base.png` beside each canvas
-  would allow erasing older paint.
-- **Licence of a new canvas**: CC0 by default (§11.2).
+- **A full atlas** (4096 × 4096) refuses; a second atlas per material (a `paint` key per page and a
+  page per entry) would lift it.
+- **Brushes across box edges**: a stamp is clipped to its face (first round).
+- **Non-square faces** stretch over a rectangle sized by the group's largest face (§5.2).
+- **The eyedropper's read-back** (§7.4) of the G-buffer albedo.
+- **Paint on emissive and metal surfaces** covers emission and metalness (§4.3); keeping them is
+  one line of the paint stage.
+- **Mip bleeding** between rectangles from level 3 on (the 2-texel border on a 4-texel grid keeps
+  levels 0–2 clean).
+- **Licence of an atlas**: CC0 by default (§11.2).
+- **`--apply-edits` and a new atlas**: a `paint` key loaded from disk must name an existing file, so an
+  edit script's `paint-add` needs the atlas PNG in the package first (a lenient check would let the entry
+  load inactive, "has no atlas image").
+- **The unwrap of a large model** blocks the frame after its note (3.2 s for `rock_face_01.glb`): a
+  worker thread would need copies of the mesh data.
+- **The eyedropper** renders the view once more per click (R3D's albedo output mode).
 
 ## Implementation notes
 
-(Appended per stream as it merges.)
+(Appended per stream as it merges. The paint-layer round's notes come first as they merge; the first
+round's notes below describe the canvas model and the bake that the paint layer replaces. Phase 4 moves
+what is only history into the `project-history` skill.)
+
+### Implementation notes: paint layer phase 1 (the runtime)
+
+What phase 1 built in `runtime/monolith_scene.c/.h`, and where it differs from §1–§9.
+
+- **Parsing** (§4.1, §4.2): `paint` and `paint_filter` in `ParseMaterial` (`MatDef.paint`, `paintFilter`); the
+  `paint` statement in `ParsePaint` (stored with its entity, no statement key, hashed into
+  `SceneData.paintHash` only); the entities are resolved at the end of the parse (`ResolvePaintEntities`:
+  the line `id N` through the statement key set, its boxes / models by binary search on the statement
+  index). The rules between entries are one function, `PaintConflict` (a sweep over the rectangles sorted
+  by atlas and x, and over the entries sorted by material, kind and object), used by the parser and the
+  compiled reader alike. **Interpretation**: "no two entries of one material overlap (the 2-texel borders
+  may touch)" is checked as *no texel shared*; the border is the packer's rule, not the parser's.
+- **Activity** (`PaintResolve`, after `BuildEntities` and the model files, in every load and edit): box
+  material = entry material; for a model: slot < the file's `materialCount`, `SlotMaterial` = the entry's
+  material (`-1` own), slot ≤ 255 (a byte in the paint mesh), the file not skinned, the slot's paint UVs
+  usable (unwrap or own UVs that pass the test below), the rectangle inside the atlas (its size from the
+  provided image or the PNG header, `ImageFileSize`, so `--compile` and `--dump-*` decide the same way
+  without decoding). An inactive entry is logged once per load: `map:line: paint: 120:0 +x is not drawn with
+  concrete; inactive` (also "lies outside its atlas", "has no atlas image", "is in a skinned model file",
+  "needs a paint unwrap", "…'s shader can't take the paint stage"). A material whose shader can't take the
+  stage (more than 2 samplers, too long, or a compile error) is demoted with its entries (`PaintDemote`).
+- **Own UVs** (§4.5, `OwnUvKind`): from the file's CPU mesh data, so the game build decides like the editor:
+  every coordinate in 0..1 and not all 0, then a 1024² raster in which a texel touched (conservatively,
+  separating axes) by two UV islands (triangles joined over exactly equal UV edges), or whose centre lies
+  strictly inside two triangles (folded or mirrored halves joined at a seam), fails. Found: every Kenney
+  model in `maps/` and both scans (rock_face_01: folded triangles; stump_old) need an unwrap; only
+  `sedan.glb` passes. Computed once per file and slot (`FilePaint.uvKind`), carried over by live edits.
+- **CPU mesh data**: kept (not freed after the pick BVH) for every model file in editor builds
+  (`MS_ModelMeshData`, unwraps, the own-UV test) and, in game builds, for files a paint entry names.
+- **Unwrap sidecar** (§4.5): `models/<file>.paintuv`, the model path with its extension replaced (so
+  `models/barrel.glb` → `models/barrel.paintuv`); read by `UnwrapRead` (game and editor), checked against
+  the model file's FNV-1a 64 and its meshes (`UnwrapMatches`: a mesh per mesh, the mesh's slot, the same
+  triangle count, sources inside the mesh); stale or not fitting: ignored, logged. A sidecar that exists is a
+  dependency (watched, exported). `MS_PaintUnwrapProvide` keeps a copy per model *path* with a generation;
+  dropped like provided textures (a load from disk, `MS_Unload`).
+- **Own atlases** (§4.1): `textures/paint/<file>_s<N>.png`, `<file>` the model file's name without folder and
+  extension, kept to letters, digits, `-`, `_` (`OwnAtlasPath`). `MS_PaintAtlasOf(-1, file, slot)` names it
+  also before any entry. A missing own atlas makes its entries inactive (no error: there is no path token
+  to cite); it is a dependency when it exists or is provided.
+- **The paint shader** (§4.3, `PaintShaderSource`): comments stripped (a block comment becomes a space),
+  leading blanks and empty lines dropped; `[flat|smooth|noperspective] varying T x;` becomes
+  `#ifdef STAGE_VERT … out … #else … in … #endif` in place; `vertex()` / `fragment()` become
+  `ms_userVertex()` / `ms_userFragment()` under their stage guard; a source with only one entry point has its
+  whole code under that stage's guard (R3D gives a stage without its entry no user code, so its global code
+  never compiled in the other stage before). **R3D's parser skips any token starting with `flat `,
+  `smooth `, `noperspective `** (it copies global code with `hasVaryings` true), so interpolation qualifiers
+  are written as `MS_INTERP(flat)` with `#define MS_INTERP(q) q`. The stage then follows as in §4.3 with two
+  changes: the fragment test excludes only `DEPTH` / `DEPTH_CUBE` — **`GEOMETRY_PREPASS` is also the shading
+  pass after the depth pre-pass** (R3D patch 6: `uDepthOnly` returns early in the depth-only run), so
+  excluding it hid the paint of every `alpha_cutoff 0` material — and `ALPHA += …` runs under `FORWARD`
+  (the blended program) only, which gives the transparency / cutout rules for every material of one shader
+  file with one compile. The uv is clamped half a texel inside with `textureSize(ms_paint, 0)`.
+  Compiled once per shader file and load (`ShaderFile.paint`, the empty shader is the entry with `rel` NULL);
+  originals are now compiled lazily too (`GetShaderFile`), so a file only painted materials use is not
+  compiled twice. Generated sizes: tower_ruin 14 118 bytes (raw 16 260), poster_var 12 178, concrete 9 429,
+  the empty shader 1 719. All 19 shaders of `maps/` and `tests/models` pass `glslangValidator` in every
+  variant (vertex, vertex DEPTH, fragment, DEPTH, DEPTH_CUBE, FORWARD, GEOMETRY + GEOMETRY_PREPASS, UNLIT)
+  with STAGE_* and the vertex attributes defined (a scratch variant of `check_surface_shader.py`: the stock
+  one defines neither, so it can't check generated sources).
+- **Keys** (§4.4, `PaintKeys`): 6 per painted box, `materialCount` per painted model instance, from 1 up, in
+  box then instance order; a face or slot without an entry keeps a zero rectangle. **A live edit keeps the
+  keys of objects matched to old ones** (`boxFrom` / `modelFrom`) and appends new keys after old's, so a
+  stroke on a new face rebuilds one cell, not every later one; a full load packs them again. Merged meshes:
+  the key's 3 bytes in bone indices 0..2 (index 3 is 0), the corner UV as two unorm16 in the four weights
+  (`PaintBones`, in `BuildBoxMesh` for axis-aligned and turned boxes). Instanced boxes:
+  `R3D_INSTANCE_CUSTOM` (FLOAT32) `(first key, 1, 0, 0)`; the shader computes the face and UV from the unit
+  cube's position and normal, checked once against `R3D_GenMeshDataCube` (`PaintCheckCube`: UVs and zero
+  bone data). Model groups: the custom attribute `(first key or 0, 2, 0, 0)` on **every group that draws a
+  slot with a paint shader** (also groups of unpainted files, whose bone bytes then don't matter); paint
+  meshes per painted file (`BuildPaintMeshes`: copies of the CPU mesh data, or the unwrap's vertices, with
+  slot and paint UV in the bone channels; groups draw them instead of the file's meshes).
+- **Table** (§4.4): RGBA32F, 1024 keys per row, `rlLoadTexture` with nearest filtering, bound as
+  `ms_paintTable` to every paint alias (`PaintBindTable`). A live edit takes old's texture when the table is
+  byte-identical, else uploads a new one.
+- **Atlas upload** (§4.3): `GetTextureEx(premul)`: RGBA8, colour premultiplied by alpha **in linear light and
+  stored sRGB-encoded** (`PremulLut`, a 64 KB table: 255 keeps the byte, 0 gives 0), sRGB texture, clamp,
+  trilinear (R3D's mipmaps) or `paint_filter nearest` (nearest / nearest-mipmap-linear). The GPU decodes
+  sRGB before filtering, so the filtered value is colour × alpha in linear light, which the stage adds.
+  `MS_TextureUpdate` premultiplies the uploaded rectangle the same way for atlas cache entries
+  (`TexEntry.premul`); the provided image stays straight alpha.
+- **Live edits** (§9.2): `matPaintlessHash` (the material's lines without the paint keys) next to the look
+  and shape hashes: a change only in `paint` / `paint_filter` is no `PLAN_MAPS`. The plan is now bits
+  (`PLAN_MAPS`, `PLAN_NEW`, `PLAN_PAINT`); `PLAN_PAINT` when `PaintSigSame` differs (painted or not, atlas
+  path, size, filter): the material gets a new alias (`BuildMaterialShader`), old's is freed on success.
+  **Draw order**: R3D sorts instanced opaque draws by the alias's creation serial (patch 17), so a re-made
+  alias would draw after all others and coplanar faces of two materials could resolve differently than in a
+  load (measured: 248 pixels at ground contact). Every later material with a shader is therefore re-aliased
+  too (`materialsRebuilt` counts them). Merged cells are kept when their boxes' keys are the same
+  (`BoxPaintKey`), instanced buffers when their boxes and keys are (`instanceBuffersRebuilt`), paint meshes
+  when the file's unwrap generation is (`PaintMeshesLive`; replaced ones go to `LiveRetire`). A failed
+  edit rebinds old's aliases to old's table (`LiveMaterialsBack`). New `MS_EditStats` fields:
+  `instanceBuffersRebuilt`, `paintTables`, `paintMeshFiles`.
+- **Picking** (§6): boxes: `paintUv` = the face UV (`CubeFaceUv`, the stage's mapping); models: the
+  triangle's paint UVs (own UVs quantised to unorm16 as the paint mesh holds them, or the unwrap's)
+  interpolated with the hit's barycentric coordinates; `paintEntry` by a linear search of the active entries.
+- **Compiled maps** (§4.6): as specified (`CmMaterial` 164 bytes, `CmPaint` 40 bytes, section 18, version 5,
+  versions 2–5 read). The reader re-checks the parser's rules (`PaintConflict`, an explicit `id` on the
+  object's line, a material with an atlas). `tests/unit/compiled_test.c`: `MAT_SIZE` 164 and five new cases.
+- **Not done / open**: the transform preview draws its moved boxes from a buffer without the custom attribute
+  (their paint is hidden while the preview runs; merged ranges rebuilt for the preview keep theirs); a model
+  file with more than 256 material slots can't paint slots past 255; `MS_EditStats.materialsRebuilt` now also
+  counts re-aliased materials (see *Draw order*).
+- **Verification** (scratch package: merged, turned, `stairs` step, instanced, stripes-shader, concrete and
+  tower_ruin boxes; transparent, unlit and emissive boxes and model slots; own material with own UVs
+  (sedan) and with an unwrap (rock scan); a Kenney tree and the rock scan with synthetic sidecars; 20
+  entries): every map in `maps/`, `tests/models`, `tests/rotated`: identical dumps and 0 changed pixels in
+  61 shots (viewpoints, yaw sweeps, heights, the steep view, `--reload-test`) against the build before.
+  Zero-alpha atlases vs no paint: 0 pixels at 11 views. An opaque rectangle: with SSAO, SSIL and bloom off,
+  879 254 changed pixels inside the paint footprint and 478 outside it (1-pixel dilation) over 10 views; with
+  every effect on, the indirect light changes 1.96 M pixels outside it. Live edits (a first paint on a new
+  material, an entry on an already keyed box, an entry removed, back to the start) vs a load of the same
+  text: 0 pixels; a stroke (`MS_TextureUpdate` of every atlas) vs loading those atlases: 0; an atlas grown
+  through `MS_PaintAtlasProvide`: 0. Compiled round trip, `compiled_test.sh`, `parse_error_test.sh`,
+  `export_strip_test.sh` pass; the export renders identically with the examples' game runtime.
+
+### Implementation notes: paint layer phase 3a (harness bench, unwrap)
+
+**The harness bench** (`tests/examples/harness.h`, §14). `<example> --bench <report.md>
+[--bench-frames N] [--note …]` in any test build (`examples/build.sh test`) or an export's `viewer.c`
+compiled with `-include <repo>/tests/examples/harness.h`. It mirrors `monolith --bench --headless`
+(`src/main.c`'s bench loop, `src/bench.c`), whose code can't be included (it needs the editor's
+`common.h`, the global `scene`, the spectator): the hidden window is always 1920 × 1006 (titled
+`monolith-bench`; the program's own size request and its `MS_ApplyRenderResolution` calls are replaced
+by that size), 60 warmup frames per viewpoint (monolith: 59 on the first one), then N timed frames
+(default 600, 10 … 1 000 000) with the camera at the viewpoint's eye, monolith's yaw and pitch towards
+its target and fovy 70, the yaw turning 2π · frame / N; `glFinish` after every `EndDrawing`, a frame's
+time from one `glFinish` to the next. The camera is replaced in the first scene's `MS_Draw` calls, so
+programs that draw with `R3D_Begin` + `MS_DrawGeometry` (`02_existing_project/after`, `05_entities`)
+can't be benched: after 600 frames without an `MS_Draw` the run stops with exit 1. The report has
+monolith's *Setup* rows (GPU, driver, CPU, system, resolution plus R3D's, map, sun shadow, effects,
+vsync, window, method, command, the note; R3D build and quality become one *Program* row) and its
+statistics per viewpoint and overall (avg ms, avg FPS, 1 % low FPS, worst ms, shadow updates) plus
+the median, p95 and p99 the phase-0 interface asked for; the same table goes to stdout. No per-pass
+GPU table: the harness never enables R3D's profiler (monolith's bench does, so absolute numbers of
+the two tools differ; compare harness runs only with harness runs). `--shot` behaves as before: every
+example's shots (`01_minimal` ×3 incl. `--quality medium`, `02` before / after, `03`, `04` and its
+capture shim, `05`) are byte-identical to the phase-0 harness. `--shot` with `--bench`, and
+`--bench-frames` / `--note` without `--bench`, are refused (exit 1).
+
+**`tools/bench-export-ab.sh`** `<base export> <new export> --note "…" [--map <name>] [--pairs N ≥ 3]
+[--frames N] [--out <dir>] [--dry-run]`, `--summarize <out dir>`: compiles each export's `viewer.c`
+with the harness (its own object; the runtime is compiled without it) against that export's
+`monolith_scene.c/.h` and its libraries (`prebuilt/linux/lib`, else `build/r3d-linux/lib`), runs
+A, B, A, B, … on each export's own package with `__GL_SYNC_TO_VBLANK=0 vblank_mode=0`, a note per run
+naming its side and pair, and prints per pair A, B, B − A (ms, %), then the mean and median of the
+paired differences overall and per viewpoint. Reports and logs in `benchmark/export-ab/<stamp>/`
+(`A-<i>.md`, `B-<i>.md`, `runs.txt`, `summary.txt`). Linux only. Checked with `--dry-run` (both
+binaries build with 0 warnings) and `--summarize` on copies of the one screening report (the parser);
+it has not run a real A/B (the lead's benches).
+
+The one screening run (exported `pine_forest`, `--bench-frames 150`, RTX 4050 Laptop GPU, driver
+615.71.09, Ryzen 7 7435HS, Linux 7.2.5-cachyos; the GPU was shared with another agent's shots: not a
+measurement): all views 3.267 ms avg (306 FPS), per view 2.83–4.11 ms, 0 shadow updates in timed frames.
+
+**The paint unwrap** (`src/paintunwrap.c/.h`, §4.5). `PaintUnwrapMeshes(meshes, count, texelsHint,
+out, err, errSize)` over plain arrays (positions float3, UVs float2 or NULL, indices or NULL for
+unindexed, the slot) → `MS_PaintUnwrap`; `PaintUnwrapModelFile(scene, file, out, err, errSize)` (the
+signature of the task; texelsHint `PAINTUNWRAP_TEXELS` = 1024) reads the meshes through
+`MS_ModelMeshData` (as the header declares it: `R3D_MeshData *out`, not §8.2's `const R3D_MeshData
+**`), converts R3D's float16 UVs, takes the slots from `model.meshMaterials`, refuses skinned files and
+sets `fileHash` (FNV-1a 64 of the file). Per slot, in the order slots first appear, one xatlas atlas
+holds all meshes of the slot: `ComputeCharts` with default options (the own UVs only as a seam hint),
+`PackCharts` with padding 2 and bilinear borders into one texelsHint² domain (xatlas packs a fixed
+resolution into as many atlases as needed, so the texels per unit start at xatlas's own estimate and
+shrink by 0.9 until one atlas holds every chart). Paint UVs are the packed UVs / texelsHint as unorm16;
+triangles keep their order and count (xatlas writes each output triangle at its source position; the
+test proves `source[indices[3t + k]]` = the input's index `3t + k` for every corner of every model).
+**Folds:** xatlas leaves a few overlapping triangles inside LSCM charts on dense meshes
+(`rock_face_01.glb`: 43 texel centres of 1024² covered twice; `campfire.glb`: 2, from a triangle with
+zero area in 3D). The unwrap checks its own result exactly (integer separating axes on the unorm16
+triangles, a 128² grid) and gives every overlapping triangle an xatlas material group of its own (a
+chart of its own) for another pass, up to 8 passes (both needed one more); triangles with zero area in
+3D (they draw no pixel) and coincident duplicates (same three positions) are exempt. xatlas runs
+single-threaded (`XA_MULTITHREADED=0`): two runs give the same bytes.
+
+**xatlas** is vendored at `f700c779` (MIT, `src/vendor/xatlas/README.md`: URL, commit, sha256 of
+`xatlas.cpp`, `xatlas.h`, `xatlas_c.h`, `LICENSE`); downloaded into an empty scratch folder, read
+(includes, file I/O: only its debug writers, compiled out; no network, no process calls), copied
+unchanged. `build.sh` compiles it once per build folder (`Xatlas`: C++14 — C++11 fails on its
+single-threaded path — `-w -DNDEBUG -DXATLAS_C_API=1 -DXA_MULTITHREADED=0`, the build's own optimisation
+and sanitizer flags, `-fno-sanitize=function` for UBSan) and links the object into the editor only;
+the export and examples don't get it. Both targets 0 warnings; Linux NEEDED unchanged (libgcc_s, libGL,
+libm, libc, ld-linux), newest GLIBC symbol 2.34; Windows imports unchanged (system DLLs and UCRT only).
+
+**The test** (`tests/unit/paintunwrap_test.c` + `.sh`, ASan + UBSan; also in `tools/leakcheck.sh` as
+`paintunwrap`): synthetic meshes (a cube whose six faces share UVs 0..1, the same without UVs, a cube
+of 8 shared vertices, a mirrored quad pair with overlapping UVs, five meshes over four slots with an
+empty mesh, an unindexed one, tiled UVs and a degenerate triangle, three kinds of bad input) and every
+model file in `maps/*/models/`, read with R3D's importer exactly as the runtime does
+(`R3D_LoadModelEx(…, R3D_IMPORT_RETAIN_MESH_DATA)` in a hidden window). Per input: triangle order and
+count, valid sources and indices, an exact texel-centre raster at 1024² (top-left rule) with 0 texels
+covered twice (coincident faces counted apart), chart footprints (conservative raster at texelsHint) at
+least 2 empty texels apart, and two runs byte-identical. The sidecar round trip (`MS_PaintUnwrapWrite`
+→ `MS_PaintUnwrapRead`) and `PaintUnwrapModelFile` against the direct unwrap (`--scene` on the package
+with the most models) run automatically once phase 1 replaces the stubs; until then they print
+"skipped". Results (`-O2`, times of one unwrap; all: overlap 0, footprints 0, gaps > 2 texels,
+deterministic):
+
+| Input | Meshes / slots | Triangles | Vertices in → out | Charts | Time |
+|---|---|---:|---:|---:|---:|
+| `monolith/models/sedan.glb` | 5 / 1 | 2032 | 2718 → 2780 | 120 | 201 ms |
+| `pine_forest/models/campfire.glb` | 4 / 3 | 641 | 1048 → 1098 | 192 | 130 ms |
+| `lantern.glb` | 1 / 1 | 264 | 338 → 364 | 62 | 170 ms |
+| `log.glb` | 2 / 2 | 200 | 312 → 312 | 64 | 61 ms |
+| `rock_face_01.glb` (not Kenney; scanned) | 1 / 1 | 10000 | 5803 → 9578 | 777 | 3188 ms |
+| `rock_largeA.glb` | 2 / 2 | 80 | 146 → 146 | 23 | 125 ms |
+| `rock_largeD.glb` | 3 / 3 | 80 | 146 → 146 | 22 | 132 ms |
+| `stump_old.glb` | 1 / 1 | 120 | 208 → 212 | 42 | 33 ms |
+| `tent.glb` | 2 / 2 | 352 | 518 → 586 | 82 | 140 ms |
+| `tree_pineDefaultA.glb` | 2 / 2 | 230 | 392 → 392 | 51 | 159 ms |
+| `tree_pineRoundC.glb` | 2 / 2 | 206 | 342 → 342 | 64 | 156 ms |
+| `tree_pineSmallA.glb` | 2 / 2 | 164 | 280 → 280 | 53 | 125 ms |
+| `tree_pineTallA.glb` / `B` | 2 / 2 | 78 | 136 → 136 | 32 | 131 / 143 ms |
+| `tree_pineTallC.glb` / `D` | 2 / 2 | 98 | 156 → 156 | 33 | 149 / 159 ms |
+
+Open: most of a small model's time is the repacking (up to 80 fixed-resolution packs; a bisection
+of the texels per unit would need ~8); `rock_face_01` takes 3 s, which a first stroke would wait for
+(a worker thread, or a progress note, in phase 2). The 2-texel gap holds at texelsHint (1024); a
+smaller paint rectangle scales it down (at 256 texels the charts are only ~0.5 texel apart), so draw
+mode should pass the slot's real rectangle size, or the unwrap be made at the smallest size it will
+be painted at.
+
+### Implementation notes: paint layer phase 2 (draw mode)
+
+What phase 2 built (`src/drawmode.c/.h`, `src/drawpanel.c/.h`, `src/mapedit.c/.h`, `src/paintunwrap.c/.h`,
+the draw-mode wiring in `src/main.c`, `src/keyspanel.c`, `tools/leakcheck.sh`, a removal in the runtime),
+and where it differs from §1–§14 (which now say what was settled).
+
+- **The bake and the canvases are gone**: `src/surfacebake.c/.h` (to the trash), shared mode and H, the
+  per-object material copies, `EDIT_PAINT_MATERIAL` and `paint-material`. Removed from the runtime because
+  nothing else used them (examples, tools and tests grepped): `MS_TextureProvide` (its body is now
+  `MS_PaintAtlasProvide`), `MS_TextureFind`, `MS_ModelSlotTexture`, `MS_TextureRead`, `MS_BoxDrawOf` /
+  `MS_BoxDraw`, `MS_MaterialFaceLayout`, `MS_FaceCellRect`. No other runtime change; every map in `maps/`,
+  `tests/models` and `tests/rotated` stays pixel- and box-identical.
+- **Atlases** (`Atlas` in `drawmode.h`): one per atlas path, opened from its PNG when it exists (straight
+  alpha RGBA8, the pixels it was read with are its saved state), else empty until its first rectangle.
+  Always provided (`MS_PaintAtlasProvide`) while it holds unsaved or session pixels; a frame's stamps go
+  up with one `MS_TextureUpdate` per atlas (raylib's log quietened around it). A material's new atlas is
+  `textures/paint/<material>.png` (letters, digits, `-`, `_`), `-2`, `-3`, ... when another material's key,
+  another file's own atlas, a file on disk or another material's atlas of this session has the name (an
+  atlas of the same material from an undone stroke is reused). Own atlases take the runtime's name
+  (`MS_PaintAtlasOf(-1, file, slot)`).
+- **Allocation** (`AddRect`): the size of §5.2 (`ceil(rho * edge)` with a 1e-4 slack, so 2 m at 64/m is
+  128, not 129), the packer of §5.1 (an occupancy grid of 4-texel cells and its summed-area table, built
+  on the click: at most 1024² cells), growth, then the op: `EDIT_PAINT_ADD` pushed with the stroke's step
+  (`MapEditPushPaint`) or amended onto it (`MapEditAmendPaint`, a stroke that went on onto another face).
+  The atlas is provided at its new size before the text goes live. A failed push puts the atlas back and
+  releases the step, whose pixels go back too (`PaintStep.pending`). **Deviation**: a stroke onto a new
+  face allocates at once (the text goes live mid-stroke, so the paint shows), and the step stays one undo.
+- **Steps** (`PaintStep`): the atlas, the 64 × 64 tiles, the atlas's size before / after and whether the
+  step gave the runtime the atlas (`created`). Undo swaps the tiles at the larger size, crops back to the
+  size before, and takes a created atlas out (`MS_PaintAtlasProvide(NULL)`; it stays in memory for redo);
+  redo extends, swaps and provides. Panel edits (faces, resize, clear) are `STEP_EDIT` steps: tiles, no
+  samples.
+- **Strokes** (§7): samples in atlas texels with a region (the entry's rectangle; a model: the island of
+  the hit triangle, from `IslandsFor`: the slot's triangles joined over equal paint-UV edges, rasterised
+  conservatively at the rectangle's size, cached per file, slot, size and scene version); stamps clip to
+  the region. A stroke stays on the object, material (and slot) of its LMB down; on a box it goes on over
+  any face. The eraser lowers alpha (`a · (1 − coverage)`, 0 0 0 0 at 0). Fill fills the region.
+- **Unwraps** (§4.5): `EnsureUnwrap` before the first stroke on a slot whose `MS_ModelPaintUv` is
+  `NEEDS_UNWRAP`: refused without the model's `ASSETS.md` row, then `PaintUnwrapModelFile(scene, file,
+  texelsHint, …)` (the new parameter: the slot's rectangle side) and `MS_PaintUnwrapProvide`; the
+  allocation's live edit makes the paint UVs exist, so the stroke's samples read them from the triangle
+  (`MS_ModelSlotPaintTriangle` with the hit's barycentrics). Interactively the click only says
+  "unwrapping x.glb for paint ...", the HUD shows it for a frame, and the next `DrawModeUpdate` unwraps
+  (synchronously) and begins the stroke where LMB went down (a released button: one dab). No worker
+  thread: `rock_face_01.glb` freezes the game for 3.2 s on that frame (machine A). A provided unwrap stays
+  for the session (undo doesn't take it back: the file looks the same either way); its sidecar is written
+  only while the text paints an instance of the file. `--paint-script`'s `uv` on such a slot unwraps first
+  and makes a live edit of the same text so its paint UVs exist before the first hit.
+- **Refusals** (`Resolve`, before the click; the panel and the HUD say them): lights and the sky; a
+  skinned file; a slot above 255; a material whose shader declares 3 or more `uniform sampler…` or whose
+  source without comments, leading blanks and empty lines plus 1 800 bytes passes 16 384 (a heuristic of
+  the runtime's own test, read from the shader file once per material and scene version); a face or slot
+  whose entry the text has but the load made inactive ("its paint entry (map line N) is inactive"); a
+  model without a licence row when it needs an unwrap; a full atlas.
+- **The eyedropper** (§7.4) as specified: the G-buffer albedo is feasible from the app side, through
+  R3D's output mode (no R3D change). Measured: on `tests/models`' ground (`albedo 118 112 100`) it picks
+  `#767063`.
+- **Saving** (§11): atlases (live and unsaved), then the unwrap sidecars, then the map, then the atlas
+  rows; `MS_EditMarkSaved` when files were written and the map on disk is the working copy. Rows: an atlas
+  `` | `textures/paint/x.png` | made in monolith (painted by hand) | <package> | CC0 1.0, https://… | <date> | - | none | ``;
+  a sidecar `` | `models/x.paintuv` | paint unwrap of `models/x.glb`, generated in monolith | <the model's
+  author> | <the model's licence cell> | <date> | - | made from the model by monolith's draw mode (xatlas) | ``;
+  each with an `.asset.md` sidecar.
+- **Rebase** (§12): as the first round, per atlas; after the sync, when any atlas is still provided, one
+  live edit of the same text loads the atlases from memory (the scene was loaded from disk before they were
+  provided again, and a step of paint alone changes no text: an atlas replayed onto a PNG of another size
+  stayed inactive without it), then their pixels go up. A panel edit can't be replayed onto an atlas that
+  changed on disk: it fails into `failed[]`.
+- **Panel** (§13.2): Target (no Shared switch), Pen, Colour, **Density** (texel size, *Resize to density*,
+  *Pixel look*, *Clear paint*), Faces (the target box's groups from its entries, `DrawTarget.groups`;
+  `facesKey` follows the box and material). `--draw-panel density` (and the old `canvas`). HUD: `DRAW
+  round 4 px #C83232 a255 | ground's atlas 2048×2048, face +y | 2 unsaved edits`, before a first stroke
+  `face +z: a new 96×64 in concrete's atlas` (`(unwrap first)`). The keys panel lost H.
+- **`--paint-script`** (§14): `faces`, `resize`, `clear`, `pixel` act on the surface of the last stroke's
+  LMB down (the panel's target in the game); `uv` coordinates are paint coordinates; `print` lists atlases
+  (size, owner, unsaved, pixel hash, refs, provided), entries (line, material, entity, faces / slot,
+  rectangle, active) and unwraps.
+- **Leak check**: `paint-bake*`, `draw-panel-canvas` and shared mode are gone; new or rewritten:
+  `paint-script` (every pen, first strokes on a textured, a plain and a shader box, a Kenney rock with its
+  unwrap, faces, resize, pixel look, the eyedropper both ways, clear, save, poll; a stroke on the sky fails
+  on purpose), `paint-rebase`, `paint-apply`, `paint-ops` (`paint-add` / `set` / `remove` in an edit script,
+  undo; a bad face fails on purpose), `paint-rot` (turned merged and instanced boxes in paint coordinates),
+  `draw-mode-input` (no H), `draw-unwrap-input` (a click on a Kenney tree: the note, then the unwrap and the
+  stroke a frame later), `draw-panel-paint`.
+
+**Verification** (machine A: RTX 4050 Laptop, driver 615.71.09, Ryzen 7 7435HS; scripts and images in the
+session's scratch folder `agentC/`):
+
+1. **Unpainted**: every map in `maps/` (monolith, pine_forest, test1), `tests/models`, `tests/rotated`
+   against the base build (paint-layer + phases 1 and 3a): `--dump-boxes` identical (5 of 5), 0 changed
+   pixels at every viewpoint and three yaws (34 of 34 shot pairs).
+2. **Every pen on every kind** (a scratch package `kinds`: merged, instanced, turned boxes, a `stairs` step,
+   a shader box, `transparency alpha`, `unlit`, emissive boxes; a Kenney tree with its own materials (unwrap),
+   the Kenney rock with a shader override, `transparency alpha`, `unlit` and emissive overrides, the sedan
+   with its own material and own UVs, `rock_face_01.glb` with its own material (unwrap, 3.2 s), the
+   ground): fill, round, square, soft and eraser on each of the 17 surfaces (85 strokes); the live shot
+   equals the saved package loaded fresh (0 pixels). On copies of `maps/monolith`: concrete (line 360,
+   +x), a weed tuft (33551, top), the tower ruin ledge (488, a repeat copy), porcelain (668, top), the poster
+   (378, +z, cutout) and the ivy (8000, instanced, cutout, `cull none`: paint shows only on the leaves); each
+   look stays everywhere it isn't painted (before / after pairs in `agentC/mono/mono-before-after.png`), and
+   pine_forest's ground (2048² clamped, 29.3 cm texels, the panel says so; `agentC/pine-before-after.png`).
+3. **Alpha-0 first stroke**: on the 17 surfaces of `kinds` (one stroke each, every one allocating): 0 changed
+   pixels against no stroke, live and after save + reload at 3 viewpoints; on the six monolith surfaces and
+   pine_forest's ground: 0 pixels live and saved.
+4. **Undo of first strokes + save** (`tests/models`: a box with a shader and a Kenney model slot, both
+   allocating, both undone): the map's bytes identical, no `textures/paint/`, no sidecar, `ASSETS.md`
+   identical; the shot equals the unpainted one (0 pixels). A stroke over the awning's edge (+y onto +z) is
+   one step: one undo removes both entries.
+5. **`--apply-edits`** of the seven `paint-add` ops a live script made (the atlases copied in first) gives
+   the same bytes as the live `--paint-script` with `save`. The minimal diff (`tests/models`): each painted
+   material gains ` paint "textures/paint/<material>.png"` at the end of its line, each painted object's
+   line gains `id N `, and the file gains `# paint (draw mode)` and seven sorted `paint` lines.
+6. **Save → reload**: live painted shots against the saved copies loaded fresh: 0 pixels (`tests/models`,
+   `kinds` with every pen, the six monolith surfaces, pine_forest's ground).
+7. `./build.sh`, `./build.sh --win`, `examples/build.sh` and `examples/build.sh test`: 0 warnings;
+   `tools/leakcheck.sh` and `tools/leakcheck.sh --asan`: `leakcheck: OK: zero leaks of ours` (ASan: no
+   sanitizer error); `tests/unit/compiled_test.sh`, `parse_error_test.sh`, `export_strip_test.sh`,
+   `paintunwrap_test.sh` (with `PaintUnwrapModelFile`'s new parameter) pass.
+
+**Open**: `--apply-edits` needs the atlas file of a new `paint` key (the loader's strict path check for a
+load from disk); the unwrap of a large scan blocks a frame for seconds (a worker thread would need copies
+of the mesh data); a material line for the built-in `"default"` goes into the paint block; the shader
+refusal is a heuristic (the runtime demotes what it can't compile, logged); a split face group copies the
+paint at its old size; a panel edit isn't replayed onto an atlas changed on disk.
+
+### Implementation notes: the draw order fix (lead, after the phase 2 verification)
+
+The phase 2 verifier found two image changes outside any paint, both at depth ties where two
+surfaces touch: an alpha-0 entry on a Kenney tree's bark changed 157 pixels where trunks (painted
+and unpainted) meet pine_forest's ground, and after four live strokes one monolith view differed by
+11 pixels from a fresh load of the saved text (weed / ground). Cause: R3D sorts draws by the custom
+shader's creation serial (patch 17; 0 without a shader) before textures, and the first draw wins at
+equal depth. A material without a shader that draws with the paint version of the empty shader moved
+behind every material without one; a live edit that makes an alias again gave it a later serial than
+a fresh load. Fix: **R3D patch 27** (`R3D_SetSurfaceShaderSortKey`, `submodules/r3d/patches.md`) and
+`ShaderSortKey` in the runtime: every scene material's alias gets the key `material index + 1`, the
+paint alias of a material without a shader (and of a model slot's own material) the key 0, so the draw
+order is the unpainted load's whatever is painted and however the aliases were made. With the patched
+R3D a live paint edit no longer makes the later materials' aliases again (phase 1's workaround stays
+for builds without `MS_PATCHED_R3D`). Verified: both repros 0 pixels; every map in `maps/`,
+`tests/models`, `tests/rotated` against the round's base: dumps identical, 49 shot pairs 0 pixels;
+alpha-0 entries on every kind (the verifiers' packages, monolith's six shader surfaces, pine_forest's
+ground and a Kenney tree): 0 pixels; leak check and `--asan` clean.
+
+## Implementation notes of the first round (canvases and the shader bake, replaced)
 
 ### Implementation notes: phase 1 (the runtime)
 

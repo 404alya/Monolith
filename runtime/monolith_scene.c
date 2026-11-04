@@ -138,7 +138,30 @@
 //                                    (see UploadBoxes). On is for shaders that read INSTANCE_* or the
 //                                    model-space POSITION in vertex(); a scan of the source turns it
 //                                    on with a warning when it finds those
+//         paint "textures/paint/x.png"   the material's paint atlas (RGBA8 PNG, straight alpha): the
+//                                    material draws with a paint stage after its own shader once a
+//                                    `paint` line below draws with it (docs/painting.md 4); none: nothing
+//                                    changes
+//         paint_filter trilinear|nearest   how the atlas is sampled (nearest: crisp paint texels)
 //   Colours are 0-255 sRGB. Unset keys keep R3D's defaults (R3D_MATERIAL_BASE).
+//
+// Paint (format 2; docs/painting.md 4.2), anywhere after the material's line:
+//   paint "material" N:i <faces> x y w h   faces of box i of the line with `id N` (its index within the
+//                                  line, map order), `<faces>` a comma list of +x -x +y -y +z -z (a
+//                                  turned box: its own axes), get the rectangle x y w h (texels) of the
+//                                  material's atlas; each face shows it in its own orientation (R3D's
+//                                  unit cube UVs)
+//   paint "material" N:i slot S x y w h   slot S of model instance i of the line `id N`, drawn with
+//                                  that material (an override), in the slot's paint UVs (its own UVs
+//                                  when they lie in 0..1 without overlap, else the file's unwrap
+//                                  sidecar, models/<file>.paintuv)
+//   paint own N:i slot S x y w h [paint_filter nearest]   the same for a slot drawn with the model's
+//                                  own material: its atlas is textures/paint/<file>_s<S>.png
+//   Rules (errors): the material exists and has a `paint` key, line N exists and made such an
+//   object i, the faces are valid and not repeated, w h >= 1, no two rectangles of one atlas share a
+//   texel, no face or slot of an object is in two entries of one material. An entry whose object no
+//   longer draws that face or slot with that material, or whose rectangle lies outside its atlas,
+//   draws nothing (logged). `paint` lines are no statements: they take no statement key.
 //
 // Environment (format 2):  env <key> <value...>
 //   Every field of R3D_Environment, by its C name: background.color/energy/skyBlur/rotation
@@ -277,9 +300,83 @@ typedef struct {
     unsigned char filter;               // `filter`: TEX_TRILINEAR (default) or TEX_NEAREST, for its four maps
     bool merge, occluder;               // set at upload: boxes become a visible-face mesh / may hide other boxes' faces
     int faceCube;                       // set at upload: 1 + its entry in faceCubes[] (hasFaces), 0 = R3D's cube
+    // The paint layer: `paint "path"` (its atlas, NULL = none) and `paint_filter` (TEX_*); painted:
+    // it has an active paint entry, so it draws with the paint version of its shader (PaintResolve);
+    // paintW x paintH: the atlas image's size (0: unreadable); paintTex: the atlas on the GPU
+    char *paint;
+    int paintLine;
+    unsigned char paintFilter;
+    bool painted;
+    int paintW, paintH;
+    Texture2D paintTex;
 } MatDef;
 
 enum { TEX_TRILINEAR, TEX_NEAREST };
+
+// A `paint` statement: a rectangle of an atlas for faces of one box or one slot of one model
+// instance. material -1: the model slot's own material (its atlas is named by file and slot:
+// ownAtlas). The object is resolved from the entity (`id N`, index i) when the map is parsed; the
+// entity id itself is filled in after BuildEntities. active: drawn (PaintResolve); why: the reason
+// it isn't (PAINT_*), for the log
+typedef struct {
+    int material;
+    int kind;                           // PAINT_BOX or PAINT_MODEL
+    int object;                         // boxes[] or models[] index
+    unsigned char faces;                // boxes: bit f for face f (+x -x +y -y +z -z)
+    int slot;                           // models: the file's material slot; boxes: -1
+    int x, y, w, h;                     // texels of the atlas
+    bool nearest;                       // `paint own ... paint_filter nearest`
+    int line;
+    MS_EntityId entity;
+    int ownAtlas;                       // own material: index into ownAtlases[]; else -1
+    bool active;
+    signed char why;
+} PaintDef;
+
+enum { PAINT_BOX = 0, PAINT_MODEL = 1 };
+enum { PAINT_OK = 0, PAINT_NOT_DRAWN, PAINT_OUTSIDE, PAINT_NO_ATLAS, PAINT_SKINNED, PAINT_NEEDS_UNWRAP, PAINT_NO_SHADER };
+
+// The atlas of a model slot drawn with the file's own material: textures/paint/<file>_s<slot>.png
+typedef struct {
+    int file, slot;
+    char *rel;
+    bool nearest;                       // an entry asked for paint_filter nearest
+    bool painted;                       // it has an active entry
+    int w, h;                           // the image's size (0: none)
+    Texture2D tex;
+    R3D_SurfaceShader *shader;          // the own material's paint shader alias (GPU)
+} OwnAtlas;
+
+// A model file's paint UVs from an unwrap (its .paintuv sidecar, or one provided in memory): per
+// mesh of the file, the unwrap's vertices (a source vertex each, with a unorm16 paint UV) and indices
+typedef struct {
+    int slot, vertexCount, indexCount;
+    unsigned int *source;
+    unsigned short *uv;
+    unsigned int *indices;
+} UnwrapMesh;
+
+typedef struct {
+    int meshCount;
+    UnwrapMesh *meshes;
+    unsigned long long fileHash;
+} Unwrap;
+
+// The paint state of a model file (parallel to modelFiles[]). painted: an active entry draws on
+// one of its instances, so its meshes are drawn from `meshes` (rebuilt in memory with the slot and
+// the paint UV in the bone channels; the file's own meshes are untouched). uvKind: per slot, an
+// MS_PAINTUV_* value once computed (-1: not yet)
+typedef struct {
+    bool painted, keepData;
+    bool hasUnwrap;                     // `unwrap` holds a valid unwrap of the file as loaded
+    Unwrap unwrap;
+    unsigned int unwrapGen;             // 0: from the sidecar; else the provided unwrap's generation
+    R3D_Mesh *meshes;                   // GPU: the paint meshes, NULL = none
+    int meshCount;
+    unsigned int meshesGen;             //   built from the unwrap of this generation (or own UVs: ~0u)
+    signed char *uvKind;
+    int uvKindCount;
+} FilePaint;
 
 typedef struct {
     bool enabled, shadow;
@@ -311,7 +408,9 @@ typedef struct {
     BoundingBox fogRegion;
 } EnvDef;
 
-typedef struct { char *path; bool isColor, data; int wrap, filter; Texture2D tex; } TexEntry;
+// A loaded texture. premul: a paint atlas, uploaded with its colour premultiplied by its alpha (in
+// linear light, stored sRGB-encoded) so filtering transparent texels adds no dark fringe
+typedef struct { char *path; bool isColor, data, premul; int wrap, filter; Texture2D tex; } TexEntry;
 
 // The unit cube of one face layout (`uv_faces`): R3D's cube with each face's UVs moved into its
 // cell (FaceLayoutData), as mesh data for the merged meshes and as a mesh for instanced draws
@@ -323,10 +422,14 @@ typedef struct {
 
 // A surface shader file of the map, compiled once: every material that uses it draws with an
 // alias of it (its own uniforms and samplers, the shared program and shader variants)
+// rel NULL: the empty shader (only its paint version, for painted materials without a shader).
+// Each version is compiled when a material first draws with it.
 typedef struct {
     const char *rel;                    // the materials' shader path (not owned)
     R3D_SurfaceShader *shader;          // never drawn with: aliases copy its default uniform values
     bool scanned, needsCube, cutout;    // ScanShader of its source (unreadable: both true)
+    R3D_SurfaceShader *paint;           // its paint version (PaintShaderSource), NULL = not compiled
+    bool paintTried;                    //   a compile was tried (paint NULL then: it failed)
 } ShaderFile;
 
 // Where a load's time went (ms), for the load log line (LogLoadTimes)
@@ -432,6 +535,23 @@ typedef struct {
     int modelColliderCount;             // world colliders the instances will need
     MS_SlotMaterial *modelSlots;
     int modelSlotCount, modelSlotCap;
+
+    // The paint layer (docs/painting.md): the `paint` entries, the atlases of model slots drawn
+    // with their own material, each model file's paint state (parallel to modelFiles[], NULL with
+    // no model files); per box / model instance the first of its paint keys (0 = none; NULL while
+    // nothing is painted) and the paint table: 4 floats per key (the rectangle, normalised to its
+    // atlas), PAINT_TABLE_W keys per row, its texture (GPU); anyPaint: an active entry exists
+    PaintDef *paints;
+    int paintCount, paintCap;
+    OwnAtlas *ownAtlases;
+    int ownAtlasCount, ownAtlasCap;
+    FilePaint *filePaint;
+    int *boxPaintKey, *modelPaintKey;
+    int paintKeyCount;
+    float *paintTable;
+    int paintTableRows;
+    Texture2D paintTableTex;
+    bool anyPaint;
     BoundingBox *colliders;             // boxes, then model colliders (only with models)
     int colliderCount;
     BvhNode *colliderNodes;             // BVH over the published colliders (MS_Raycast, MS_FirstCollision)
@@ -493,8 +613,12 @@ typedef struct {
     unsigned long long lookHash;        // the statements that are no objects (materials, env, format)
     unsigned long long restLookHash;    // the same without the materials (env, format)
     unsigned long long *matLookHash;    // per material: its `material` lines (parallel to materials[])
-    unsigned long long *matShapeHash;   //   and the same without its uv_faces, filter and albedo_map keys
-    int matLookHashCap, matShapeHashCap;
+    unsigned long long *matShapeHash;   //   and the same without its uv_faces, filter, albedo_map, paint
+                                        //   and paint_filter keys
+    unsigned long long *matPaintlessHash;   //   and its lines without the paint and paint_filter keys
+    int matLookHashCap, matShapeHashCap, matPaintlessHashCap;
+    unsigned long long paintHash;       // the `paint` statements (no look hash has them)
+    MS_PaintEntry *paintPub;            // MS_PaintEntryAt's view of paints[] (filled by PaintResolve)
     struct MS_Private *live;            // MS_EditSetText: the scene whose provided textures it may use
     unsigned char *hidden;              // per box: its hidden faces (UploadBoxes), NULL = none merged
     int *boxOrder;                      // the boxes in draw order (material, cell; UploadBoxes)
@@ -531,12 +655,20 @@ typedef struct {
 } SunShadowCache;
 
 #ifdef MONOLITH_EDITOR
-// An image provided for a package path (MS_TextureProvide): what an upload from memory uses
+// An image provided for a package path (MS_PaintAtlasProvide): what an upload from memory uses
 // instead of the file (RGBA8, owned)
 typedef struct ProvidedTex {
     char *rel;
     Image img;
 } ProvidedTex;
+
+// An unwrap provided for a model file (MS_PaintUnwrapProvide): what the next live edit uses instead
+// of the file's sidecar (owned)
+typedef struct ProvidedUnwrap {
+    char *rel;
+    Unwrap u;
+    unsigned int gen;
+} ProvidedUnwrap;
 
 // A transform preview (MS_EditPreviewBegin .. End): the objects, what they were at Begin, and how
 // the selected boxes are drawn meanwhile (out of their merged meshes and instanced buffers, as
@@ -598,7 +730,7 @@ struct MS_Private {
     float aoVoxel, aoIntensity;
     struct EditPreview *pv;
 
-    // Painting (region "Painting"): images provided for package paths (MS_TextureProvide), the
+    // Painting (region "Painting"): images provided for package paths (MS_PaintAtlasProvide), the
     // texture generation (+1 on every MS_TextureUpdate) and the scratch a sub-rectangle upload
     // packs its rows into (grown to the largest rectangle seen)
     struct ProvidedTex *provided;
@@ -606,6 +738,11 @@ struct MS_Private {
     unsigned int textureGeneration;
     unsigned char *texScratch;
     int texScratchCap;
+    // Unwraps provided for model files (MS_PaintUnwrapProvide), by the file's package path; each
+    // provide gets the next generation (a file's paint meshes are rebuilt when it changes)
+    struct ProvidedUnwrap *unwraps;
+    int unwrapCount, unwrapCap;
+    unsigned int unwrapGeneration;
 
     // Meshes a live edit replaced, freed by the next MS_DrawGeometry (after a frame drew the new ones):
     // see LiveRetire
@@ -709,7 +846,6 @@ static void MsErrorV(char *err, int errSize, const char *path, int line, const c
     else if (m >= errSize - n) TrimUtf8Tail(err, (size_t)errSize - 1);
 }
 
-#ifdef MONOLITH_EDITOR
 static unsigned long long Fnv1a64Update(unsigned long long h, const void *data, size_t size)
 {
     const unsigned char *p = data;
@@ -720,7 +856,6 @@ static unsigned long long Fnv1a64Update(unsigned long long h, const void *data, 
     return h;
 }
 #define FNV_OFFSET 14695981039346656037ULL
-#endif
 
 // Reads a whole file of at most maxBytes (malloc'd, NUL-terminated). NULL with a message in err on failure.
 static char *ReadWholeFile(const char *path, long maxBytes, int *size, char *err, int errSize)
@@ -1438,6 +1573,673 @@ static void FaceLayoutData(R3D_MeshData *md, const unsigned char cells[6])
     }
 }
 
+// Where on face f (+x -x +y -y +z -z) of a unit cube a point in its local -0.5..0.5 coordinates
+// lies, as R3D_GenMeshDataCube maps the face's corners (linear in the two face axes, so exact):
+// u along the face's tangent, v up for the side faces. The paint stage's instanced boxes compute
+// the same in GLSL (PAINT_STAGE_VERT); PaintCheckCube proves it against R3D's cube at load.
+static Vector2 CubeFaceUv(int f, Vector3 l)
+{
+    switch (f) {
+    case 0:  return (Vector2){ 0.5f - l.z, l.y + 0.5f };    // +x
+    case 1:  return (Vector2){ l.z + 0.5f, l.y + 0.5f };    // -x
+    case 2:  return (Vector2){ l.x + 0.5f, 0.5f - l.z };    // +y
+    case 3:  return (Vector2){ l.x + 0.5f, l.z + 0.5f };    // -y
+    case 4:  return (Vector2){ l.x + 0.5f, l.y + 0.5f };    // +z
+    default: return (Vector2){ 0.5f - l.x, l.y + 0.5f };    // -z
+    }
+}
+
+// #endregion
+
+// ======================================================================================
+// #region Small helpers: the paint layer (docs/painting.md 4)
+// ======================================================================================
+// What paint is drawn with, apart from the map's statements: atlas files, unwrap sidecars, the
+// paint shader's source, and the test whether a model slot's own UVs can carry paint.
+
+#define PAINT_TABLE_W       1024        // keys per row of the paint table (RGBA32F)
+#define PAINT_RASTER        1024        // the own-UV test's raster (texels per side)
+#define PAINT_SHADER_MAX    16384       // R3D_MAX_SHADER_CODE_LENGTH (R3D's CMakeLists.txt): a surface shader's source
+static const char *const PAINT_FACES[6] = { "+x", "-x", "+y", "-y", "+z", "-z" };
+
+// The size of a PNG from its header (IHDR), without decoding it; else of any image raylib reads.
+// False when the file can't be read.
+static bool ImageFileSize(const char *full, int *w, int *h)
+{
+    *w = *h = 0;
+    FILE *f = fopen(full, "rb");
+    if (!f) return false;
+    unsigned char b[24];
+    size_t n = fread(b, 1, sizeof(b), f);
+    fclose(f);
+    static const unsigned char SIG[8] = { 0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n' };
+    if (n == sizeof(b) && memcmp(b, SIG, 8) == 0 && memcmp(b + 12, "IHDR", 4) == 0) {
+        *w = (int)((unsigned)b[16] << 24 | (unsigned)b[17] << 16 | (unsigned)b[18] << 8 | b[19]);
+        *h = (int)((unsigned)b[20] << 24 | (unsigned)b[21] << 16 | (unsigned)b[22] << 8 | b[23]);
+        return *w > 0 && *h > 0;
+    }
+    Image img = LoadImage(full);
+    *w = img.width;
+    *h = img.height;
+    UnloadImage(img);
+    return *w > 0 && *h > 0;
+}
+
+// Premultiplying an sRGB colour byte c by an alpha byte a in linear light, stored sRGB-encoded again:
+// PremulLut()[a * 256 + c]. A texture of such texels decodes (sRGB -> linear, before filtering) to
+// colour x alpha, which the paint stage adds over the material. a = 255 gives c back, a = 0 gives 0.
+// A constant table of the arithmetic, not content: built once, never freed (64 KB).
+static unsigned char g_premul[256 * 256];
+static atomic_bool g_premulReady;
+
+static const unsigned char *PremulLut(void)
+{
+    if (atomic_load(&g_premulReady)) return g_premul;
+    for (int c = 0; c < 256; c++) {
+        float s = (float)c / 255.0f;
+        float lin = s <= 0.04045f ? s / 12.92f : powf((s + 0.055f) / 1.055f, 2.4f);
+        for (int a = 0; a < 256; a++) {
+            float v = lin * (float)a / 255.0f;
+            float e = v <= 0.0031308f ? v * 12.92f : 1.055f * powf(v, 1.0f / 2.4f) - 0.055f;
+            int q = (int)floorf(e * 255.0f + 0.5f);
+            g_premul[a * 256 + c] = (unsigned char)(a == 255 ? c : q < 0 ? 0 : q > 255 ? 255 : q);
+        }
+    }
+    atomic_store(&g_premulReady, true);
+    return g_premul;
+}
+
+// RGBA8 texels premultiplied in place (PremulLut)
+static void PremultiplyRgba8(unsigned char *px, size_t texels)
+{
+    const unsigned char *lut = PremulLut();
+    for (size_t i = 0; i < texels; i++, px += 4) {
+        const unsigned char *row = lut + (size_t)px[3] * 256;
+        px[0] = row[px[0]];
+        px[1] = row[px[1]];
+        px[2] = row[px[2]];
+    }
+}
+
+// A key and a face corner's (or a paint UV's) u, v in a vertex's bone channels: the key's three bytes
+// in the bone indices, u and v as unorm16 in the four weights (docs/painting.md 4.4)
+static void PaintBones(R3D_Vertex *v, unsigned int key, Vector2 uv)
+{
+    unsigned int u = (unsigned int)(fminf(fmaxf(uv.x, 0.0f), 1.0f) * 65535.0f + 0.5f);
+    unsigned int w = (unsigned int)(fminf(fmaxf(uv.y, 0.0f), 1.0f) * 65535.0f + 0.5f);
+    v->boneIndices[0] = (uint8_t)(key & 0xFF);
+    v->boneIndices[1] = (uint8_t)(key >> 8 & 0xFF);
+    v->boneIndices[2] = (uint8_t)(key >> 16 & 0xFF);
+    v->boneIndices[3] = 0;
+    v->boneWeights[0] = (uint8_t)(u & 0xFF);
+    v->boneWeights[1] = (uint8_t)(u >> 8);
+    v->boneWeights[2] = (uint8_t)(w & 0xFF);
+    v->boneWeights[3] = (uint8_t)(w >> 8);
+}
+
+// The atlas of a model slot drawn with the file's own material: textures/paint/<name>_s<slot>.png,
+// <name> the model file's name without its folder and extension, kept to letters, digits, '-' and
+// '_' (anything else becomes '_'). False when it doesn't fit.
+static bool OwnAtlasPath(const char *modelRel, int slot, char *out, int size)
+{
+    const char *base = strrchr(modelRel, '/');
+    base = base ? base + 1 : modelRel;
+    const char *dot = strrchr(base, '.');
+    int len = dot && dot > base ? (int)(dot - base) : (int)strlen(base);
+    int n = snprintf(out, (size_t)size, "textures/paint/%.*s_s%d.png", len, base, slot);
+    if (n < 0 || n >= size) return false;
+    for (char *c = out + 15; c < out + 15 + len; c++)
+        if (!isalnum((unsigned char)*c) && *c != '-' && *c != '_') *c = '_';
+    return true;
+}
+
+// A model file's unwrap sidecar: its path with the extension replaced by .paintuv
+// (models/barrel.glb -> models/barrel.paintuv). False when it doesn't fit.
+static bool UnwrapSidecarPath(const char *modelRel, char *out, int size)
+{
+    const char *slash = strrchr(modelRel, '/');
+    const char *dot = strrchr(modelRel, '.');
+    int len = dot && (!slash || dot > slash + 1) ? (int)(dot - modelRel) : (int)strlen(modelRel);
+    int n = snprintf(out, (size_t)size, "%.*s.paintuv", len, modelRel);
+    return n >= 0 && n < size;
+}
+
+static void UnwrapFree(Unwrap *u)
+{
+    for (int m = 0; u->meshes && m < u->meshCount; m++) {
+        free(u->meshes[m].source);
+        free(u->meshes[m].uv);
+        free(u->meshes[m].indices);
+    }
+    free(u->meshes);
+    memset(u, 0, sizeof(*u));
+}
+
+// Little-endian reads from a checked buffer
+static uint32_t Le32(const unsigned char *p)
+{
+    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+static uint16_t Le16(const unsigned char *p) { return (uint16_t)(p[0] | p[1] << 8); }
+
+static const unsigned char UNWRAP_MAGIC[10] = { 'M', 'S', 'P', 'A', 'I', 'N', 'T', 'U', 'V', 0x1A };
+
+// Reads a .paintuv sidecar (docs/painting.md 4.5): "MSPAINTUV" 0x1A, uint32 version 1, uint32
+// meshCount, uint64 the model file's FNV-1a 64, then per mesh uint32 slot, vertexCount, indexCount,
+// vertexCount x { uint32 source, uint16 u, uint16 v }, indexCount x uint32 index; little-endian.
+// Checked: the sizes, whole triangles, every index below the mesh's vertex count. False (nothing
+// allocated) when it isn't such a file or out of memory.
+static bool UnwrapRead(const char *path, Unwrap *out)
+{
+    memset(out, 0, sizeof(*out));
+    char err[MS_PATH_MAX + 64];
+    int size = 0;
+    unsigned char *b = (unsigned char *)ReadWholeFile(path, MS_MAX_COMPILED_BYTES, &size, err, sizeof(err));
+    if (!b) return false;
+    bool ok = size >= 30 && memcmp(b, UNWRAP_MAGIC, 10) == 0 && Le32(b + 10) == 1;
+    uint32_t meshes = ok ? Le32(b + 14) : 0;
+    ok = ok && meshes <= MS_MAX_OBJECTS;
+    if (ok) {
+        out->fileHash = (unsigned long long)Le32(b + 18) | (unsigned long long)Le32(b + 22) << 32;
+        out->meshes = calloc(meshes > 0 ? meshes : 1, sizeof(UnwrapMesh));
+        ok = out->meshes != NULL;
+    }
+    size_t at = 26;
+    for (uint32_t m = 0; ok && m < meshes; m++) {
+        if ((size_t)size - at < 12) { ok = false; break; }
+        uint32_t slot = Le32(b + at), vc = Le32(b + at + 4), ic = Le32(b + at + 8);
+        at += 12;
+        if (slot > MS_MAX_OBJECTS || ic % 3 != 0 ||
+            (uint64_t)vc * 8 + (uint64_t)ic * 4 > (uint64_t)size - at) { ok = false; break; }
+        UnwrapMesh *M = &out->meshes[m];
+        out->meshCount = (int)m + 1;
+        M->slot = (int)slot;
+        M->vertexCount = (int)vc;
+        M->indexCount = (int)ic;
+        M->source = malloc(sizeof(unsigned int) * (vc > 0 ? vc : 1));
+        M->uv = malloc(sizeof(unsigned short) * 2 * (vc > 0 ? vc : 1));
+        M->indices = malloc(sizeof(unsigned int) * (ic > 0 ? ic : 1));
+        if (!M->source || !M->uv || !M->indices) { ok = false; break; }
+        for (uint32_t k = 0; k < vc; k++, at += 8) {
+            M->source[k] = Le32(b + at);
+            M->uv[2 * k] = Le16(b + at + 4);
+            M->uv[2 * k + 1] = Le16(b + at + 6);
+        }
+        for (uint32_t k = 0; k < ic && ok; k++, at += 4) {
+            M->indices[k] = Le32(b + at);
+            ok = M->indices[k] < vc;
+        }
+    }
+    ok = ok && at == (size_t)size;
+    free(b);
+    if (!ok) UnwrapFree(out);
+    return ok;
+}
+
+// FNV-1a 64 of a file's bytes; false when it can't be read
+static bool FileHash(const char *path, unsigned long long *hash)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    unsigned long long h = FNV_OFFSET;
+    unsigned char buf[65536];
+    size_t got;
+    while ((got = fread(buf, 1, sizeof(buf), f)) > 0) h = Fnv1a64Update(h, buf, got);
+    fclose(f);
+    *hash = h;
+    return true;
+}
+
+// Whether an unwrap fits a model as loaded: a mesh per mesh, each with the mesh's slot, its
+// triangles in the same number (the order is the mesh's), every source vertex inside the mesh
+static bool UnwrapMatches(const Unwrap *u, const R3D_Model *m)
+{
+    if (!m->meshData || !m->meshMaterials || u->meshCount != m->meshCount) return false;
+    for (int i = 0; i < u->meshCount; i++) {
+        const UnwrapMesh *M = &u->meshes[i];
+        const R3D_MeshData *md = &m->meshData[i];
+        int tris = md->indexCount > 0 ? md->indexCount / 3 : md->vertexCount / 3;
+        if (M->slot != m->meshMaterials[i] || M->indexCount != 3 * tris) return false;
+        for (int k = 0; k < M->vertexCount; k++)
+            if (M->source[k] >= (unsigned int)md->vertexCount) return false;
+    }
+    return true;
+}
+
+// --- The paint stage (docs/painting.md 4.3). A painted material's shader is its own surface shader
+// (or an empty one) rewritten so that a last stage composites the material's paint atlas over what
+// the material computed: comments stripped, `varying`s declared in place per stage, vertex() and
+// fragment() renamed and kept to their stage, then the stage below. R3D's parser copies global code
+// into both stages and skips any line starting with flat / smooth / noperspective, so interpolation
+// qualifiers are written through MS_INTERP().
+
+static const char PAINT_STAGE_HEAD[] =
+    "uniform sampler2D ms_paint;\n"
+    "uniform sampler2D ms_paintTable;\n";
+
+// The vertex stage: which paint key and where in its domain. INSTANCE_CUSTOM.y tells the draw kinds
+// apart: 1 an instanced box (key x + face, uv from the unit cube), 2 a model instance (key x + the
+// slot in bone index 0, uv in the bone weights as two unorm16), 0 a merged box mesh (the key in the
+// four bone indices, uv in the bone weights). Key 0 holds a zero rectangle: no paint.
+static const char PAINT_STAGE_VERT[] =
+    "#ifdef STAGE_VERT\n"
+    "MS_INTERP(flat) out vec4 ms_rect;\n"
+    "out vec2 ms_uv;\n"
+    "void vertex() {\n"
+    "%s"
+    "#if !defined(DEPTH) && !defined(DEPTH_CUBE)\n"
+    "int ms_key = 0;\n"
+    "vec2 ms_p;\n"
+    "float ms_kind = INSTANCE_CUSTOM.y;\n"
+    "if (ms_kind > 0.5 && ms_kind < 1.5) {\n"
+    "vec3 ms_n = aNormal, ms_q = aPosition;\n"
+    "int ms_f;\n"
+    "if (abs(ms_n.x) > 0.5) { ms_f = ms_n.x > 0.0 ? 0 : 1; ms_p = vec2(ms_n.x > 0.0 ? 0.5 - ms_q.z : ms_q.z + 0.5, ms_q.y + 0.5); }\n"
+    "else if (abs(ms_n.y) > 0.5) { ms_f = ms_n.y > 0.0 ? 2 : 3; ms_p = vec2(ms_q.x + 0.5, ms_n.y > 0.0 ? 0.5 - ms_q.z : ms_q.z + 0.5); }\n"
+    "else { ms_f = ms_n.z > 0.0 ? 4 : 5; ms_p = vec2(ms_n.z > 0.0 ? ms_q.x + 0.5 : 0.5 - ms_q.x, ms_q.y + 0.5); }\n"
+    "if (INSTANCE_CUSTOM.x > 0.5) ms_key = int(INSTANCE_CUSTOM.x + 0.5) + ms_f;\n"
+    "} else {\n"
+    "vec4 ms_w = floor(aBoneWeights * 255.0 + 0.5);\n"
+    "ms_p = vec2(ms_w.x + ms_w.y * 256.0, ms_w.z + ms_w.w * 256.0) / 65535.0;\n"
+    "if (ms_kind > 1.5) { if (INSTANCE_CUSTOM.x > 0.5) ms_key = int(INSTANCE_CUSTOM.x + 0.5) + aBoneIndices.x; }\n"
+    "else ms_key = aBoneIndices.x + aBoneIndices.y * 256 + aBoneIndices.z * 65536;\n"
+    "}\n"
+    "ms_rect = texelFetch(ms_paintTable, ivec2(ms_key % 1024, ms_key / 1024), 0);\n"
+    "ms_uv = ms_p;\n"
+    "#endif\n"
+    "}\n"
+    "#endif\n";
+
+// The fragment stage: paint is a matte coat over the material's albedo, covering its emission and
+// metalness by its alpha; on a blended (forward) material it adds to the alpha. The atlas is
+// premultiplied; the uv stays half a texel inside the rectangle. (GEOMETRY_PREPASS is not a depth
+// variant: with the depth pre-pass it is also the shading pass, R3D patch 6.)
+static const char PAINT_STAGE_FRAG[] =
+    "#ifdef STAGE_FRAG\n"
+    "MS_INTERP(flat) in vec4 ms_rect;\n"
+    "in vec2 ms_uv;\n"
+    "void fragment() {\n"
+    "%s"
+    "#if !defined(DEPTH) && !defined(DEPTH_CUBE)\n"
+    "if (ms_rect.z > ms_rect.x) {\n"
+    "vec2 ms_h = 0.5 / vec2(textureSize(ms_paint, 0));\n"
+    "vec4 ms_c = texture(ms_paint, clamp(mix(ms_rect.xy, ms_rect.zw, ms_uv), ms_rect.xy + ms_h, ms_rect.zw - ms_h));\n"
+    "ALBEDO = ALBEDO * (1.0 - ms_c.a) + ms_c.rgb;\n"
+    "EMISSION *= 1.0 - ms_c.a;\n"
+    "METALNESS *= 1.0 - ms_c.a;\n"
+    "#ifdef FORWARD\n"
+    "ALPHA += ms_c.a * (1.0 - ALPHA);\n"
+    "#endif\n"
+    "}\n"
+    "#endif\n"
+    "}\n"
+    "#endif\n";
+
+// A growing text (the generated source)
+typedef struct { char *s; int n, cap; bool oom; } Text;
+
+static void TextPut(Text *t, const char *s, int len)
+{
+    if (t->oom || !MS_RESERVE(t->s, t->cap, t->n + len + 1)) { t->oom = true; return; }
+    memcpy(t->s + t->n, s, (size_t)len);
+    t->n += len;
+    t->s[t->n] = '\0';
+}
+
+static void TextStr(Text *t, const char *s) { TextPut(t, s, (int)strlen(s)); }
+
+static bool IsIdent(char c) { return isalnum((unsigned char)c) || c == '_'; }
+
+// The word w at s[i] (not inside a longer identifier), followed by whitespace when `space`
+static bool WordAt(const char *s, int i, const char *w, bool space)
+{
+    size_t n = strlen(w);
+    if ((i > 0 && IsIdent(s[i - 1])) || strncmp(s + i, w, n) != 0) return false;
+    return space ? isspace((unsigned char)s[i + (int)n]) : !IsIdent(s[i + (int)n]);
+}
+
+// The source without comments (a block comment becomes one space, as the preprocessor sees it),
+// each line without its leading blanks, and without empty lines: smaller, the same GLSL
+static bool StripComments(const char *src, Text *out)
+{
+    bool lineStart = true;
+    for (int i = 0; src[i]; ) {
+        if (src[i] == '/' && src[i + 1] == '/') {
+            while (src[i] && src[i] != '\n') i++;
+            continue;
+        }
+        if (src[i] == '/' && src[i + 1] == '*') {
+            const char *e = strstr(src + i + 2, "*/");
+            i = e ? (int)(e - src) + 2 : (int)strlen(src);
+            if (!lineStart) TextPut(out, " ", 1);
+            continue;
+        }
+        if (lineStart && (src[i] == ' ' || src[i] == '\t' || src[i] == '\r' || src[i] == '\n')) { i++; continue; }
+        lineStart = src[i] == '\n';
+        TextPut(out, &src[i++], 1);
+    }
+    return !out->oom;
+}
+
+// How many sampler uniforms a source declares (R3D allows R3D_MAX_SHADER_SAMPLERS per material)
+static int CountSamplers(const char *s)
+{
+    int n = 0;
+    for (int i = 0; s[i]; i++) {
+        if (!WordAt(s, i, "uniform", true)) continue;
+        int k = i + 7;
+        while (isspace((unsigned char)s[k])) k++;
+        n += strncmp(s + k, "sampler", 7) == 0;
+    }
+    return n;
+}
+
+// The paint version of a surface shader's source (src NULL: of an empty shader), heap; NULL when out
+// of memory or when the source declares more than 2 samplers (the stage needs 2 of R3D's 4).
+static char *PaintShaderSource(const char *src)
+{
+    Text in = { 0 }, out = { 0 };
+    if (src && !StripComments(src, &in)) { free(in.s); return NULL; }
+    const char *s = in.s ? in.s : "";
+    if (CountSamplers(s) > 2) { free(in.s); return NULL; }
+
+    // Which entry points the source has: without vertex() its code belongs to the fragment stage
+    // only, without fragment() to the vertex stage (R3D gives a stage without its entry no user code)
+    bool hasV = false, hasF = false;
+    for (int i = 0; s[i]; i++)
+        if (WordAt(s, i, "void", true)) {
+            int k = i + 4;
+            while (isspace((unsigned char)s[k])) k++;
+            hasV = hasV || WordAt(s, k, "vertex", false);
+            hasF = hasF || WordAt(s, k, "fragment", false);
+        }
+    TextStr(&out, "#define MS_INTERP(q) q\n");
+    if (src && (hasV != hasF)) TextStr(&out, hasV ? "#ifdef STAGE_VERT\n" : "#ifdef STAGE_FRAG\n");
+
+    for (int i = 0; s[i]; ) {
+        // vertex() / fragment(): renamed, under their stage
+        if (WordAt(s, i, "void", true)) {
+            int k = i + 4;
+            while (isspace((unsigned char)s[k])) k++;
+            bool v = WordAt(s, k, "vertex", false), f = WordAt(s, k, "fragment", false);
+            const char *open = (v || f) ? strchr(s + k, '{') : NULL;
+            if (open) {
+                const char *e = open;
+                for (int depth = 0; *e; e++) {
+                    if (*e == '{') depth++;
+                    else if (*e == '}' && --depth == 0) { e++; break; }
+                }
+                TextStr(&out, v ? "\n#ifdef STAGE_VERT\nvoid ms_userVertex() " : "\n#ifdef STAGE_FRAG\nvoid ms_userFragment() ");
+                TextPut(&out, open, (int)(e - open));
+                TextStr(&out, "\n#endif\n");
+                i = (int)(e - s);
+                continue;
+            }
+        }
+        // [flat | smooth | noperspective] varying T name; -> out (vertex stage) / in (fragment stage)
+        const char *q = WordAt(s, i, "flat", true) ? "flat" : WordAt(s, i, "smooth", true) ? "smooth"
+                      : WordAt(s, i, "noperspective", true) ? "noperspective" : NULL;
+        int k = i + (q ? (int)strlen(q) : 0);
+        while (q && isspace((unsigned char)s[k])) k++;
+        if (WordAt(s, k, "varying", true)) {
+            const char *rest = s + k + 7, *semi = strchr(rest, ';');
+            if (semi) {
+                int len = (int)(semi - rest) + 1;
+                for (int st = 0; st < 2; st++) {
+                    TextStr(&out, st == 0 ? "\n#ifdef STAGE_VERT\n" : "\n#else\n");
+                    if (q) { TextStr(&out, "MS_INTERP("); TextStr(&out, q); TextStr(&out, ") "); }
+                    TextStr(&out, st == 0 ? "out" : "in");
+                    TextPut(&out, rest, len);
+                }
+                TextStr(&out, "\n#endif\n");
+                i = (int)(semi - s) + 1;
+                continue;
+            }
+        }
+        TextPut(&out, &s[i++], 1);
+    }
+    if (src && (hasV != hasF)) TextStr(&out, "\n#endif\n");
+
+    // The stage (its entry points call the source's, renamed)
+    TextStr(&out, "\n");
+    TextStr(&out, PAINT_STAGE_HEAD);
+    char head[64];
+    for (int st = 0; st < 2; st++) {
+        const char *fmt = st == 0 ? PAINT_STAGE_VERT : PAINT_STAGE_FRAG;
+        const char *at = strstr(fmt, "%s");
+        const char *call = st == 0 ? "ms_userVertex();\n" : "ms_userFragment();\n";
+        snprintf(head, sizeof(head), "%s", (st == 0 ? hasV : hasF) ? call : "");
+        TextPut(&out, fmt, (int)(at - fmt));
+        TextStr(&out, head);
+        TextStr(&out, at + 2);
+    }
+    free(in.s);
+    if (out.oom) { free(out.s); return NULL; }
+    return out.s;
+}
+
+// --- Whether a model slot's own UVs can carry paint (docs/painting.md 4.5, 7.3): every texture
+// coordinate of its triangles inside 0..1, and no texel of a PAINT_RASTER^2 raster claimed twice:
+// conservatively by two UV islands (triangles joined over shared UV edges), or at its centre by
+// two triangles (which catches mirrored halves joined at their seam)
+
+typedef struct { float u0, v0, u1, v1; int tri; } UvEdge;
+
+static int CompareUvEdges(const void *pa, const void *pb)
+{
+    const UvEdge *a = pa, *b = pb;
+    int c = memcmp(a, b, 4 * sizeof(float));
+    return c ? c : (a->tri > b->tri) - (a->tri < b->tri);
+}
+
+static int UfFind(int *parent, int i)
+{
+    while (parent[i] != i) i = parent[i] = parent[parent[i]];
+    return i;
+}
+
+// Does the triangle (a, b, c) overlap the square [x0, x1] x [y0, y1]? (separating axes: the
+// square's two and the triangle's three edge normals; its bounds were tested already)
+static bool TriOverlapsSquare(const Vector2 *t, float x0, float y0, float x1, float y1)
+{
+    for (int e = 0; e < 3; e++) {
+        Vector2 a = t[e], b = t[(e + 1) % 3], c = t[(e + 2) % 3];
+        float nx = a.y - b.y, ny = b.x - a.x;               // a normal of edge a-b
+        float side = nx * (c.x - a.x) + ny * (c.y - a.y);   // the third vertex's side
+        if (side == 0.0f) return false;                     // degenerate
+        float s = side > 0.0f ? 1.0f : -1.0f, best = -INFINITY;
+        for (int k = 0; k < 4; k++) {
+            float x = k & 1 ? x1 : x0, y = k & 2 ? y1 : y0;
+            float v = s * (nx * (x - a.x) + ny * (y - a.y));
+            if (v > best) best = v;
+        }
+        if (best < 0.0f) return false;                      // the square lies wholly outside this edge
+    }
+    return true;
+}
+
+// How a slot maps onto paint (MS_PaintUvKind's values, for the game build too)
+enum { PUV_OWN = 0, PUV_UNWRAP, PUV_NEEDS_UNWRAP, PUV_SKINNED };
+
+// PUV_OWN or PUV_NEEDS_UNWRAP for slot `slot` of a loaded model with its CPU mesh data: the
+// triangles of the meshes drawn with that slot. No texture coordinates (all 0, what R3D's importer
+// leaves), or out of memory: needs an unwrap (the safe answer).
+static int OwnUvKind(const R3D_Model *m, int slot)
+{
+    if (!m->meshData || !m->meshMaterials) return PUV_NEEDS_UNWRAP;
+    int n = 0;
+    for (int i = 0; i < m->meshCount; i++) {
+        const R3D_MeshData *md = &m->meshData[i];
+        if (m->meshMaterials[i] == slot && m->meshes[i].primitiveType == R3D_PRIMITIVE_TRIANGLES)
+            n += md->indexCount > 0 ? md->indexCount / 3 : md->vertexCount / 3;
+    }
+    if (n == 0) return PUV_NEEDS_UNWRAP;
+    Vector2 *tri = malloc(sizeof(Vector2) * 3 * (size_t)n);
+    UvEdge *edges = malloc(sizeof(UvEdge) * 3 * (size_t)n);
+    int *parent = malloc(sizeof(int) * (size_t)n);
+    int *owner = calloc((size_t)PAINT_RASTER * PAINT_RASTER, sizeof(int));
+    unsigned char *centre = calloc((size_t)PAINT_RASTER * PAINT_RASTER, 1);
+    bool own = tri && edges && parent && owner && centre, any = false;
+
+    // The slot's triangles in file order, every coordinate inside 0..1 (and not all of them 0)
+    int t = 0;
+    for (int i = 0; own && i < m->meshCount; i++) {
+        const R3D_MeshData *md = &m->meshData[i];
+        if (m->meshMaterials[i] != slot || m->meshes[i].primitiveType != R3D_PRIMITIVE_TRIANGLES) continue;
+        int tris = md->indexCount > 0 ? md->indexCount / 3 : md->vertexCount / 3;
+        for (int k = 0; k < tris && own; k++, t++)
+            for (int c = 0; c < 3; c++) {
+                unsigned int v = md->indexCount > 0 ? md->indices[3 * k + c] : (unsigned int)(3 * k + c);
+                Vector2 uv = v < (unsigned int)md->vertexCount ? R3D_UnpackTexCoord(md->vertices[v].texcoord) : (Vector2){ -1, -1 };
+                own = own && uv.x >= 0.0f && uv.x <= 1.0f && uv.y >= 0.0f && uv.y <= 1.0f;
+                any = any || uv.x != 0.0f || uv.y != 0.0f;
+                tri[3 * t + c] = uv;
+            }
+    }
+    own = own && any;
+
+    // Islands: triangles that share a UV edge (both ends exactly equal) are one island
+    for (int i = 0; own && i < n; i++) {
+        parent[i] = i;
+        for (int e = 0; e < 3; e++) {
+            Vector2 a = tri[3 * i + e], b = tri[3 * i + (e + 1) % 3];
+            bool swap = a.x > b.x || (a.x == b.x && a.y > b.y);
+            edges[3 * i + e] = swap ? (UvEdge){ b.x, b.y, a.x, a.y, i } : (UvEdge){ a.x, a.y, b.x, b.y, i };
+        }
+    }
+    if (own) qsort(edges, 3 * (size_t)n, sizeof(UvEdge), CompareUvEdges);
+    for (int e = 1; own && e < 3 * n; e++)
+        if (memcmp(&edges[e], &edges[e - 1], 4 * sizeof(float)) == 0) {
+            int a = UfFind(parent, edges[e].tri), b = UfFind(parent, edges[e - 1].tri);
+            if (a != b) parent[a] = b;
+        }
+
+    // The raster: a texel touched by two islands, or whose centre two triangles cover, is shared
+    const float R = (float)PAINT_RASTER;
+    for (int i = 0; own && i < n; i++) {
+        Vector2 p[3];
+        float mnx = INFINITY, mny = INFINITY, mxx = -INFINITY, mxy = -INFINITY;
+        for (int c = 0; c < 3; c++) {
+            p[c] = (Vector2){ tri[3 * i + c].x * R, tri[3 * i + c].y * R };
+            mnx = fminf(mnx, p[c].x); mxx = fmaxf(mxx, p[c].x);
+            mny = fminf(mny, p[c].y); mxy = fmaxf(mxy, p[c].y);
+        }
+        float area = (p[1].x - p[0].x) * (p[2].y - p[0].y) - (p[2].x - p[0].x) * (p[1].y - p[0].y);
+        if (area == 0.0f) continue;
+        int island = UfFind(parent, i) + 1;
+        int x0 = (int)floorf(mnx), x1 = (int)floorf(mxx), y0 = (int)floorf(mny), y1 = (int)floorf(mxy);
+        if (x0 < 0) x0 = 0;
+        if (y0 < 0) y0 = 0;
+        if (x1 > PAINT_RASTER - 1) x1 = PAINT_RASTER - 1;
+        if (y1 > PAINT_RASTER - 1) y1 = PAINT_RASTER - 1;
+        for (int y = y0; own && y <= y1; y++)
+            for (int x = x0; own && x <= x1; x++) {
+                if (!TriOverlapsSquare(p, (float)x, (float)y, (float)x + 1.0f, (float)y + 1.0f)) continue;
+                int *o = &owner[(size_t)y * PAINT_RASTER + x];
+                if (*o && *o != island) own = false;
+                *o = island;
+                // the centre strictly inside (a centre on a shared edge belongs to neither)
+                float cx = (float)x + 0.5f, cy = (float)y + 0.5f, prev = 0.0f;
+                bool inside = true;
+                for (int e = 0; e < 3 && inside; e++) {
+                    Vector2 a = p[e], b = p[(e + 1) % 3];
+                    float v = (b.x - a.x) * (cy - a.y) - (b.y - a.y) * (cx - a.x);
+                    inside = v != 0.0f && (prev == 0.0f || (v > 0.0f) == (prev > 0.0f));
+                    prev = v;
+                }
+                if (inside && centre[(size_t)y * PAINT_RASTER + x]++) own = false;
+            }
+    }
+    free(tri); free(edges); free(parent); free(owner); free(centre);
+    return own ? PUV_OWN : PUV_NEEDS_UNWRAP;
+}
+
+// --- The rules between paint entries (docs/painting.md 4.2), one check for the text parser and
+// compiled maps: no two rectangles of one atlas share a texel, and no face or slot of an object is in
+// two entries of one material. (A material's atlas is its own; an own material's atlas is per model
+// file and slot: ownAtlases[].)
+
+typedef struct { long long a, b; int idx; } PaintSortItem;
+
+static int ComparePaintItems(const void *pa, const void *pb)
+{
+    const PaintSortItem *x = pa, *y = pb;
+    if (x->a != y->a) return x->a < y->a ? -1 : 1;
+    if (x->b != y->b) return x->b < y->b ? -1 : 1;
+    return (x->idx > y->idx) - (x->idx < y->idx);
+}
+
+// 0: the entries keep the rules; 1: entries *ea and *eb overlap in their atlas; 2: they name the
+// same face or slot of one object in one material; -1: out of memory
+static int PaintConflict(const SceneData *d, int *ea, int *eb)
+{
+    int n = d->paintCount;
+    if (n < 2) return 0;
+    PaintSortItem *it = malloc(sizeof(PaintSortItem) * (size_t)n);
+    if (!it) return -1;
+    int result = 0;
+
+    // Rectangles: by atlas, then x; each against the following ones that start left of its end
+    for (int i = 0; i < n; i++) {
+        const PaintDef *e = &d->paints[i];
+        it[i] = (PaintSortItem){ e->material >= 0 ? e->material : (long long)d->materialCount + e->ownAtlas, e->x, i };
+    }
+    qsort(it, (size_t)n, sizeof(PaintSortItem), ComparePaintItems);
+    for (int i = 0; i < n && !result; i++) {
+        const PaintDef *e = &d->paints[it[i].idx];
+        for (int j = i + 1; j < n && it[j].a == it[i].a && it[j].b < (long long)e->x + e->w && !result; j++) {
+            const PaintDef *f = &d->paints[it[j].idx];
+            if (f->y < e->y + e->h && e->y < f->y + f->h) {
+                result = 1;
+                *ea = it[i].idx < it[j].idx ? it[i].idx : it[j].idx;
+                *eb = it[i].idx < it[j].idx ? it[j].idx : it[i].idx;
+            }
+        }
+    }
+
+    // Faces and slots: by (material, kind, object); neighbours in a run share no face or slot
+    for (int i = 0; i < n && !result; i++) {
+        const PaintDef *e = &d->paints[i];
+        it[i] = (PaintSortItem){ ((long long)(e->material + 1) << 1) | e->kind, e->object, i };
+    }
+    if (!result) qsort(it, (size_t)n, sizeof(PaintSortItem), ComparePaintItems);
+    for (int i = 0; i < n && !result; i++)
+        for (int j = i + 1; j < n && it[j].a == it[i].a && it[j].b == it[i].b && !result; j++) {
+            const PaintDef *e = &d->paints[it[i].idx], *f = &d->paints[it[j].idx];
+            if (e->kind == PAINT_BOX ? (e->faces & f->faces) != 0 : e->slot == f->slot) {
+                result = 2;
+                *ea = it[i].idx < it[j].idx ? it[i].idx : it[j].idx;
+                *eb = it[i].idx < it[j].idx ? it[j].idx : it[i].idx;
+            }
+        }
+    free(it);
+    return result;
+}
+
+// The own atlas of model file `file`'s slot `slot` in d->ownAtlases, -1 when there is none
+static int OwnAtlasFind(const SceneData *d, int file, int slot)
+{
+    for (int i = 0; i < d->ownAtlasCount; i++)
+        if (d->ownAtlases[i].file == file && d->ownAtlases[i].slot == slot) return i;
+    return -1;
+}
+
+// The own atlas of model file `file`'s slot `slot` in d->ownAtlases (added when missing: its path
+// from the file's name, OwnAtlasPath); -1 when out of memory or the path doesn't fit
+static int OwnAtlasOf(SceneData *d, int file, int slot)
+{
+    int found = OwnAtlasFind(d, file, slot);
+    if (found >= 0) return found;
+    char rel[MS_PATH_MAX];
+    if (!OwnAtlasPath(d->modelFiles[file].path, slot, rel, sizeof(rel))) return -1;
+    char *copy = MS_StrDup(rel);
+    OwnAtlas *a = copy ? MS_PUSH(d->ownAtlases, d->ownAtlasCount, d->ownAtlasCap) : NULL;
+    if (!a) { free(copy); return -1; }
+    *a = (OwnAtlas){ .file = file, .slot = slot, .rel = copy };
+    return d->ownAtlasCount - 1;
+}
+
 // #endregion
 
 // ======================================================================================
@@ -1600,7 +2402,7 @@ static bool Dup(Parser *P, const char *s, char **out)
     return true;
 }
 
-// The image provided for package path `rel` (MS_TextureProvide), NULL if none (or no scene)
+// The image provided for package path `rel` (MS_PaintAtlasProvide), NULL if none (or no scene)
 static const Image *ProvidedImage(const MS_Private *p, const char *rel)
 {
     for (int i = 0; p && i < p->providedCount; i++)
@@ -1618,7 +2420,7 @@ static bool PackagePath(Parser *P, Token t, char *full, int fullSize)
     // Watched before the existence check: after a failed load the watch list is this attempt's
     // dependencies, so a file that is still missing reloads the package once it appears
     if (!AddDep(P, full)) return false;
-    // (a live edit may name a texture that exists only in memory so far: MS_TextureProvide)
+    // (a live edit may name a texture that exists only in memory so far: MS_PaintAtlasProvide)
     if (!FileExists(full) && !ProvidedImage(P->d->live, s))
         return Fail(P, "file not found: \"%s\" (paths are relative to the package folder)", s);
     return true;
@@ -2109,14 +2911,15 @@ static int AddMaterial(SceneData *d, const char *name)
         return -1;
     }
     if (!MS_RESERVE(d->matLookHash, d->matLookHashCap, d->materialCount + 1) ||
-        !MS_RESERVE(d->matShapeHash, d->matShapeHashCap, d->materialCount + 1)) {
+        !MS_RESERVE(d->matShapeHash, d->matShapeHashCap, d->materialCount + 1) ||
+        !MS_RESERVE(d->matPaintlessHash, d->matPaintlessHashCap, d->materialCount + 1)) {
         free(copy);
         return -1;
     }
     int mi = d->materialCount++;
     d->materials[mi] = (MS_Material){ .name = copy, .material = R3D_MATERIAL_BASE };
     d->matDefs[mi] = (MatDef){ 0 };
-    d->matLookHash[mi] = d->matShapeHash[mi] = FNV_OFFSET;
+    d->matLookHash[mi] = d->matShapeHash[mi] = d->matPaintlessHash[mi] = FNV_OFFSET;
     if (!MatHashInsert(d, mi)) return -1;   // (the entry stays; FreeData frees its name)
     return mi;
 }
@@ -2146,6 +2949,7 @@ static bool ParseMaterial(Parser *P, Token *tok, int n)
     // (each line starts with its keyword and name in both hashes, so two lines never hash as one)
     d->matLookHash[mi] = HashTokens(d->matLookHash[mi], tok, 2);
     d->matShapeHash[mi] = HashTokens(d->matShapeHash[mi], tok, 2);
+    d->matPaintlessHash[mi] = HashTokens(d->matPaintlessHash[mi], tok, 2);
 
     for (int t = 2; t < n; ) {
         const char *k = tok[t].s;
@@ -2266,6 +3070,21 @@ static bool ParseMaterial(Parser *P, Token *tok, int n)
             ONE_WORD();
             if (!Keyword(P, v[0], FI, 2, "texture filter", &e)) return false;
             D->filter = (unsigned char)e;
+        } else if (strcmp(k, "paint") == 0) {
+            // The paint layer's atlas (docs/painting.md 4.1): used once a `paint` entry draws with it
+            ONE_WORD();
+            if (!PackagePath(P, v[0], full, sizeof(full))) return false;
+            char *copy;
+            if (!Dup(P, v[0].s, &copy)) return false;
+            free(D->paint);
+            D->paint = copy;
+            D->paintLine = P->line;
+        } else if (strcmp(k, "paint_filter") == 0) {
+            static const char *const PF[] = { "trilinear", "nearest" };   // = TEX_*
+            int e;
+            ONE_WORD();
+            if (!Keyword(P, v[0], PF, 2, "paint filter", &e)) return false;
+            D->paintFilter = (unsigned char)e;
         } else if (strcmp(k, "priority") == 0) {
             NEED(1);
             if (!NumI(P, v[0], -1000000, 1000000, &m->priority)) return false;
@@ -2291,15 +3110,172 @@ static bool ParseMaterial(Parser *P, Token *tok, int n)
         #undef NEED
         #undef ONE_WORD
         // The key into the material's hashes (the shape hash leaves out what a live edit can change
-        // without a full upload: the face layout, the filter and the albedo map)
+        // without a full upload: the face layout, the filter, the albedo map and the paint keys; the
+        // paintless hash leaves out only the paint keys, whose change rebuilds no mesh)
+        bool paintKey = strcmp(k, "paint") == 0 || strcmp(k, "paint_filter") == 0;
         d->matLookHash[mi] = HashTokens(d->matLookHash[mi], &tok[t], 1 + used);
-        if (strcmp(k, "uv_faces") != 0 && strcmp(k, "filter") != 0 && strcmp(k, "albedo_map") != 0)
+        if (strcmp(k, "uv_faces") != 0 && strcmp(k, "filter") != 0 && strcmp(k, "albedo_map") != 0 && !paintKey)
             d->matShapeHash[mi] = HashTokens(d->matShapeHash[mi], &tok[t], 1 + used);
+        if (!paintKey) d->matPaintlessHash[mi] = HashTokens(d->matPaintlessHash[mi], &tok[t], 1 + used);
         t += 1 + used;
     }
     // A face layout puts each face in a cell of the texture: tiling would cross the cells
     if (D->hasFaces && (m->uvScale.x != 1.0f || m->uvScale.y != 1.0f || m->uvOffset.x != 0.0f || m->uvOffset.y != 0.0f))
         return Fail(P, "uv_faces needs uv_scale 1 1 and uv_offset 0 0", NULL);
+    return true;
+}
+
+// `paint "<material>"|own <id>:<i> <faces>|slot <N> <x> <y> <w> <h> [paint_filter nearest|trilinear]`
+// (docs/painting.md 4.2): stored with its entity; the entity is resolved at the end of the parse
+// (ResolvePaintEntities), when every line is known. Not a statement of objects: it takes no
+// statement key and no part of the look hashes (d->paintHash has it).
+static bool ParsePaint(Parser *P, Token *tok, int n)
+{
+    SceneData *d = P->d;
+    d->paintHash = HashTokens(d->paintHash, tok, n);
+    static const char USAGE[] = "paint takes a material (or own), an entity id:index, faces (+x,-y,...) or slot N, "
+                                "and a rectangle x y w h: paint \"name\" 12:0 +x 0 0 64 64";
+    if (n < 8) return Fail(P, "%s", USAGE);
+    PaintDef e = { .slot = -1, .ownAtlas = -1, .line = P->line };
+
+    // The material (`own`: the model slot's own)
+    if (tok[1].quoted) {
+        if ((e.material = FindMaterial(d, tok[1].s)) < 0)
+            return Fail(P, "unknown material \"%s\" (define it with 'material' before its paint)", tok[1].s);
+    } else if (strcmp(tok[1].s, "own") == 0) e.material = -1;
+    else return Fail(P, "paint: expected a material name in double quotes or own, got '%s'", tok[1].s);
+
+    // The entity: the line's id and the object's index within the line
+    char *colon = tok[2].quoted ? NULL : strchr(tok[2].s, ':');
+    if (!colon) return Fail(P, "paint: expected an entity id:index (e.g. 12:0), got '%s'", tok[2].s);
+    *colon = '\0';
+    int id, index;
+    bool entOk = ParseInt(P, tok[2].s, 1, 2147483647, &id) && ParseInt(P, colon + 1, 0, MS_MAX_OBJECTS, &index);
+    *colon = ':';
+    if (!entOk) return false;
+    e.entity = (MS_EntityId){ (unsigned int)id, index };
+
+    // Faces (a box) or a slot (a model)
+    int t;
+    if (!tok[3].quoted && strcmp(tok[3].s, "slot") == 0) {
+        e.kind = PAINT_MODEL;
+        if (!NumI(P, tok[4], 0, MS_MAX_OBJECTS, &e.slot)) return false;
+        t = 5;
+    } else {
+        if (tok[3].quoted) return Fail(P, "paint: expected faces (+x,-y,...) or slot N, got the string \"%s\"", tok[3].s);
+        e.kind = PAINT_BOX;
+        for (const char *f = tok[3].s; ; ) {
+            size_t len = strcspn(f, ",");
+            int face = -1;
+            for (int k = 0; k < 6; k++)
+                if (len == 2 && strncmp(f, PAINT_FACES[k], 2) == 0) face = k;
+            if (face < 0) return Fail(P, "paint: bad face list '%s' (faces +x -x +y -y +z -z, separated by commas)", tok[3].s);
+            if (e.faces & (1u << face)) return Fail(P, "paint: face %s twice", PAINT_FACES[face]);
+            e.faces |= (unsigned char)(1u << face);
+            if (f[len] == '\0') break;
+            f += len + 1;
+        }
+        t = 4;
+    }
+    if (e.material < 0 && e.kind == PAINT_BOX)
+        return Fail(P, "paint own is for a model slot drawn with its own material: paint own N:i slot S x y w h", NULL);
+
+    // The rectangle, then paint_filter (own materials only: a material line has its own key)
+    if (n < t + 4) return Fail(P, "%s", USAGE);
+    if (!NumI(P, tok[t], 0, 1000000, &e.x) || !NumI(P, tok[t + 1], 0, 1000000, &e.y) ||
+        !NumI(P, tok[t + 2], 1, 1000000, &e.w) || !NumI(P, tok[t + 3], 1, 1000000, &e.h))
+        return false;
+    t += 4;
+    if (t < n && !tok[t].quoted && strcmp(tok[t].s, "paint_filter") == 0) {
+        if (e.material >= 0)
+            return Fail(P, "paint: paint_filter goes on the material's line (only `paint own` entries take it)", NULL);
+        static const char *const PF[] = { "trilinear", "nearest" };
+        int f;
+        if (t + 1 >= n) return Fail(P, "paint_filter takes trilinear or nearest", NULL);
+        if (!Keyword(P, tok[t + 1], PF, 2, "paint filter", &f)) return false;
+        e.nearest = f == 1;
+        t += 2;
+    }
+    if (t < n) return Fail(P, "paint: unexpected '%s' after the rectangle", tok[t].s);
+
+    PaintDef *slot = MS_PUSH(d->paints, d->paintCount, d->paintCap);
+    if (!slot) return Fail(P, "out of memory", NULL);
+    *slot = e;
+    return true;
+}
+
+// The first object of statement `prim` in a list sorted by statement (boxes by boxRefs, models by
+// ref): its index and how many the statement made
+static int StatementObjects(const SceneData *d, bool models, int prim, int *count)
+{
+    int n = models ? d->modelCount : d->boxCount, lo = 0, hi = n;
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        int p = models ? d->models[mid].ref.prim : d->boxRefs[mid].prim;
+        if (p < prim) lo = mid + 1;
+        else hi = mid;
+    }
+    int k = lo;
+    while (k < n && (models ? d->models[k].ref.prim : d->boxRefs[k].prim) == prim) k++;
+    *count = k - lo;
+    return lo;
+}
+
+// After the last line: each paint entry's entity becomes its object (the line `id N` exists and
+// made a box, or a model for a slot, with index i), its material has a `paint` key, the own
+// materials' atlases are named (and watched), and the entries keep the rules between them
+// (PaintConflict). The messages cite the paint line.
+static bool ResolvePaintEntities(Parser *P)
+{
+    SceneData *d = P->d;
+    for (int i = 0; i < d->paintCount; i++) {
+        PaintDef *e = &d->paints[i];
+        P->line = e->line;
+        if (e->material >= 0 && !d->matDefs[e->material].paint)
+            return Fail(P, "paint: material \"%s\" has no paint key (add paint \"textures/paint/<name>.png\" to it)",
+                        d->materials[e->material].name);
+        int *s = d->stmtSetCap ? StmtSlot(d, e->entity.stmt) : NULL;
+        if (!s || !*s) return FailF(P, "paint: no line has id %u", e->entity.stmt);
+        int prim = *s - 1, boxes, models;
+        int firstBox = StatementObjects(d, false, prim, &boxes), firstModel = StatementObjects(d, true, prim, &models);
+        int count = e->kind == PAINT_BOX ? boxes : models;
+        if (count == 0)
+            return FailF(P, e->kind == PAINT_BOX ? "paint: line %d (id %u) makes no boxes (a model is painted by slot)"
+                                                 : "paint: line %d (id %u) makes no models (a box is painted by faces)",
+                         d->stmtLines[prim], e->entity.stmt);
+        if (e->entity.index >= count)
+            return FailF(P, "paint: %u:%d: line %d makes %d %s", e->entity.stmt, e->entity.index, d->stmtLines[prim], count,
+                         e->kind == PAINT_BOX ? (count == 1 ? "box" : "boxes") : (count == 1 ? "model" : "models"));
+        e->object = (e->kind == PAINT_BOX ? firstBox : firstModel) + e->entity.index;
+
+        // An own material's atlas: named after the file, watched like any file the map names
+        if (e->material < 0) {
+            int a = OwnAtlasOf(d, d->models[e->object].file, e->slot);
+            if (a < 0) return Fail(P, "out of memory", NULL);
+            e->ownAtlas = a;
+            OwnAtlas *A = &d->ownAtlases[a];
+            A->nearest = A->nearest || e->nearest;
+            char full[MS_PATH_MAX + MS_PATH_MAX];
+            snprintf(full, sizeof(full), "%s%s", d->root, A->rel);
+            if ((FileExists(full) || ProvidedImage(d->live, A->rel)) && !AddDep(P, full)) return false;
+        }
+    }
+    int a = 0, b = 0, c = PaintConflict(d, &a, &b);
+    if (c < 0) return Fail(P, "out of memory", NULL);
+    if (c > 0) {
+        const PaintDef *e = &d->paints[a], *f = &d->paints[b];
+        P->line = f->line;
+        const char *mat = f->material >= 0 ? d->materials[f->material].name : d->ownAtlases[f->ownAtlas].rel;
+        if (c == 1)
+            return FailF(P, "paint: the rectangle %d %d %d %d overlaps line %d's (%d %d %d %d) in the atlas of %s",
+                         f->x, f->y, f->w, f->h, e->line, e->x, e->y, e->w, e->h, mat);
+        if (f->kind == PAINT_BOX)
+            return FailF(P, "paint: %u:%d: a face of it is already in line %d's entry of %s", f->entity.stmt,
+                         f->entity.index, e->line, mat);
+        return FailF(P, "paint: %u:%d slot %d is already in line %d's entry of %s", f->entity.stmt, f->entity.index,
+                     f->slot, e->line, mat);
+    }
+    P->line = 0;
     return true;
 }
 
@@ -2702,6 +3678,12 @@ static bool ParseModel(Parser *P, Token *args, int n, const Placement *pl)
         MS_ModelFile *F = &d->modelFiles[file];
         F->path = copy;
         F->line = P->line;
+        // Its paint unwrap (docs/painting.md 4.5), when there is one: a file of the package too
+        char side[MS_PATH_MAX], sideFull[MS_PATH_MAX + MS_PATH_MAX];
+        if (UnwrapSidecarPath(copy, side, sizeof(side))) {
+            snprintf(sideFull, sizeof(sideFull), "%s%s", d->root, side);
+            if (FileExists(sideFull) && !AddDep(P, sideFull)) return false;
+        }
     }
     float pos[3];
     for (int i = 0; i < 3; i++)
@@ -2891,7 +3873,7 @@ static bool ParseStatement(Parser *P, Token *tok, int n)
         return true;
     }
 
-    static const char *const V2_STATEMENTS[] = { "material", "use", "env", "spawn", "viewpoint", "light", "model" };
+    static const char *const V2_STATEMENTS[] = { "material", "use", "env", "spawn", "viewpoint", "light", "model", "paint" };
     for (int i = 0; i < COUNT(V2_STATEMENTS); i++)
         if (!v2 && strcmp(kw, V2_STATEMENTS[i]) == 0)
             return Fail(P, "'%s' needs map format 2: add 'monolith 2' as the first line", kw);
@@ -2907,6 +3889,7 @@ static bool ParseStatement(Parser *P, Token *tok, int n)
         return true;
     }
     if (strcmp(kw, "env") == 0) return ParseEnv(P, tok, n);
+    if (strcmp(kw, "paint") == 0) return ParsePaint(P, tok, n);
     if (strcmp(kw, "spawn") == 0) {
         float v[5] = { 0 };
         if (n != 5 && n != 6) return Fail(P, "spawn takes x y z yawDeg [pitchDeg] (feet position)", NULL);
@@ -2959,7 +3942,7 @@ static bool ParseStatement(Parser *P, Token *tok, int n)
     for (int i = 0; i < COUNT(PRIMS); i++)
         if (strcmp(prim, PRIMS[i].name) == 0) return ParsePrimitive(P, &PRIMS[i], &tok[t + 1], n - t - 1, &pl);
     if (v2) return Fail(P, "unknown keyword '%s' (expected group, box, block, stairs, waffle, model, light, material, use, env, "
-                           "spawn, viewpoint, repeat or at)", prim);
+                           "paint, spawn, viewpoint, repeat or at)", prim);
     return Fail(P, "unknown keyword '%s' (expected group, box, block, stairs, waffle, repeat or at)", prim);
 }
 
@@ -2992,7 +3975,7 @@ static bool ParseText(Parser *P, const char *text, int size)
     P->line = 0;
     if (P->d->boxCount == 0 && P->d->modelCount == 0)
         return Fail(P, P->d->formatVersion >= 2 ? "map is empty (no boxes and no models)" : "map is empty (no boxes)", NULL);
-    return true;
+    return ResolvePaintEntities(P);
 }
 
 #endif
@@ -3015,9 +3998,10 @@ static bool ParseText(Parser *P, const char *text, int size)
 // reader (CmRead*) in ReadCompiled's list after the sections its records point into, and the
 // matching section writer (CmPut*). The layout goes into docs/compiled-map.md.
 
-#define CM_VERSION          4           // MS_COMPILED_VERSION: bump on any change to a record or section
+#define CM_VERSION          5           // MS_COMPILED_VERSION: bump on any change to a record or section
 #define CM_VERSION_OLDEST   2           // the oldest version still read (2: no box turns section; 2 and 3:
-                                        // materials without uvFaces and filter)
+                                        // materials without uvFaces and filter; 2 to 4: materials without
+                                        // paint, no paint section)
 #define CM_BYTE_ORDER       0x01020304u
 #define CM_NONE             0xFFFFFFFFu // a string field without a string
 #define CM_MAX_ENV          4096        // env records (the key tables have ~120 keys)
@@ -3062,6 +4046,8 @@ typedef struct {
 // uniforms / samplers sections (each material's ranges follow the previous material's).
 // Version 4: uvFaces: the box face layout (`uv_faces`, a cell per face +x -x +y -y +z -z; all
 // 255 = none); filter: TEX_* (`filter`); pad: 0. A version 2 or 3 record ends before uvFaces.
+// Version 5: paint: the paint atlas (`paint`, CM_NONE for none); paintFilter: TEX_* (`paint_filter`);
+// pad2: 0. A version 4 record ends before paint.
 typedef struct {
     uint32_t name, shader, maps[MAP_COUNT];     // maps: albedo, normal, orm, emission
     int32_t line, shaderLine, mapLine[MAP_COUNT];
@@ -3072,9 +4058,24 @@ typedef struct {
     uint32_t inherit, unlit, instanced;
     uint32_t uniformFirst, uniformCount, samplerFirst, samplerCount;
     uint8_t uvFaces[6], filter, pad;            // version 4
+    uint32_t paint;                             // version 5
+    uint8_t paintFilter, pad2[3];
 } CmMaterial;
 
 #define CM_MATERIAL_V3_SIZE ((uint32_t)offsetof(CmMaterial, uvFaces))  // a version 2 / 3 material record
+#define CM_MATERIAL_V4_SIZE ((uint32_t)offsetof(CmMaterial, paint))    // a version 4 material record
+
+// A `paint` statement (version 5), its entity resolved to the object: material (CM_NONE: the model
+// slot's own material), kind (0 a box, 1 a model instance), object (index into the boxes or models
+// section), faces (a box: bit f for face f, +x -x +y -y +z -z) or the slot (a model), the rectangle
+// in texels of the atlas, filter (TEX_*: `paint own … paint_filter`; 0 for a material's entry), the
+// paint line. Every entry is stored, also one that doesn't draw (the load decides that).
+typedef struct {
+    uint32_t material, kind, object, facesOrSlot;
+    uint32_t x, y, w, h;
+    uint32_t filter;
+    int32_t line;
+} CmPaint;
 
 // A material's shader uniform (`uniform <name> f [f f f]`): count: how many of v are used (1 to 4); the
 // others are 0
@@ -3161,8 +4162,10 @@ enum {
     CM_STRINGS = 1, CM_BOXES, CM_GROUPS, CM_MATERIALS, CM_UNIFORMS, CM_SAMPLERS, CM_LIGHTS, CM_VIEWPOINTS,
     CM_MODEL_FILES, CM_MODELS, CM_COLLIDERS, CM_SLOTS, CM_STATEMENTS, CM_ENV, CM_SPAWN, CM_DEPS,
     CM_BOX_TURNS,                       // version 3
-    CM_SECTIONS = CM_BOX_TURNS,
-    CM_SECTIONS_V2 = CM_DEPS            // the sections of a version 2 file
+    CM_PAINT,                           // version 5
+    CM_SECTIONS = CM_PAINT,
+    CM_SECTIONS_V2 = CM_DEPS,           // the sections of a version 2 file
+    CM_SECTIONS_V4 = CM_BOX_TURNS       //   and of a version 3 or 4 file
 };
 
 // What the code knows about one section: its name (for messages), its record size and the most
@@ -3192,6 +4195,7 @@ static const CmSectionInfo CM_SECTION[CM_SECTIONS + 1] = {
     [CM_SPAWN]       = { "spawn", sizeof(CmSpawn), 1 },
     [CM_DEPS]        = { "dependencies", 4, MS_MAX_OBJECTS },
     [CM_BOX_TURNS]   = { "box turns", sizeof(CmBoxTurn), MS_MAX_OBJECTS },
+    [CM_PAINT]       = { "paint", sizeof(CmPaint), MS_MAX_OBJECTS },
 };
 
 // --- Reader
@@ -3236,10 +4240,13 @@ static void CmRecord(const CmReader *R, int id, uint32_t i, void *out)
     memcpy(out, R->bytes + R->sec[id].offset + (size_t)i * size, size);
 }
 
-// The record size of section `id` in a file of `version` (a material had no uvFaces before 4)
+// The record size of section `id` in a file of `version` (a material had no uvFaces before 4, no
+// paint before 5)
 static uint32_t CmRecordSize(uint32_t version, uint32_t id)
 {
-    return id == CM_MATERIALS && version < 4 ? CM_MATERIAL_V3_SIZE : CM_SECTION[id].size;
+    if (id == CM_MATERIALS && version < 4) return CM_MATERIAL_V3_SIZE;
+    if (id == CM_MATERIALS && version < 5) return CM_MATERIAL_V4_SIZE;
+    return CM_SECTION[id].size;
 }
 
 // A string field: *out = the string (NULL for CM_NONE when `optional`), false with a message otherwise
@@ -3353,7 +4360,7 @@ static bool CmReadHeader(CmReader *R, CmHeader *h)
         return CmFail(R, "compiled map version %u; this runtime reads compiled map versions %d to %d: compile the map again",
                       h->version, CM_VERSION_OLDEST, CM_VERSION);
     // The sections of this version (a section's id is its place in this list)
-    uint32_t sections = h->version == 2 ? CM_SECTIONS_V2 : CM_SECTIONS;
+    uint32_t sections = h->version == 2 ? CM_SECTIONS_V2 : h->version < 5 ? CM_SECTIONS_V4 : CM_SECTIONS;
     R->version = h->version;
     if (h->headerSize != sizeof(CmHeader) || h->flags != 0) return CmFail(R, "compiled map: bad header");
     if (h->fileSize != R->size)
@@ -3495,7 +4502,9 @@ static bool CmMaterialInRange(const CmMaterial *c)
            c->unlit <= 1 &&
            c->instanced <= 1 &&
            c->filter <= TEX_NEAREST &&
-           c->pad == 0;
+           c->pad == 0 &&
+           c->paintFilter <= TEX_NEAREST &&
+           c->pad2[0] == 0 && c->pad2[1] == 0 && c->pad2[2] == 0;
 }
 
 // A material's face layout: none (all 255), or a layout the parser accepts (FaceCellsValid) on a
@@ -3541,6 +4550,7 @@ static void CmFillMaterial(const CmMaterial *c, MS_Material *M, MatDef *D)
     D->hasFaces = c->uvFaces[0] != 255;
     if (D->hasFaces) memcpy(D->uvFaces, c->uvFaces, sizeof(D->uvFaces));
     D->filter = c->filter;
+    D->paintFilter = c->paintFilter;
 }
 
 // A material's uniforms and samplers. Each material's ranges start where the previous material's
@@ -3597,6 +4607,7 @@ static bool CmReadMaterial(CmReader *R, uint32_t i, uint32_t *uniformsUsed, uint
     CmMaterial c;
     CmRecord(R, CM_MATERIALS, i, &c);
     if (R->version < 4) memset(c.uvFaces, 255, sizeof(c.uvFaces));     // (no layout, filter 0: trilinear)
+    if (R->version < 5) c.paint = CM_NONE;                              // (no paint, paint_filter trilinear)
 
     // Counted first: the strings below are heap copies FreeData must find
     MS_Material *M = &d->materials[i];
@@ -3615,6 +4626,8 @@ static bool CmReadMaterial(CmReader *R, uint32_t i, uint32_t *uniformsUsed, uint
     M->shader = shader;
     for (int k = 0; k < MAP_COUNT; k++)
         if (!CmPath(R, c.maps[k], true, "material texture", &D->maps[k])) return false;
+    if (!CmPath(R, c.paint, true, "material paint atlas", &D->paint)) return false;
+    D->paintLine = c.line;
 
     // Numbers, lines and enums
     float f[] = {
@@ -3826,6 +4839,53 @@ static bool CmReadModels(CmReader *R)
         M.slotCount = c.slotCount;
         d->models[d->modelCount++] = M;
     }
+    return true;
+}
+
+// The paint entries (version 5), after the materials, boxes and models they point into. The
+// parser's guarantees for a `paint` line: a material with a paint key (or a model slot's own), a
+// box with faces or a model with a slot, made by a line with an explicit `id`, a rectangle of at
+// least one texel, paint_filter only on own entries, and the rules between the entries
+// (PaintConflict). The entity id is the object's (BuildEntities fills it in).
+static bool CmReadPaint(CmReader *R)
+{
+    SceneData *d = R->d;
+    uint32_t n = R->sec[CM_PAINT].count;
+    if (n == 0) return true;
+    if (!MS_RESERVE(d->paints, d->paintCap, (int)n)) return CmFail(R, "out of memory");
+    for (uint32_t i = 0; i < n; i++) {
+        CmPaint c;
+        CmRecord(R, CM_PAINT, i, &c);
+        bool own = c.material == CM_NONE;
+        bool ok = (own || (c.material < (uint32_t)d->materialCount && d->matDefs[c.material].paint)) &&
+                  c.kind <= PAINT_MODEL &&
+                  (!own || c.kind == PAINT_MODEL) &&
+                  c.object < (uint32_t)(c.kind == PAINT_BOX ? d->boxCount : d->modelCount) &&
+                  (c.kind == PAINT_BOX ? c.facesOrSlot >= 1 && c.facesOrSlot <= 0x3F : c.facesOrSlot <= MS_MAX_OBJECTS) &&
+                  c.x <= 1000000 && c.y <= 1000000 && c.w >= 1 && c.w <= 1000000 && c.h >= 1 && c.h <= 1000000 &&
+                  c.filter <= TEX_NEAREST && (own || c.filter == 0) &&
+                  c.line >= 0;
+        if (!ok) return CmFail(R, "paint %u: value out of range", i);
+        int prim = c.kind == PAINT_BOX ? d->boxRefs[c.object].prim : d->models[c.object].ref.prim;
+        if (d->stmtKeys[prim] & 0x80000000u) return CmFail(R, "paint %u: its line has no id", i);
+
+        PaintDef e = {
+            .material = own ? -1 : (int)c.material, .kind = (int)c.kind, .object = (int)c.object,
+            .faces = c.kind == PAINT_BOX ? (unsigned char)c.facesOrSlot : 0,
+            .slot = c.kind == PAINT_BOX ? -1 : (int)c.facesOrSlot,
+            .x = (int)c.x, .y = (int)c.y, .w = (int)c.w, .h = (int)c.h,
+            .nearest = c.filter == TEX_NEAREST, .line = c.line, .ownAtlas = -1,
+        };
+        if (own) {
+            if ((e.ownAtlas = OwnAtlasOf(d, d->models[e.object].file, e.slot)) < 0) return CmFail(R, "out of memory");
+            d->ownAtlases[e.ownAtlas].nearest = d->ownAtlases[e.ownAtlas].nearest || e.nearest;
+        }
+        d->paints[d->paintCount++] = e;
+    }
+    int a = 0, b = 0, conflict = PaintConflict(d, &a, &b);
+    if (conflict < 0) return CmFail(R, "out of memory");
+    if (conflict == 1) return CmFail(R, "paint %d: its rectangle overlaps paint %d's in one atlas", b, a);
+    if (conflict == 2) return CmFail(R, "paint %d: a face or slot of its object is in paint %d too", b, a);
     return true;
 }
 
@@ -4097,6 +5157,7 @@ static bool ReadCompiled(SceneData *d, const char *bytes, int size, char *err, i
            CmReadColliders(&R) &&       // a range of colliders
            CmReadSlots(&R) &&           // and a range of slots
            CmReadModels(&R) &&
+           CmReadPaint(&R) &&           // a paint entry names a material and a box or model
            CmReadLights(&R) &&
            CmReadViewpoints(&R) &&
            CmReadSpawn(&R) &&
@@ -4321,12 +5382,14 @@ static void CmPutMaterials(CmWriter *W, const SceneData *d)
             .uniformFirst = W->count[CM_UNIFORMS], .uniformCount = (uint32_t)D->uniformCount,
             .samplerFirst = W->count[CM_SAMPLERS], .samplerCount = (uint32_t)D->samplerCount,
             .uvFaces = { 255, 255, 255, 255, 255, 255 }, .filter = D->filter,
+            .paintFilter = D->paintFilter,
         };
         if (D->hasFaces) memcpy(c.uvFaces, D->uvFaces, sizeof(c.uvFaces));
         for (int k = 0; k < MAP_COUNT; k++) {
             c.maps[k] = CmStr(W, D->maps[k]);
             c.mapLine[k] = D->mapLine[k];
         }
+        c.paint = CmStr(W, D->paint);
         CmPut(W, CM_MATERIALS, &c);
 
         // Its uniforms and samplers, right after the previous material's
@@ -4386,6 +5449,22 @@ static void CmPutModels(CmWriter *W, const SceneData *d)
             .ref = CmRefOf(M->ref),
         };
         CmPut(W, CM_MODELS, &c);
+    }
+}
+
+// The paint entries in map order, each resolved to its object (ResolvePaintEntities)
+static void CmPutPaint(CmWriter *W, const SceneData *d)
+{
+    for (int i = 0; i < d->paintCount; i++) {
+        const PaintDef *e = &d->paints[i];
+        CmPaint c = {
+            .material = e->material >= 0 ? (uint32_t)e->material : CM_NONE,
+            .kind = (uint32_t)e->kind, .object = (uint32_t)e->object,
+            .facesOrSlot = e->kind == PAINT_BOX ? e->faces : (uint32_t)e->slot,
+            .x = (uint32_t)e->x, .y = (uint32_t)e->y, .w = (uint32_t)e->w, .h = (uint32_t)e->h,
+            .filter = e->nearest ? TEX_NEAREST : TEX_TRILINEAR, .line = e->line,
+        };
+        CmPut(W, CM_PAINT, &c);
     }
 }
 
@@ -4510,6 +5589,7 @@ static unsigned char *WriteCompiled(const SceneData *d, const char *srcName, uns
     CmPutMaterials(&W, d);
     CmPutBoxes(&W, d);
     CmPutModels(&W, d);
+    CmPutPaint(&W, d);
     CmPutLights(&W, d);
     CmPutViewpoints(&W, d);
     CmPutSpawn(&W, d);
@@ -5319,10 +6399,10 @@ static bool ParseScene(SceneData *d, const char *text, int size, char *err, int 
 }
 #endif
 
-// A material's texture (or a sampler's: filter TEX_TRILINEAR), loaded once per path, colour space,
-// kind, wrap and filter
-static Texture2D GetTexture(SceneData *d, const char *rel, bool isColor, bool data, int wrap, int filter, int line,
-                            char *err, int errSize)
+// A material's texture (or a sampler's: filter TEX_TRILINEAR; a paint atlas: premul), loaded once per
+// path, colour space, kind, wrap and filter
+static Texture2D GetTextureEx(SceneData *d, const char *rel, bool isColor, bool data, bool premul, int wrap, int filter,
+                              int line, char *err, int errSize)
 {
     char full[MS_PATH_MAX + MS_PATH_MAX];
     snprintf(full, sizeof(full), "%s%s", d->root, rel);
@@ -5333,7 +6413,7 @@ static Texture2D GetTexture(SceneData *d, const char *rel, bool isColor, bool da
 #endif
     for (int i = 0; i < d->textureCount; i++)
         if (strcmp(d->textures[i].path, full) == 0 && d->textures[i].isColor == isColor && d->textures[i].data == data &&
-            d->textures[i].wrap == wrap && d->textures[i].filter == filter) {
+            d->textures[i].premul == premul && d->textures[i].wrap == wrap && d->textures[i].filter == filter) {
 #ifdef MONOLITH_EDITOR
             if (prov && (d->textures[i].tex.width != prov->width || d->textures[i].tex.height != prov->height)) continue;
 #endif
@@ -5352,13 +6432,30 @@ static Texture2D GetTexture(SceneData *d, const char *rel, bool isColor, bool da
     static const TextureWrap WRAPS[] = { TEXTURE_WRAP_REPEAT, TEXTURE_WRAP_CLAMP, TEXTURE_WRAP_MIRROR_REPEAT };
     double t0 = GetTime();
     TextureFilter tf = data ? TEXTURE_FILTER_POINT : TEXTURE_FILTER_TRILINEAR;
-    Texture2D tex;
+    Texture2D tex = { 0 };
+    if (premul) {
+        // A paint atlas: RGBA8, premultiplied in linear light (PremulLut), from the provided pixels
+        // or the file; the image keeps straight alpha
+        Image img = { 0 };
 #ifdef MONOLITH_EDITOR
-    // A live edit uses the pixels provided for the path (a canvas in memory) instead of the file
-    if (prov) tex = R3D_LoadTextureFromImageEx(*prov, WRAPS[wrap % 3], tf, isColor && !data);
-    else
+        if (prov) img = ImageCopy(*prov);
+        else
 #endif
-    tex = R3D_LoadTextureEx(full, WRAPS[wrap % 3], tf, isColor && !data);
+        img = LoadImage(full);
+        if (img.data && img.format != PIXELFORMAT_UNCOMPRESSED_R8G8B8A8) ImageFormat(&img, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
+        if (img.data && img.format == PIXELFORMAT_UNCOMPRESSED_R8G8B8A8) {
+            PremultiplyRgba8(img.data, (size_t)img.width * (size_t)img.height);
+            tex = R3D_LoadTextureFromImageEx(img, WRAPS[wrap % 3], tf, true);
+        }
+        UnloadImage(img);
+    } else {
+#ifdef MONOLITH_EDITOR
+        // A live edit uses the pixels provided for the path (a canvas in memory) instead of the file
+        if (prov) tex = R3D_LoadTextureFromImageEx(*prov, WRAPS[wrap % 3], tf, isColor && !data);
+        else
+#endif
+        tex = R3D_LoadTextureEx(full, WRAPS[wrap % 3], tf, isColor && !data);
+    }
     // `filter nearest`: crisp texels up close (nearest magnification), and nearest texels of the
     // two nearest mipmaps blended at a distance (no shimmer); the mipmaps are the trilinear load's
     if (tex.id && filter == TEX_NEAREST && !data) {
@@ -5375,10 +6472,17 @@ static Texture2D GetTexture(SceneData *d, const char *rel, bool isColor, bool da
     e->path = path;
     e->isColor = isColor;
     e->data = data;
+    e->premul = premul;
     e->wrap = wrap;
     e->filter = filter;
     e->tex = tex;
     return tex;
+}
+
+static Texture2D GetTexture(SceneData *d, const char *rel, bool isColor, bool data, int wrap, int filter, int line,
+                            char *err, int errSize)
+{
+    return GetTextureEx(d, rel, isColor, data, false, wrap, filter, line, err, errSize);
 }
 
 // --- Models: load, pick data (BVH), transforms, draw groups
@@ -5498,8 +6602,8 @@ static void BuildModelPickUv(const R3D_Model *m, ModelPick *mp)
 #endif
 
 // Copies the triangles of a loaded model (R3D_IMPORT_RETAIN_MESH_DATA) into a ModelPick
-// with a BVH, then frees R3D's CPU mesh data
-static void BuildModelPick(MS_ModelFile *F, ModelPick *mp)
+// with a BVH, then frees R3D's CPU mesh data unless `keepData` (paint rebuilds the meshes from it)
+static void BuildModelPick(MS_ModelFile *F, ModelPick *mp, bool keepData)
 {
     R3D_Model *m = &F->model;
     int verts = 0, tris = 0;
@@ -5533,7 +6637,7 @@ static void BuildModelPick(MS_ModelFile *F, ModelPick *mp)
         for (int k = 0; mp->triSrc && k < tris; k++) mp->triAt[mp->triSrc[k]] = (unsigned int)k;
 #endif
     } else if (tris > 0) FreeModelPick(mp);
-    if (m->meshData) {
+    if (m->meshData && !keepData) {
         for (int i = 0; i < m->meshCount; i++) {
             R3D_UnloadMeshData(m->meshData[i]);
             memset(&m->meshData[i], 0, sizeof(m->meshData[i]));
@@ -5548,6 +6652,8 @@ static void BuildModelPick(MS_ModelFile *F, ModelPick *mp)
 #else
 #define MODEL_LOAD_ERROR "%s:%d: cannot load the model \"%s\" (unsupported or broken file; see the log)"
 #endif
+
+static void PaintLoadUnwrap(SceneData *d, int file);
 
 // Loads model file i of `d` (GPU). On failure: "map:line: message"
 static bool LoadModelFile(SceneData *d, int i, char *err, int errSize)
@@ -5564,7 +6670,8 @@ static bool LoadModelFile(SceneData *d, int i, char *err, int errSize)
     F->bounds = F->model.aabb;
     F->meshCount = F->model.meshCount;
     F->materialCount = F->model.materialCount;
-    BuildModelPick(F, &d->modelPick[i]);
+    BuildModelPick(F, &d->modelPick[i], d->filePaint && d->filePaint[i].keepData);
+    if (d->filePaint) PaintLoadUnwrap(d, i);
     TraceLog(LOG_INFO, "monolith_scene: model %s: %d meshes, %d triangles, %d materials, size %.3f x %.3f x %.3f",
              F->path, F->meshCount, F->triangleCount, F->materialCount, F->bounds.max.x - F->bounds.min.x,
              F->bounds.max.y - F->bounds.min.y, F->bounds.max.z - F->bounds.min.z);
@@ -5854,10 +6961,25 @@ static bool BuildModelGroups(SceneData *d, char *err, int errSize)
         G->model = F->model;
         G->model.materials = malloc(sizeof(R3D_Material) * (F->materialCount > 0 ? F->materialCount : 1));
         if (!G->slotMat || !G->model.materials) { ok = false; break; }
+        // Paint (docs/painting.md 4.4): a group with a slot drawn with a paint shader carries its
+        // instances' first paint key (x; 0: none) and the draw kind 2 (y); a painted file is drawn
+        // from its paint meshes (slot and paint UV in the bone channels)
+        const FilePaint *FP = d->filePaint ? &d->filePaint[G->file] : NULL;
+        if (FP && FP->meshes) G->model.meshes = FP->meshes;
+        bool painted = false;
         for (int s = 0; s < F->materialCount; s++) {
             const R3D_Material *own = &F->model.materials[s];
             int mi = G->slotMat[s];
-            if (mi < 0) { G->model.materials[s] = *own; continue; }
+            if (mi >= 0) painted = painted || d->matDefs[mi].painted;
+            if (mi < 0) {
+                G->model.materials[s] = *own;
+                int a = OwnAtlasFind(d, G->file, s);
+                if (a >= 0 && d->ownAtlases[a].painted && d->ownAtlases[a].shader) {
+                    G->model.materials[s].shader = d->ownAtlases[a].shader;
+                    painted = true;
+                }
+                continue;
+            }
             R3D_Material m = d->materials[mi].material;
             unsigned inh = d->matDefs[mi].inherit;
             if (inh & INHERIT_ALBEDO) m.albedo.texture = own->albedo.texture;
@@ -5867,18 +6989,29 @@ static bool BuildModelGroups(SceneData *d, char *err, int errSize)
             G->model.materials[s] = m;
         }
         if (!G->castShadow) {
+            const R3D_Mesh *src = G->model.meshes;
             G->model.meshes = malloc(sizeof(R3D_Mesh) * F->model.meshCount);
             if (!G->model.meshes) { G->model.meshes = F->model.meshes; ok = false; break; }
             G->ownMeshes = true;
             for (int k = 0; k < F->model.meshCount; k++) {
-                G->model.meshes[k] = F->model.meshes[k];
+                G->model.meshes[k] = src[k];
                 G->model.meshes[k].shadowCastMode = R3D_SHADOW_CAST_DISABLED;
             }
         }
         int count = G->count;
-        G->inst = R3D_LoadInstanceBuffer(count, R3D_INSTANCE_POSITION | R3D_INSTANCE_ROTATION | R3D_INSTANCE_SCALE);
+        G->inst = R3D_LoadInstanceBuffer(count, R3D_INSTANCE_POSITION | R3D_INSTANCE_ROTATION | R3D_INSTANCE_SCALE |
+                                                (painted ? R3D_INSTANCE_CUSTOM : 0));
         G->instLoaded = true;
         if (G->inst.capacity < count) { ok = false; break; }
+        if (painted) {
+            Vector4 *cus = R3D_MapInstances(G->inst, R3D_INSTANCE_CUSTOM, false);
+            for (int k = 0; k < count && cus; k++) {
+                int i = items[at + k].index;
+                cus[k] = (Vector4){ d->modelPaintKey ? (float)d->modelPaintKey[i] : 0.0f, 2.0f, 0.0f, 0.0f };
+            }
+            if (cus) R3D_UnmapInstances(G->inst, R3D_INSTANCE_CUSTOM);
+            else ok = false;
+        }
         Vector3 *pos = R3D_MapInstances(G->inst, R3D_INSTANCE_POSITION, false);
         Quaternion *rot = R3D_MapInstances(G->inst, R3D_INSTANCE_ROTATION, false);
         Vector3 *scl = R3D_MapInstances(G->inst, R3D_INSTANCE_SCALE, false);
@@ -5954,11 +7087,21 @@ static inline const R3D_MeshData *MaterialCube(const SceneData *d, int m, const 
     return c > 0 ? &d->faceCubes[c - 1].data : cube;
 }
 
+static void FreePaintMeshes(SceneData *d);
+
 static void FreeGpu(SceneData *d)
 {
     if (!d->gpu) return;
     FreeModelGroups(d);
     FreeFaceCubes(d);
+    FreePaintMeshes(d);
+    for (int a = 0; a < d->ownAtlasCount; a++) {
+        if (d->ownAtlases[a].shader) R3D_UnloadSurfaceShader(d->ownAtlases[a].shader);
+        d->ownAtlases[a].shader = NULL;
+        d->ownAtlases[a].tex = (Texture2D){ 0 };       // (in the texture cache: freed below)
+    }
+    if (d->paintTableTex.id) rlUnloadTexture(d->paintTableTex.id);
+    d->paintTableTex = (Texture2D){ 0 };
     for (int i = 0; i < d->modelFileCount; i++)
         if (d->modelFiles[i].model.meshes) {
             R3D_UnloadModel(d->modelFiles[i].model, true);
@@ -5970,7 +7113,10 @@ static void FreeGpu(SceneData *d)
         d->materials[i].material.shader = NULL;
     }
     // (after their aliases, which share their programs)
-    for (int i = 0; i < d->shaderFileCount; i++) R3D_UnloadSurfaceShader(d->shaderFiles[i].shader);
+    for (int i = 0; i < d->shaderFileCount; i++) {
+        if (d->shaderFiles[i].shader) R3D_UnloadSurfaceShader(d->shaderFiles[i].shader);
+        if (d->shaderFiles[i].paint) R3D_UnloadSurfaceShader(d->shaderFiles[i].paint);
+    }
     free(d->shaderFiles);
     d->shaderFiles = NULL;
     d->shaderFileCount = d->shaderFileCap = 0;
@@ -6370,11 +7516,21 @@ static bool BuildBoxMesh(SceneData *d, DrawRange *R, const CellItem *items, cons
         R3D_UnloadMeshData(md);
         return false;
     }
+    // A painted material's painted boxes: each face's paint key and corner UV in the bone channels
+    // (docs/painting.md 4.4); every other vertex keeps the cube's (zero: key 0, no paint)
+    const int *paintKey = d->matDefs[R->group].painted ? d->boxPaintKey : NULL;
     for (int k = 0; k < R->count; k++) {
         const BoundingBox *B = &d->boxes[items[k].index];
         const MS_TurnedBox *t = TurnedOf(d, items[k].index);
+        int key = paintKey ? paintKey[items[k].index] : 0;
         if (t) {
+            int first = md.vertexCount;
             TurnedFaces(&md, t, cube);
+            for (int v = 0; key > 0 && v < 24; v++) {
+                const R3D_Vertex *cv = &cube->vertices[v];
+                int face = FaceOfNormal(R3D_UnpackNormal(cv->normal));
+                PaintBones(&md.vertices[first + v], (unsigned int)(key + face), CubeFaceUv(face, cv->position));
+            }
             continue;
         }
         Vector3 pos = Vector3Scale(Vector3Add(B->min, B->max), 0.5f), scl = Vector3Subtract(B->max, B->min);
@@ -6383,6 +7539,10 @@ static bool BuildBoxMesh(SceneData *d, DrawRange *R, const CellItem *items, cons
             unsigned int base = (unsigned int)md.vertexCount;
             for (int c = 0; c < 4; c++) {
                 R3D_Vertex vx = cube->vertices[f * 4 + c];
+                if (key > 0) {
+                    int face = FaceOfNormal(R3D_UnpackNormal(vx.normal));
+                    PaintBones(&vx, (unsigned int)(key + face), CubeFaceUv(face, vx.position));
+                }
                 vx.position = (Vector3){ pos.x + vx.position.x * scl.x, pos.y + vx.position.y * scl.y, pos.z + vx.position.z * scl.z };
                 md.vertices[md.vertexCount++] = vx;
             }
@@ -6402,13 +7562,20 @@ static bool LoadBoxInstances(SceneData *d, int m, const CellItem *items, int cou
 {
     bool turned = false;
     for (int k = 0; k < count && !turned; k++) turned = items[k].turned;
-    R3D_InstanceFlags flags = R3D_INSTANCE_POSITION | R3D_INSTANCE_SCALE | (turned ? R3D_INSTANCE_ROTATION : 0);
+    // A painted material's boxes carry their first paint key (x; 0: none) and the draw kind 1 (y) in
+    // the custom attribute (docs/painting.md 4.4); other buffers have none
+    bool painted = d->matDefs[m].painted && d->boxPaintKey;
+    R3D_InstanceFlags flags = R3D_INSTANCE_POSITION | R3D_INSTANCE_SCALE | (turned ? R3D_INSTANCE_ROTATION : 0) |
+                              (painted ? R3D_INSTANCE_CUSTOM : 0);
     d->inst[m] = R3D_LoadInstanceBuffer(count, flags);
     if (d->inst[m].capacity < count) return false;
     Vector3 *pos = R3D_MapInstances(d->inst[m], R3D_INSTANCE_POSITION, false);
     Vector3 *scl = R3D_MapInstances(d->inst[m], R3D_INSTANCE_SCALE, false);
     Quaternion *rot = turned ? R3D_MapInstances(d->inst[m], R3D_INSTANCE_ROTATION, false) : NULL;
-    bool ok = pos && scl && (!turned || rot);
+    Vector4 *cus = painted ? R3D_MapInstances(d->inst[m], R3D_INSTANCE_CUSTOM, false) : NULL;
+    bool ok = pos && scl && (!turned || rot) && (!painted || cus);
+    for (int k = 0; k < count && ok && cus; k++) cus[k] = (Vector4){ (float)d->boxPaintKey[items[k].index], 1.0f, 0.0f, 0.0f };
+    if (cus) R3D_UnmapInstances(d->inst[m], R3D_INSTANCE_CUSTOM);
     for (int k = 0; k < count && ok; k++) {
         const MS_TurnedBox *t = TurnedOf(d, items[k].index);
         if (t) {
@@ -6559,51 +7726,613 @@ static void ScanShader(const char *src, bool *needsCube, bool *cutout)
     *needsCube = HasWord(open, end, "POSITION");
 }
 
-// The compiled shader of a material's shader file: loaded (and its source scanned) by the first
-// material that uses the file. NULL when it fails to load or out of memory (err says which).
-static ShaderFile *GetShaderFile(SceneData *d, const MS_Material *M, const MatDef *D, char *err, int errSize)
+// The source of a shader file as R3D gets it (heap; NULL when unreadable): the load's shader
+// defines (when it has any) go first, so the source's #ifdef blocks see them (R3D copies a
+// #define like any other global code)
+static char *ShaderSourceText(const SceneData *d, const char *rel)
 {
-    for (int i = 0; i < d->shaderFileCount; i++)
-        if (strcmp(d->shaderFiles[i].rel, M->shader) == 0) return &d->shaderFiles[i];
+    char full[MS_PATH_MAX + MS_PATH_MAX];
+    snprintf(full, sizeof(full), "%s%s", d->root, rel);
+    char *text = LoadFileText(full);
+    if (!text) return NULL;
+    const char *defs = "";
+#ifdef MONOLITH_EDITOR
+    if (d->shaderDefines && (!d->shaderDefinesFile || strcmp(d->shaderDefinesFile, rel) == 0)) defs = d->shaderDefines;
+#endif
+    size_t a = strlen(defs), b = strlen(text);
+    char *code = malloc(a + b + 2);
+    if (code) {
+        memcpy(code, defs, a);
+        code[a] = '\n';
+        memcpy(code + a + 1, text, b + 1);
+        if (a == 0) memmove(code, code + 1, b + 1);     // (no defines: the file as it is)
+    }
+    UnloadFileText(text);
+    return code;
+}
+
+// A material's shader file (rel NULL: the empty shader of painted materials without one): found or
+// added with its source scanned. NULL when out of memory (err says so).
+static ShaderFile *ShaderFileOf(SceneData *d, const char *rel, int line, char *err, int errSize)
+{
+    for (int i = 0; i < d->shaderFileCount; i++) {
+        const char *r = d->shaderFiles[i].rel;
+        if (rel ? r && strcmp(r, rel) == 0 : !r) return &d->shaderFiles[i];
+    }
     ShaderFile *f = MS_PUSH(d->shaderFiles, d->shaderFileCount, d->shaderFileCap);
     if (!f) {
-        snprintf(err, errSize, "%s:%d: out of memory", d->srcPath, D->shaderLine);
+        snprintf(err, errSize, "%s:%d: out of memory", d->srcPath, line);
         return NULL;
     }
+    *f = (ShaderFile){ .rel = rel, .scanned = true };
+    if (!rel) return f;
     char full[MS_PATH_MAX + MS_PATH_MAX];
-    snprintf(full, sizeof(full), "%s%s", d->root, M->shader);
-    double t0 = GetTime();
-#ifdef MONOLITH_EDITOR
-    if (d->shaderDefines && (!d->shaderDefinesFile || strcmp(d->shaderDefinesFile, M->shader) == 0)) {
-        // The defines go first, so the source's #ifdef blocks see them (R3D copies a
-        // #define like any other global code)
-        char *text = LoadFileText(full);
-        size_t a = strlen(d->shaderDefines), b = text ? strlen(text) : 0;
-        char *code = text ? malloc(a + b + 2) : NULL;
-        if (code) {
-            memcpy(code, d->shaderDefines, a);
-            code[a] = '\n';
-            memcpy(code + a + 1, text, b + 1);
-        }
-        *f = (ShaderFile){ .rel = M->shader, .shader = code ? R3D_LoadSurfaceShaderFromMemory(code) : NULL };
-        free(code);
-        UnloadFileText(text);
-    } else
-#endif
-    *f = (ShaderFile){ .rel = M->shader, .shader = R3D_LoadSurfaceShader(full) };
-    d->times.shaderLoads++;
-    if (!f->shader) {
-        d->shaderFileCount--;
-        snprintf(err, errSize, "%s:%d: cannot load the surface shader \"%s\" (see the log)", d->srcPath, D->shaderLine, M->shader);
-        return NULL;
-    }
+    snprintf(full, sizeof(full), "%s%s", d->root, rel);
     char *src = LoadFileText(full);
     f->scanned = src != NULL;
     if (src) ScanShader(src, &f->needsCube, &f->cutout);
     else f->needsCube = f->cutout = true;
     UnloadFileText(src);
-    d->times.shaders += (GetTime() - t0) * 1000.0;
     return f;
+}
+
+// The compiled shader of a material's shader file: compiled by the first material that draws with
+// it. NULL when it fails to load or out of memory (err says which).
+static ShaderFile *GetShaderFile(SceneData *d, const MS_Material *M, const MatDef *D, char *err, int errSize)
+{
+    ShaderFile *f = ShaderFileOf(d, M->shader, D->shaderLine, err, errSize);
+    if (!f || f->shader) return f;
+    double t0 = GetTime();
+#ifdef MONOLITH_EDITOR
+    if (d->shaderDefines && (!d->shaderDefinesFile || strcmp(d->shaderDefinesFile, M->shader) == 0)) {
+        char *code = ShaderSourceText(d, M->shader);
+        f->shader = code ? R3D_LoadSurfaceShaderFromMemory(code) : NULL;
+        free(code);
+    } else
+#endif
+    {
+        char full[MS_PATH_MAX + MS_PATH_MAX];
+        snprintf(full, sizeof(full), "%s%s", d->root, M->shader);
+        f->shader = R3D_LoadSurfaceShader(full);
+    }
+    d->times.shaderLoads++;
+    d->times.shaders += (GetTime() - t0) * 1000.0;
+    if (!f->shader) {
+        snprintf(err, errSize, "%s:%d: cannot load the surface shader \"%s\" (see the log)", d->srcPath, D->shaderLine, M->shader);
+        return NULL;
+    }
+    return f;
+}
+
+// The paint version of a shader file (docs/painting.md 4.3), compiled the first time a painted
+// material needs it. NULL when the source can't take the paint stage (more than 2 samplers, too
+// long for R3D) or doesn't compile: its materials then draw without paint (logged).
+static R3D_SurfaceShader *PaintShaderOf(SceneData *d, ShaderFile *f)
+{
+    if (f->paintTried) return f->paint;
+    f->paintTried = true;
+    double t0 = GetTime();
+    char *src = f->rel ? ShaderSourceText(d, f->rel) : NULL;
+    char *code = (!f->rel || src) ? PaintShaderSource(src) : NULL;
+    if (code && strlen(code) <= PAINT_SHADER_MAX) f->paint = R3D_LoadSurfaceShaderFromMemory(code);
+    if (!f->paint)
+        TraceLog(LOG_WARNING, "monolith_scene: %s: the surface shader \"%s\" can't take the paint stage (%s); its paint is "
+                 "not drawn", d->srcPath, f->rel ? f->rel : "(none)", !code ? "more than 2 samplers, or unreadable"
+                 : strlen(code) > PAINT_SHADER_MAX ? "longer than R3D's limit with it" : "see the log");
+    free(code);
+    free(src);
+    d->times.shaderLoads++;
+    d->times.shaders += (GetTime() - t0) * 1000.0;
+    return f->paint;
+}
+
+// --- The paint layer at load and upload (docs/painting.md 4). Nothing here runs for a map without
+// an active paint entry: no shader, texture, vertex data or instance attribute is added.
+
+// The size of a paint atlas image: the pixels provided in memory, else the file's header
+static void PaintAtlasSize(const SceneData *d, const char *rel, int *w, int *h)
+{
+    *w = *h = 0;
+#ifdef MONOLITH_EDITOR
+    const Image *prov = ProvidedImage(d->live, rel);
+    if (prov) {
+        *w = prov->width;
+        *h = prov->height;
+        return;
+    }
+#endif
+    char full[MS_PATH_MAX + MS_PATH_MAX];
+    snprintf(full, sizeof(full), "%s%s", d->root, rel);
+    ImageFileSize(full, w, h);
+}
+
+// Before the model files load: their paint state, and which keep their CPU mesh data (builds with
+// the text parser: every file, for unwraps and picking; others: the files a paint entry names)
+static void PaintPrepare(SceneData *d)
+{
+    if (d->modelFileCount == 0 || !(d->filePaint = calloc((size_t)d->modelFileCount, sizeof(FilePaint)))) return;
+    for (int f = 0; f < d->modelFileCount; f++) {
+#ifdef MONOLITH_EDITOR
+        d->filePaint[f].keepData = true;
+#endif
+    }
+    for (int i = 0; i < d->paintCount; i++)
+        if (d->paints[i].kind == PAINT_MODEL) d->filePaint[d->models[d->paints[i].object].file].keepData = true;
+}
+
+static void FreeFilePaint(FilePaint *FP)
+{
+    UnwrapFree(&FP->unwrap);
+    free(FP->uvKind);
+    free(FP->meshes);       // (the meshes themselves: FreePaintMeshes, GPU)
+    memset(FP, 0, sizeof(*FP));
+}
+
+#ifdef MONOLITH_EDITOR
+// A deep copy (the editor's provided unwraps, a live edit's files)
+static bool UnwrapCopy(Unwrap *dst, const Unwrap *src)
+{
+    memset(dst, 0, sizeof(*dst));
+    dst->fileHash = src->fileHash;
+    if (!(dst->meshes = calloc(src->meshCount > 0 ? (size_t)src->meshCount : 1, sizeof(UnwrapMesh)))) return false;
+    for (int m = 0; m < src->meshCount; m++) {
+        const UnwrapMesh *S = &src->meshes[m];
+        UnwrapMesh *D = &dst->meshes[m];
+        dst->meshCount = m + 1;
+        *D = (UnwrapMesh){ S->slot, S->vertexCount, S->indexCount, NULL, NULL, NULL };
+        D->source = malloc(sizeof(unsigned int) * (S->vertexCount > 0 ? (size_t)S->vertexCount : 1));
+        D->uv = malloc(sizeof(unsigned short) * 2 * (S->vertexCount > 0 ? (size_t)S->vertexCount : 1));
+        D->indices = malloc(sizeof(unsigned int) * (S->indexCount > 0 ? (size_t)S->indexCount : 1));
+        if (!D->source || !D->uv || !D->indices) { UnwrapFree(dst); return false; }
+        memcpy(D->source, S->source, sizeof(unsigned int) * (size_t)S->vertexCount);
+        memcpy(D->uv, S->uv, sizeof(unsigned short) * 2 * (size_t)S->vertexCount);
+        memcpy(D->indices, S->indices, sizeof(unsigned int) * (size_t)S->indexCount);
+    }
+    return true;
+}
+
+// The unwrap provided for a model file (MS_PaintUnwrapProvide), NULL if none
+static const ProvidedUnwrap *ProvidedUnwrapOf(const MS_Private *p, const char *rel)
+{
+    for (int i = 0; p && i < p->unwrapCount; i++)
+        if (strcmp(p->unwraps[i].rel, rel) == 0) return &p->unwraps[i];
+    return NULL;
+}
+#endif
+
+// After model file `file` loaded (with its CPU mesh data): its unwrap, provided in memory or read
+// from its sidecar, kept when it fits the file as loaded (the model's hash and its meshes); a stale
+// or broken sidecar is ignored (logged)
+static void PaintLoadUnwrap(SceneData *d, int file)
+{
+    FilePaint *FP = &d->filePaint[file];
+    const MS_ModelFile *F = &d->modelFiles[file];
+    UnwrapFree(&FP->unwrap);
+    FP->hasUnwrap = false;
+    FP->unwrapGen = 0;
+    if (!FP->keepData || !F->loaded || !F->model.meshData) return;
+#ifdef MONOLITH_EDITOR
+    const ProvidedUnwrap *pu = ProvidedUnwrapOf(d->live, F->path);
+    if (pu) {
+        FP->hasUnwrap = UnwrapMatches(&pu->u, &F->model) && UnwrapCopy(&FP->unwrap, &pu->u);
+        FP->unwrapGen = pu->gen;
+        if (!FP->hasUnwrap) TraceLog(LOG_WARNING, "monolith_scene: %s: the provided paint unwrap doesn't fit it; ignored", F->path);
+        return;
+    }
+#endif
+    char side[MS_PATH_MAX], full[MS_PATH_MAX + MS_PATH_MAX], model[MS_PATH_MAX + MS_PATH_MAX];
+    if (!UnwrapSidecarPath(F->path, side, sizeof(side))) return;
+    snprintf(full, sizeof(full), "%s%s", d->root, side);
+    if (!FileExists(full)) return;
+    snprintf(model, sizeof(model), "%s%s", d->root, F->path);
+    unsigned long long hash = 0;
+    bool read = UnwrapRead(full, &FP->unwrap);
+    bool fresh = read && FileHash(model, &hash) && hash == FP->unwrap.fileHash;
+    FP->hasUnwrap = fresh && UnwrapMatches(&FP->unwrap, &F->model);
+    if (!FP->hasUnwrap) {
+        TraceLog(LOG_WARNING, "monolith_scene: %s: %s; ignored", side, !read ? "not a paint unwrap file"
+                 : !fresh ? "made for another version of the model file" : "doesn't fit the model's meshes");
+        UnwrapFree(&FP->unwrap);
+    }
+}
+
+// How slot `slot` of model file `file` maps onto paint (PUV_*): the file's unwrap for every slot when
+// it has one, else its own UVs if they can carry paint (OwnUvKind, computed once per slot)
+static int FileUvKind(SceneData *d, int file, int slot)
+{
+    const MS_ModelFile *F = &d->modelFiles[file];
+    FilePaint *FP = d->filePaint ? &d->filePaint[file] : NULL;
+    if (!FP || !F->loaded) return PUV_NEEDS_UNWRAP;
+    if (F->model.skeleton.boneCount > 0) return PUV_SKINNED;
+    if (FP->hasUnwrap) return PUV_UNWRAP;
+    if (slot < 0 || slot >= F->materialCount || !F->model.meshData) return PUV_NEEDS_UNWRAP;
+    if (!FP->uvKind) {
+        if (!(FP->uvKind = malloc((size_t)F->materialCount))) return PUV_NEEDS_UNWRAP;
+        memset(FP->uvKind, -1, (size_t)F->materialCount);
+        FP->uvKindCount = F->materialCount;
+    }
+    if (FP->uvKind[slot] < 0) FP->uvKind[slot] = (signed char)OwnUvKind(&F->model, slot);
+    return FP->uvKind[slot];
+}
+
+// The faces of an entry as written ("+x,-y") or its slot ("slot 2"), for messages
+static void PaintTargetText(const PaintDef *e, char *out, int size)
+{
+    if (e->kind == PAINT_MODEL) { snprintf(out, (size_t)size, "slot %d", e->slot); return; }
+    int n = 0;
+    out[0] = '\0';
+    for (int f = 0; f < 6 && n < size; f++)
+        if (e->faces & (1u << f)) n += snprintf(out + n, (size_t)(size - n), "%s%s", n ? "," : "", PAINT_FACES[f]);
+}
+
+// What is painted, from the entries that are active: the materials, own atlases and model files that
+// draw paint, and whether anything does
+static void PaintFlags(SceneData *d)
+{
+    d->anyPaint = false;
+    for (int m = 0; m < d->materialCount; m++) d->matDefs[m].painted = false;
+    for (int a = 0; a < d->ownAtlasCount; a++) d->ownAtlases[a].painted = false;
+    for (int f = 0; d->filePaint && f < d->modelFileCount; f++) d->filePaint[f].painted = false;
+    for (int i = 0; i < d->paintCount; i++) {
+        const PaintDef *e = &d->paints[i];
+        if (!e->active) continue;
+        d->anyPaint = true;
+        if (e->material >= 0) d->matDefs[e->material].painted = true;
+        else d->ownAtlases[e->ownAtlas].painted = true;
+        if (e->kind == PAINT_MODEL && d->filePaint) d->filePaint[d->models[e->object].file].painted = true;
+    }
+}
+
+// An entry that doesn't draw: logged once per load, with the reason
+static void PaintLogInactive(const SceneData *d, const PaintDef *e)
+{
+    char what[64], why[MS_PATH_MAX + 64];
+    PaintTargetText(e, what, sizeof(what));
+    const char *mat = e->material >= 0 ? d->materials[e->material].name : "its own material";
+    const char *atlas = e->material >= 0 ? d->matDefs[e->material].paint : d->ownAtlases[e->ownAtlas].rel;
+    switch (e->why) {
+    case PAINT_NOT_DRAWN:    snprintf(why, sizeof(why), "is not drawn with %s", mat); break;
+    case PAINT_OUTSIDE:      snprintf(why, sizeof(why), "lies outside its atlas %s", atlas); break;
+    case PAINT_NO_ATLAS:     snprintf(why, sizeof(why), "has no atlas image %s", atlas); break;
+    case PAINT_SKINNED:      snprintf(why, sizeof(why), "is in a skinned model file (its bone channels are in use)"); break;
+    case PAINT_NEEDS_UNWRAP: snprintf(why, sizeof(why), "needs a paint unwrap (its own UVs overlap, repeat or are missing)"); break;
+    default:                 snprintf(why, sizeof(why), "can't be drawn: %s's shader can't take the paint stage", mat); break;
+    }
+    TraceLog(LOG_WARNING, "monolith_scene: %s:%d: paint: %u:%d %s %s; inactive", d->srcPath, e->line, e->entity.stmt,
+             e->entity.index, what, why);
+}
+
+// Which entries draw (docs/painting.md 4.2): the object draws those faces / that slot with the
+// entry's material, the slot's UVs can carry paint, and the rectangle lies inside its atlas. After
+// BuildEntities (a compiled map's entries get their entity ids here) and the model files.
+static void PaintResolve(SceneData *d)
+{
+    for (int m = 0; m < d->materialCount; m++) {
+        MatDef *D = &d->matDefs[m];
+        if (D->paint) PaintAtlasSize(d, D->paint, &D->paintW, &D->paintH);
+    }
+    for (int a = 0; a < d->ownAtlasCount; a++) PaintAtlasSize(d, d->ownAtlases[a].rel, &d->ownAtlases[a].w, &d->ownAtlases[a].h);
+    for (int i = 0; i < d->paintCount; i++) {
+        PaintDef *e = &d->paints[i];
+        int ent = d->objEntities ? d->objEntities[(e->kind == PAINT_BOX ? 0 : d->boxCount) + e->object] : -1;
+        if (ent >= 0) e->entity = d->entityIds[ent];
+        int w = e->material >= 0 ? d->matDefs[e->material].paintW : d->ownAtlases[e->ownAtlas].w;
+        int h = e->material >= 0 ? d->matDefs[e->material].paintH : d->ownAtlases[e->ownAtlas].h;
+        int why = PAINT_OK;
+        if (e->kind == PAINT_BOX) {
+            if (d->boxRefs[e->object].material != e->material) why = PAINT_NOT_DRAWN;
+        } else {
+            const MS_ModelInstance *M = &d->models[e->object];
+            const MS_ModelFile *F = &d->modelFiles[M->file];
+            int uv = F->loaded ? FileUvKind(d, M->file, e->slot) : PUV_OWN;
+            if ((F->loaded && e->slot >= F->materialCount) || e->slot > 255 || SlotMaterial(d, M, e->slot) != e->material)
+                why = PAINT_NOT_DRAWN;
+            else if (uv == PUV_SKINNED) why = PAINT_SKINNED;
+            else if (uv == PUV_NEEDS_UNWRAP) why = PAINT_NEEDS_UNWRAP;
+        }
+        if (why == PAINT_OK && (w <= 0 || h <= 0)) why = PAINT_NO_ATLAS;
+        else if (why == PAINT_OK && ((long long)e->x + e->w > w || (long long)e->y + e->h > h)) why = PAINT_OUTSIDE;
+        e->active = why == PAINT_OK;
+        e->why = (signed char)why;
+        if (!e->active) PaintLogInactive(d, e);
+    }
+    PaintFlags(d);
+}
+
+#ifdef MONOLITH_EDITOR
+// MS_PaintEntryAt's view of the entries, once the load or edit knows which draw. Out of memory: none
+// (MS_PaintEntryCount 0).
+static void PaintPublish(SceneData *d)
+{
+    free(d->paintPub);
+    d->paintPub = NULL;
+    if (d->paintCount == 0 || !(d->paintPub = malloc(sizeof(MS_PaintEntry) * (size_t)d->paintCount))) return;
+    for (int i = 0; i < d->paintCount; i++) {
+        const PaintDef *e = &d->paints[i];
+        d->paintPub[i] = (MS_PaintEntry){
+            .material = e->material, .line = e->line, .entity = e->entity,
+            .obj = { e->kind == PAINT_BOX ? MS_OBJ_BOX : MS_OBJ_MODEL, e->object },
+            .faces = e->faces, .slot = e->slot,
+            .x = e->x, .y = e->y, .w = e->w, .h = e->h,
+            .nearest = e->nearest, .active = e->active,
+        };
+    }
+}
+#endif
+
+// A material whose shader can't take the paint stage (PaintShaderOf failed): its entries don't draw
+static void PaintDemote(SceneData *d, int material, int ownAtlas)
+{
+    for (int i = 0; i < d->paintCount; i++) {
+        PaintDef *e = &d->paints[i];
+        if (!e->active || (material >= 0 ? e->material != material : e->ownAtlas != ownAtlas)) continue;
+        e->active = false;
+        e->why = PAINT_NO_SHADER;
+        PaintLogInactive(d, e);
+    }
+    PaintFlags(d);
+}
+
+// Where a scene material's draws go in R3D's draw sort: material i with its own shader keeps rank
+// i + 1 whether it draws with that shader or with its paint version, and a material without one
+// keeps 0 when it draws with the paint version of the empty shader. So the draw order (and which of
+// two coplanar faces shows) doesn't depend on paint or on the order live edits made the aliases.
+// Without the patched R3D the order is the aliases' creation order (a load's: material order).
+static void ShaderSortKey(R3D_SurfaceShader *shader, unsigned int key)
+{
+#ifdef MS_PATCHED_R3D
+    R3D_SetSurfaceShaderSortKey(shader, key);   // (R3D patch 27)
+#else
+    (void)shader; (void)key;
+#endif
+}
+
+// The paint alias of painted material i: the paint version of its shader (or of the empty one),
+// its uniforms and samplers, and its atlas as ms_paint (ms_paintTable: PaintBindTable). A shader
+// that can't take the paint stage demotes the material (it draws as unpainted). On failure (out of
+// memory, an unreadable texture) err says why.
+static bool BuildPaintedShader(SceneData *d, int i, char *err, int errSize)
+{
+    MS_Material *M = &d->materials[i];
+    MatDef *D = &d->matDefs[i];
+    R3D_Material *m = &M->material;
+    ShaderFile *f = ShaderFileOf(d, M->shader, D->shaderLine, err, errSize);
+    if (!f) return false;
+    R3D_SurfaceShader *ps = PaintShaderOf(d, f);
+    if (!ps) {
+        PaintDemote(d, i, -1);
+        return true;
+    }
+    if (!(m->shader = R3D_LoadSurfaceShaderAlias(ps))) {
+        snprintf(err, errSize, "%s:%d: out of memory", d->srcPath, D->shaderLine);
+        return false;
+    }
+    ShaderSortKey(m->shader, M->shader ? (unsigned int)i + 1 : 0);
+    for (int u = 0; u < D->uniformCount; u++) R3D_SetSurfaceShaderUniform(m->shader, D->uniforms[u].name, D->uniforms[u].v);
+    for (int s = 0; s < D->samplerCount; s++) {
+        Texture2D tex = GetTexture(d, D->samplers[s].path, true, D->samplers[s].data, D->wrap, TEX_TRILINEAR,
+                                   D->samplers[s].line, err, errSize);
+        if (!tex.id) return false;
+        R3D_SetSurfaceShaderSampler(m->shader, D->samplers[s].name, tex);
+    }
+    D->paintTex = GetTextureEx(d, D->paint, true, false, true, 1, D->paintFilter, D->paintLine, err, errSize);
+    if (!D->paintTex.id) return false;
+    R3D_SetSurfaceShaderSampler(m->shader, "ms_paint", D->paintTex);
+    return true;
+}
+
+// The atlases and paint aliases of the model slots painted with their own material (an alias of
+// the empty shader's paint version each)
+static bool BuildOwnAtlases(SceneData *d, char *err, int errSize)
+{
+    for (int a = 0; a < d->ownAtlasCount; a++) {
+        OwnAtlas *A = &d->ownAtlases[a];
+        if (!A->painted || A->shader) continue;
+        ShaderFile *f = ShaderFileOf(d, NULL, d->modelFiles[A->file].line, err, errSize);
+        if (!f) return false;
+        R3D_SurfaceShader *ps = PaintShaderOf(d, f);
+        if (!ps) {
+            PaintDemote(d, -1, a);
+            continue;
+        }
+        A->tex = GetTextureEx(d, A->rel, true, false, true, 1, A->nearest ? TEX_NEAREST : TEX_TRILINEAR,
+                              d->modelFiles[A->file].line, err, errSize);
+        if (!A->tex.id) return false;
+        if (!(A->shader = R3D_LoadSurfaceShaderAlias(ps))) {
+            snprintf(err, errSize, "%s: out of memory", d->path);
+            return false;
+        }
+        ShaderSortKey(A->shader, 0);        // (sorts as the model's own material: no shader)
+        R3D_SetSurfaceShaderSampler(A->shader, "ms_paint", A->tex);
+    }
+    return true;
+}
+
+// The paint keys (docs/painting.md 4.4): 6 per painted box (its faces +x -x +y -y +z -z), one per slot
+// of a painted model instance, key 0 for "no paint"; and the table of rectangles. A scene built
+// to replace another passes it (old, with boxFrom / modelFrom: d's object -> old's) so unchanged
+// objects keep their keys and their meshes and buffers can stay; new keys go after old's. False when
+// out of memory.
+static bool PaintKeys(SceneData *d, const SceneData *old, const int *boxFrom, const int *modelFrom)
+{
+    free(d->boxPaintKey);
+    free(d->modelPaintKey);
+    free(d->paintTable);
+    d->boxPaintKey = d->modelPaintKey = NULL;
+    d->paintTable = NULL;
+    d->paintKeyCount = d->paintTableRows = 0;
+    if (!d->anyPaint) return true;
+    d->boxPaintKey = calloc(d->boxCount > 0 ? (size_t)d->boxCount : 1, sizeof(int));
+    d->modelPaintKey = calloc(d->modelCount > 0 ? (size_t)d->modelCount : 1, sizeof(int));
+    if (!d->boxPaintKey || !d->modelPaintKey) return false;
+
+    // Which objects need keys, then their keys (old's where an object is the same)
+    for (int i = 0; i < d->paintCount; i++) {
+        const PaintDef *e = &d->paints[i];
+        if (e->active) (e->kind == PAINT_BOX ? d->boxPaintKey : d->modelPaintKey)[e->object] = -1;
+    }
+    int next = old && old->paintKeyCount > 1 ? old->paintKeyCount : 1;
+    for (int b = 0; b < d->boxCount; b++) {
+        if (d->boxPaintKey[b] >= 0) continue;
+        int o = old && boxFrom && old->boxPaintKey ? boxFrom[b] : -1;
+        if (o >= 0 && old->boxPaintKey[o] > 0) d->boxPaintKey[b] = old->boxPaintKey[o];
+        else { d->boxPaintKey[b] = next; next += 6; }
+    }
+    for (int i = 0; i < d->modelCount; i++) {
+        if (d->modelPaintKey[i] >= 0) continue;
+        int o = old && modelFrom && old->modelPaintKey ? modelFrom[i] : -1;
+        int slots = d->modelFiles[d->models[i].file].materialCount;
+        if (o >= 0 && old->modelPaintKey[o] > 0) d->modelPaintKey[i] = old->modelPaintKey[o];
+        else { d->modelPaintKey[i] = next; next += slots > 0 ? slots : 1; }
+    }
+    if (next > 16777215) return false;      // (keys are 3 bytes in a merged mesh's vertices)
+
+    // The table: each active entry's rectangle, normalised to its atlas, at its faces' / slot's keys
+    d->paintKeyCount = next;
+    d->paintTableRows = (next + PAINT_TABLE_W - 1) / PAINT_TABLE_W;
+    if (!(d->paintTable = calloc((size_t)d->paintTableRows * PAINT_TABLE_W * 4, sizeof(float)))) return false;
+    for (int i = 0; i < d->paintCount; i++) {
+        const PaintDef *e = &d->paints[i];
+        if (!e->active) continue;
+        float w = (float)(e->material >= 0 ? d->matDefs[e->material].paintW : d->ownAtlases[e->ownAtlas].w);
+        float h = (float)(e->material >= 0 ? d->matDefs[e->material].paintH : d->ownAtlases[e->ownAtlas].h);
+        float r[4] = { (float)e->x / w, (float)e->y / h, (float)(e->x + e->w) / w, (float)(e->y + e->h) / h };
+        if (e->kind == PAINT_BOX) {
+            for (int f = 0; f < 6; f++)
+                if (e->faces & (1u << f)) memcpy(&d->paintTable[4 * (size_t)(d->boxPaintKey[e->object] + f)], r, sizeof(r));
+        } else memcpy(&d->paintTable[4 * (size_t)(d->modelPaintKey[e->object] + e->slot)], r, sizeof(r));
+    }
+    return true;
+}
+
+// The paint table on the GPU: old's texture when the table is the same (*took), else a new one
+static bool PaintTableUpload(SceneData *d, const SceneData *old, bool *took)
+{
+    *took = false;
+    if (!d->anyPaint) return true;
+    size_t bytes = (size_t)d->paintTableRows * PAINT_TABLE_W * 4 * sizeof(float);
+    if (old && old->paintTableTex.id && old->paintTable && old->paintTableRows == d->paintTableRows &&
+        memcmp(old->paintTable, d->paintTable, bytes) == 0) {
+        d->paintTableTex = old->paintTableTex;
+        *took = true;
+        return true;
+    }
+    unsigned int id = rlLoadTexture(d->paintTable, PAINT_TABLE_W, d->paintTableRows, PIXELFORMAT_UNCOMPRESSED_R32G32B32A32, 1);
+    if (!id) return false;
+    rlTextureParameters(id, RL_TEXTURE_MIN_FILTER, RL_TEXTURE_FILTER_NEAREST);
+    rlTextureParameters(id, RL_TEXTURE_MAG_FILTER, RL_TEXTURE_FILTER_NEAREST);
+    d->paintTableTex = (Texture2D){ id, PAINT_TABLE_W, d->paintTableRows, 1, PIXELFORMAT_UNCOMPRESSED_R32G32B32A32 };
+    return true;
+}
+
+// Every paint alias of x reads x's table
+static void PaintBindTable(const SceneData *x)
+{
+    if (!x->paintTableTex.id) return;
+    for (int m = 0; m < x->materialCount; m++)
+        if (x->matDefs[m].painted && x->materials[m].material.shader)
+            R3D_SetSurfaceShaderSampler(x->materials[m].material.shader, "ms_paintTable", x->paintTableTex);
+    for (int a = 0; a < x->ownAtlasCount; a++)
+        if (x->ownAtlases[a].shader) R3D_SetSurfaceShaderSampler(x->ownAtlases[a].shader, "ms_paintTable", x->paintTableTex);
+}
+
+static void PaintCheckCube(void);
+
+// The paint layer's GPU state after the materials (their paint aliases and atlases): the own
+// materials' atlases and aliases, the keys (old's for the same objects, when d replaces old), the table
+// (old's texture when it is the same: *tookTable) bound to every paint alias. On failure err says why.
+static bool PaintUpload(SceneData *d, const SceneData *old, const int *boxFrom, const int *modelFrom, bool *tookTable,
+                        char *err, int errSize)
+{
+    bool took = false;
+    if (!BuildOwnAtlases(d, err, errSize)) return false;
+    if (!PaintKeys(d, old, boxFrom, modelFrom) || !PaintTableUpload(d, old, &took)) {
+        snprintf(err, errSize, "%s: out of memory (paint keys)", d->path);
+        return false;
+    }
+    if (tookTable) *tookTable = took;
+    PaintBindTable(d);
+    if (d->anyPaint) PaintCheckCube();
+    return true;
+}
+
+// R3D's unit cube as the paint stage assumes it: each face's UVs what CubeFaceUv gives for its
+// corners (the instanced boxes' face UVs are computed from the position in the shader), and no bone
+// data (a box without paint reads key 0). Checked once per process; a mismatch is logged (paint on
+// instanced boxes would then be misplaced).
+static void PaintCheckCube(void)
+{
+    static atomic_bool checked;     // (a fact of the R3D build, not of a scene)
+    if (atomic_exchange(&checked, true)) return;
+    R3D_MeshData c = R3D_GenMeshDataCube(1.0f, 1.0f, 1.0f);
+    bool ok = c.vertexCount == 24;
+    for (int k = 0; ok && k < c.vertexCount; k++) {
+        const R3D_Vertex *v = &c.vertices[k];
+        Vector2 uv = R3D_UnpackTexCoord(v->texcoord), cu = CubeFaceUv(FaceOfNormal(R3D_UnpackNormal(v->normal)), v->position);
+        ok = uv.x == cu.x && uv.y == cu.y && !v->boneIndices[0] && !v->boneIndices[1] && !v->boneIndices[2] &&
+             !v->boneIndices[3] && !v->boneWeights[0] && !v->boneWeights[1] && !v->boneWeights[2] && !v->boneWeights[3];
+    }
+    R3D_UnloadMeshData(c);
+    if (!ok) TraceLog(LOG_ERROR, "monolith_scene: R3D's unit cube is not the one the paint stage assumes (UVs or bone data): "
+                      "paint on boxes is misplaced");
+}
+
+// The paint meshes of painted model file `file` (docs/painting.md 4.5): each mesh rebuilt from the
+// file's CPU mesh data with the slot (bone index 0) and the paint UV (bone weights): the unwrap's
+// vertices and triangles when the file has one, else its own vertices with their UVs. The file's
+// meshes and the file on disk are not changed. False when out of memory.
+static bool BuildPaintMeshes(SceneData *d, int file)
+{
+    FilePaint *FP = &d->filePaint[file];
+    const R3D_Model *m = &d->modelFiles[file].model;
+    if (!m->meshData || !m->meshMaterials) return false;
+    if (!(FP->meshes = calloc((size_t)m->meshCount, sizeof(R3D_Mesh)))) return false;
+    FP->meshCount = m->meshCount;
+    for (int i = 0; i < m->meshCount; i++) {
+        const R3D_MeshData *md = &m->meshData[i];
+        const R3D_Mesh *orig = &m->meshes[i];
+        unsigned int slot = (unsigned int)(m->meshMaterials[i] < 255 ? m->meshMaterials[i] : 255);
+        R3D_MeshData nd;
+        // (a mesh without vertices stays an empty mesh: nothing to draw)
+        if (md->vertexCount <= 0 || !md->vertices || (FP->hasUnwrap && FP->unwrap.meshes[i].vertexCount <= 0)) continue;
+        if (FP->hasUnwrap) {
+            const UnwrapMesh *U = &FP->unwrap.meshes[i];
+            nd = R3D_LoadMeshData(U->vertexCount > 0 ? U->vertexCount : 1, U->indexCount);
+            if (!nd.vertices || (U->indexCount > 0 && !nd.indices)) { R3D_UnloadMeshData(nd); return false; }
+            for (int k = 0; k < U->vertexCount; k++) {
+                nd.vertices[k] = md->vertices[U->source[k]];
+                PaintBones(&nd.vertices[k], slot, (Vector2){ U->uv[2 * k] / 65535.0f, U->uv[2 * k + 1] / 65535.0f });
+            }
+            if (U->indexCount > 0) memcpy(nd.indices, U->indices, sizeof(uint32_t) * (size_t)U->indexCount);
+            nd.vertexCount = U->vertexCount;
+            nd.indexCount = U->indexCount;
+        } else {
+            nd = R3D_CopyMeshData(*md);
+            if (!nd.vertices) return false;
+            for (int k = 0; k < nd.vertexCount; k++)
+                PaintBones(&nd.vertices[k], slot, R3D_UnpackTexCoord(nd.vertices[k].texcoord));
+        }
+        R3D_Mesh mesh = R3D_LoadMesh(orig->primitiveType, nd, &orig->aabb);
+        R3D_UnloadMeshData(nd);
+        if (mesh.vertexCount <= 0) return false;
+        mesh.shadowCastMode = orig->shadowCastMode;
+        mesh.layerMask = orig->layerMask;
+        FP->meshes[i] = mesh;
+    }
+    FP->meshesGen = FP->hasUnwrap ? FP->unwrapGen : ~0u;
+    return true;
+}
+
+static void FreePaintMeshes(SceneData *d)
+{
+    for (int f = 0; d->filePaint && f < d->modelFileCount; f++) {
+        FilePaint *FP = &d->filePaint[f];
+        for (int i = 0; FP->meshes && i < FP->meshCount; i++)
+            if (FP->meshes[i].vertexCapacity > 0) R3D_UnloadMesh(FP->meshes[i]);
+        free(FP->meshes);
+        FP->meshes = NULL;
+        FP->meshCount = 0;
+    }
 }
 
 // Material i's textures (its four maps, with the material's wrap and filter); an unset map keeps
@@ -6624,12 +8353,15 @@ static bool BuildMaterialMaps(SceneData *d, int i, char *err, int errSize)
 
 // Material i's GPU state: its shader alias (with its uniforms and samplers) and its textures. On
 // failure err says why (what it made stays in d: FreeGpu frees it).
-static bool BuildMaterial(SceneData *d, int i, char *err, int errSize)
+static bool BuildMaterialShader(SceneData *d, int i, char *err, int errSize)
 {
     MS_Material *M = &d->materials[i];
     MatDef *D = &d->matDefs[i];
     R3D_Material *m = &M->material;
     m->shader = NULL;
+    // A painted material draws with the paint version of its shader (or of the empty one)
+    if (D->painted && !BuildPaintedShader(d, i, err, errSize)) return false;
+    if (D->painted) return true;
     if (M->shader) {
         // One compiled shader per file (a compile is ~2 ms, and the first frame compiles each
         // shader's variants again); the materials' aliases are created in material order, so
@@ -6639,6 +8371,7 @@ static bool BuildMaterial(SceneData *d, int i, char *err, int errSize)
         if (f) m->shader = R3D_LoadSurfaceShaderAlias(f->shader);
         if (f && !m->shader) snprintf(err, errSize, "%s:%d: out of memory", d->srcPath, D->shaderLine);
         if (!m->shader) return false;
+        ShaderSortKey(m->shader, (unsigned int)i + 1);
         for (int u = 0; u < D->uniformCount; u++)
             R3D_SetSurfaceShaderUniform(m->shader, D->uniforms[u].name, D->uniforms[u].v);
         for (int s = 0; s < D->samplerCount; s++) {
@@ -6648,7 +8381,12 @@ static bool BuildMaterial(SceneData *d, int i, char *err, int errSize)
             R3D_SetSurfaceShaderSampler(m->shader, D->samplers[s].name, tex);
         }
     }
-    return BuildMaterialMaps(d, i, err, errSize);
+    return true;
+}
+
+static bool BuildMaterial(SceneData *d, int i, char *err, int errSize)
+{
+    return BuildMaterialShader(d, i, err, errSize) && BuildMaterialMaps(d, i, err, errSize);
 }
 
 // How material i's boxes are drawn (after BuildMaterial loaded its shader)
@@ -6659,7 +8397,7 @@ static void MaterialDrawMode(SceneData *d, int i, char *err, int errSize)
     R3D_Material *m = &M->material;
     bool needsCube = false, cutout = false;
     if (M->shader) {
-        const ShaderFile *f = GetShaderFile(d, M, D, err, errSize);     // (loaded by BuildMaterial)
+        const ShaderFile *f = ShaderFileOf(d, M->shader, D->shaderLine, err, errSize);    // (scanned)
         needsCube = !f || f->needsCube;
         cutout = !f || f->cutout;
         if (f && f->scanned && f->needsCube && !D->instanced)
@@ -6694,6 +8432,12 @@ static bool UploadGpu(SceneData *d, char *err, int errSize)
             FreeGpu(d);
             return false;
         }
+
+    // The paint layer (only with an active entry): the own materials' paint, the keys and their table
+    if (d->anyPaint && !PaintUpload(d, NULL, NULL, NULL, NULL, err, errSize)) {
+        FreeGpu(d);
+        return false;
+    }
 
     // How the boxes of each material are drawn, and the unit cubes of the face layouts
     for (int i = 0; i < d->materialCount; i++) MaterialDrawMode(d, i, err, errSize);
@@ -6742,6 +8486,12 @@ static bool UploadGpu(SceneData *d, char *err, int errSize)
         d->lightShadowDrawn[i] = false;
         if (d->lights[i].shadow) d->lightShadow[i] = R3D_LoadShadowMap(d->lights[i].light.type);
     }
+    for (int f = 0; d->filePaint && f < d->modelFileCount; f++)
+        if (d->filePaint[f].painted && !BuildPaintMeshes(d, f)) {
+            snprintf(err, errSize, "%s: out of memory (paint meshes)", d->path);
+            FreeGpu(d);
+            return false;
+        }
     if (!BuildModelGroups(d, err, errSize)) {
         FreeGpu(d);
         return false;
@@ -6774,10 +8524,19 @@ static void FreeData(SceneData *d)
         for (int k = 0; k < D->samplerCount; k++) { free(D->samplers[k].name); free(D->samplers[k].path); }
         free(D->uniforms);
         free(D->samplers);
+        free(D->paint);
     }
     free(d->materials);
     free(d->matDefs);
     free(d->matHash);
+    free(d->paints);
+    for (int a = 0; a < d->ownAtlasCount; a++) free(d->ownAtlases[a].rel);
+    free(d->ownAtlases);
+    for (int f = 0; d->filePaint && f < d->modelFileCount; f++) FreeFilePaint(&d->filePaint[f]);
+    free(d->filePaint);
+    free(d->boxPaintKey);
+    free(d->modelPaintKey);
+    free(d->paintTable);
     for (int i = 0; i < d->groupCount; i++) free(d->groups[i]);
     free(d->groups);
     for (int i = 0; i < d->viewpointCount; i++) free((char *)d->viewpoints[i].name);
@@ -6809,6 +8568,8 @@ static void FreeData(SceneData *d)
     free(d->lineStarts);
     free(d->matLookHash);
     free(d->matShapeHash);
+    free(d->matPaintlessHash);
+    free(d->paintPub);
 #endif
     free(d);
 }
@@ -6898,6 +8659,7 @@ static bool FinishLoad(SceneData *d, const MS_LoadOptions *opt, bool gpu, char *
     d->shaderDefinesFile = opt->shaderDefinesFile;
 #endif
     double t0 = GetTime();
+    PaintPrepare(d);
     if (gpu) {
         d->gpu = true;                  // (so FreeData unloads what LoadModelFiles loaded)
         ok = LoadModelFiles(d, err, errSize);
@@ -6914,7 +8676,11 @@ static bool FinishLoad(SceneData *d, const MS_LoadOptions *opt, bool gpu, char *
         snprintf(err, errSize, "%s: out of memory", d->path);
         ok = false;
     }
+    if (ok && d->paintCount > 0) PaintResolve(d);
     if (ok && gpu) ok = UploadGpu(d, err, errSize);
+#ifdef MONOLITH_EDITOR
+    if (ok) PaintPublish(d);
+#endif
     return ok;
 }
 
@@ -7112,6 +8878,7 @@ void MS_Unload(MS_Scene *s)
         free(p->filterObjNew);
         FreeProvided(p);
         free(p->provided);
+        free(p->unwraps);
         free(p->texScratch);
         for (int i = 0; p->gpu && i < p->retiredCount; i++) R3D_UnloadMesh(p->retired[i]);
         free(p->retired);
@@ -7541,6 +9308,10 @@ static bool DirtyHitsSphere(const MS_Private *p, int from, int to, Vector3 c, fl
     return false;
 }
 
+// What a live edit does with a material (bits of the plan): its textures and meshes again (changed
+// only in uv_faces, filter or albedo_map), built (appended), its shader alias again (its paint changed)
+enum { PLAN_MAPS = 1, PLAN_NEW = 2, PLAN_MATERIAL = 3, PLAN_PAINT = 4 };
+
 // --- What d borrowed from old: given back to old when the edit fails, taken from old (its handles
 // zeroed, so freeing old leaves them) when it succeeds
 
@@ -7554,11 +9325,13 @@ typedef struct {
     bool faceCubes;             // d took old's face layout cubes (the same layouts)
     int textureCount;           // with materials: old's textures (d's list may have grown past them)
     const unsigned char *matRebuild;    // LiveMaterialPlan's (not owned): the materials d built again
+    bool paintTable;            // d took old's paint table texture (the same table)
+    int *paintMeshFrom;         // per model file of d: the old file whose paint meshes it took, -1
 } LiveBorrow;
 
 static void LiveBorrowFree(LiveBorrow *B)
 {
-    free(B->fileFrom); free(B->lightFrom); free(B->meshFrom); free(B->instFrom);
+    free(B->fileFrom); free(B->lightFrom); free(B->meshFrom); free(B->instFrom); free(B->paintMeshFrom);
     memset(B, 0, sizeof(*B));
 }
 
@@ -7594,6 +9367,14 @@ static void LiveRelease(SceneData *x, bool isNew, const SceneData *d, const Live
         x->faceCubes = NULL;            // (one array: moved, not copied)
         x->faceCubeCount = x->faceCubeCap = 0;
     }
+    if (B->paintTable) x->paintTableTex = (Texture2D){ 0 };
+    for (int i = 0; B->paintMeshFrom && x->filePaint && i < d->modelFileCount; i++) {
+        if (B->paintMeshFrom[i] < 0) continue;
+        FilePaint *FP = &x->filePaint[isNew ? i : B->paintMeshFrom[i]];
+        free(FP->meshes);               // (the array: each side has its own; the meshes are shared)
+        FP->meshes = NULL;
+        FP->meshCount = 0;
+    }
 }
 
 // The box meshes and face cubes old still owns after an edit are not freed yet: they go to
@@ -7618,6 +9399,49 @@ static void LiveRetire(MS_Private *p, SceneData *old)
         *slot = old->faceCubes[c].mesh;
         old->faceCubes[c].mesh = (R3D_Mesh){ 0 };
     }
+    for (int f = 0; old->filePaint && f < old->modelFileCount; f++)
+        for (int i = 0; old->filePaint[f].meshes && i < old->filePaint[f].meshCount; i++) {
+            R3D_Mesh *m = &old->filePaint[f].meshes[i];
+            if (m->vertexCapacity <= 0) continue;
+            R3D_Mesh *slot = MS_PUSH(p->retired, p->retiredCount, p->retiredCap);
+            if (!slot) return;
+            *slot = *m;
+            *m = (R3D_Mesh){ 0 };
+        }
+}
+
+// The paint meshes of d's painted model files: old's when d took the file over and they were built
+// from the same unwrap (or both from own UVs), else built (stats: paintMeshFiles). False when out of
+// memory (err says so).
+static bool PaintMeshesLive(SceneData *old, SceneData *d, LiveBorrow *B, MS_EditStats *st, char *err, int errSize)
+{
+    if (!d->filePaint) return true;
+    if (!(B->paintMeshFrom = malloc(sizeof(int) * (size_t)d->modelFileCount))) {
+        snprintf(err, errSize, "%s: out of memory", d->path);
+        return false;
+    }
+    for (int f = 0; f < d->modelFileCount; f++) {
+        FilePaint *FP = &d->filePaint[f];
+        int o = B->fileFrom ? B->fileFrom[f] : -1;
+        const FilePaint *OP = o >= 0 && old->filePaint ? &old->filePaint[o] : NULL;
+        B->paintMeshFrom[f] = -1;
+        if (!FP->painted) continue;
+        unsigned int gen = FP->hasUnwrap ? FP->unwrapGen : ~0u;
+        if (OP && OP->meshes && OP->meshesGen == gen && OP->meshCount == d->modelFiles[f].model.meshCount &&
+            (FP->meshes = malloc(sizeof(R3D_Mesh) * (size_t)OP->meshCount))) {
+            memcpy(FP->meshes, OP->meshes, sizeof(R3D_Mesh) * (size_t)OP->meshCount);
+            FP->meshCount = OP->meshCount;
+            FP->meshesGen = gen;
+            B->paintMeshFrom[f] = o;
+            continue;
+        }
+        if (!BuildPaintMeshes(d, f)) {
+            snprintf(err, errSize, "%s: out of memory (paint meshes)", d->path);
+            return false;
+        }
+        st->paintMeshFiles++;
+    }
+    return true;
 }
 
 // The face layout cubes of d: old's when d's materials have the same layouts in the same order (the
@@ -7655,12 +9479,22 @@ static bool LiveFaceCubes(SceneData *old, SceneData *d, LiveBorrow *B)
 // list, which may have moved while it grew, goes back to old
 static void LiveMaterialsBack(SceneData *old, SceneData *d, const LiveBorrow *B)
 {
-    for (int i = 0; B->matRebuild && i < d->materialCount; i++)
-        if (B->matRebuild[i] == 2 && d->materials[i].material.shader) {
-            R3D_UnloadSurfaceShader(d->materials[i].material.shader);
+    for (int i = 0; B->matRebuild && i < d->materialCount; i++) {
+        R3D_SurfaceShader *sh = d->materials[i].material.shader;
+        bool fresh = (B->matRebuild[i] & PLAN_MATERIAL) == PLAN_NEW ||
+                     ((B->matRebuild[i] & PLAN_PAINT) && i < old->materialCount && sh != old->materials[i].material.shader);
+        if (fresh && sh) {
+            R3D_UnloadSurfaceShader(sh);
             d->materials[i].material.shader = NULL;
         }
-    for (int f = old->shaderFileCount; f < d->shaderFileCount; f++) R3D_UnloadSurfaceShader(d->shaderFiles[f].shader);
+    }
+    // Shaders d compiled: whole files it added, and versions of old's files old hadn't compiled
+    for (int f = 0; f < d->shaderFileCount; f++) {
+        const ShaderFile *o = f < old->shaderFileCount ? &old->shaderFiles[f] : NULL;
+        if (d->shaderFiles[f].shader && (!o || !o->shader)) R3D_UnloadSurfaceShader(d->shaderFiles[f].shader);
+        if (d->shaderFiles[f].paint && (!o || !o->paint)) R3D_UnloadSurfaceShader(d->shaderFiles[f].paint);
+    }
+    PaintBindTable(old);        // (old's aliases d shared read d's table meanwhile)
     for (int i = B->textureCount; i < d->textureCount; i++) {
         R3D_UnloadTexture(d->textures[i].tex);
         free(d->textures[i].path);
@@ -7669,10 +9503,10 @@ static void LiveMaterialsBack(SceneData *old, SceneData *d, const LiveBorrow *B)
     old->textureCap = d->textureCap;
 }
 
-// Whether old's materials can stay (docs/painting.md 9.4): the rest of the look the same, each of
-// old's materials the same (0), or changed only in uv_faces, filter or albedo_map (1: its textures
-// and meshes again), and the others appended at the end (2: built). *plan: per material of d (heap,
-// the caller frees it). False: a full upload.
+// Whether old's materials can stay (docs/painting.md 9.2, 9.4): the rest of the look the same, each of
+// old's materials the same (0), or changed only in uv_faces, filter or albedo_map (PLAN_MAPS) or only
+// in its paint keys (0 here: PaintSigSame decides), and the others appended at the end (PLAN_NEW).
+// *plan: per material of d (heap, the caller frees it). False: a full upload.
 static bool LiveMaterialPlan(const SceneData *old, const SceneData *d, unsigned char **plan)
 {
     if (old->restLookHash != d->restLookHash || d->materialCount < old->materialCount || !old->matLookHash ||
@@ -7685,11 +9519,42 @@ static bool LiveMaterialPlan(const SceneData *old, const SceneData *d, unsigned 
             free(w);
             return false;
         }
-        w[i] = 1;
+        if (old->matPaintlessHash[i] != d->matPaintlessHash[i]) w[i] = PLAN_MAPS;
     }
-    for (int i = old->materialCount; i < d->materialCount; i++) w[i] = 2;
+    for (int i = old->materialCount; i < d->materialCount; i++) w[i] = PLAN_NEW;
     *plan = w;
     return true;
+}
+
+// Whether material i draws the same paint in old and d: both without, or both with the same atlas
+// (path, size) and filter
+static bool PaintSigSame(const SceneData *old, const SceneData *d, int i)
+{
+    const MatDef *a = &old->matDefs[i], *b = &d->matDefs[i];
+    if (a->painted != b->painted) return false;
+    return !a->painted || (strcmp(a->paint, b->paint) == 0 && a->paintFilter == b->paintFilter &&
+                           a->paintW == b->paintW && a->paintH == b->paintH);
+}
+
+// A model file d took over from old (index `from` there): its unwrap, the one provided for it now or
+// else old's, and old's own-UV results (they depend on the file only)
+static void PaintLiveUnwrap(const MS_Private *p, SceneData *d, int i, const SceneData *old, int from)
+{
+    FilePaint *FP = &d->filePaint[i];
+    const FilePaint *OP = old->filePaint ? &old->filePaint[from] : NULL;
+    const MS_ModelFile *F = &d->modelFiles[i];
+    const ProvidedUnwrap *pu = ProvidedUnwrapOf(p, F->path);
+    if (pu) {
+        FP->hasUnwrap = F->model.meshData && UnwrapMatches(&pu->u, &F->model) && UnwrapCopy(&FP->unwrap, &pu->u);
+        FP->unwrapGen = pu->gen;
+    } else if (OP && OP->hasUnwrap) {
+        FP->hasUnwrap = UnwrapCopy(&FP->unwrap, &OP->unwrap);
+        FP->unwrapGen = OP->unwrapGen;
+    }
+    if (OP && OP->uvKind && F->materialCount > 0 && (FP->uvKind = malloc((size_t)F->materialCount))) {
+        memcpy(FP->uvKind, OP->uvKind, (size_t)F->materialCount);
+        FP->uvKindCount = F->materialCount;
+    }
 }
 
 // --- Boxes: the draws of d, keeping old's meshes and instance buffers where nothing changed
@@ -7705,6 +9570,12 @@ static long long HideTotal(const SceneData *d)
         if (HideCells(&bx, lo, hi)) total += (long long)(hi[0] - lo[0] + 1) * (hi[1] - lo[1] + 1) * (hi[2] - lo[2] + 1);
     }
     return total;
+}
+
+// The paint key a box of material m is drawn with in x (0: none; a material without paint draws none)
+static inline int BoxPaintKey(const SceneData *x, int m, int b)
+{
+    return x->matDefs[m].painted && x->boxPaintKey ? x->boxPaintKey[b] : 0;
 }
 
 // Old ranges of material m: [first[m], end[m]) in old->boxRanges; items of m start at at[m]
@@ -7839,13 +9710,17 @@ static bool UploadBoxesLive(MS_Private *p, SceneData *old, SceneData *d, const i
         for (int k = 0; sameList && k < count; k++) sameList = boxFrom[items[at + k].index] == old->boxOrder[oat + k];
         int first = d->boxRangeCount;
         if (!d->matDefs[m].merge) {
-            if (sameList && old->inst[m].capacity >= count) {
+            // (an instanced buffer also carries its boxes' paint keys: the same ones, or none on both sides)
+            bool samePaint = sameList && old->matDefs[m].painted == d->matDefs[m].painted;
+            for (int k = 0; samePaint && d->matDefs[m].painted && k < count; k++)
+                samePaint = BoxPaintKey(d, m, items[at + k].index) == BoxPaintKey(old, m, old->boxOrder[oat + k]);
+            if (samePaint && old->inst[m].capacity >= count) {
                 d->inst[m] = old->inst[m];
                 B->instFrom[m] = true;
             } else if (!LoadBoxInstances(d, m, items + at, count)) {
                 ok = false;
                 if (d->inst[m].capacity < count) break;
-            }
+            } else st->instanceBuffersRebuilt++;
             d->boxTrisDrawn += 12LL * count;
         }
         if (ok && !AddRanges(&d->boxRanges, &d->boxRangeCount, &d->boxRangeCap, m, items + at, count)) ok = false;
@@ -7853,7 +9728,7 @@ static bool UploadBoxesLive(MS_Private *p, SceneData *old, SceneData *d, const i
         for (int r = first; ok && r < d->boxRangeCount; r++) B->meshFrom[r] = -1;
         if (!ok || !d->matDefs[m].merge) continue;
         // Merged: walk old's ranges of m alongside (both sorted by big, cell)
-        bool keepable = canKeep && m < oldMc && !(rebuild && rebuild[m]);
+        bool keepable = canKeep && m < oldMc && !(rebuild && (rebuild[m] & PLAN_MATERIAL));
         int o = keepable ? ri.first[m] : 0, oEnd = keepable ? ri.end[m] : 0;
         for (int r = first; ok && r < d->boxRangeCount; r++) {
             DrawRange *R = &d->boxRanges[r];
@@ -7871,7 +9746,8 @@ static bool UploadBoxesLive(MS_Private *p, SceneData *old, SceneData *d, const i
                     bool same = true;
                     for (int k = 0; same && k < R->count; k++) {
                         int nb = items[at + R->first + k].index, ob = old->boxOrder[oat + O->first + k];
-                        same = boxFrom[nb] == ob && old->hidden && hidden[nb] == old->hidden[ob];
+                        same = boxFrom[nb] == ob && old->hidden && hidden[nb] == old->hidden[ob] &&
+                               BoxPaintKey(d, m, nb) == BoxPaintKey(old, m, ob);
                     }
                     if (same) keep = o;
                 }
@@ -8049,7 +9925,7 @@ MS_ReloadResult MS_EditSetText(MS_Scene *s, const char *text, int size, MS_EditS
     bool ok = d && InitData(d, old->path);
     if (!ok) snprintf(err, errSize, "%s: out of memory", old->path);
     if (ok) {
-        d->live = p;                    // (the provided textures count as files: MS_TextureProvide)
+        d->live = p;                    // (the provided textures count as files: MS_PaintAtlasProvide)
         memcpy(bytes, text, (size_t)size);
         bytes[size] = '\0';
         ok = ParseScene(d, bytes, size, err, errSize);
@@ -8075,6 +9951,7 @@ MS_ReloadResult MS_EditSetText(MS_Scene *s, const char *text, int size, MS_EditS
     if (ok && !full && (old->lookHash != d->lookHash || old->materialCount != d->materialCount))
         full = !LiveMaterialPlan(old, d, &matRebuild);
     st.full = full;
+    if (ok) PaintPrepare(d);
     if (ok && !p->gpu) ok = CheckModelFiles(d, err, errSize);
     else if (ok) {
         // Model files: the ones old has are taken over, new paths are loaded
@@ -8097,6 +9974,7 @@ MS_ReloadResult MS_EditSetText(MS_Scene *s, const char *text, int size, MS_EditS
                 F->triangleCount = O->triangleCount;
                 F->materialCount = O->materialCount;
                 d->modelPick[i] = old->modelPick[B.fileFrom[i]];
+                if (d->filePaint) PaintLiveUnwrap(p, d, i, old, B.fileFrom[i]);
             } else ok = LoadModelFile(d, i, err, errSize);
         }
         st.modelsMs = (GetTime() - tm) * 1000.0;
@@ -8114,6 +9992,7 @@ MS_ReloadResult MS_EditSetText(MS_Scene *s, const char *text, int size, MS_EditS
             snprintf(err, errSize, "%s: out of memory", d->path);
             ok = false;
         }
+        if (ok && d->paintCount > 0) PaintResolve(d);
         st.entitiesMs = (GetTime() - te) * 1000.0;
     }
 
@@ -8139,7 +10018,7 @@ MS_ReloadResult MS_EditSetText(MS_Scene *s, const char *text, int size, MS_EditS
         // A material built again (a new texture or filter: its alpha may cut other shadows; an
         // albedo map also makes it no occluder) changes what its unmoved objects do too
         for (int j = 0; ok && matRebuild && j < d->boxCount; j++)
-            if (boxFrom[j] >= 0 && matRebuild[d->boxRefs[j].material]) DirtyAdd(p, d->boxes[j]);
+            if (boxFrom[j] >= 0 && (matRebuild[d->boxRefs[j].material] & PLAN_MATERIAL)) DirtyAdd(p, d->boxes[j]);
         dirtyBoxes = p->dirtyCount;
         for (int i = 0; ok && i < old->modelCount; i++) if (!oldModelUsed[i]) DirtyAdd(p, old->models[i].bounds);
         for (int j = 0; ok && j < d->modelCount; j++) if (modelFrom[j] < 0) DirtyAdd(p, d->models[j].bounds);
@@ -8147,17 +10026,44 @@ MS_ReloadResult MS_EditSetText(MS_Scene *s, const char *text, int size, MS_EditS
             bool uses = false;
             for (int sl = 0; modelFrom[j] >= 0 && sl < d->modelFiles[d->models[j].file].materialCount && !uses; sl++) {
                 int m = SlotMaterial(d, &d->models[j], sl);
-                uses = m >= 0 && matRebuild[m];
+                uses = m >= 0 && (matRebuild[m] & PLAN_MATERIAL);
             }
             if (uses) DirtyAdd(p, d->models[j].bounds);
         }
         if (DirtyAll(p)) dirtyBoxes = 0;
     }
 
+    // The paint layer: a material whose paint changed (it started or stopped drawing paint, or its
+    // atlas, filter or atlas size changed) gets its shader alias again (PLAN_PAINT). With the
+    // patched R3D every alias carries its material's sort key (ShaderSortKey), so the draw order
+    // stays a load's. Without it R3D draws in the order the aliases were made (their serial), which
+    // must stay a load's (material order), or coplanar faces of two materials could swap: so the
+    // materials after it that have a shader get their alias again too.
+    if (ok && p->gpu && !full) {
+        bool after = false;
+        for (int i = 0; i < old->materialCount; i++) {
+#ifdef MS_PATCHED_R3D
+            bool again = !PaintSigSame(old, d, i);
+            (void)after;
+#else
+            bool again = !PaintSigSame(old, d, i) || (after && (d->materials[i].shader || d->matDefs[i].painted));
+#endif
+            if (!again) continue;
+            after = true;
+            if (!matRebuild && !(matRebuild = calloc((size_t)d->materialCount, 1))) {
+                snprintf(err, errSize, "%s: out of memory", d->path);
+                ok = false;
+                break;
+            }
+            matRebuild[i] |= PLAN_PAINT;
+        }
+    }
+
     double tu = GetTime();
     if (ok && p->gpu && full) {
         ok = UploadGpu(d, err, errSize);        // (frees what it made on failure)
         if (ok) for (int j = 0; j < d->lightCount; j++) B.lightFrom[j] = -1;
+        if (ok && d->anyPaint) st.paintTables++;
     } else if (ok && p->gpu) {
         d->gpu = true;
         d->inst = calloc(d->materialCount, sizeof(R3D_InstanceBuffer));
@@ -8173,7 +10079,7 @@ MS_ReloadResult MS_EditSetText(MS_Scene *s, const char *text, int size, MS_EditS
             for (int f = 0; f < old->shaderFileCount; f++) {
                 ShaderFile *F = &d->shaderFiles[f];
                 *F = old->shaderFiles[f];
-                for (int i = 0; i < d->materialCount; i++)       // (rel points into the materials' strings)
+                for (int i = 0; F->rel && i < d->materialCount; i++)   // (rel points into the materials' strings)
                     if (d->materials[i].shader && strcmp(d->materials[i].shader, F->rel) == 0) { F->rel = d->materials[i].shader; break; }
             }
             d->textures = old->textures;
@@ -8185,25 +10091,32 @@ MS_ReloadResult MS_EditSetText(MS_Scene *s, const char *text, int size, MS_EditS
             B.textureCount = old->textureCount;
             B.matRebuild = matRebuild;
             // Materials: old's as they are; one changed in uv_faces, filter or albedo_map keeps old's
-            // shader and gets its textures again; an appended one is built (in material order, so
-            // its shader alias comes after old's, as in a load)
+            // shader and gets its textures again; one whose paint changed gets its shader alias again
+            // (PLAN_PAINT: the paint version or the original); an appended one is built (in material
+            // order, so its shader alias comes after old's, as in a load)
             for (int i = 0; ok && i < d->materialCount; i++) {
                 int how = matRebuild ? matRebuild[i] : 0;
                 if (how == 0) {
                     d->materials[i].material = old->materials[i].material;
                     d->matDefs[i].merge = old->matDefs[i].merge;
                     d->matDefs[i].occluder = old->matDefs[i].occluder;
+                    d->matDefs[i].paintTex = old->matDefs[i].paintTex;
                     continue;
                 }
-                if (how == 1) {
+                if ((how & PLAN_MATERIAL) == PLAN_NEW) ok = BuildMaterial(d, i, err, errSize);
+                else {
                     R3D_Material m = old->materials[i].material, fresh = d->materials[i].material;
-                    m.albedo.texture = fresh.albedo.texture;
-                    m.normal.texture = fresh.normal.texture;
-                    m.orm.texture = fresh.orm.texture;
-                    m.emission.texture = fresh.emission.texture;
+                    d->matDefs[i].paintTex = old->matDefs[i].paintTex;
+                    if (how & PLAN_MAPS) {
+                        m.albedo.texture = fresh.albedo.texture;
+                        m.normal.texture = fresh.normal.texture;
+                        m.orm.texture = fresh.orm.texture;
+                        m.emission.texture = fresh.emission.texture;
+                    }
                     d->materials[i].material = m;
-                    ok = BuildMaterialMaps(d, i, err, errSize);
-                } else ok = BuildMaterial(d, i, err, errSize);
+                    if (how & PLAN_MAPS) ok = BuildMaterialMaps(d, i, err, errSize);
+                    if (ok && (how & PLAN_PAINT)) ok = BuildMaterialShader(d, i, err, errSize);
+                }
                 if (ok) MaterialDrawMode(d, i, err, errSize);
                 st.materialsRebuilt++;
             }
@@ -8211,6 +10124,11 @@ MS_ReloadResult MS_EditSetText(MS_Scene *s, const char *text, int size, MS_EditS
                 snprintf(err, errSize, "%s: out of memory", d->path);
                 ok = false;
             }
+            // The paint keys (the same objects keep theirs) and table, before the box draws use them
+            bool tookTable = false;
+            if (ok) ok = PaintUpload(d, old, boxFrom, modelFrom, &tookTable, err, errSize);
+            B.paintTable = tookTable;
+            if (ok && d->anyPaint && !tookTable) st.paintTables++;
             if (ok) ok = UploadBoxesLive(p, old, d, boxFrom, dirtyBoxes, &B, matRebuild, &st, err, errSize);
         }
         // Lights: an identical light keeps its shadow map (drawn again below if a change reaches it)
@@ -8226,6 +10144,8 @@ MS_ReloadResult MS_EditSetText(MS_Scene *s, const char *text, int size, MS_EditS
                 st.lightShadowsDirty++;
             }
         }
+        // Paint meshes of the painted model files: old's when built from the same unwrap
+        if (ok) ok = PaintMeshesLive(old, d, &B, &st, err, errSize);
         if (ok) ok = BuildModelGroups(d, err, errSize);
     }
     st.uploadMs = (GetTime() - tu) * 1000.0 - st.hiddenMs - st.meshesMs;
@@ -8250,7 +10170,13 @@ MS_ReloadResult MS_EditSetText(MS_Scene *s, const char *text, int size, MS_EditS
     p->d = d;
     s->version++;
     Publish(s, d);
+    PaintPublish(d);
     if (p->gpu) {
+        // (an alias a material replaced because its paint changed: old's, not shared)
+        for (int i = 0; matRebuild && B.materials && i < old->materialCount; i++) {
+            R3D_SurfaceShader *sh = old->materials[i].material.shader;
+            if ((matRebuild[i] & PLAN_PAINT) && sh && sh != d->materials[i].material.shader) R3D_UnloadSurfaceShader(sh);
+        }
         LiveRelease(old, false, d, &B);
         LiveRetire(p, old);
         if (full) {
@@ -8957,21 +10883,6 @@ void MS_SetDrawFilter(MS_Scene *s, const bool *hidden, int count)
 static bool RaycastModelTri(const MS_Scene *s, int mi, Vector3 origin, Vector3 dir, float maxDist, MS_Hit *hit, int *tri,
                             Vector3 *bary);
 
-// Where on face f (+x -x +y -y +z -z) of a unit cube a point in its local -0.5..0.5 coordinates
-// lies, as R3D_GenMeshDataCube maps the face's corners (linear in the two face axes, so exact):
-// u along the face's tangent, v up for the side faces
-static Vector2 CubeFaceUv(int f, Vector3 l)
-{
-    switch (f) {
-    case 0:  return (Vector2){ 0.5f - l.z, l.y + 0.5f };    // +x
-    case 1:  return (Vector2){ l.z + 0.5f, l.y + 0.5f };    // -x
-    case 2:  return (Vector2){ l.x + 0.5f, 0.5f - l.z };    // +y
-    case 3:  return (Vector2){ l.x + 0.5f, l.z + 0.5f };    // -y
-    case 4:  return (Vector2){ l.x + 0.5f, l.y + 0.5f };    // +z
-    default: return (Vector2){ 0.5f - l.x, l.y + 0.5f };    // -z
-    }
-}
-
 // A face UV (0..1) in its cell of the layout, as the GPU interpolates it between the cube's corners:
 // their UVs as FaceLayoutData writes them (half floats, R3D's vertex format), then linear
 static Vector2 FaceCellUv(const unsigned char cells[6], int f, Vector2 fu)
@@ -8994,6 +10905,25 @@ static int MeshOfTriangle(const ModelPick *mp, int src)
         else hi = mid - 1;
     }
     return lo;
+}
+
+// A model's own UV as its paint mesh stores it (unorm16, PaintBones), so picking and drawing agree
+static Vector2 Unorm16Uv(Vector2 t)
+{
+    float u = fminf(fmaxf(t.x, 0.0f), 1.0f), v = fminf(fmaxf(t.y, 0.0f), 1.0f);
+    return (Vector2){ floorf(u * 65535.0f + 0.5f) / 65535.0f, floorf(v * 65535.0f + 0.5f) / 65535.0f };
+}
+
+// The active paint entry of a box face (face >= 0) or a model slot in `material`'s atlas (-1: the
+// slot's own material), -1 for none (a linear search: entries are few)
+static int PaintEntryOf(const SceneData *d, int kind, int object, int material, int face, int slot)
+{
+    for (int i = 0; i < d->paintCount; i++) {
+        const PaintDef *e = &d->paints[i];
+        if (e->active && e->kind == kind && e->object == object && e->material == material &&
+            (kind == PAINT_BOX ? face >= 0 && (e->faces >> face & 1) : e->slot == slot)) return i;
+    }
+    return -1;
 }
 
 // A box hit: its face in its own frame, where on the face, the cell (uv_faces), the material's
@@ -9028,6 +10958,8 @@ static void SurfaceOfBox(const SceneData *d, MS_SurfaceHit *out)
     fu.x = fu.x < 0.0f ? 0.0f : fu.x > 1.0f ? 1.0f : fu.x;
     fu.y = fu.y < 0.0f ? 0.0f : fu.y > 1.0f ? 1.0f : fu.y;
     out->faceUv = fu;
+    out->paintUv = fu;          // (the face corner UVs of the paint keys: CubeFaceUv's mapping)
+    out->paintEntry = PaintEntryOf(d, PAINT_BOX, b, m, out->face, -1);
     Vector2 uv = fu;
     if (m >= 0 && m < d->materialCount) {
         const MatDef *D = &d->matDefs[m];
@@ -9065,6 +10997,27 @@ static void SurfaceOfModel(const MS_Scene *s, Vector3 origin, Vector3 dir, float
     out->faceUv = tc;
     int m = out->slot >= 0 ? SlotMaterial(d, M, out->slot) : -1;
     out->material = m;
+    // The paint coordinate: the triangle's paint UVs (own, as the paint mesh stores them, or the
+    // unwrap's) at the hit; -1 -1 while the slot needs an unwrap
+    int kind = d->filePaint ? FileUvKind(s->priv->d, M->file, out->slot) : PUV_NEEDS_UNWRAP;
+    Vector2 q[3] = { { 0 } };
+    bool any = false;
+    if (kind == PUV_OWN && mp->uv) {
+        const unsigned int *v = &mp->tri[3 * tri];
+        for (int c = 0; c < 3; c++) q[c] = Unorm16Uv(mp->uv[v[c]]);
+        any = true;
+    } else if (kind == PUV_UNWRAP && out->mesh < d->filePaint[M->file].unwrap.meshCount) {
+        const UnwrapMesh *U = &d->filePaint[M->file].unwrap.meshes[out->mesh];
+        for (int c = 0; c < 3 && 3 * out->triangle + c < U->indexCount; c++) {
+            unsigned int u = U->indices[3 * out->triangle + c];
+            q[c] = (Vector2){ U->uv[2 * u] / 65535.0f, U->uv[2 * u + 1] / 65535.0f };
+        }
+        any = true;
+    }
+    if (any)
+        out->paintUv = (Vector2){ bary.x * q[0].x + bary.y * q[1].x + bary.z * q[2].x,
+                                  bary.x * q[0].y + bary.y * q[1].y + bary.z * q[2].y };
+    out->paintEntry = PaintEntryOf(d, PAINT_MODEL, mi, m, -1, out->slot);
     // The uv_scale / uv_offset the slot is drawn with: the override's, else the file's own material's
     const R3D_Material *R = m >= 0 ? &d->materials[m].material
                           : out->slot >= 0 && out->slot < model->materialCount && model->materials ? &model->materials[out->slot]
@@ -9077,6 +11030,8 @@ bool MS_RaycastSurface(const MS_Scene *s, Vector3 origin, Vector3 dir, float max
     memset(out, 0, sizeof(*out));
     out->hit = MS_Raycast(s, origin, dir, maxDist);
     out->material = out->face = out->slot = out->mesh = out->triangle = -1;
+    out->paintUv = (Vector2){ -1.0f, -1.0f };     // (no paint coordinate: SurfaceOf* fill it)
+    out->paintEntry = -1;
     const SceneData *d = s->priv->d;
     if (out->hit.obj.kind == MS_OBJ_BOX) SurfaceOfBox(d, out);
     else if (out->hit.obj.kind == MS_OBJ_MODEL) SurfaceOfModel(s, origin, dir, maxDist, out);
@@ -9134,96 +11089,7 @@ int MS_ModelSlotTriangleIndex(const MS_Scene *s, int file, int mesh, int triangl
     return k;
 }
 
-bool MS_MaterialFaceLayout(const MS_Scene *s, int material, unsigned char cells[6], int *cols, int *rows)
-{
-    const SceneData *d = s ? s->priv->d : NULL;
-    if (!d || material < 0 || material >= d->materialCount || !d->matDefs[material].hasFaces) return false;
-    memcpy(cells, d->matDefs[material].uvFaces, 6);
-    FaceGrid(cells, cols, rows);
-    return true;
-}
-
-// (the meshes' own function, so the editor and the meshes agree bit for bit)
-Rectangle MS_FaceCellRect(const unsigned char cells[6], int face, bool inset)
-{
-    return FaceCellRect(cells, face, inset);
-}
-
-// What DrawBoxRange draws box b with: instanced, its slot in the material's buffer (the order of
-// LoadBoxInstances: boxOrder's run of the material); merged, the unit cube placed where
-// BuildBoxMesh / TurnedFaces put its faces (local * size, turned, + centre)
-bool MS_BoxDrawOf(const MS_Scene *s, int box, MS_BoxDraw *out)
-{
-    memset(out, 0, sizeof(*out));
-    const MS_Private *p = s ? s->priv : NULL;
-    const SceneData *d = p ? p->d : NULL;
-    if (!d || !d->gpu || box < 0 || box >= d->boxCount) return false;
-    int m = d->boxRefs[box].material;
-    if (m < 0 || m >= d->materialCount) return false;
-    int c = d->matDefs[m].faceCube;
-    out->material = d->materials[m].material;
-    out->cube = c > 0 ? d->faceCubes[c - 1].mesh : p->cube;
-    if (!d->matDefs[m].merge) {
-        if (!d->boxOrder || !d->instCount) return false;
-        int at = 0;
-        for (int k = 0; k < m; k++) at += d->instCount[k];
-        out->index = -1;
-        for (int k = 0; k < d->instCount[m] && out->index < 0; k++)
-            if (d->boxOrder[at + k] == box) out->index = k;
-        out->instanced = true;
-        out->instances = d->inst[m];
-        return out->index >= 0;
-    }
-    const MS_TurnedBox *t = TurnedOf(d, box);
-    const BoundingBox *B = &d->boxes[box];
-    Vector3 ctr = t ? t->center : Vector3Scale(Vector3Add(B->min, B->max), 0.5f);
-    Vector3 size = t ? t->size : Vector3Subtract(B->max, B->min);
-    Vector3 ax[3] = { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } };
-    if (t) memcpy(ax, t->axis, sizeof(ax));
-    // (raylib's Matrix: m0 m1 m2 is the first column, the box's x axis times its size)
-    Matrix M = { 0 };
-    M.m0 = ax[0].x * size.x; M.m1 = ax[0].y * size.x; M.m2 = ax[0].z * size.x;
-    M.m4 = ax[1].x * size.y; M.m5 = ax[1].y * size.y; M.m6 = ax[1].z * size.y;
-    M.m8 = ax[2].x * size.z; M.m9 = ax[2].y * size.z; M.m10 = ax[2].z * size.z;
-    M.m12 = ctr.x;
-    M.m13 = ctr.y;
-    M.m14 = ctr.z;
-    M.m15 = 1.0f;
-    out->transform = M;
-    return true;
-}
-
-Texture2D MS_TextureFind(const MS_Scene *s, const char *rel)
-{
-    const SceneData *d = s && s->priv ? s->priv->d : NULL;
-    if (!d || !rel) return (Texture2D){ 0 };
-    char full[MS_PATH_MAX + MS_PATH_MAX];
-    snprintf(full, sizeof(full), "%s%s", d->root, rel);
-    for (int i = 0; i < d->textureCount; i++)
-        if (strcmp(d->textures[i].path, full) == 0) return d->textures[i].tex;
-    return (Texture2D){ 0 };
-}
-
-Texture2D MS_ModelSlotTexture(const MS_Scene *s, int file, int slot)
-{
-    if (!s || file < 0 || file >= s->modelFileCount) return (Texture2D){ 0 };
-    const R3D_Model *m = &s->modelFiles[file].model;
-    if (slot < 0 || slot >= m->materialCount || !m->materials) return (Texture2D){ 0 };
-    return m->materials[slot].albedo.texture;
-}
-
-bool MS_TextureRead(Texture2D tex, Image *out)
-{
-    *out = (Image){ 0 };
-    if (tex.id == 0) return false;
-    Image img = LoadImageFromTexture(tex);
-    if (!img.data) return false;
-    if (img.format != PIXELFORMAT_UNCOMPRESSED_R8G8B8A8) ImageFormat(&img, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
-    *out = img;
-    return out->data != NULL;
-}
-
-// Forgets every provided image (a load or reload from disk, MS_Unload)
+// Forgets every provided image and unwrap (a load or reload from disk, MS_Unload)
 static void FreeProvided(MS_Private *p)
 {
     for (int i = 0; i < p->providedCount; i++) {
@@ -9231,9 +11097,14 @@ static void FreeProvided(MS_Private *p)
         UnloadImage(p->provided[i].img);
     }
     p->providedCount = 0;
+    for (int i = 0; i < p->unwrapCount; i++) {
+        free(p->unwraps[i].rel);
+        UnwrapFree(&p->unwraps[i].u);
+    }
+    p->unwrapCount = 0;
 }
 
-bool MS_TextureProvide(MS_Scene *s, const char *rel, const Image *img)
+bool MS_PaintAtlasProvide(MS_Scene *s, const char *rel, const Image *img)
 {
     MS_Private *p = s->priv;
     if (!rel) return false;
@@ -9365,6 +11236,9 @@ bool MS_TextureUpdate(MS_Scene *s, const char *rel, const Image *img, Rectangle 
         if (strcmp(e->path, full) != 0 || e->tex.width != img->width || e->tex.height != img->height) continue;
         const void *rows = PackRect(p, img, x0, y0, x1 - x0, y1 - y0, e->tex.format);
         if (!rows) continue;
+        // (a paint atlas is premultiplied on the GPU; the image stays straight alpha)
+        if (e->premul && e->tex.format == PIXELFORMAT_UNCOMPRESSED_R8G8B8A8)
+            PremultiplyRgba8(p->texScratch, (size_t)(x1 - x0) * (size_t)(y1 - y0));
         rlUpdateTexture(e->tex.id, x0, y0, x1 - x0, y1 - y0, e->tex.format, rows);
         if (!e->data) {
             int mipmaps;
@@ -9388,6 +11262,214 @@ bool MS_TextureUpdate(MS_Scene *s, const char *rel, const Image *img, Rectangle 
 unsigned int MS_TextureGeneration(const MS_Scene *s)
 {
     return s->priv->textureGeneration;
+}
+
+// --- The paint layer (docs/painting.md 3-9, 8): entries, atlases, model paint UVs, unwraps
+
+int MS_PaintEntryCount(const MS_Scene *s)
+{
+    const SceneData *d = s && s->priv ? s->priv->d : NULL;
+    return d && d->paintPub ? d->paintCount : 0;
+}
+
+const MS_PaintEntry *MS_PaintEntryAt(const MS_Scene *s, int i)
+{
+    const SceneData *d = s && s->priv ? s->priv->d : NULL;
+    return d && d->paintPub && i >= 0 && i < d->paintCount ? &d->paintPub[i] : NULL;
+}
+
+bool MS_PaintAtlasOf(const MS_Scene *s, int material, int file, int slot, MS_PaintAtlas *out)
+{
+    memset(out, 0, sizeof(*out));
+    MS_Private *p = s ? s->priv : NULL;
+    SceneData *d = p ? p->d : NULL;
+    if (!d) return false;
+    const char *rel = NULL;
+    if (material >= 0) {
+        if (material >= d->materialCount) return false;
+        rel = d->matDefs[material].paint;
+        out->nearest = d->matDefs[material].paintFilter == TEX_NEAREST;
+    } else {
+        // A model slot's own material: its atlas's path is named after the file (also before any entry)
+        if (file < 0 || file >= d->modelFileCount || slot < 0 || slot > MS_MAX_OBJECTS) return false;
+        int a = OwnAtlasOf(d, file, slot);
+        if (a < 0) return false;
+        rel = d->ownAtlases[a].rel;
+        out->nearest = d->ownAtlases[a].nearest;
+    }
+    out->rel = rel;
+    if (!rel) return true;
+    // The image's size now: the provided pixels (a new or grown atlas), else the file's
+    const Image *prov = ProvidedImage(p, rel);
+    if (prov) {
+        out->width = prov->width;
+        out->height = prov->height;
+    } else {
+        char full[MS_PATH_MAX + MS_PATH_MAX];
+        snprintf(full, sizeof(full), "%s%s", d->root, rel);
+        ImageFileSize(full, &out->width, &out->height);
+    }
+    return true;
+}
+
+MS_PaintUvKind MS_ModelPaintUv(const MS_Scene *s, int file, int slot)
+{
+    SceneData *d = s && s->priv ? s->priv->d : NULL;
+    if (!d || file < 0 || file >= d->modelFileCount || !d->modelFiles[file].loaded || !d->filePaint) return MS_PAINTUV_INVALID;
+    return (MS_PaintUvKind)FileUvKind(d, file, slot);
+}
+
+bool MS_ModelSlotPaintTriangle(const MS_Scene *s, int file, int slot, int k, Vector2 puv[3], Vector3 pos[3])
+{
+    SceneData *d = s && s->priv ? s->priv->d : NULL;
+    if (!d || file < 0 || file >= d->modelFileCount || k < 0 || !d->filePaint) return false;
+    const ModelPick *mp = &d->modelPick[file];
+    const R3D_Model *model = &d->modelFiles[file].model;
+    int kind = FileUvKind(d, file, slot);
+    if (kind != PUV_OWN && kind != PUV_UNWRAP) return false;
+    if (!mp->meshTri || !mp->triAt || !model->meshMaterials || (kind == PUV_OWN && !mp->uv)) return false;
+    const FilePaint *FP = &d->filePaint[file];
+    for (int i = 0; i < mp->meshCount && i < model->meshCount; i++) {
+        if (model->meshMaterials[i] != slot) continue;
+        int n = mp->meshTri[i + 1] - mp->meshTri[i];
+        if (k >= n) {
+            k -= n;
+            continue;
+        }
+        const unsigned int *v = &mp->tri[3 * mp->triAt[mp->meshTri[i] + k]];
+        for (int c = 0; c < 3; c++) {
+            pos[c] = mp->pos[v[c]];
+            if (kind == PUV_UNWRAP) {
+                const UnwrapMesh *U = &FP->unwrap.meshes[i];
+                unsigned int u = U->indices[3 * k + c];
+                puv[c] = (Vector2){ U->uv[2 * u] / 65535.0f, U->uv[2 * u + 1] / 65535.0f };
+            } else {
+                puv[c] = Unorm16Uv(mp->uv[v[c]]);
+            }
+        }
+        return true;
+    }
+    return false;
+}
+
+bool MS_ModelMeshData(const MS_Scene *s, int file, int mesh, R3D_MeshData *out)
+{
+    memset(out, 0, sizeof(*out));
+    const SceneData *d = s && s->priv ? s->priv->d : NULL;
+    if (!d || file < 0 || file >= d->modelFileCount || !d->modelFiles[file].loaded) return false;
+    const R3D_Model *m = &d->modelFiles[file].model;
+    if (!m->meshData || mesh < 0 || mesh >= m->meshCount || !m->meshData[mesh].vertices) return false;
+    *out = m->meshData[mesh];
+    return true;
+}
+
+// MS_PaintUnwrap and the runtime's Unwrap have the same fields: a copy either way (deep)
+static bool UnwrapFromPublic(Unwrap *dst, const MS_PaintUnwrap *src)
+{
+    Unwrap view = { src->meshCount, NULL, src->fileHash };
+    UnwrapMesh *meshes = calloc(src->meshCount > 0 ? (size_t)src->meshCount : 1, sizeof(UnwrapMesh));
+    if (!meshes) return false;
+    for (int m = 0; m < src->meshCount; m++) {
+        const MS_PaintUnwrapMesh *M = &src->meshes[m];
+        meshes[m] = (UnwrapMesh){ M->slot, M->vertexCount, M->indexCount, M->source, M->uv, M->indices };
+    }
+    view.meshes = meshes;
+    bool ok = UnwrapCopy(dst, &view);
+    free(meshes);
+    return ok;
+}
+
+bool MS_PaintUnwrapProvide(MS_Scene *s, int file, const MS_PaintUnwrap *u)
+{
+    MS_Private *p = s->priv;
+    const SceneData *d = p->d;
+    if (!d || file < 0 || file >= d->modelFileCount) return false;
+    const char *rel = d->modelFiles[file].path;
+    int i = 0;
+    while (i < p->unwrapCount && strcmp(p->unwraps[i].rel, rel) != 0) i++;
+    if (!u) {
+        // forget it (the last entry takes its place)
+        if (i < p->unwrapCount) {
+            free(p->unwraps[i].rel);
+            UnwrapFree(&p->unwraps[i].u);
+            p->unwraps[i] = p->unwraps[--p->unwrapCount];
+        }
+        return true;
+    }
+    Unwrap copy;
+    if (!UnwrapFromPublic(&copy, u)) return false;
+    if (i == p->unwrapCount) {
+        char *name = MS_StrDup(rel);
+        ProvidedUnwrap *e = name ? MS_PUSH(p->unwraps, p->unwrapCount, p->unwrapCap) : NULL;
+        if (!e) {
+            free(name);
+            UnwrapFree(&copy);
+            return false;
+        }
+        e->rel = name;
+    } else UnwrapFree(&p->unwraps[i].u);
+    p->unwraps[i].u = copy;
+    p->unwraps[i].gen = ++p->unwrapGeneration;
+    return true;
+}
+
+// Little-endian writes of the sidecar's fields
+static bool PutLe(FILE *f, uint64_t v, int bytes)
+{
+    unsigned char b[8];
+    for (int i = 0; i < bytes; i++) b[i] = (unsigned char)(v >> (8 * i));
+    return fwrite(b, 1, (size_t)bytes, f) == (size_t)bytes;
+}
+
+bool MS_PaintUnwrapWrite(const char *path, const MS_PaintUnwrap *u)
+{
+    if (!path || !u || u->meshCount < 0) return false;
+    FILE *f = fopen(path, "wb");
+    if (!f) return false;
+    bool ok = fwrite(UNWRAP_MAGIC, 1, sizeof(UNWRAP_MAGIC), f) == sizeof(UNWRAP_MAGIC) &&
+              PutLe(f, 1, 4) && PutLe(f, (uint64_t)u->meshCount, 4) && PutLe(f, u->fileHash, 8);
+    for (int m = 0; ok && m < u->meshCount; m++) {
+        const MS_PaintUnwrapMesh *M = &u->meshes[m];
+        ok = M->vertexCount >= 0 && M->indexCount >= 0 &&
+             PutLe(f, (uint64_t)M->slot, 4) && PutLe(f, (uint64_t)M->vertexCount, 4) && PutLe(f, (uint64_t)M->indexCount, 4);
+        for (int k = 0; ok && k < M->vertexCount; k++)
+            ok = PutLe(f, M->source[k], 4) && PutLe(f, M->uv[2 * k], 2) && PutLe(f, M->uv[2 * k + 1], 2);
+        for (int k = 0; ok && k < M->indexCount; k++) ok = PutLe(f, M->indices[k], 4);
+    }
+    if (fclose(f) != 0) ok = false;
+    return ok;
+}
+
+bool MS_PaintUnwrapRead(const char *path, MS_PaintUnwrap *out)
+{
+    memset(out, 0, sizeof(*out));
+    Unwrap u;
+    if (!path || !UnwrapRead(path, &u)) return false;
+    MS_PaintUnwrapMesh *meshes = calloc(u.meshCount > 0 ? (size_t)u.meshCount : 1, sizeof(MS_PaintUnwrapMesh));
+    if (!meshes) {
+        UnwrapFree(&u);
+        return false;
+    }
+    // (the arrays move over)
+    for (int m = 0; m < u.meshCount; m++) {
+        const UnwrapMesh *M = &u.meshes[m];
+        meshes[m] = (MS_PaintUnwrapMesh){ M->slot, M->vertexCount, M->indexCount, M->source, M->uv, M->indices };
+    }
+    *out = (MS_PaintUnwrap){ u.meshCount, meshes, u.fileHash };
+    free(u.meshes);
+    return true;
+}
+
+void MS_PaintUnwrapFree(MS_PaintUnwrap *u)
+{
+    if (!u) return;
+    for (int m = 0; u->meshes && m < u->meshCount; m++) {
+        free(u->meshes[m].source);
+        free(u->meshes[m].uv);
+        free(u->meshes[m].indices);
+    }
+    free(u->meshes);
+    memset(u, 0, sizeof(*u));
 }
 
 // #endregion

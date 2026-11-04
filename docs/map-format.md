@@ -116,6 +116,21 @@ material "embers" albedo 30 14 8 emission 255 110 40 emission_energy 5 roughness
 material "wet asphalt" albedo 28 28 32 roughness 0.15 metalness 0                               # neon street
 ```
 
+**Paint** ([painting.md](painting.md) §4): a layer of hand-painted texels over a material, drawn by a last stage of its shader; where nothing is painted the material looks exactly as without it.
+
+```
+material "concrete" ... paint "textures/paint/concrete.png" paint_filter nearest
+paint "concrete" 120:0 +x 0 0 96 64          faces of box 0 of the line `id 120`: a rectangle of the atlas
+paint "concrete" 120:3 +y,-y 100 0 48 48     faces in one entry share the rectangle
+paint "crate" 40:0 slot 1 0 0 512 512        slot 1 of a model instance drawn with "crate" (its override)
+paint own 41:0 slot 0 0 0 256 256 paint_filter nearest   a slot drawn with the model's own material
+```
+
+- `paint "<path>"` names the material's atlas (an RGBA8 PNG, straight alpha, transparent where unpainted); `paint_filter trilinear|nearest` how it is sampled (default trilinear; `nearest`: crisp texels). A material draws with its paint stage only once an entry below draws with it.
+- `paint "<material>"|own <id>:<i> <faces>|slot <S> <x> <y> <w> <h>`: the entity is the line's `id` and the object's index within the line (as `select` writes it); faces are `+x -x +y -y +z -z` (a turned box: its own axes), comma-separated; the rectangle is in texels of the atlas. A face shows its rectangle in the orientation of R3D's unit cube. A model slot maps its **paint UVs** onto the rectangle: its own UVs when they all lie in 0..1 without overlap, otherwise the file's unwrap sidecar `models/<file>.paintuv` (written by draw mode). A model's own material has no line for a key: its atlas is `textures/paint/<file>_s<S>.png`.
+- Errors: an unknown material, a material without `paint`, no line with that `id`, an index beyond the line's objects, bad or repeated faces, `w` or `h` below 1, two rectangles of one atlas sharing a texel, a face or slot in two entries of one material. An entry whose object no longer draws that face or slot with that material (its line was edited), or whose rectangle lies outside its atlas, is kept but draws nothing; the load logs it.
+- Draw mode (**B**) writes these lines in a block at the end of the file, under `# paint (draw mode)`; they may move anywhere after their material's line. A map without paint draws exactly as before.
+
 ### 2.5 Environment
 
 `env <key> <value...>`, one key per line. Every key has a built-in default (`BuiltinEnvironment()` in `runtime/monolith_scene.c`: the values the default map was built with); `--new-map` writes them all out, so a map's file shows its whole look.

@@ -24,6 +24,8 @@ __GL_SYNC_TO_VBLANK=0 ./build/linux/monolith --bench --headless --note "what cha
 
 Reports go to `benchmark/<stamp>_shadow-<size>-<range>.md` (gitignored, so they stay on the machine that made them; completed runs only). Their *Setup* table names the GPU, driver, CPU, system and resolution: quote it with any result you report or record. Other flags (`--bench-still`, `--bench-window`, `--no-profile`, `--shadow`, `--map`): `docs/command-line.md`. Window titles of automated runs are `monolith-bench` / `monolith-shot`; keep them.
 
+**The exported game's frame time** (the runtime without the editor, as `--export` writes it): `tools/bench-export-ab.sh <base export> <new export> --note "what changed" [--frames 150] [--pairs N]` compiles each export's `viewer.c` with the examples' test harness (`tests/examples/harness.h`, bench mode: the same hidden 1920 × 1006 window, warmup, spinning camera, `glFinish`, statistics and *Setup* table as `--bench --headless`, but no per-pass GPU table) against that export's own runtime and libraries, runs A, B, A, B, … and prints the paired differences (`--summarize <dir>` again from the reports). One harness bench by hand: `<test binary> --bench <report.md> [--bench-frames N] [--note …] <package>`. Compare harness numbers only with harness numbers.
+
 ## 2. Performance method
 
 - **Measure first.** `--bench --headless` has a per-pass GPU table (R3D patch 5); put the breakdown in front of any optimisation. The frame is fill-bound; vertex work is tiny. For the CPU side (draw submission, the editor UI, map loading and hot reload) profile first: "CPU profiling" below.

@@ -127,19 +127,21 @@
 //                  of this run queued or running on the map, the first edit after the last save
 //                  (and a save) only warns (again within 3 s: go ahead)
 //   B              draw mode (drawmode.c, drawpanel.c; docs/painting.md): paint on boxes and
-//                  models. The cursor is free; RMB held flies as in edit mode. LMB drags paint
-//                  with the pen under the cursor (fill: the face's cell / the UV island), ALT+LMB
-//                  picks the texture's colour, 1..5 the pen (hard round, square, soft round,
-//                  eraser, fill; the effect toggles wait), [ / ] or CTRL+wheel the size in texels
-//                  (1..256), SHIFT+wheel the alpha, X swaps to the colour before, H paints the
-//                  material's own texture (shared) instead of the object's own canvas, TAB hides
-//                  the panel (docked left: target, pen, colour sliders / hex / recent colours,
-//                  texels per metre + Resize to density + Pixel look, the box's face groups +
-//                  Apply). The first stroke on an object gives it its own material (a copy) with
-//                  albedo_map textures/paint/paint_<id>.png, one live edit. Strokes are undone
-//                  with CTRL+Z in the same history as the edits; CTRL+S writes the canvases (and
-//                  their ASSETS.md rows and sidecars), then the map. B / ESC (and M, V, C) leave;
-//                  with unsaved edits the first B only says so
+//                  models, a layer over their material (its look stays wherever it isn't painted).
+//                  The cursor is free; RMB held flies as in edit mode. LMB drags paint with the
+//                  pen under the cursor (fill: the face's rectangle / the UV island), ALT+LMB picks
+//                  the colour (an opaque paint texel, else the surface's albedo), 1..5 the pen
+//                  (hard round, square, soft round, eraser, fill; the effect toggles wait), [ / ] or
+//                  CTRL+wheel the size in texels (1..256), SHIFT+wheel the alpha, X swaps to the
+//                  colour before, TAB hides the panel (docked left: target, pen, colour sliders /
+//                  hex / recent colours, texels per metre + Resize to density + Pixel look + Clear
+//                  paint, the box's face groups + Apply). The first stroke on a face or model slot
+//                  gives it a rectangle in its material's atlas (textures/paint/<material>.png): a
+//                  `paint` statement, the material's `paint` key, the line's id, one live edit (a
+//                  model whose UVs can't carry paint is unwrapped first: a .paintuv sidecar).
+//                  Strokes are undone with CTRL+Z in the same history as the edits; CTRL+S writes
+//                  the atlases and unwraps (and their ASSETS.md rows and sidecars), then the map.
+//                  B / ESC (and M, V, C) leave; with unsaved edits the first B only says so
 //   CTRL+S         write the working copy to the map file (spectator mode; the settings' Editor
 //                  row "Save edits" = auto writes every edit, undo and redo at once instead).
 //                  "N unsaved edits" shows in every spectator mode while there are any; ENTER in
@@ -1394,7 +1396,7 @@ static int Run(int argc, char **argv)
     static DrawPanel drawPanel;
     DrawPanelInit(&drawPanel);
     if (drawPanelFlag && !DrawPanelSetOnly(&drawPanel, drawPanelSection)) {
-        fprintf(stderr, "monolith: --draw-panel %s: no such section (all, target, pen, color, canvas, faces)\n", drawPanelSection);
+        fprintf(stderr, "monolith: --draw-panel %s: no such section (all, target, pen, color, density, faces)\n", drawPanelSection);
         return 1;
     }
     // --input-script: the input of a --shot run (input.c), from frame 10 on (every cache drawn)
@@ -1950,7 +1952,7 @@ static int Run(int argc, char **argv)
                     idPanel.scene = NULL;                   // (and the id panel's rows)
                     ModelPickerDropThumbs(&picker);         // (rendered again while it is open)
                     reuse.keyValid = reuse.cacheValid = false;
-                    DrawModeBeforeSync(&drawMode);          // (the canvases, for the working copy)
+                    DrawModeBeforeSync(&drawMode);          // (the paint atlases, for the working copy)
                     EditModeSync(&edit, &designer, true);  // (the working copy goes live again)
                     DrawModeSync(&drawMode, &edit, true);
                 } else if (fatal) {
@@ -2306,9 +2308,6 @@ static int Run(int argc, char **argv)
         // environment and every cache as they were); dropped when the map is loaded again
         if (picker.open && !shotPath && !(spec.active && edit.active)) ModelPickerClose(&picker);   // (left the mode)
         if (!bench && (!shotPath || frame >= pickerThumbFrame)) ModelPickerRenderThumbs(&picker, PICKER_THUMBS_PER_FRAME);
-        // The draw mode's shader bake (a first stroke on a box with a surface shader, docs/painting.md
-        // 3.6): the same pattern, outside R3D_Begin/End; its stroke begins in the next frame
-        DrawModeRunBake(&drawMode);
 
         // Frame reuse (see its region): same key as the last frame -> composite the cache
         bool reused = false;
@@ -2543,8 +2542,8 @@ static int Run(int argc, char **argv)
     if (unsavedAtExit > 0 && !hidden) {
         char path[1400];
         bool ok = GfxUnsavedPath(scene->path, path, sizeof(path)) && MapEditWriteWork(&edit.ed, path);
-        // (and each unsaved canvas under <map>-<time>/<package path>, docs/painting.md 11.3)
-        if (ok && DrawModeUnsavedCanvases(&drawMode) > 0) {
+        // (and each unsaved paint atlas under <map>-<time>/<package path>, docs/painting.md 11.3)
+        if (ok && DrawModeUnsavedAtlases(&drawMode) > 0) {
             char dir[1400];
             snprintf(dir, sizeof(dir), "%s", path);
             char *dot = strrchr(dir, '.');

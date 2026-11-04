@@ -24,10 +24,11 @@
 # a failing command; `id` / `id remove` with a failing one; --dump-entities; the edit-mode HUD), the id panel
 # (--id-panel unfiltered, filtered, and with live id edits and the number field), the draw panel
 # (--draw-panel whole, one section, clicks on its widgets through --input-script, a bad section), painting
-# (--paint-script: every pen, a derived canvas, face groups, resize, pixel look, undo / redo, the
-# eyedropper, save, a rebase onto a PNG changed on disk; --apply-edits with a paint script; the draw
-# mode's HUD and strokes through the input shim; the shader bake of a first stroke on boxes with
-# surface-shader materials: merged, turned, instanced, cutout, through a script and the input shim), live edits (--edit-script with --shot and
+# (--paint-script into the paint layer: every pen, first strokes on plain, textured, shader, turned and
+# instanced boxes and model slots (a Kenney model unwrapped), a stroke onto a second face, face groups,
+# resize, pixel look, clear, undo / redo, the eyedropper (paint and G-buffer albedo), save, a rebase
+# onto an atlas changed on disk; --apply-edits with a paint script and with paint-add / set / remove;
+# the draw mode's HUD and strokes through the input shim, a click that unwraps a model), live edits (--edit-script with --shot and
 # --dump-entities: moves, undo / redo, duplicate, add, a preview, save, and a rebase after `disk`
 # with a failing step; with the fog cache and the AO volume; refused without --shot / a dump),
 # the transform ops (turn with pitch / roll / local / pivot, scale, size: --apply-edits with a failing
@@ -41,7 +42,9 @@
 # --export, --compile and compiled maps (dumps, a shot with a reload, a damaged file, a stale one
 # and its refused export), --inspect-model, --new-map, --import (stub terminal), --classify, and
 # every example's --shot (plus the capture shim; the game-style ones load compiled maps), and the
-# profiling tool (tools/profile.c) on the fixtures in tests/profile/ (--report-only, no perf run).
+# profiling tool (tools/profile.c) on the fixtures in tests/profile/ (--report-only, no perf run), and
+# the paint unwrap test (tests/unit/paintunwrap_test.c: xatlas on synthetic meshes and every model
+# file in maps/*/models/).
 # Bundles go to its own requests folder
 # (MONOLITH_REQUESTS_DIR=<tmp>/requests), never to requests/: a coordinator running meanwhile
 # never sees them, and bundles queued meanwhile are left alone. Files it creates (that folder,
@@ -81,7 +84,7 @@ Trash() {   # moves files we created to the trash (never rm)
 R3D_SRC="${R3D_DIR:-$ROOT/submodules/r3d}"
 Newer() { [[ ! -x "$1" ]] || [[ -n "$(find "$ROOT/src" "$ROOT/runtime" "$ROOT/build.sh" "$ROOT/examples" \
                                           "$R3D_SRC/src" "$R3D_SRC/include" "$R3D_SRC/shaders" -newer "$1" \
-                                          \( -name '*.c' -o -name '*.h' -o -name '*.sh' -o -name '*.glsl' -o -name '*.vert' -o -name '*.frag' \) \
+                                          \( -name '*.c' -o -name '*.cpp' -o -name '*.h' -o -name '*.sh' -o -name '*.glsl' -o -name '*.vert' -o -name '*.frag' \) \
                                           -not -path '*/build/*' -print -quit 2>/dev/null)" ]]; }
 if [[ $BUILD == 1 ]]; then
   if Newer "$M"; then
@@ -97,6 +100,21 @@ if [[ $BUILD == 1 ]]; then
     "${CC:-clang}" -std=c11 -Wall -Wextra -Wno-missing-field-initializers -g -O1 -fno-omit-frame-pointer \
       -fsanitize=$SAN "$ROOT/tools/profile.c" -o "$BIN_DIR/profile" \
       || { echo "leakcheck: building tools/profile.c failed" >&2; exit 1; }
+  fi
+fi
+if [[ $BUILD == 1 ]]; then
+  # the paint unwrap test (tests/unit/paintunwrap_test.c) against the build's own xatlas object
+  # (build.sh compiles it into <build folder>-obj/ with the same sanitizer)
+  if [[ ! -x "$BIN_DIR/paintunwrap_test" || -n "$(find "$ROOT/tests/unit/paintunwrap_test.c" "$ROOT/src/paintunwrap.c" \
+          "$ROOT/src/paintunwrap.h" "$ROOT/runtime" "$BIN_DIR-obj/xatlas.o" -newer "$BIN_DIR/paintunwrap_test" -print -quit)" ]]; then
+    SAN=leak; [[ $MODE == debug ]] && SAN=address,undefined
+    LIBDIR="$R3D_SRC/build-linux"
+    "${CC:-clang}" -std=c11 -Wall -Wextra -Wno-missing-field-initializers -g -O1 -fno-omit-frame-pointer -fsanitize=$SAN \
+      -DMS_PATCHED_R3D -DMONOLITH_EDITOR -I"$R3D_SRC/include" -I"$LIBDIR/external/raylib/raylib/include" \
+      -I"$ROOT/runtime" -I"$ROOT/src" "$ROOT/tests/unit/paintunwrap_test.c" "$ROOT/src/paintunwrap.c" \
+      "$ROOT/runtime/monolith_scene.c" "$BIN_DIR-obj/xatlas.o" -o "$BIN_DIR/paintunwrap_test" -L"$LIBDIR/lib" \
+      -lr3d -lraylib -lassimp -lzlibstatic -l:libstdc++.a -lgcc_s -lGL -lm -lpthread -ldl \
+      || { echo "leakcheck: building tests/unit/paintunwrap_test.c failed" >&2; exit 1; }
   fi
 fi
 [[ -x "$M" ]] || { echo "leakcheck: $M missing (run without --no-build)" >&2; exit 1; }
@@ -283,29 +301,35 @@ Run keys-panel 0        "$M" --shot "$TMP/keys.png" --view 1 --shot-hud --keys-p
 # (the hex field typed into, a number field applied by a click on the next one, a slider, buttons)
 Run draw-panel 0        "$M" --shot "$TMP/drawpanel.png" --view 1 --shot-hud --draw-panel
 Run draw-panel-color 0  "$M" --shot "$TMP/drawpanel2.png" --view 1 --shot-hud --draw-panel color --shot-size 1280 720
-# (the panel's layout at 1280 x 720 with the refusal of maps/monolith's concrete as its target: the
+# (the panel's layout at 1280 x 720 with maps/monolith's concrete wall as its target (a new rectangle): the
 # hex field, the R and G fields, the soft and square pens; a scripted --draw-panel shot goes through
 # the draw mode's own input, and its keys never reach the designer)
 printf 'at 155 435\nclick left\nwait 2\npress 3\npress C\npress 8\npress 0\npress F\npress F\npress ENTER\nwait 2\nat 266 335\nclick left\nwait 2\npress 7\nat 266 359\nclick left\nwait 3\npress ESCAPE\nat 155 241\nclick left\nwait 2\nat 100 241\nclick left\nwait 2\n' > "$TMP/drawpanel.txt"
 Run draw-panel-input 0  "$M" --shot "$TMP/drawpanel3.png" --view 1 --shot-hud --draw-panel --shot-size 1280 720 \
                             --input-script "$TMP/drawpanel.txt"
 Run draw-panel-bad 1    "$M" --shot "$TMP/drawpanel4.png" --draw-panel nosuch
-# Painting (docs/painting.md, phase 2): --paint-script on a copy of tests/models with every pen on a
-# flat box (the ground: its first stroke makes its own material and canvas), a textured one (a copy of
-# the tile wall, split out of its repeat: a derived canvas, so the copy gets an ASSETS.md row for
-# tiles.png), its face groups, a resize and the pixel look, models (the rock's "rock" override), undo /
-# redo, the eyedropper, save (PNGs, map, licence rows and sidecars), the hot reload's poll, shared
-# mode (tiles.png painted in place, its row marked) and shared mode on a surface shader, refused (the
-# last command: exit 1); then a rebase on the saved copy (a PNG and the
-# map changed on disk, the stroke replayed); --apply-edits with a paint script (a hidden window);
-# the draw mode's HUD and brush cursor; strokes, undo, the eyedropper and leaving through the input shim
+# Painting (docs/painting.md: the paint layer): --paint-script on a copy of tests/models with every pen
+# on the tile wall, the ground and the awning (a surface shader; first strokes allocate rectangles in
+# their materials' atlases), a stroke that goes on onto another face of the same box (one step), face
+# groups, a resize, the pixel look, models (the Kenney rock's "rock" override: its file is unwrapped
+# first), undo / redo, the eyedropper (an opaque paint texel, then the G-buffer albedo of a render),
+# clear, save (atlases, unwrap sidecars, the map, licence rows and sidecars), the hot reload's poll,
+# and a stroke on the sky, refused (the last command: exit 1); then a rebase on the saved copy (an
+# atlas and the map changed on disk, the stroke replayed); --apply-edits with a paint script (a
+# hidden window) and with the paint ops of the edit script; tests/rotated (a turned merged box, an
+# instanced one) in paint coordinates; the draw mode's HUD and brush cursor; strokes, undo, the
+# eyedropper and leaving through the input shim; a click on a model that needs an unwrap (the note,
+# then the unwrap and the stroke a frame later)
 cp -r tests/models "$TMP/paint-models"
-printf '| `textures/tiles.png` | test texture | monolith | CC0 1.0 | 2026-10-11 | - | none |\n' >> "$TMP/paint-models/ASSETS.md"
 cat > "$TMP/paint.txt" <<PAINT
 pen square
 size 16
 color 30 60 230 128
 stroke px 720 380 880 380
+stroke px 990 380 1000 400
+pen round
+size 6
+stroke px 700 330 700 355
 faces 0 0 1 1 2 2
 density 32
 resize
@@ -324,7 +348,9 @@ pen eraser
 stroke px 700 600 900 600
 pen fill
 dab px 1000 520
-pick px 800 600
+dab px 720 350
+pick px 1000 520
+pick px 400 500
 undo
 undo
 redo
@@ -332,11 +358,14 @@ print
 save
 poll
 print
-shared on
 pen round
-stroke px 880 380 860 385
+size 8
+color 20 200 20
+dab px 580 565
+clear
 save
-stroke px 720 350 740 350
+print
+stroke px 850 150 860 150
 PAINT
 Run paint-script 1      "$M" --shot "$TMP/paint.png" --view 1 --map "$TMP/paint-models" --paint-script "$TMP/paint.txt"
 { cat "$TMP/paint-models/models.map"; echo "# changed on disk"; } > "$TMP/paint-changed.map"
@@ -344,7 +373,7 @@ cat > "$TMP/paint-rebase.txt" <<PAINT
 pen round
 size 8
 stroke px 600 470 700 480
-put tests/models/textures/tiles.png textures/paint/paint_2.png
+put tests/models/textures/tiles.png textures/paint/ground.png
 disk $TMP/paint-changed.map
 print
 PAINT
@@ -353,33 +382,41 @@ cp -r tests/models "$TMP/paint-apply"
 printf 'select line 30 copy 1\nmove 0 0 1\n' > "$TMP/paint-apply-edits.txt"
 printf 'pen round\nsize 4\nstroke px 700 700 900 720\nsave\nprint\n' > "$TMP/paint-apply.txt"
 Run paint-apply 0       "$M" --map "$TMP/paint-apply" --apply-edits "$TMP/paint-apply-edits.txt" --paint-script "$TMP/paint-apply.txt"
+# (the paint ops in an edit script: the atlases exist on disk, as an --apply-edits map needs them)
+cp -r tests/models "$TMP/paint-ops"
+mkdir -p "$TMP/paint-ops/textures/paint"
+cp "$TMP/paint-models/textures/paint/ground.png" "$TMP/paint-ops/textures/paint/ground.png"
+cat > "$TMP/paint-ops.txt" <<PAINT
+select line 26
+paint-add "ground" "textures/paint/ground.png" faces +y,+z 0 0 64 64 nearest
+paint-add "ground" "textures/paint/ground.png" faces +z 68 0 32 32
+paint-set "ground" faces +y,+z,-x 0 0 64 64
+paint-remove "ground" faces -x
+select line 40
+paint-add own slot 1 0 0 64 64 nearest
+paint-set own slot 1 trilinear
+paint-remove own
+undo
+select line 26
+paint-remove "ground"
+paint-add "ground" "textures/paint/ground.png" faces +q 0 0 4 4
+PAINT
+Run paint-ops 1         "$M" --map "$TMP/paint-ops" --apply-edits "$TMP/paint-ops.txt"
+cp -r tests/rotated "$TMP/paint-rot"
+printf 'color 200 30 30 160\nsize 12\nstroke uv entity d21aa771:0 4 0.2 0.5 0.8 0.5\ndab uv entity bf614502:0 2 0.5 0.5\ndab uv entity f0ae616b:0 4 0.5 0.5\npen fill\ndab uv id 3:0 0 0.5 0.5\nundo\nredo\nsave\nprint\n' > "$TMP/paint-rot.txt"
+Run paint-rot 0         "$M" --map "$TMP/paint-rot" --apply-edits /dev/null --paint-script "$TMP/paint-rot.txt"
 Run draw-mode-hud 0     "$M" --shot "$TMP/drawmode.png" --view 1 --map "$TMP/paint-models" --shot-hud --draw-mode --cursor 800 600
-printf 'at 600 600\nwait 2\ndown lmb\nmove 200 20 10\nup lmb\nwait 2\ndown CTRL\npress Z\nup CTRL\nwait 2\npress 4\nat 650 620\ndown lmb\nmove 150 0 5\nup lmb\nwait 2\ndown ALT\nclick left\nup ALT\nwait 2\npress X\npress H\npress H\npress B\nwait 2\npress B\nwait 2\n' > "$TMP/paint-input.txt"
+printf 'at 600 600\nwait 2\ndown lmb\nmove 200 20 10\nup lmb\nwait 2\ndown CTRL\npress Z\nup CTRL\nwait 2\npress 4\nat 650 620\ndown lmb\nmove 150 0 5\nup lmb\nwait 2\ndown ALT\nclick left\nup ALT\nwait 2\npress X\npress B\nwait 2\npress B\nwait 2\n' > "$TMP/paint-input.txt"
 cp -r tests/models "$TMP/paint-input-models"
 Run draw-mode-input 0   "$M" --shot "$TMP/drawmode2.png" --view 1 --map "$TMP/paint-input-models" --shot-hud --draw-mode \
                             --input-script "$TMP/paint-input.txt"
-# The shader bake (docs/painting.md 3.6): the awning's first stroke bakes its shader (canvas and ORM
-# map), undo / redo, save (three rows and sidecars), a second stroke; a copy of tests/rotated with
-# scratch shaders on a turned merged box with holes and a normal map, a tumbled crate and an
-# instanced turned box (`instanced on`, model-space POSITION and INSTANCE_SCALE), with --apply-edits;
-# a click through the input shim (the bake before the scene's draw, the stroke the frame after it)
-cp -r tests/models "$TMP/paint-bake"
-printf 'color 0 0 0 0\nstroke px 720 350 740 350\nprint\nundo\nredo\nsave\ncolor 200 30 30\nsize 8\nstroke px 700 340 760 360\nsave\nprint\n' > "$TMP/paint-bake.txt"
-Run paint-bake 0        "$M" --shot "$TMP/paintbake.png" --view 1 --map "$TMP/paint-bake" --paint-script "$TMP/paint-bake.txt"
-cp -r tests/rotated "$TMP/paint-bake-rot"
-mkdir -p "$TMP/paint-bake-rot/shaders"
-printf '#pragma usage opaque shadow\nuniform float u_cell;\nvoid fragment()\n{\n    vec3 p = POSITION / u_cell;\n    float k = mod(floor(p.x) + floor(p.y) + floor(p.z), 2.0);\n    ALBEDO = mix(vec3(0.6, 0.12, 0.05), vec3(0.1, 0.35, 0.6), k);\n    ROUGHNESS = mix(0.3, 0.9, k);\n    ALPHA = length(fract(p) - 0.5) < 0.22 ? 0.0 : 1.0;\n    if (k > 0.5) NORMAL_MAP = normalize(vec3(0.35, 0.0, 1.0)) * 0.5 + 0.5;\n}\n' > "$TMP/paint-bake-rot/shaders/world.glsl"
-printf '#pragma usage opaque shadow\nvarying vec3 v_local;\nvoid vertex()\n{\n    v_local = POSITION * INSTANCE_SCALE;\n}\nvoid fragment()\n{\n    ALBEDO = mix(vec3(0.7, 0.6, 0.1), vec3(0.05, 0.3, 0.1), step(0.5, fract(v_local.x * 2.0 + v_local.y * 3.0)));\n}\n' > "$TMP/paint-bake-rot/shaders/inst.glsl"
-sed -i 's|^material "wall" .*|material "wall" shader "shaders/world.glsl" uniform u_cell 0.5 alpha_cutoff 0.5|; s|^material "crate" .*|material "crate" shader "shaders/world.glsl" uniform u_cell 0.25 alpha_cutoff 0.5|; s|^material "inst" .*|material "inst" shader "shaders/inst.glsl" alpha_cutoff 0 instanced on|' "$TMP/paint-bake-rot/rotated.map"
-printf 'color 0 0 0 0\ndab uv entity d21aa771:0 4 0.5 0.5\ndab uv entity bf614502:0 2 0.5 0.5\ndab uv entity f0ae616b:0 4 0.5 0.5\nsave\nprint\n' > "$TMP/paint-bake-rot.txt"
-Run paint-bake-rot 0    "$M" --map "$TMP/paint-bake-rot" --apply-edits /dev/null --paint-script "$TMP/paint-bake-rot.txt"
-cp -r tests/models "$TMP/paint-bake-input"
-printf 'at 720 350\nwait 2\ndown lmb\nmove 40 10 6\nup lmb\nwait 2\ndown CTRL\npress Z\nup CTRL\nwait 2\nat 725 352\nclick left\nwait 3\n' > "$TMP/paint-bake-input.txt"
-Run paint-bake-input 0  "$M" --shot "$TMP/paintbake2.png" --view 1 --map "$TMP/paint-bake-input" --shot-hud --draw-mode \
-                            --input-script "$TMP/paint-bake-input.txt"
-# The brush cursor and the panel on real canvases (phase 3b): the fill outline of a model's UV
-# island (the slot's triangles and islands cached), a ring across a model's triangles after its first
-# stroke, and the panel on a painted box whose faces were regrouped (live only: nothing is saved)
+cp -r tests/models "$TMP/paint-unwrap-input"
+printf 'at 800 370\nwait 2\nclick left\nwait 4\ndown CTRL\npress Z\nup CTRL\nwait 2\n' > "$TMP/paint-unwrap-input.txt"
+Run draw-unwrap-input 0 "$M" --shot "$TMP/drawmode3.png" --view 1 --map "$TMP/paint-unwrap-input" --shot-hud --draw-mode \
+                            --input-script "$TMP/paint-unwrap-input.txt"
+# The brush cursor and the panel on real paint: the fill outline of a model's UV island (the slot's
+# triangles and islands cached), a ring across a model's triangles after its first stroke, and the
+# panel on a painted box whose faces were regrouped (live only: nothing is saved)
 cp -r tests/models "$TMP/paint-cursor-models"
 printf 'pen fill\n' > "$TMP/paint-cursor1.txt"
 Run draw-cursor-fill 0  "$M" --shot "$TMP/drawcursor1.png" --view 2 --map "$TMP/paint-cursor-models" --shot-hud --draw-mode \
@@ -387,8 +424,8 @@ Run draw-cursor-fill 0  "$M" --shot "$TMP/drawcursor1.png" --view 2 --map "$TMP/
 printf 'pen round\nsize 16\ndab px 850 150\n' > "$TMP/paint-cursor2.txt"
 Run draw-cursor-model 0 "$M" --shot "$TMP/drawcursor2.png" --view 2 --map "$TMP/paint-cursor-models" --shot-hud --draw-mode \
                             --paint-script "$TMP/paint-cursor2.txt" --cursor 850 150
-printf 'pen square\nsize 8\ndab px 800 700\nfaces 0 0 1 2 0 0\nshared on\n' > "$TMP/paint-cursor3.txt"
-Run draw-panel-canvas 0 "$M" --shot "$TMP/drawcursor3.png" --view 2 --map "$TMP/paint-cursor-models" --shot-hud --draw-panel \
+printf 'pen square\nsize 8\ndab px 800 700\nfaces 0 0 0 1 0 0\n' > "$TMP/paint-cursor3.txt"
+Run draw-panel-paint 0  "$M" --shot "$TMP/drawcursor3.png" --view 2 --map "$TMP/paint-cursor-models" --shot-hud --draw-panel \
                             --paint-script "$TMP/paint-cursor3.txt" --cursor 800 700
 Run id-panel-filter 0   "$M" --shot "$TMP/idpanel2.png" --view 1 --shot-hud --id-panel block
 cp -r tests/models "$TMP/id-models2"
@@ -562,6 +599,13 @@ Run profile-report-gpu 0  "$PROFILE" --report-only tests/profile/perf.txt --benc
 Run profile-report-gpu-all 0 "$PROFILE" --report-only tests/profile/perf.txt --bench tests/profile/bench.md --all
 Run profile-missing 1     "$PROFILE" --report-only "$TMP/missing-perf.txt"
 Run profile-refuse 2      "$PROFILE" --bin "$M" refused -- --view 2
+
+# The paint unwrap (src/paintunwrap.c + xatlas): the synthetic meshes, bad input and the model
+# files of the packages (R3D's importer in a hidden window); the sidecar round trip in $TMP
+echo "leakcheck: running the paint unwrap test ..."
+UNWRAP_MODELS=()
+for m in maps/*/models/*.glb maps/*/models/*.gltf; do [[ -f "$m" ]] && UNWRAP_MODELS+=("$m"); done
+Run paintunwrap 0         "$BIN_DIR/paintunwrap_test" --scratch "$TMP" "${UNWRAP_MODELS[@]}"
 
 if [[ $MODE == lsan ]]; then
   echo "leakcheck: running the examples ..."

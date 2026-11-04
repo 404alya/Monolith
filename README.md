@@ -70,4 +70,4 @@ The repository carries everything Claude Code needs: `CLAUDE.md` (guard rails an
 
 ## Licence
 
-monolith is released under the [MIT licence](LICENSE). R3D, raylib and assimp keep their own licences (`submodules/r3d/`), and every external asset in a map package has its source and licence recorded in the package's `ASSETS.md`. Local changes to R3D are recorded in `submodules/r3d/patches.md`.
+monolith is released under the [MIT licence](LICENSE). R3D, raylib and assimp keep their own licences (`submodules/r3d/`), as does xatlas (MIT, the editor's paint unwrap: `src/vendor/xatlas/`), and every external asset in a map package has its source and licence recorded in the package's `ASSETS.md`. Local changes to R3D are recorded in `submodules/r3d/patches.md`.

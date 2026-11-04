@@ -108,19 +108,18 @@ Editing one copy of a `repeat` row (a single pillar of a row of eight) splits th
 
 ### Painting (B)
 
-Marks, signs, decals and pixel art don't need a request either: press **B** in spectator mode and paint straight onto any box or model. As in edit mode the cursor is free and **holding the right mouse button flies**. The **draw panel** on the left shows what the cursor last rested on (the object, the face, the canvas it paints into, or why it can't be painted), the pen, the colour and the canvas settings; a ring on the surface shows exactly which texels the brush will cover (at size 1, the one texel).
+Marks, signs, decals and pixel art don't need a request either: press **B** in spectator mode and paint straight onto any box or model. As in edit mode the cursor is free and **holding the right mouse button flies**. The **draw panel** on the left shows what the cursor last rested on (the object, the face or model part, where its paint goes, or why it can't be painted), the pen, the colour and the density; a ring on the surface shows exactly which texels the brush will cover (at size 1, the one texel).
 
-**Where the paint goes.** The first stroke on an object gives it a texture of its own: a copy of its material named `paint_<id>` with `albedo_map "textures/paint/paint_<id>.png"`, so painting one crate doesn't paint the others. The copy looks the same as before (a flat colour becomes a canvas of that colour; a texture is copied in, with its tint and tiling baked in). On a box line the line is wrapped in `use "paint_<id>"` … `use "<its old material>"` (split out of its `repeat` like other edits); on a model it is `material.N`. With **Shared** on (**H**) you paint the texture the material already has instead, and every object using it changes. Painted boxes get a canvas with a cell per face (`uv_faces 0 1 2 3 4 5`, [map format](map-format.md)); the panel's **Faces** buttons group faces that should share paint (e.g. the four sides), then **Apply**. **Texels / m** sets how big a texel is for new canvases (64 by default; **Resize to density** resamples the canvas under the cursor), **Pixel look** keeps texels crisp up close (`filter nearest`).
+**Where the paint goes.** Paint is a layer over the material: the object keeps its look (its shader, textures, glow) everywhere you haven't painted. Each material that has paint gets an atlas, `textures/paint/<material>.png`, and the first stroke on a box face or a model part gives it a rectangle there: a `paint` line at the end of the map (under `# paint (draw mode)`), the material's `paint` key and an `id` on the object's line, one undoable edit. A stroke that runs over onto another face of the same box gives that face its rectangle too (still one undo). A model part drawn with its own material paints into `textures/paint/<file>_s<N>.png`. A model whose own texture coordinates repeat or overlap (most low-poly kits, scanned rocks) is **unwrapped** for paint on its first stroke (a `models/<file>.paintuv` file beside it; a large scan takes a few seconds, the HUD says so). Each face of a box has its own rectangle; the panel's **Faces** buttons group faces that should share paint (e.g. the four sides), then **Apply**. **Texels / m** sets how big a texel of new paint is (64 by default, clamped to 2048 texels a side: the panel says when), **Resize to density** gives the paint under the cursor a rectangle of that size (its paint resampled), **Pixel look** keeps texels crisp up close (`paint_filter nearest`), **Clear paint** removes the paint of that face or part.
 
 | In draw mode | Action |
 |---|---|
-| left mouse drag | paint (fill: fill the face or the model's UV island under the cursor) |
-| Alt+click | pick the colour of the texture under the cursor |
-| 1 – 5 | pen: hard round, square (pixel-exact), soft round, eraser (back to how the canvas was when you started), fill; the effect toggles wait while draw mode is on |
+| left mouse drag | paint (fill: fill the face's rectangle or the model's UV island under the cursor) |
+| Alt+click | pick the colour: the paint where it is opaque, else what the surface shows |
+| 1 – 5 | pen: hard round, square (pixel-exact), soft round, eraser (makes the paint transparent again), fill; the effect toggles wait while draw mode is on |
 | [ / ], Ctrl+wheel | brush size in texels (1 – 256) |
 | Shift+wheel | brush alpha |
 | X | swap to the colour before |
-| H | shared: paint the material's own texture |
 | Tab | hide / show the panel |
 | Ctrl+Z / Ctrl+Shift+Z | undo / redo strokes, in the same history as the edits |
 | Ctrl+S | save |
@@ -128,7 +127,7 @@ Marks, signs, decals and pixel art don't need a request either: press **B** in s
 
 In the panel, drag a slider or click a number to type it (Enter or a click elsewhere applies, Esc cancels); the colour also takes a hex value (`#C83232` or `#C8323280`) and the last colours are one click away.
 
-**Saving** works as for edits: **Ctrl+S** writes each changed canvas as a PNG under the package's `textures/paint/`, its `ASSETS.md` row and sidecar (a new canvas is recorded as made in monolith; one copied from a texture or a model keeps that asset's licence and attribution), then the map. A request needs everything saved first. Closing the game with unsaved paint writes the canvases next to the unsaved map under `unsaved/`. When the map or a painted PNG changes on disk, your unsaved strokes are painted again on top. A box whose material has a surface shader is **baked** on its first stroke: what the shader shows (colour, roughness and metal, its surface relief) is rendered into the box's own canvas plus an ORM and, when the shader bends the normals, a normal map, and the copy has no shader any more. Its look can change a little: detail finer than the canvas density softens, and anything the shader animates or computes per view freezes. A short pause (up to a few tenths of a second) on that first click is the bake. Model parts with a shader material can't be painted, nor can a shader material in shared mode.
+**Saving** works as for edits: **Ctrl+S** writes each changed atlas as a PNG under the package's `textures/paint/` and each new unwrap beside its model, their `ASSETS.md` rows and sidecars (an atlas is recorded as made in monolith, CC0; an unwrap keeps its model's licence and attribution; a model without a licence row can't be unwrapped), then the map. A request needs everything saved first. Closing the game with unsaved paint writes the atlases next to the unsaved map under `unsaved/`. When the map or an atlas changes on disk, your unsaved strokes are painted again on top. Paint can't go on lights, the sky, skinned models or a material whose shader already uses three textures.
 
 ### What happens next
 

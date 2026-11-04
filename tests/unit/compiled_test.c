@@ -17,9 +17,10 @@ static char dir[1024], fuzzPath[1100];
 
 // The header and section table fields this test changes (docs/compiled-map.md, section 2)
 enum { H_VERSION = 8, H_SIZE = 12, H_ORDER = 16, H_FORMAT = 20, H_COUNT = 24, H_TABLE = 28, H_FILESIZE = 32 };
-enum { S_STRINGS = 1, S_BOXES = 2, S_MATERIALS = 4, S_STATEMENTS = 13, S_ENV = 14, S_BOX_TURNS = 17, S_SECTIONS = 17 };
-// A material record (version 4) and its face layout, filter and padding bytes
-enum { MAT_SIZE = 156, MAT_UV_FACES = 148, MAT_FILTER = 154, MAT_PAD = 155 };
+enum { S_STRINGS = 1, S_BOXES = 2, S_MATERIALS = 4, S_STATEMENTS = 13, S_ENV = 14, S_BOX_TURNS = 17, S_PAINT = 18, S_SECTIONS = 18 };
+// A material record (version 5) and its face layout, filter and padding bytes, its paint atlas path,
+// paint filter and padding
+enum { MAT_SIZE = 164, MAT_UV_FACES = 148, MAT_FILTER = 154, MAT_PAD = 155, MAT_PAINT = 156, MAT_PAINT_FILTER = 160, MAT_PAD2 = 161 };
 
 static uint32_t Rd32(const unsigned char *b, uint32_t at) { uint32_t v; memcpy(&v, b + at, 4); return v; }
 static void Wr32(unsigned char *b, uint32_t at, uint32_t v) { memcpy(b + at, &v, 4); }
@@ -278,6 +279,12 @@ int main(int argc, char **argv)
     CASE("material uv_faces partly none", memcpy(c + mats + MAT_UV_FACES, PART, 6));
     CASE("material filter 2", c[mats + MAT_FILTER] = 2);
     CASE("material padding 1", c[mats + MAT_PAD] = 1);
+    // The paint atlas (version 5): a path inside the package that exists, paint_filter 0 / 1, padding 0
+    CASE("material paint atlas offset outside the string table", Wr32(c, mats + MAT_PAINT, strCount));
+    CASE("material paint atlas not a file", Wr32(c, mats + MAT_PAINT, Rd32(c, mats)));   // ("default")
+    CASE("material paint_filter 2", c[mats + MAT_PAINT_FILTER] = 2);
+    CASE("material padding 2 nonzero", c[mats + MAT_PAD2 + 2] = 1);
+    CASE("version 4 with the version 5 section table", Wr32(c, H_VERSION, 4));
     // A layout needs uv_scale 1 1 (tests/models: material 2, "tiles", has 2 2); material 0 loads with one
     if (Rd32(orig, mats + 2 * MAT_SIZE + 80) != 0x3F800000u)       // (its uvScale.x is not 1)
         CASE("uv_faces on a material with uv_scale 2 2", memcpy(c + mats + 2 * MAT_SIZE + MAT_UV_FACES, ALL, 6));

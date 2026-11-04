@@ -98,16 +98,24 @@
 //   id [<n>]                       the selection's line gets `id n` (one line), or without n each
 //                                  selected line without an id gets the next free one
 //   id remove                      the selection's lines lose their `id n` prefix (objects stay)
-//   paint-material "<name>" [slot <N>] <keys...>
-//                                  the draw mode's first stroke (docs/painting.md 3.1, 10.3): the
-//                                  selection (the objects of one line, or of one copy of a repeat)
-//                                  gets the new material <name> with these keys (written as given).
-//                                  The material line goes after the file's last material line when
-//                                  that is before the object, else right before it; a box line is
-//                                  wrapped in use "<name>" ... use "<its material>", a model line
-//                                  gets material.N "<name>" (no slot: `material "<name>"`); a copy of
-//                                  a repeat is split out, the line gets an id. Refused when a
-//                                  material of that name exists
+//   paint-add "<material>"|own ["<atlas>"] faces <+x,-x,...>|slot <N> <x> <y> <w> <h> [nearest]
+//                                  the draw mode's first stroke on a face / slot (docs/painting.md 3.3,
+//                                  10.3): a `paint` statement for the selected object (one) in the
+//                                  file's paint block (`# paint (draw mode)` at the end of the file,
+//                                  sorted by material, entity, face / slot); the material gets
+//                                  `paint "<atlas>"` (with nearest: and `paint_filter nearest`; own:
+//                                  nearest goes on the statement) when it has no paint key; the line
+//                                  gets an id when it has none. Faces in other entries of the object in
+//                                  that material leave them (an entry left without faces goes)
+//   paint-set "<material>"|own faces <+x,...>|slot <N> [<x> <y> <w> <h>] [nearest|trilinear]
+//                                  the entry holding the first of the faces (or the slot) gets these
+//                                  faces (taken from the object's other entries) and rectangle;
+//                                  nearest / trilinear: an own entry's paint_filter (several objects
+//                                  selected: each one's entry, without a rectangle)
+//   paint-remove "<material>"|own [faces <+x,...>|slot <N>]
+//                                  the faces leave the object's entries (an entry left without faces
+//                                  goes), or the slot's entry goes; without faces / slot: every entry
+//                                  of the object in that material
 //   material-set "<name>" <keys...>   the keys replace the same keys of the material (the first
 //                                  occurrence on its lines; later ones go) or are added to its first
 //                                  line; "-key" removes a key
@@ -669,10 +677,6 @@ typedef struct {
     int nextId;             // the next free `id`
     Rewrite rw;
     char why[200];          // first refusal
-    // EDIT_PAINT_MATERIAL: the material line when it goes right before the object (else ""), and
-    // the material the lines after a painted box go back to
-    char *matLine;
-    char oldUse[256];
 } Ctx;
 
 static double NormalizeYaw(double y)
@@ -1239,22 +1243,6 @@ bool MapEditPreviewTransform(const EditOp *op, int cls, const MS_Transform *in, 
     return false;
 }
 
-// A model line's `material.N "name"` (slot >= 0) or `material "name"` (slot -1): the name of the
-// key it has replaced, else the key added after the line's last token (before its comment)
-static void RwModelMaterial(Rewrite *w, const Stmt *st, int slot, const char *name)
-{
-    char key[32], val[300];
-    if (slot >= 0) snprintf(key, sizeof(key), "material.%d", slot);
-    else snprintf(key, sizeof(key), "material");
-    snprintf(val, sizeof(val), "\"%s\"", name);
-    for (int k = st->kw + 5; k + 1 < st->n; k++)
-        if (TokIs(st, k, key) && st->tok[k + 1].quoted) { RwStr(w, st->tok[k + 1].s, st->tok[k + 1].e, val); return; }
-    char add[340];
-    snprintf(add, sizeof(add), " %s %s", key, val);
-    int at = st->tok[st->n - 1].e;
-    RwStr(w, at, at, add);
-}
-
 // Copy c of the line as a plain line of its own (world numbers, no repeat / at, new id),
 // moved / turned / scaled / resized / shifted by the op (EDIT_REMOVE never gets here)
 static bool CopyLine(Ctx *C, const Stmt *st, int c, StrBuf *out)
@@ -1276,7 +1264,6 @@ static bool CopyLine(Ctx *C, const Stmt *st, int c, StrBuf *out)
     if (IsTransform(C->op) && !RwTransform(C, st, vals, false)) return false;
     for (int k = 0; k < st->posCount; k++) RwNumber(w, st, st->posTok[k], vals[k], decs[k]);
     RwId(w, st, C->nextId++);
-    if (C->op->kind == EDIT_PAINT_MATERIAL && st->kind == ST_MODEL) RwModelMaterial(w, st, C->op->slot, C->op->matName);
     RwBuild(w, st, out);
     return !w->oom;
 }
@@ -1501,12 +1488,7 @@ static bool EditStatement(Ctx *C, Patch *P, const StmtSel *S, const Stmt *st, Li
                     if (k != EDIT_REMOVE) {
                         int id = C->nextId;
                         if (!first) SbStr(out, "\n");
-                        // (a painted box copy: its material around it, docs/painting.md 3.1)
-                        bool wrap = k == EDIT_PAINT_MATERIAL && st->kind == ST_BOX;
-                        if (k == EDIT_PAINT_MATERIAL && C->matLine && C->matLine[0]) { SbStr(out, C->matLine); SbStr(out, "\n"); }
-                        if (wrap) SbFmt(out, "use \"%s\"\n", C->op->matName);
                         if (!CopyLine(C, st, c, out)) return false;
-                        if (wrap) SbFmt(out, "\nuse \"%s\"", C->oldUse);
                         first = false;
                         for (int i = 0, n = PartsOf(S, c); i < n; i++) SelAdd(P, (unsigned int)id, i);
                     }
@@ -1727,7 +1709,8 @@ static bool MaterialLineIs(const Patch *P, int l, const char *name, Stmt *st)
 // and numbers, samplers a name and a path, the others the numbers or the quoted path after them
 static int KeyEnd(const Stmt *st, int k)
 {
-    static const char *const WORD[] = { "filter", "wrap", "cull", "transparency", "blend", "unlit", "instanced", "inherit" };
+    static const char *const WORD[] = { "filter", "wrap", "cull", "transparency", "blend", "unlit", "instanced", "inherit",
+                                        "paint_filter" };
     char key[32];
     if (!TokCopy(st, k, key, sizeof(key)) || key[0] == '-') return k + 1;
     int e = k + 1;
@@ -1828,127 +1811,539 @@ done:
     return ok;
 }
 
-// EDIT_PAINT_MATERIAL on the objects of one statement (one copy, or every copy): the material line
-// (after the file's last material line when that is before the object, else right before it), then
-// the object: a box line wrapped in use "name" ... use "<its material>", a model line with
-// material.N; one copy of a repeat line is split out (CopyLine, EditStatement), the line gets an id
-// Several model lines (every copy of each): the draw mode's shared texture of a model slot
-// (docs/painting.md 3.4): each line gets material.N (and an id), the material line goes before the
-// first of them (or after the file's last material line)
-static bool PaintModelLines(Ctx *C, Patch *P, const StmtSel *ss, int ssCount, Stmt *st, int lastMat, const char *matLine)
+// --- The paint layer's statements (docs/painting.md 4.2, 10.3) -------------------------------
+
+#define PAINT_BLOCK "# paint (draw mode)"
+static const char *const PAINT_FACE_NAMES[6] = { "+x", "-x", "+y", "-y", "+z", "-z" };
+
+// One `paint` statement of the text, as written
+typedef struct {
+    int line;               // 1-based
+    bool own;
+    char material[256];     // the material's name ("" for own)
+    unsigned int id;
+    int index;
+    bool box;
+    unsigned char faces;    // boxes
+    int slot;               // models
+    int rect[4];
+    signed char filter;     // `paint_filter`: -1 not written, 0 trilinear, 1 nearest
+    int facesTok, rectTok, filterTok;   // token indices (filterTok -1: none)
+} PaintLine;
+
+// "+x,-z" for face bits
+static void PaintFacesText(unsigned char faces, char *out, int size)
 {
-    const EditOp *op = C->op;
-    for (int k = 0; k < ssCount; k++) {
-        const StmtSel *S = &ss[k];
-        if (S->line < 1 || S->line > P->lineCount) { snprintf(C->why, sizeof(C->why), "line %d is not in the file", S->line); return false; }
-        const LineSpan *ls = &P->lines[S->line - 1];
-        if (!Analyze(st, P->text + ls->start, ls->contentEnd - ls->start, C->why, sizeof(C->why))) return false;
-        if (st->kind != ST_MODEL || S->selCopies != S->copies || CopyCount(st) != S->copies) {
-            snprintf(C->why, sizeof(C->why), "paint-material on several lines: only whole model lines (line %d)", S->line);
-            return false;
+    int n = 0;
+    out[0] = '\0';
+    for (int f = 0; f < 6 && n < size; f++)
+        if (faces & (1u << f)) n += snprintf(out + n, (size_t)(size - n), "%s%s", n ? "," : "", PAINT_FACE_NAMES[f]);
+}
+
+// Line l (0-based) as a paint statement, tokenized into st (false: it is none, or not one this
+// editor can read)
+static bool ReadPaintLine(const Patch *P, int l, Stmt *st, PaintLine *pl)
+{
+    const char *s = P->text + P->lines[l].start;
+    int len = P->lines[l].contentEnd - P->lines[l].start, i = 0;
+    while (i < len && (s[i] == ' ' || s[i] == '\t')) i++;
+    if (len - i < 6 || memcmp(s + i, "paint", 5) != 0 || (s[i + 5] != ' ' && s[i + 5] != '\t')) return false;
+    st->text = s;
+    st->len = len;
+    if (!Tokenize(st) || st->n < 8 || !TokIs(st, 0, "paint")) return false;
+    memset(pl, 0, sizeof(*pl));
+    pl->line = l + 1;
+    pl->filterTok = -1;
+    pl->filter = -1;
+    pl->slot = -1;
+    if (st->tok[1].quoted) {
+        int n = st->tok[1].e - st->tok[1].s - 2;
+        if (n >= (int)sizeof(pl->material)) return false;
+        memcpy(pl->material, s + st->tok[1].s + 1, (size_t)n);
+        pl->material[n] = '\0';
+    } else if (TokIs(st, 1, "own")) pl->own = true;
+    else return false;
+    char ent[64];
+    if (!TokCopy(st, 2, ent, sizeof(ent))) return false;
+    char *colon = strchr(ent, ':'), *end;
+    if (!colon) return false;
+    *colon = '\0';
+    unsigned long id = strtoul(ent, &end, 10);
+    if (end == ent || *end) return false;
+    long index = strtol(colon + 1, &end, 10);
+    if (end == colon + 1 || *end || index < 0 || index > INT_MAX) return false;
+    pl->id = (unsigned int)id;
+    pl->index = (int)index;
+    int t = 4;
+    if (TokIs(st, 3, "slot")) {
+        if (!TokInt(st, 4, &pl->slot)) return false;
+        t = 5;
+    } else {
+        char faces[64];
+        if (!TokCopy(st, 3, faces, sizeof(faces))) return false;
+        pl->box = true;
+        pl->facesTok = 3;
+        for (char *f = faces; ; ) {
+            size_t fl = strcspn(f, ",");
+            int face = -1;
+            for (int k = 0; k < 6; k++) if (fl == 2 && strncmp(f, PAINT_FACE_NAMES[k], 2) == 0) face = k;
+            if (face < 0) return false;
+            pl->faces |= (unsigned char)(1u << face);
+            if (!f[fl]) break;
+            f += fl + 1;
         }
     }
-    bool before = !(lastMat > 0 && lastMat < ss[0].line);
-    if (!before) {
-        LineOut *m = OutFor(P, lastMat);
-        if (!m) { snprintf(C->why, sizeof(C->why), "out of memory"); return false; }
-        SbAdd(&m->text, P->text + P->lines[lastMat - 1].start, P->lines[lastMat - 1].contentEnd - P->lines[lastMat - 1].start);
-        SbStr(&m->text, "\n");
-        SbStr(&m->text, matLine);
+    if (t + 4 > st->n) return false;
+    pl->rectTok = t;
+    for (int k = 0; k < 4; k++) if (!TokInt(st, t + k, &pl->rect[k])) return false;
+    if (t + 4 < st->n && TokIs(st, t + 4, "paint_filter")) {
+        pl->filterTok = t + 4;
+        pl->filter = (signed char)(TokIs(st, t + 5, "nearest") ? 1 : 0);
     }
-    for (int k = 0; k < ssCount; k++) {
-        const StmtSel *S = &ss[k];
-        const LineSpan *ls = &P->lines[S->line - 1];
-        Analyze(st, P->text + ls->start, ls->contentEnd - ls->start, C->why, sizeof(C->why));
-        LineOut *o = OutFor(P, S->line);
-        if (!o) { snprintf(C->why, sizeof(C->why), "out of memory"); return false; }
-        Rewrite *w = &C->rw;
-        RwReset(w);
-        int id = st->idTok >= 0 ? st->id : C->nextId++;
-        if (st->idTok < 0) RwId(w, st, id);
-        RwModelMaterial(w, st, op->slot, op->matName);
-        if (k == 0 && before) { SbStr(&o->text, matLine); SbStr(&o->text, "\n"); }
-        RwBuild(w, st, &o->text);
-        if (w->oom || o->text.oom) { snprintf(C->why, sizeof(C->why), "out of memory"); return false; }
-        for (int i = 0; i < S->entityCount; i++) SelAdd(P, (unsigned int)id, i);
-    }
-    snprintf(P->what, sizeof(P->what), "painted %d model lines from line %d: material %s on slot %d", ssCount, ss[0].line, op->matName, op->slot);
     return true;
 }
 
-static bool PaintMaterial(Ctx *C, Patch *P, const StmtSel *ss, int ssCount, Stmt *st)
+// The order of the paint block: by material (named ones first, by name; then own), entity, face / slot
+static int PaintLineCompare(const PaintLine *a, const PaintLine *b)
 {
-    const EditOp *op = C->op;
-    if (!op->matName || !op->matName[0] || strchr(op->matName, '"')) { snprintf(C->why, sizeof(C->why), "bad material name"); return false; }
-    const StmtSel *S = &ss[0];
-    if (S->line < 1 || S->line > P->lineCount) { snprintf(C->why, sizeof(C->why), "line %d is not in the file", S->line); return false; }
-    int lastMat = 0;
-    for (int l = 0; l < P->lineCount; l++) {
-        if (!MaterialLineIs(P, l, NULL, st)) continue;
-        lastMat = l + 1;
-        if (MaterialLineIs(P, l, op->matName, st)) {
-            snprintf(C->why, sizeof(C->why), "material %s exists on disk", op->matName);
-            return false;
-        }
+    if (a->own != b->own) return a->own ? 1 : -1;
+    int c = strcmp(a->material, b->material);
+    if (c) return c;
+    if (a->id != b->id) return a->id < b->id ? -1 : 1;
+    if (a->index != b->index) return a->index < b->index ? -1 : 1;
+    if (a->box != b->box) return a->box ? -1 : 1;
+    if (a->box) {
+        int fa = 0, fb = 0;
+        while (fa < 6 && !(a->faces & (1u << fa))) fa++;
+        while (fb < 6 && !(b->faces & (1u << fb))) fb++;
+        return (fa > fb) - (fa < fb);
     }
-    const LineSpan *ls = &P->lines[S->line - 1];
-    if (!Analyze(st, P->text + ls->start, ls->contentEnd - ls->start, C->why, sizeof(C->why))) return false;
-    if (CopyCount(st) != S->copies) { snprintf(C->why, sizeof(C->why), "line %d: the copies don't match the loaded map", S->line); return false; }
-    if (st->kind == ST_LIGHT) { snprintf(C->why, sizeof(C->why), "line %d: a light can't be painted", S->line); return false; }
-    if (S->selCopies != 1 && S->selCopies != S->copies) {
-        snprintf(C->why, sizeof(C->why), "line %d: paint one copy of the repeat or all of them (%d of %d selected)", S->line,
-                 S->selCopies, S->copies);
+    return (a->slot > b->slot) - (a->slot < b->slot);
+}
+
+// The new text of the lines a paint op changes: a line rewritten (body) or deleted, and lines that
+// go after it (after); emitted as LineOuts in line order at the end (PaintOutsEmit)
+typedef struct {
+    int line;
+    bool rewritten, deleted;
+    StrBuf body, after;
+} PaintOut;
+
+typedef struct {
+    PaintOut *v;
+    int n, cap;
+    PaintLine *lines;       // every paint statement of the text
+    int lineCount, lineCap;
+} PaintEdit;
+
+static PaintOut *PaintOutFor(PaintEdit *pe, int line)
+{
+    for (int i = 0; i < pe->n; i++) if (pe->v[i].line == line) return &pe->v[i];
+    PaintOut *o = MS_PUSH(pe->v, pe->n, pe->cap);
+    if (o) o->line = line;
+    return o;
+}
+
+// One more line after the out's line (and the lines already added after it)
+static void PaintAfter(PaintOut *o, const char *text)
+{
+    if (o->after.len > 0) SbStr(&o->after, "\n");
+    SbStr(&o->after, text);
+}
+
+static void PaintEditFree(PaintEdit *pe)
+{
+    for (int i = 0; i < pe->n; i++) {
+        free(pe->v[i].body.s);
+        free(pe->v[i].after.s);
+    }
+    free(pe->v);
+    free(pe->lines);
+    memset(pe, 0, sizeof(*pe));
+}
+
+static int CompareOuts(const void *a, const void *b)
+{
+    const LineOut *x = a, *y = b;
+    return (x->line > y->line) - (x->line < y->line);
+}
+
+// The outs as the patch's LineOuts, in line order
+static bool PaintOutsEmit(Patch *P, PaintEdit *pe)
+{
+    for (int i = 0; i < pe->n; i++) {
+        PaintOut *po = &pe->v[i];
+        if (po->body.oom || po->after.oom) return false;
+        LineOut *o = OutFor(P, po->line);
+        if (!o) return false;
+        const LineSpan *ls = &P->lines[po->line - 1];
+        bool keep = !po->deleted;
+        if (keep && po->rewritten) SbAdd(&o->text, po->body.s ? po->body.s : "", po->body.len);
+        else if (keep) SbAdd(&o->text, P->text + ls->start, ls->contentEnd - ls->start);
+        if (po->after.len > 0) {
+            if (keep) SbStr(&o->text, "\n");
+            SbAdd(&o->text, po->after.s, po->after.len);
+        }
+        o->deleted = !keep && po->after.len == 0;
+        if (o->text.oom) return false;
+    }
+    if (P->outCount > 1) qsort(P->outs, (size_t)P->outCount, sizeof(LineOut), CompareOuts);
+    return true;
+}
+
+// Every paint statement of the text into pe->lines
+static bool PaintScan(const Patch *P, PaintEdit *pe, Stmt *st)
+{
+    for (int l = 0; l < P->lineCount; l++) {
+        PaintLine pl;
+        if (!ReadPaintLine(P, l, st, &pl)) continue;
+        PaintLine *slot = MS_PUSH(pe->lines, pe->lineCount, pe->lineCap);
+        if (!slot) return false;
+        *slot = pl;
+    }
+    return true;
+}
+
+// The selected object's line (analyzed into st), its `id` (0: none) and its index within the line
+static bool PaintObject(Ctx *C, const Patch *P, MS_ObjRef obj, Stmt *st, int *line, int *id, int *index)
+{
+    int e = MS_ObjectEntity(scene, obj);
+    if (e < 0 || (obj.kind != MS_OBJ_BOX && obj.kind != MS_OBJ_MODEL)) {
+        snprintf(C->why, sizeof(C->why), "paint: select a box or a model (one object)");
         return false;
     }
-    StrBuf matLine = { 0 };
-    SbFmt(&matLine, "material \"%s\"", op->matName);
-    if (op->matKeys && op->matKeys[0]) { SbStr(&matLine, " "); SbStr(&matLine, op->matKeys); }
-    bool ok = false;
-    if (matLine.oom) { snprintf(C->why, sizeof(C->why), "out of memory"); goto done; }
-    if (ssCount > 1) {
-        ok = PaintModelLines(C, P, ss, ssCount, st, lastMat, matLine.s);
-        goto done;
+    const MS_Source *src = &scene->entitySources[e];
+    int first = e;
+    while (first > 0 && scene->entitySources[first - 1].prim == src->prim) first--;
+    *index = e - first;
+    *line = src->line;
+    if (*line < 1 || *line > P->lineCount) { snprintf(C->why, sizeof(C->why), "line %d is not in the file", *line); return false; }
+    const LineSpan *ls = &P->lines[*line - 1];
+    if (!Analyze(st, P->text + ls->start, ls->contentEnd - ls->start, C->why, sizeof(C->why))) return false;
+    *id = st->idTok >= 0 ? st->id : 0;
+    return true;
+}
+
+// The paint statement is the object's (id, index) in the op's material
+static bool PaintLineOf(const PaintLine *pl, const EditOp *op, int id, int index)
+{
+    if (id <= 0 || pl->id != (unsigned int)id || pl->index != index) return false;
+    if (!op->paint.material) return pl->own;
+    return !pl->own && strcmp(pl->material, op->paint.material) == 0;
+}
+
+// The paint statement on its line rewritten with its faces token replaced
+static bool PaintRewriteFaces(Ctx *C, const Patch *P, PaintOut *o, const PaintLine *pl, unsigned char faces, Stmt *st)
+{
+    PaintLine cur;
+    if (!ReadPaintLine(P, pl->line - 1, st, &cur)) return false;
+    char text[32];
+    PaintFacesText(faces, text, sizeof(text));
+    RwReset(&C->rw);
+    RwStr(&C->rw, st->tok[cur.facesTok].s, st->tok[cur.facesTok].e, text);
+    o->body.len = 0;
+    RwBuild(&C->rw, st, &o->body);
+    o->rewritten = true;
+    return !C->rw.oom && !o->body.oom;
+}
+
+// The faces `take` leave the object's other entries of the material (skip: the entry that keeps
+// them, -1); an entry left without faces goes
+static bool PaintSteal(Ctx *C, const Patch *P, PaintEdit *pe, Stmt *st, int id, int index, unsigned char take, int skip)
+{
+    const EditOp *op = C->op;
+    for (int k = 0; k < pe->lineCount; k++) {
+        const PaintLine *pl = &pe->lines[k];
+        if (k == skip || !pl->box || !(pl->faces & take) || !PaintLineOf(pl, op, id, index)) continue;
+        PaintOut *o = PaintOutFor(pe, pl->line);
+        if (!o) return false;
+        unsigned char left = (unsigned char)(pl->faces & ~take);
+        if (!left) o->deleted = true;
+        else if (!PaintRewriteFaces(C, P, o, pl, left, st)) return false;
     }
-    if (lastMat > 0 && lastMat < S->line) {
-        LineOut *m = OutFor(P, lastMat);
-        if (!m) { snprintf(C->why, sizeof(C->why), "out of memory"); goto done; }
-        SbAdd(&m->text, P->text + P->lines[lastMat - 1].start, P->lines[lastMat - 1].contentEnd - P->lines[lastMat - 1].start);
-        SbStr(&m->text, "\n");
-        SbStr(&m->text, matLine.s);
-        C->matLine = NULL;
-    } else C->matLine = matLine.s;
-    if (st->kind == ST_BOX) {
-        ActiveUse(P, S->line, C->oldUse, sizeof(C->oldUse));
-        if (!C->oldUse[0]) snprintf(C->oldUse, sizeof(C->oldUse), "default");
+    return true;
+}
+
+static bool PaintRectOk(Ctx *C, const int r[4])
+{
+    if (r[0] < 0 || r[1] < 0 || r[2] < 1 || r[3] < 1 || r[0] > 1000000 || r[1] > 1000000 || r[2] > 1000000 || r[3] > 1000000) {
+        snprintf(C->why, sizeof(C->why), "paint: the rectangle must be x y >= 0, w h >= 1");
+        return false;
     }
-    LineOut *o = OutFor(P, S->line);
-    if (!o) { snprintf(C->why, sizeof(C->why), "out of memory"); goto done; }
-    bool split = S->selCopies < S->copies;
-    if (split) {
-        if (!EditStatement(C, P, S, st, o)) {
-            if (!C->why[0]) snprintf(C->why, sizeof(C->why), "line %d: cannot rewrite it", S->line);
-            goto done;
+    return true;
+}
+
+// The paint block's comment line (1-based, 0: none)
+static int PaintBlockLine(const Patch *P)
+{
+    for (int l = 0; l < P->lineCount; l++) {
+        int len = P->lines[l].contentEnd - P->lines[l].start;
+        if (len == (int)strlen(PAINT_BLOCK) && memcmp(P->text + P->lines[l].start, PAINT_BLOCK, (size_t)len) == 0) return l + 1;
+    }
+    return 0;
+}
+
+// EDIT_PAINT_ADD (docs/painting.md 3.3, 4.2)
+static bool PaintAdd(Ctx *C, Patch *P, PaintEdit *pe, MS_ObjRef obj, Stmt *st)
+{
+    const EditOp *op = C->op;
+    const char *mat = op->paint.material;
+    bool model = obj.kind == MS_OBJ_MODEL;
+    if (mat && (!mat[0] || strchr(mat, '"'))) { snprintf(C->why, sizeof(C->why), "paint: bad material name"); return false; }
+    if (!model && (!mat || (op->paint.faces & EDIT_PAINT_ALL_FACES) == 0 || (op->paint.faces & ~EDIT_PAINT_ALL_FACES))) {
+        snprintf(C->why, sizeof(C->why), "paint-add on a box takes a material and faces");
+        return false;
+    }
+    if (model && op->paint.slot < 0) { snprintf(C->why, sizeof(C->why), "paint-add on a model takes a slot"); return false; }
+    if (!PaintRectOk(C, op->paint.rect)) return false;
+    int line, id, index;
+    if (!PaintObject(C, P, obj, st, &line, &id, &index)) return false;
+    bool newId = id == 0;
+    if (newId) {
+        id = C->nextId++;
+        PaintOut *o = PaintOutFor(pe, line);
+        if (!o) return false;
+        RwReset(&C->rw);
+        RwId(&C->rw, st, id);
+        RwBuild(&C->rw, st, &o->body);
+        o->rewritten = true;
+    }
+    // A model slot has one entry per material; a box's faces leave the entries they were in
+    for (int k = 0; !newId && model && k < pe->lineCount; k++)
+        if (!pe->lines[k].box && pe->lines[k].slot == op->paint.slot && PaintLineOf(&pe->lines[k], op, id, index)) {
+            snprintf(C->why, sizeof(C->why), "paint: slot %d of %d:%d already has an entry (line %d)", op->paint.slot, id, index,
+                     pe->lines[k].line);
+            return false;
         }
-    } else {
-        Rewrite *w = &C->rw;
-        RwReset(w);
-        int id = st->idTok >= 0 ? st->id : C->nextId++;
-        if (st->idTok < 0) RwId(w, st, id);
-        if (st->kind == ST_MODEL) RwModelMaterial(w, st, op->slot, op->matName);
-        if (C->matLine) { SbStr(&o->text, C->matLine); SbStr(&o->text, "\n"); }
-        if (st->kind == ST_BOX) SbFmt(&o->text, "use \"%s\"\n", op->matName);
-        RwBuild(w, st, &o->text);
-        if (st->kind == ST_BOX) SbFmt(&o->text, "\nuse \"%s\"", C->oldUse);
-        if (w->oom || o->text.oom) { snprintf(C->why, sizeof(C->why), "out of memory"); goto done; }
-        for (int i = 0; i < S->entityCount; i++) SelAdd(P, (unsigned int)id, i);
+    if (!newId && !model && !PaintSteal(C, P, pe, st, id, index, op->paint.faces, -1)) return false;
+
+    // The material's paint key (on its first line), or a line of its own for the built-in "default"
+    int blockLine = PaintBlockLine(P);
+    StrBuf matLine = { 0 };
+    char key[MS_PATH_MAX + 64] = "";
+    if (mat) {
+        if (!op->paint.atlas || !op->paint.atlas[0] || strchr(op->paint.atlas, '"')) {
+            snprintf(C->why, sizeof(C->why), "paint-add: bad atlas path");
+            return false;
+        }
+        snprintf(key, sizeof(key), "paint \"%s\"%s", op->paint.atlas, op->paint.nearest ? " paint_filter nearest" : "");
+        int firstLine = 0;
+        bool hasKey = false;
+        for (int l = 0; l < P->lineCount; l++) {
+            if (!MaterialLineIs(P, l, mat, st)) continue;
+            if (!firstLine) firstLine = l + 1;
+            for (int k = 2; k < st->n; k = KeyEnd(st, k)) hasKey = hasKey || TokIs(st, k, "paint");
+        }
+        if (!firstLine && strcmp(mat, "default") != 0) {
+            snprintf(C->why, sizeof(C->why), "no material \"%s\" in the map", mat);
+            return false;
+        }
+        if (!firstLine) SbFmt(&matLine, "material \"default\" %s", key);
+        else if (!hasKey) {
+            MaterialLineIs(P, firstLine - 1, mat, st);
+            PaintOut *o = PaintOutFor(pe, firstLine);
+            if (!o) return false;
+            char add[MS_PATH_MAX + 80];
+            snprintf(add, sizeof(add), " %s", key);
+            RwReset(&C->rw);
+            int at = st->tok[st->n - 1].e;
+            RwStr(&C->rw, at, at, add);
+            o->body.len = 0;
+            RwBuild(&C->rw, st, &o->body);
+            o->rewritten = true;
+        }
     }
-    snprintf(P->what, sizeof(P->what), "painted line %d: material %s%s%s", S->line, op->matName,
-             st->kind == ST_MODEL ? (op->slot >= 0 ? TextFormat(" on slot %d", op->slot) : " on every slot") : "",
-             split ? " (split)" : "");
-    ok = true;
-done:
-    C->matLine = NULL;
+
+    // The statement, sorted into the block (appended at the end of the file with the block when the
+    // file has none)
+    PaintLine me = { .own = !mat, .id = (unsigned int)id, .index = index, .box = !model, .faces = op->paint.faces,
+                     .slot = model ? op->paint.slot : -1 };
+    if (mat) snprintf(me.material, sizeof(me.material), "%s", mat);
+    StrBuf stmt = { 0 };
+    char where[64];
+    if (model) snprintf(where, sizeof(where), "slot %d", op->paint.slot);
+    else PaintFacesText(op->paint.faces, where, sizeof(where));
+    const int *r = op->paint.rect;
+    if (mat) SbFmt(&stmt, "paint \"%s\" %d:%d %s %d %d %d %d", mat, id, index, where, r[0], r[1], r[2], r[3]);
+    else SbFmt(&stmt, "paint own %d:%d %s %d %d %d %d%s", id, index, where, r[0], r[1], r[2], r[3], op->paint.nearest ? " paint_filter nearest" : "");
+    bool ok = !stmt.oom && !matLine.oom;
+    if (ok && blockLine) {
+        // after the block's last statement that sorts before it (the comment and material lines
+        // right after it are the block's head)
+        int after = blockLine;
+        for (int l = blockLine; l < P->lineCount; l++) {
+            PaintLine pl;
+            if (ReadPaintLine(P, l, st, &pl)) {
+                if (PaintLineCompare(&pl, &me) > 0) break;
+                after = l + 1;
+            } else if (after == l && MaterialLineIs(P, l, NULL, st)) after = l + 1;
+            else break;
+        }
+        if (matLine.len) {
+            PaintOut *o = PaintOutFor(pe, blockLine);
+            ok = o != NULL;
+            if (ok) PaintAfter(o, matLine.s);
+        }
+        PaintOut *o = ok ? PaintOutFor(pe, after) : NULL;
+        ok = o != NULL;
+        if (ok) PaintAfter(o, stmt.s);
+    } else if (ok) {
+        int last = P->lineCount;
+        PaintOut *o = last > 0 ? PaintOutFor(pe, last) : NULL;
+        ok = o != NULL;
+        if (ok) {
+            const LineSpan *ls = &P->lines[last - 1];
+            bool blank = true;
+            for (int i = ls->start; i < ls->contentEnd && blank; i++) blank = P->text[i] == ' ' || P->text[i] == '\t' || P->text[i] == '\r';
+            // (a blank line before the block's comment, unless the file ends with one)
+            if (o->after.len > 0) SbStr(&o->after, "\n");
+            SbFmt(&o->after, "%s" PAINT_BLOCK, blank ? "" : "\n");
+            if (matLine.len) PaintAfter(o, matLine.s);
+            PaintAfter(o, stmt.s);
+        }
+    }
+    if (ok) {
+        SelAdd(P, (unsigned int)id, index);
+        snprintf(P->what, sizeof(P->what), "%.190s", stmt.s);
+    } else if (!C->why[0]) snprintf(C->why, sizeof(C->why), "out of memory");
+    free(stmt.s);
     free(matLine.s);
+    return ok;
+}
+
+// EDIT_PAINT_SET: the entry's faces, rectangle and (own entries) filter
+static bool PaintSet(Ctx *C, Patch *P, PaintEdit *pe, const MS_ObjRef *sel, int selCount, Stmt *st)
+{
+    const EditOp *op = C->op;
+    bool rect = op->paint.rect[2] > 0;
+    if (rect && !PaintRectOk(C, op->paint.rect)) return false;
+    if (rect && selCount != 1) { snprintf(C->why, sizeof(C->why), "paint-set with a rectangle: select one object"); return false; }
+    for (int i = 0; i < selCount; i++) {
+        int line, id, index;
+        if (!PaintObject(C, P, sel[i], st, &line, &id, &index)) return false;
+        bool model = sel[i].kind == MS_OBJ_MODEL;
+        if (!model && (op->paint.faces & EDIT_PAINT_ALL_FACES) == 0) {
+            snprintf(C->why, sizeof(C->why), "paint-set on a box takes faces");
+            return false;
+        }
+        int first = 0;
+        while (first < 5 && !(op->paint.faces & (1u << first))) first++;
+        // (the entry with the given rectangle, else the one holding the first face / the slot)
+        int k = pe->lineCount;
+        for (int j = 0; rect && j < pe->lineCount && k == pe->lineCount; j++) {
+            const PaintLine *pl = &pe->lines[j];
+            if (PaintLineOf(pl, op, id, index) && pl->box != model && memcmp(pl->rect, op->paint.rect, sizeof(pl->rect)) == 0) k = j;
+        }
+        for (int j = 0; j < pe->lineCount && k == pe->lineCount; j++) {
+            const PaintLine *pl = &pe->lines[j];
+            if (!PaintLineOf(pl, op, id, index) || pl->box == model) continue;
+            if (model ? pl->slot == op->paint.slot : (pl->faces & (1u << first)) != 0) k = j;
+        }
+        if (k == pe->lineCount) {
+            char where[32];
+            if (model) snprintf(where, sizeof(where), "slot %d", op->paint.slot);
+            else snprintf(where, sizeof(where), "%s", PAINT_FACE_NAMES[first]);
+            snprintf(C->why, sizeof(C->why), "paint-set: line %d has no entry of %s for %s", line,
+                     op->paint.material ? op->paint.material : "its own material", where);
+            return false;
+        }
+        const PaintLine *pl = &pe->lines[k];
+        if (!model && !PaintSteal(C, P, pe, st, id, index, op->paint.faces, k)) return false;
+        PaintOut *o = PaintOutFor(pe, pl->line);
+        if (!o) return false;
+        PaintLine cur;
+        ReadPaintLine(P, pl->line - 1, st, &cur);
+        RwReset(&C->rw);
+        if (!model && op->paint.faces != pl->faces) {
+            char faces[32];
+            PaintFacesText(op->paint.faces, faces, sizeof(faces));
+            RwStr(&C->rw, st->tok[pl->facesTok].s, st->tok[pl->facesTok].e, faces);
+        }
+        for (int c = 0; rect && c < 4; c++)
+            if (op->paint.rect[c] != pl->rect[c]) {
+                char n[24];
+                snprintf(n, sizeof(n), "%d", op->paint.rect[c]);
+                RwStr(&C->rw, st->tok[pl->rectTok + c].s, st->tok[pl->rectTok + c].e, n);
+            }
+        if (pl->own && op->paint.filter >= 0 && op->paint.filter != (pl->filter > 0 ? 1 : 0)) {
+            if (op->paint.filter == 1 && pl->filterTok < 0) {
+                int at = st->tok[st->n - 1].e;
+                RwStr(&C->rw, at, at, " paint_filter nearest");
+            } else if (op->paint.filter == 1) RwStr(&C->rw, st->tok[pl->filterTok + 1].s, st->tok[pl->filterTok + 1].e, "nearest");
+            else RwDropKey(&C->rw, st, pl->filterTok, pl->filterTok + 2 <= st->n ? pl->filterTok + 2 : st->n);
+        }
+        if (C->rw.n > 0) {
+            o->body.len = 0;
+            RwBuild(&C->rw, st, &o->body);
+            o->rewritten = true;
+        }
+        SelAdd(P, (unsigned int)id, index);
+        if (i == 0) {
+            char where[48];
+            if (model) snprintf(where, sizeof(where), "slot %d", op->paint.slot);
+            else PaintFacesText(op->paint.faces, where, sizeof(where));
+            snprintf(P->what, sizeof(P->what), "paint %.120s %d:%d %s", op->paint.material ? op->paint.material : "own", id, index, where);
+            if (rect) {
+                size_t l = strlen(P->what);
+                snprintf(P->what + l, sizeof(P->what) - l, " %d %d %d %d", op->paint.rect[0], op->paint.rect[1], op->paint.rect[2],
+                         op->paint.rect[3]);
+            }
+        }
+    }
+    if (selCount > 1) {
+        size_t l = strlen(P->what);
+        snprintf(P->what + l, sizeof(P->what) - l, " (and %d more)", selCount - 1);
+    }
+    return true;
+}
+
+// EDIT_PAINT_REMOVE
+static bool PaintRemove(Ctx *C, Patch *P, PaintEdit *pe, MS_ObjRef obj, Stmt *st)
+{
+    const EditOp *op = C->op;
+    int line, id, index;
+    if (!PaintObject(C, P, obj, st, &line, &id, &index)) return false;
+    unsigned char mask = op->paint.faces ? op->paint.faces : EDIT_PAINT_ALL_FACES;
+    int hit = 0;
+    for (int k = 0; k < pe->lineCount; k++) {
+        const PaintLine *pl = &pe->lines[k];
+        if (!PaintLineOf(pl, op, id, index)) continue;
+        if (pl->box ? !(pl->faces & mask) : (op->paint.slot >= 0 && pl->slot != op->paint.slot)) continue;
+        PaintOut *o = PaintOutFor(pe, pl->line);
+        if (!o) return false;
+        hit++;
+        unsigned char left = pl->box ? (unsigned char)(pl->faces & ~mask) : 0;
+        if (!left) o->deleted = true;
+        else if (!PaintRewriteFaces(C, P, o, pl, left, st)) return false;
+    }
+    if (hit == 0) {
+        snprintf(C->why, sizeof(C->why), "paint-remove: line %d has no entry of %s there", line,
+                 op->paint.material ? op->paint.material : "its own material");
+        return false;
+    }
+    SelAdd(P, (unsigned int)id, index);
+    snprintf(P->what, sizeof(P->what), "removed %d paint entr%s of %.120s from %d:%d", hit, hit == 1 ? "y" : "ies",
+             op->paint.material ? op->paint.material : "own", id, index);
+    return true;
+}
+
+// EDIT_PAINT_ADD / SET / REMOVE into the patch
+static bool PaintOp(Ctx *C, Patch *P, const MS_ObjRef *sel, int selCount, Stmt *st)
+{
+    const EditOp *op = C->op;
+    if (selCount < 1 || (selCount > 1 && op->kind != EDIT_PAINT_SET)) {
+        snprintf(C->why, sizeof(C->why), "paint: select one object (%d selected)", selCount);
+        return false;
+    }
+    PaintEdit pe = { 0 };
+    bool ok = PaintScan(P, &pe, st);
+    if (!ok) snprintf(C->why, sizeof(C->why), "out of memory");
+    if (ok && op->kind == EDIT_PAINT_ADD) ok = PaintAdd(C, P, &pe, sel[0], st);
+    else if (ok && op->kind == EDIT_PAINT_SET) ok = PaintSet(C, P, &pe, sel, selCount, st);
+    else if (ok) ok = PaintRemove(C, P, &pe, sel[0], st);
+    if (ok && !PaintOutsEmit(P, &pe)) ok = false;
+    if (!ok && !C->why[0]) snprintf(C->why, sizeof(C->why), "out of memory");
+    PaintEditFree(&pe);
     return ok;
 }
 
@@ -1963,6 +2358,10 @@ static bool BuildPatch(Ctx *C, Patch *P, const MS_ObjRef *sel, int selCount)
 
     if (op->kind == EDIT_MATERIAL_SET) {
         ok = MaterialSet(C, P, &st);
+        goto done;
+    }
+    if (op->kind == EDIT_PAINT_ADD || op->kind == EDIT_PAINT_SET || op->kind == EDIT_PAINT_REMOVE) {
+        ok = PaintOp(C, P, sel, selCount, &st);
         goto done;
     }
     if (op->kind == EDIT_ADD) {
@@ -2047,10 +2446,6 @@ static bool BuildPatch(Ctx *C, Patch *P, const MS_ObjRef *sel, int selCount)
     }
     if (op->kind == EDIT_ID_REMOVE) {
         ok = IdRemoveLines(C, P, ss, ssCount, &st);
-        goto doneSel;
-    }
-    if (op->kind == EDIT_PAINT_MATERIAL) {
-        ok = PaintMaterial(C, P, ss, ssCount, &st);
         goto doneSel;
     }
 
@@ -2193,6 +2588,13 @@ static void FreeStep(MapEditor *E, EditStep *s)
     free(s->modelPath);
     free(s->matName);
     free(s->matKeys);
+    free(s->paintMaterial);
+    free(s->paintAtlas);
+    for (int i = 0; i < s->moreCount; i++) {
+        free(s->more[i].material);
+        free(s->more[i].atlas);
+    }
+    free(s->more);
     if (s->paint && E->paintHooks.release) E->paintHooks.release(E->paintHooks.user, s->paint);
     memset(s, 0, sizeof(*s));
 }
@@ -2336,7 +2738,18 @@ static EditResult ApplyStep(MapEditor *E, const MS_ObjRef *sel, int selCount, co
     step.op = *op;
     step.op.modelPath = NULL;
     step.op.matName = step.op.matKeys = NULL;
-    if (op->kind == EDIT_PAINT_MATERIAL || op->kind == EDIT_MATERIAL_SET) {
+    step.op.paint.material = step.op.paint.atlas = NULL;
+    if (op->kind == EDIT_PAINT_ADD || op->kind == EDIT_PAINT_SET || op->kind == EDIT_PAINT_REMOVE) {
+        step.paintMaterial = op->paint.material ? MS_StrDup(op->paint.material) : NULL;
+        step.paintAtlas = op->paint.atlas ? MS_StrDup(op->paint.atlas) : NULL;
+        if ((op->paint.material && !step.paintMaterial) || (op->paint.atlas && !step.paintAtlas)) {
+            snprintf(msg, msgSize, "out of memory");
+            goto done;
+        }
+        step.op.paint.material = step.paintMaterial;
+        step.op.paint.atlas = step.paintAtlas;
+    }
+    if (op->kind == EDIT_MATERIAL_SET) {
         step.matName = MS_StrDup(op->matName ? op->matName : "");
         step.matKeys = MS_StrDup(op->matKeys ? op->matKeys : "");
         if (!step.matName || !step.matKeys) { snprintf(msg, msgSize, "out of memory"); goto done; }
@@ -2670,6 +3083,8 @@ int MapEditRebase(MapEditor *E, MS_EntityId **outSel, int *outSelCount, char *ms
         op.modelPath = st->modelPath;
         op.matName = st->matName;
         op.matKeys = st->matKeys;
+        op.paint.material = st->paintMaterial;
+        op.paint.atlas = st->paintAtlas;
         if (!why[0] && op.kind == EDIT_ADD) {
             MS_EntityId id = MapId(map, mapCount, st->anchorId);
             int e = id.stmt ? MS_FindEntity(scene, id) : -1;
@@ -2704,6 +3119,23 @@ int MapEditRebase(MapEditor *E, MS_EntityId **outSel, int *outSelCount, char *ms
         for (int k = 0; k < count && k < st->selAfterCount; k++) {
             IdPair *pr = MS_PUSH(map, mapCount, mapCap);
             if (pr) *pr = (IdPair){ st->selAfter[k], ids[k] };
+        }
+        // Paint ops amended onto it (a stroke that went on onto another face, face groups): on the
+        // objects it has now
+        for (int k = 0; k < st->moreCount; k++) {
+            int on = 0;
+            for (int j = 0; j < count; j++) {
+                int e = MS_FindEntity(scene, ids[j]);
+                if (e >= 0 && MS_RESERVE(sel, selCap, on + 1)) sel[on++] = scene->entityObjects[e];
+            }
+            char am[512];
+            if (MapEditAmendPaint(E, sel, on, &st->more[k].op, am, sizeof(am)) != EDIT_DONE) {
+                EditStep note = { 0 };
+                snprintf(note.what, sizeof(note.what), "could not re-apply: %.80s, its part \"%s\" (%.60s)", st->what,
+                         st->more[k].op.kind == EDIT_PAINT_ADD ? "paint-add" : st->more[k].op.kind == EDIT_PAINT_SET ? "paint-set" : "paint-remove", am);
+                EditStep *slot = MS_PUSH(E->failed, E->failedCount, E->failedCap);
+                if (slot) *slot = note;
+            }
         }
         free(*outSel);
         *outSel = ids;
@@ -2931,11 +3363,11 @@ static int RunScript(MapEditor *E, const char *scriptPath, bool live)
         if (nl) { *nl = '\0'; save = nl + 1; } else save = NULL;
         lineNo++;
         char *w[12];
-        char *raw = MS_StrDup(line);     // (paint-material / material-set read their keys as written)
+        char *raw = MS_StrDup(line);     // (material-set and the paint ops read their words as written)
         int n = ScriptWords(line, w, 12);
         if (n == 0 || !raw) { free(raw); continue; }
         char msg[512] = "";
-        char matName[256] = "";
+        char matName[256] = "", atlasBuf[MS_PATH_MAX] = "";
         bool ok = false, wentLive = false;
         EditOp op = { 0 };
         bool isEdit = false;
@@ -3014,11 +3446,9 @@ static int RunScript(MapEditor *E, const char *scriptPath, bool live)
             isEdit = n == 5 && ScriptNum(w[2], &op.pos[0]) && ScriptNum(w[3], &op.pos[1]) && ScriptNum(w[4], &op.pos[2]) && sel.n > 0;
             if (isEdit) op.anchor = sel.v[0];
             else snprintf(msg, sizeof(msg), "add \"<model file>\" <x> <y> <z> (after the first selected object's line)");
-        } else if (strcmp(w[0], "paint-material") == 0 || strcmp(w[0], "material-set") == 0) {
-            // paint-material "<name>" [slot <N>] <keys...> / material-set "<name>" <keys...> (docs/painting.md 10.3)
-            bool paint = w[0][0] == 'p';
-            op.kind = paint ? EDIT_PAINT_MATERIAL : EDIT_MATERIAL_SET;
-            op.slot = -1;
+        } else if (strcmp(w[0], "material-set") == 0) {
+            // material-set "<name>" <keys...> (docs/painting.md 10.3)
+            op.kind = EDIT_MATERIAL_SET;
             char *p = raw + strspn(raw, " \t");
             p += strcspn(p, " \t");
             p += strspn(p, " \t");
@@ -3029,24 +3459,69 @@ static int RunScript(MapEditor *E, const char *scriptPath, bool live)
                 p = q + 1;
             }
             p += strspn(p, " \t");
-            long slot = -1;
-            if (paint && strncmp(p, "slot", 4) == 0 && (p[4] == ' ' || p[4] == '\t')) {
-                char *end;
-                slot = strtol(p + 5, &end, 10);
-                p = end + strspn(end, " \t");
-            }
             // the keys: to the end of the line, without a comment outside "quotes" and trailing blanks
             bool quoted = false;
             char *e = p;
             for (; *e && (quoted || *e != '#'); e++) if (*e == '"') quoted = !quoted;
             while (e > p && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\r')) e--;
             *e = '\0';
-            op.slot = (int)slot;
             op.matName = matName;
             op.matKeys = p;
-            isEdit = matName[0] && slot >= -1 && slot < 1000000 && (paint || p[0]);
-            if (!isEdit) snprintf(msg, sizeof(msg), paint ? "paint-material \"<name>\" [slot <N>] <keys...> (on the selection: one object)"
-                                                          : "material-set \"<name>\" <keys...> (\"-key\" removes one)");
+            isEdit = matName[0] && p[0];
+            if (!isEdit) snprintf(msg, sizeof(msg), "material-set \"<name>\" <keys...> (\"-key\" removes one)");
+        } else if (strcmp(w[0], "paint-add") == 0 || strcmp(w[0], "paint-set") == 0 || strcmp(w[0], "paint-remove") == 0) {
+            // paint-add "<material>"|own ["<atlas>"] faces <+x,...>|slot <N> <x> <y> <w> <h> [nearest]
+            // paint-set "<material>"|own faces <+x,...>|slot <N> [<x> <y> <w> <h>] [nearest|trilinear]
+            // paint-remove "<material>"|own [faces <+x,...>|slot <N>]      (docs/painting.md 10.3)
+            op.kind = w[0][6] == 'a' ? EDIT_PAINT_ADD : w[0][6] == 's' ? EDIT_PAINT_SET : EDIT_PAINT_REMOVE;
+            op.paint.slot = -1;
+            op.paint.filter = -1;
+            size_t rl = strlen(raw);
+            while (rl > 0 && (raw[rl - 1] == '\r' || raw[rl - 1] == ' ' || raw[rl - 1] == '\t')) raw[--rl] = '\0';
+            Stmt ps = { .text = raw, .len = (int)rl };
+            bool okp = Tokenize(&ps) && ps.n >= 2;
+            int t = 2;
+            if (okp && ps.tok[1].quoted && ps.tok[1].e - ps.tok[1].s - 2 < (int)sizeof(matName)) {
+                snprintf(matName, sizeof(matName), "%.*s", ps.tok[1].e - ps.tok[1].s - 2, raw + ps.tok[1].s + 1);
+                op.paint.material = matName;
+            } else if (!(okp && TokIs(&ps, 1, "own"))) okp = false;
+            if (okp && op.kind == EDIT_PAINT_ADD && t < ps.n && ps.tok[t].quoted && ps.tok[t].e - ps.tok[t].s - 2 < (int)sizeof(atlasBuf)) {
+                snprintf(atlasBuf, sizeof(atlasBuf), "%.*s", ps.tok[t].e - ps.tok[t].s - 2, raw + ps.tok[t].s + 1);
+                op.paint.atlas = atlasBuf;
+                t++;
+            }
+            if (okp && TokIs(&ps, t, "faces") && t + 1 < ps.n) {
+                char faces[64];
+                okp = TokCopy(&ps, t + 1, faces, sizeof(faces));
+                for (char *f = faces; okp; ) {
+                    size_t fl = strcspn(f, ",");
+                    int face = -1;
+                    for (int k = 0; k < 6; k++) if (fl == 2 && strncmp(f, PAINT_FACE_NAMES[k], 2) == 0) face = k;
+                    okp = face >= 0 && !(op.paint.faces & (1u << face));
+                    if (okp) op.paint.faces |= (unsigned char)(1u << face);
+                    if (!f[fl]) break;
+                    f += fl + 1;
+                }
+                t += 2;
+            } else if (okp && TokIs(&ps, t, "slot")) {
+                okp = TokInt(&ps, t + 1, &op.paint.slot);
+                t += 2;
+            } else if (op.kind != EDIT_PAINT_REMOVE) okp = false;
+            if (okp && (op.kind == EDIT_PAINT_ADD || (op.kind == EDIT_PAINT_SET && t < ps.n && TokNum(&ps, t, NULL, NULL)))) {
+                for (int k = 0; k < 4 && okp; k++) okp = TokInt(&ps, t + k, &op.paint.rect[k]);
+                t += 4;
+            }
+            if (okp && t < ps.n && op.kind != EDIT_PAINT_REMOVE && (TokIs(&ps, t, "nearest") || (op.kind == EDIT_PAINT_SET && TokIs(&ps, t, "trilinear")))) {
+                op.paint.nearest = TokIs(&ps, t, "nearest");
+                op.paint.filter = (signed char)(op.paint.nearest ? 1 : 0);
+                t++;
+            }
+            isEdit = okp && t == ps.n && (op.kind != EDIT_PAINT_ADD || !op.paint.material || op.paint.atlas);
+            free(ps.tok);
+            if (!isEdit)
+                snprintf(msg, sizeof(msg), "%s", op.kind == EDIT_PAINT_ADD ? "paint-add \"<material>\"|own [\"<atlas>\"] faces <+x,-x,...>|slot <N> <x> <y> <w> <h> [nearest]"
+                                       : op.kind == EDIT_PAINT_SET ? "paint-set \"<material>\"|own faces <+x,...>|slot <N> [<x> <y> <w> <h>] [nearest|trilinear]"
+                                       : "paint-remove \"<material>\"|own [faces <+x,...>|slot <N>]");
         } else if (strcmp(w[0], "id") == 0 && n == 2 && strcmp(w[1], "remove") == 0) {
             op.kind = EDIT_ID_REMOVE;
             isEdit = true;
@@ -3115,7 +3590,7 @@ static int RunScript(MapEditor *E, const char *scriptPath, bool live)
                  ScriptPreview(&sel, delta, NULL, &previewing, &previewFrom);
             snprintf(msg, sizeof(msg), ok ? "preview: %d object%s shifted" : "preview move <dx> <dy> <dz> (needs a selection; refused?)",
                      sel.n, sel.n == 1 ? "" : "s");
-        } else snprintf(msg, sizeof(msg), "unknown command '%s' (select also move turn rotation scale size remove duplicate add id paint-material material-set undo redo print%s)", w[0],
+        } else snprintf(msg, sizeof(msg), "unknown command '%s' (select also move turn rotation scale size remove duplicate add id material-set paint-add paint-set paint-remove undo redo print%s)", w[0],
                         live ? " save disk preview" : "");
 
         if (isEdit && previewOp) {
@@ -3250,6 +3725,85 @@ EditResult MapEditPushPaint(MapEditor *E, const MS_ObjRef *sel, int selCount, co
                      dropped, dropped == 1 ? "" : "s");
         }
     }
+    return res;
+}
+
+EditResult MapEditAmendPaint(MapEditor *E, const MS_ObjRef *sel, int selCount, const EditOp *op, char *msg, int msgSize)
+{
+    EditStep *top = E->work && E->undoCount > 0 ? &E->undo[E->undoCount - 1] : NULL;
+    if (!top || !top->paint || top->hunkCount == 0 || top->hashAfter != E->workHash || E->workHash != scene->hash ||
+        E->loadVersion != scene->loadVersion || E->savedAt >= E->undoCount) {
+        snprintf(msg, msgSize, "paint: nothing to add the edit to (the stroke's step is not on top any more)");
+        return EDIT_FAILED;
+    }
+    if (op->kind != EDIT_PAINT_ADD && op->kind != EDIT_PAINT_SET && op->kind != EDIT_PAINT_REMOVE) {
+        snprintf(msg, msgSize, "paint: only paint ops are added to a step");
+        return EDIT_FAILED;
+    }
+    Ctx C = { .op = op };
+    Patch P = { .text = E->work, .size = E->workSize };
+    EditStep part = { 0 };
+    EditResult res = EDIT_FAILED;
+    char *after = NULL, *before = NULL;
+    EditMore more = { .op = *op };
+    int afterSize, beforeSize;
+    if (!BuildPatch(&C, &P, sel, selCount)) { snprintf(msg, msgSize, "%s", C.why); goto done; }
+    if (!MakeHunks(&P, &part) || !(after = ApplyHunks(E->work, E->workSize, &part, false, &afterSize)) ||
+        !(before = ApplyHunks(E->work, E->workSize, top, true, &beforeSize))) {
+        snprintf(msg, msgSize, "out of memory");
+        goto done;
+    }
+    if (afterSize == E->workSize && memcmp(after, E->work, (size_t)afterSize) == 0) { snprintf(msg, msgSize, "%s: nothing changes", P.what); goto done; }
+    more.material = op->paint.material ? MS_StrDup(op->paint.material) : NULL;
+    more.atlas = op->paint.atlas ? MS_StrDup(op->paint.atlas) : NULL;
+    more.op.paint.material = more.material;
+    more.op.paint.atlas = more.atlas;
+    // The step's text becomes one hunk from the text before it to the text after both: the bytes
+    // between the common head and tail of the two
+    int head = 0, tail = 0;
+    while (head < beforeSize && head < afterSize && before[head] == after[head]) head++;
+    while (tail < beforeSize - head && tail < afterSize - head && before[beforeSize - 1 - tail] == after[afterSize - 1 - tail]) tail++;
+    EditHunk h = { head, MS_StrNDup(before + head, (size_t)(beforeSize - head - tail)), MS_StrNDup(after + head, (size_t)(afterSize - head - tail)),
+                   beforeSize - head - tail, afterSize - head - tail };
+    bool okStrings = h.oldText && h.newText && (!op->paint.material || more.material) && (!op->paint.atlas || more.atlas) &&
+                     MS_RESERVE(top->more, top->moreCap, top->moreCount + 1) && MS_RESERVE(top->hunks, top->hunkCap, 1);
+    if (!okStrings) {
+        free(h.oldText);
+        free(h.newText);
+        snprintf(msg, msgSize, "out of memory");
+        goto done;
+    }
+    char err[512];
+    if (MS_EditSetText(scene, after, afterSize, &E->lastStats, err, sizeof(err)) != MS_RELOADED) {
+        free(h.oldText);
+        free(h.newText);
+        snprintf(msg, msgSize, "the edit would break the map, not applied: %s", err);
+        goto done;
+    }
+    for (int i = 0; i < top->hunkCount; i++) { free(top->hunks[i].oldText); free(top->hunks[i].newText); }
+    top->hunks[0] = h;
+    top->hunkCount = 1;
+    top->hashAfter = Fnv1a64(after, afterSize);
+    top->more[top->moreCount++] = more;
+    more.material = more.atlas = NULL;
+    if (P.selByStmt) ResolveSelByStmt(P.sel, P.selCount);
+    free(E->work);
+    E->work = after;
+    E->workSize = afterSize;
+    E->workHash = top->hashAfter;
+    after = NULL;
+    E->knownHash = scene->hash;
+    snprintf(msg, msgSize, "%s", P.what);
+    res = EDIT_DONE;
+done:
+    free(more.material);
+    free(more.atlas);
+    FreeStep(E, &part);
+    FreePatch(&P);
+    free(C.rw.sp);
+    free(C.rw.pool.s);
+    free(after);
+    free(before);
     return res;
 }
 

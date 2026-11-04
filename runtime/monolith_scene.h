@@ -370,7 +370,11 @@ typedef struct {
     int boxesChanged, modelsChanged, lightsChanged;     // objects without an identical one before / after
     int rangesRebuilt, rangesKept;                      // merged box meshes
     int materialsRebuilt;       // materials appended, or changed only in uv_faces / filter / albedo_map
-                                // (built again while the others were kept; docs/painting.md 9.4)
+                                // or in their paint (built again while the others were kept;
+                                // docs/painting.md 9.2)
+    int instanceBuffersRebuilt; // instanced box buffers filled again (their boxes or paint keys changed)
+    int paintTables;            // paint table uploads (0: the table is unchanged)
+    int paintMeshFiles;         // model files whose paint meshes were built (docs/painting.md 4.5)
     int tilesDirty, lightShadowsDirty;                  // sun shadow tiles / light shadow maps to draw again
     bool fogDirty, aoDirty;                             // fog cache / AO volume to bake again (part or all)
     double ms;                  // the whole call
@@ -613,10 +617,10 @@ int MS_FindEntity(const MS_Scene *scene, MS_EntityId id);
 // ======================================================================================
 // Painting (editor: draw mode; docs/painting.md)
 // ======================================================================================
-// Where on a surface a ray hits (the texture coordinate the albedo map is sampled at), the
-// triangles of a model's material slot, a material's box face layout (`uv_faces`), and
-// textures: read back, provided from memory for package paths that have no file yet, and
-// updated in place (a rectangle and the mipmaps) without a new scene version.
+// Where on a surface a ray hits (the texture coordinate the albedo map is sampled at, and the
+// paint layer's coordinate), the triangles of a model's material slot, textures updated in place
+// without a new scene version, and the paint layer: entries, atlases (provided from memory for
+// paths that have no file yet) and model paint UVs.
 
 typedef struct {
     MS_Hit hit;             // as MS_Raycast (the same object, point, normal and distance)
@@ -628,6 +632,11 @@ typedef struct {
     Vector2 uv;             // where the albedo map is sampled: after uv_faces, uv_scale and
                             // uv_offset, before the wrap
     Vector3 bary;           // models: barycentric coordinates of the hit in the triangle
+    Vector2 paintUv;        // the paint layer's coordinate (docs/painting.md 4.4, 6): 0..1 in the face
+                            // (boxes, oriented as R3D's unit cube) or in the slot's paint domain
+                            // (models: own UVs or the unwrap); -1 -1: a slot that needs an unwrap
+    int paintEntry;         // MS_PaintEntryAt index of the active entry of this face / slot in
+                            // `material`'s atlas; -1: none yet
 } MS_SurfaceHit;
 
 // MS_Raycast, plus where on the surface it hit. False when nothing is hit (out->hit.obj.kind
@@ -643,51 +652,92 @@ bool MS_ModelSlotTriangle(const MS_Scene *scene, int file, int slot, int k, Vect
 // (the mesh's material slot); -1 when out of range
 int MS_ModelSlotTriangleIndex(const MS_Scene *scene, int file, int mesh, int triangle);
 
-// A material's box face layout (`uv_faces`): false when it has none. cells[f] for the faces
-// +x -x +y -y +z -z, and the grid of cells (cols x rows).
-bool MS_MaterialFaceLayout(const MS_Scene *scene, int material, unsigned char cells[6], int *cols, int *rows);
-// The rectangle of face f's cell in 0..1 texture space (inset: with the gutter of 1/64 cell on
-// each side, where the face's 0..1 UVs go). The box meshes use the same function.
-Rectangle MS_FaceCellRect(const unsigned char cells[6], int face, bool inset);
-
-// How the scene draws box `box`, for drawing it alone in an offscreen frame (the draw mode's
-// shader bake): its material, the unit cube its material's boxes are drawn with (R3D's, or the
-// face layout's), and either the material's instance buffer and the box's slot in it
-// (`instanced`: drawn as the scene draws it, so a shader sees the same INSTANCE_* and model-space
-// POSITION) or, for a merged material, the transform that puts the unit cube where the box's
-// merged faces lie (scaled, turned, moved: the same world positions, normals and UVs). False
-// when out of range or the scene has no GPU state.
-typedef struct {
-    R3D_Material material;
-    R3D_Mesh cube;
-    bool instanced;
-    R3D_InstanceBuffer instances;
-    int index;              // instanced: the box's slot in `instances`
-    Matrix transform;       // merged: model matrix of the unit cube
-} MS_BoxDraw;
-bool MS_BoxDrawOf(const MS_Scene *scene, int box, MS_BoxDraw *out);
-
-// The GPU texture the scene loaded for this package path (the first cache entry with it; id 0:
-// none)
-Texture2D MS_TextureFind(const MS_Scene *scene, const char *rel);
-// The albedo texture of model file `file`'s material slot `slot` as the file has it (id 0: none)
-Texture2D MS_ModelSlotTexture(const MS_Scene *scene, int file, int slot);
-// A GPU texture's level 0 as an RGBA8 image (UnloadImage it). False if tex.id is 0.
-bool MS_TextureRead(Texture2D tex, Image *out);
-// Pixels for a package path that the next MS_EditSetText (and any upload from memory) uses
-// instead of the file, also while the file doesn't exist (a new canvas). Copied (as RGBA8);
-// img NULL forgets the path. Kept across live edits; dropped by a load or reload from disk and
-// by MS_Unload. False when out of memory.
-bool MS_TextureProvide(MS_Scene *scene, const char *rel, const Image *img);
 // Uploads rect (texels) of img (RGBA8, the texture's size) into every cached texture with this
 // package path and regenerates their mipmaps; MS_TextureGeneration + 1 (scene->version is not
 // changed). A material with alpha_cutoff > 0 or transparency that uses it also redraws the sun
 // tiles and light shadows its objects reach. False if no texture of img's size has the path.
 // (A provided image of another size than the cached texture makes the next live edit that loads
-// the path load a texture of its size: a canvas resized or laid out anew.)
+// the path load a texture of its size: an atlas that grew.)
 bool MS_TextureUpdate(MS_Scene *scene, const char *rel, const Image *img, Rectangle rect);
 // +1 on every MS_TextureUpdate (frame reuse keys on it)
 unsigned int MS_TextureGeneration(const MS_Scene *scene);
+
+// --- The paint layer (docs/painting.md 3-9). A material with paint keeps its shader, textures and
+// draws; a last stage of its fragment shader composites its atlas over what it computed. Entries
+// are the map's `paint` statements; atlases are package PNGs (straight alpha, RGBA8). A stroke is
+// MS_TextureUpdate on the atlas path (premultiplied on upload).
+
+// A paint entry (one `paint` statement), resolved against this load
+typedef struct {
+    int material;           // materials[] index; -1: a model slot's own material (atlas by file + slot)
+    int line;               // map line of the statement
+    MS_EntityId entity;
+    MS_ObjRef obj;          // the box or model instance it resolved to (kind MS_OBJ_NONE: unresolved)
+    unsigned char faces;    // boxes: bit f for each face +x -x +y -y +z -z sharing the rectangle; models: 0
+    int slot;               // models: the slot; boxes: -1
+    int x, y, w, h;         // the rectangle, texels of the atlas
+    bool nearest;           // `paint own ... paint_filter nearest` (own materials only)
+    bool active;            // drawn: the object draws those faces / that slot with the material, and
+                            // the rectangle lies inside the atlas
+} MS_PaintEntry;
+
+int MS_PaintEntryCount(const MS_Scene *scene);
+const MS_PaintEntry *MS_PaintEntryAt(const MS_Scene *scene, int i);    // NULL when out of range
+
+// The atlas of a material (material >= 0), or of a model file's slot drawn with its own material
+// (material -1, file and slot)
+typedef struct {
+    const char *rel;        // package path of the atlas PNG; NULL: the material has no `paint` key
+    int width, height;      // of the loaded or provided image (0 x 0: none yet)
+    bool nearest;           // paint_filter nearest
+} MS_PaintAtlas;
+bool MS_PaintAtlasOf(const MS_Scene *scene, int material, int file, int slot, MS_PaintAtlas *out);
+
+// Straight-alpha pixels for an atlas path that the next MS_EditSetText (and any upload from
+// memory) uses instead of the file, also while the file doesn't exist (a new or grown atlas).
+// Copied (as RGBA8); img NULL forgets the path. Kept across live edits; dropped by a load or
+// reload from disk and by MS_Unload. False when out of memory.
+bool MS_PaintAtlasProvide(MS_Scene *scene, const char *rel, const Image *img);
+
+// How model file `file`'s slot `slot` maps onto paint (docs/painting.md 4.5)
+typedef enum {
+    MS_PAINTUV_OWN = 0,         // its own UVs (all in 0..1, no overlap)
+    MS_PAINTUV_UNWRAP,          // the file's unwrap (its .paintuv sidecar, or a provided one)
+    MS_PAINTUV_NEEDS_UNWRAP,    // own UVs overlap, repeat or are missing, and there is no unwrap yet
+    MS_PAINTUV_SKINNED,         // refused: the file is skinned (its bone channels are in use)
+    MS_PAINTUV_INVALID,         // out of range or not loaded
+} MS_PaintUvKind;
+MS_PaintUvKind MS_ModelPaintUv(const MS_Scene *scene, int file, int slot);
+
+// Triangle k of MS_ModelSlotTriangle with its paint UVs (own or unwrap) instead of its texture
+// coordinates. False when out of range or the slot needs an unwrap.
+bool MS_ModelSlotPaintTriangle(const MS_Scene *scene, int file, int slot, int k, Vector2 puv[3], Vector3 pos[3]);
+
+// The mesh data of model file `file`'s mesh `mesh` as loaded (R3D's order; positions, texture
+// coordinates, indices), for the editor's unwrap. False when out of range or not loaded.
+bool MS_ModelMeshData(const MS_Scene *scene, int file, int mesh, R3D_MeshData *out);    // not owned
+
+// An unwrap of a whole model file: the contents of its .paintuv sidecar (docs/painting.md 4.5), one
+// entry per mesh of the file in R3D's order. A vertex of the unwrap is a copy of vertex source[k] of
+// the mesh as loaded, with paint UV uv[2k], uv[2k + 1] (unorm16); triangles keep the mesh's order.
+typedef struct {
+    int slot, vertexCount, indexCount;
+    unsigned int *source;
+    unsigned short *uv;
+    unsigned int *indices;
+} MS_PaintUnwrapMesh;
+typedef struct {
+    int meshCount;
+    MS_PaintUnwrapMesh *meshes;
+    unsigned long long fileHash;    // FNV-1a 64 of the model file's bytes (a stale sidecar is ignored)
+} MS_PaintUnwrap;
+// The editor's unwrap of model file `file`, used by the next MS_EditSetText as if it were read
+// from the sidecar. Copied; NULL forgets it. Same lifetime as MS_PaintAtlasProvide.
+bool MS_PaintUnwrapProvide(MS_Scene *scene, int file, const MS_PaintUnwrap *u);
+// The sidecar: written by the editor on save, read by the runtime at load (MS_PaintUnwrapFree it)
+bool MS_PaintUnwrapWrite(const char *path, const MS_PaintUnwrap *u);
+bool MS_PaintUnwrapRead(const char *path, MS_PaintUnwrap *out);
+void MS_PaintUnwrapFree(MS_PaintUnwrap *u);
 #endif
 
 #ifdef MONOLITH_EDITOR

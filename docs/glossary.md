@@ -8,19 +8,17 @@ Terms used across these pages, in alphabetical order.
 
 **Bundle:** the folder the game writes for one request, `requests/<date>_<slug>/`: the prompt, screenshots, the camera, what the crosshair hit, the selection, the regions and the volumes, and later the result.
 
-**Canvas:** the image an object is painted on in draw mode: a PNG of the package (`textures/paint/paint_<id>.png` for an object's own, or a texture the map already has in shared mode), held in memory while you paint and written by Ctrl+S ([painting.md](painting.md)).
-
 **Compiled map** (`<name>.mapb`): a map's text compiled by `monolith --compile` (and by `--export`) into fixed-size binary records. Games and the game-style examples load it; their runtime has no text parser. The `.map` text stays the source: edit it and compile again ([compiled-map.md](compiled-map.md)).
 
 **Coordinator:** the one Claude Code session the game opens in its own terminal. It takes requests from the queue and hands each to a subagent ([request-queue.md](request-queue.md)).
 
-**Draw mode:** key B in spectator mode: paint on boxes and models with a brush, the colour picker and the draw panel. The first stroke gives an object its own material and canvas; strokes are undoable with the edits and saved with Ctrl+S ([painting.md](painting.md), [user-guide.md](user-guide.md)).
+**Draw mode:** key B in spectator mode: paint on boxes and models with a brush, the colour picker and the draw panel. The first stroke on a face or model part gives it a rectangle in its material's paint atlas; strokes are undoable with the edits and saved with Ctrl+S ([painting.md](painting.md), [user-guide.md](user-guide.md)).
 
 **Edit mode, manual edit:** key M in spectator mode: move, turn, remove, duplicate or add the selected objects yourself. Each edit is a minimal text edit to the map file (with undo / redo); no request is made ([user-guide.md](user-guide.md)).
 
 **Entity, entity id:** every box, model instance and light of a loaded map, with its data (transform, source line, model file) attached as components. Its id stays the same across reloads: the line's `id n` (or a key from the line's text) plus the object's index within the line ([map-format.md](map-format.md) §2.9).
 
-**Face groups** (`uv_faces`): which of a box's six faces share texture space. Faces with the same number share one cell of the material's texture; without the key every face shows the whole texture ([map-format.md](map-format.md)).
+**Face groups** (`uv_faces`): which of a box's six faces share texture space. Faces with the same number share one cell of the material's texture; without the key every face shows the whole texture ([map-format.md](map-format.md)). In draw mode the faces of one `paint` entry share one rectangle of the paint atlas (the draw panel's Faces section; [painting.md](painting.md)).
 
 **Fog cache** (`--fog-cache`): the volumetric fog's sun visibility baked once per load into a 3D texture, so the fog doesn't sample the shadow map every frame. A quality trade-off used by the high, medium and low presets.
 
@@ -33,6 +31,8 @@ Terms used across these pages, in alphabetical order.
 **IBL, ambient map:** image-based lighting: the soft light from the sky that reaches every surface, computed from a (procedural) sky image.
 
 **Map package:** a folder `maps/<name>/` with the `.map` file, `MAP.md`, `ASSETS.md` and the map's shaders, models and textures. Paths inside it are relative, so it can be copied or exported as a whole.
+
+**Paint atlas:** the image a material's paint lives in (`textures/paint/<material>.png`; a model part's own material: `textures/paint/<file>_s<N>.png`): each painted box face or model part has a rectangle there, named by a `paint` line of the map; drawn over the material by its paint stage ([painting.md](painting.md)).
 
 **Patch N:** a numbered local change to R3D. Each is described, with the reason and the diff, in `submodules/r3d/patches.md`; features marked "patch N" don't work with an unpatched R3D.
 

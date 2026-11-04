@@ -228,6 +228,11 @@ R3D_SurfaceShader* R3D_LoadSurfaceShaderAlias(R3D_SurfaceShader* shader)
     return alias;
 }
 
+void R3D_SetSurfaceShaderSortKey(R3D_SurfaceShader* shader, unsigned int key)
+{
+    if (shader) shader->sortKey = key;  // (local patch 27)
+}
+
 void R3D_UnloadSurfaceShader(R3D_SurfaceShader* shader)
 {
     r3d_shader_custom_free(shader);

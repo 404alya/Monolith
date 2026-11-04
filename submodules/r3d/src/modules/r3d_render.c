@@ -729,11 +729,12 @@ static inline float calculate_max_distance_to_camera(const BoundingBox* aabb, co
     return maxDistSq;
 }
 
-// Sort key of a custom shader: its creation serial, 0 = none (local patch 17; was its address,
-// which differs from run to run, so identical runs drew in different orders)
+// Sort key of a custom shader: its creation serial, or the key the caller set (local patch 27); 0 =
+// none (local patch 17; was its address, which differs from run to run, so identical runs drew in
+// different orders)
 static inline uintptr_t shader_sort_key(const struct R3D_ShaderCustom* shader)
 {
-    return shader ? (uintptr_t)shader->serial : 0;
+    return shader ? (uintptr_t)shader->sortKey : 0;
 }
 
 static inline void sort_fill_state_data(r3d_render_sort_state_t* state, const r3d_render_call_t* call)

@@ -506,7 +506,7 @@ int EditModeUnsaved(const EditMode *m)
 
 bool EditModeSave(EditMode *m, char *msg, int msgSize)
 {
-    bool ok = MapEditSaveAll(&m->ed, msg, msgSize);     // (with the draw mode's canvases)
+    bool ok = MapEditSaveAll(&m->ed, msg, msgSize);     // (with the draw mode's paint atlases)
     Say(m, !ok, msg);
     TraceLog(ok ? LOG_INFO : LOG_WARNING, "monolith: %s", msg);
     return ok;
