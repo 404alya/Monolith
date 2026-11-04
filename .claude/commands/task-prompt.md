@@ -7,6 +7,8 @@ Draft a task prompt for this round of monolith engine or feature work: $ARGUMENT
 
 Read `CLAUDE.md` and the `large-engine-work` skill (`.claude/skills/large-engine-work/SKILL.md`) first, and the sources the goal touches, so the prompt names real files and flags. Show the draft to the developer; don't start the work.
 
+**Always store the draft in a file** as well: write it (Markdown, exactly the text shown) to `/tmp/monolith-task-prompts/<YYYY-MM-DD>_<short-slug>.md` (create the folder when missing; a new name for a revised draft, e.g. `…-v2.md`, never overwrite or delete an earlier one) and give the developer the full path. The file is a hand-off copy outside the repo, not an instruction file.
+
 A task prompt for a new round only needs what is new; the `large-engine-work` skill, the hard rules (`CLAUDE.md`), the other skills and the documentation (`docs/`) are already the agent's knowledge. A good task prompt has:
 
 1. **Goal**: what the developer wants, as numbered outcomes, and why.
