@@ -5024,3 +5024,35 @@ Files: `include/r3d/r3d_surface_shader.h`, `src/r3d_surface_shader.c`, `src/modu
 monolith's runtime (`ShaderSortKey` in `runtime/monolith_scene.c`) gives every scene material's alias the key `material index + 1`, and a paint alias of a material without a shader (or of a model slot's own material) the key 0, so the draw order is the unpainted load's whatever is painted and in whatever order live edits made the aliases. Without `MS_PATCHED_R3D` it keeps the earlier workaround (live edits make the later materials' aliases again).
 
 **Verification.** Against the build before the patch (the round's phase-0 base): every map in `maps/` and `tests/models`, `tests/rotated`: `--dump-boxes` identical, 49 shot pairs (every viewpoint, yaw 0–300) 0 pixels. The two repros above: 0 pixels (bark entry at all 5 pine_forest viewpoints; live vs fresh load on monolith view 2). Alpha-0 paint entries on every kind of surface (the verifiers' packages: 7 views; monolith's six shader surfaces: 7 views; pine_forest ground + Kenney tree: 5 views): 0 pixels. `./build.sh`, `--win`, `examples/build.sh` (+ `test`) without warnings; `tools/leakcheck.sh` (+ `--asan`): zero leaks of ours.
+
+## Patch 28: a per-material opt-out of the depth pre-pass (2026-11-05)
+
+**Symptom.** `maps/monolith`'s voxel weeds (`shaders/weed.glsl`, materials `weed dry` / `olive` / `brown` / `moss`) are ~650k triangles a frame with a cheap fragment shader (making the fragment trivial saved nothing). Patch-free R3D with monolith's depth pre-pass (the code in `pass_scene_geometry`) draws every such mesh twice, the depth-only pre-pass and then the GL_EQUAL shading pass, so on an integrated GPU the vertex / triangle cost of the weeds is paid twice for no saved fragment work.
+
+**Cause.** `geometry_call_prepassable()` decides per draw call whether it is pre-passed, from the depth, stencil and alpha-test state of its material only; there is no way to say "this material's shader is cheap, draw it once".
+
+**Change.** `R3D_Material` gains `bool noDepthPrepass` (default false in `R3D_MATERIAL_BASE`; zero-initialised materials, e.g. the importer's, are false too). `geometry_call_prepassable()` returns false when it is set, so the draw takes the path every non-prepassable draw already takes: one `GEOMETRY_RASTER_FULL` draw in the shading pass with the material's own depth test (LESS / LEQUAL) and depth write, and its own stencil state. Pre-passed draws still lay down their depth first, so the opted-out draw is occluded by them through the ordinary depth test (early-Z); an opted-out draw that is nearer than a pre-passed surface makes that surface fail its GL_EQUAL test, as any other nearer draw does. The field is not part of the draw sort key (`sort_fill_state_data()`) and needs no entry there: R3D sorts calls, it never merges them, so two materials that differ only in this field stay two draws, and in the sort they are ordered by priority, shader serial / sort key, textures and state as before.
+
+Files: `include/r3d/r3d_material.h`, `src/r3d_draw.c`.
+
+```diff
+--- include/r3d/r3d_material.h  (R3D_MATERIAL_BASE)
+         .unlit = false,                                 \
++        .noDepthPrepass = false,                        \
+--- include/r3d/r3d_material.h  (R3D_Material)
+     bool unlit;                             ///< If true, material does not participate in lighting (default: false)
++    bool noDepthPrepass;                    ///< If true, never drawn in the depth pre-pass: one shading draw, depth-tested normally (default: false) (local patch 28)
+--- src/r3d_draw.c  (geometry_call_prepassable)
+-    return material->alphaCutoff <= 0.0f
++    // Local patch 28: a material may opt out (cheap shader, many triangles: the pre-pass would
++    // only double its vertex cost); it is then drawn once, as any non-prepassable draw
++    return !material->noDepthPrepass
++        && material->alphaCutoff <= 0.0f
+         && (depthMode == R3D_COMPARE_LESS || depthMode == R3D_COMPARE_LEQUAL)
+```
+
+monolith's runtime sets the field from the material key `prepass off` (`MaterialDrawMode` in `runtime/monolith_scene.c`, under `MS_PATCHED_R3D`; upstream R3D has no such field and always pre-passes, so the key changes nothing there). Compiled maps store it (`CmMaterial.noPrepass`, `CM_VERSION` 6).
+
+**Look: the winner at equal depth.** Before, coplanar fragments of a pre-passed and a non-prepassed draw were resolved by draw order (stencil tie-break, first drawn wins); an opted-out draw now always loses an exact tie against a pre-passed surface (that surface's depth is already in the buffer and the opted-out draw tests LESS). Only contact pixels change (below).
+
+**Verification.** Against the build before the patch (`build/linux/monolith-base`): `--dump-boxes` of `maps/monolith` and `maps/pine_forest` identical. The code alone (a package without `prepass off`) is pixel-identical in 19 shots (viewpoints 1–7, yaw sweeps 0/60/…/300 at `--pos 8 13.6 -70 --look y -10` and `--pos 20 2 -100 --look y 15`). With the four weed materials `prepass off`: 7 of the 19 shots change, 1–27 pixels each of 1600 × 900 (≤ 3 pixels > 2/255, max 17/255), at weed / rubble / ground contacts. Frame time, machine C (Intel HD 5500, Mesa 25.2.8, i5-5300U; headless at the native 1366 × 768 in a scratch build, the developer's settings with render scale 1; 150-frame screening runs, cool-down below 68 °C before each), 5 interleaved pairs (3 A-first, 2 B-first): frame paired differences +1.21 / −0.48 / −0.51 / −1.13 / −0.36 ms (median −0.48 ms, −1.3 %; the first pair's B ran its non-geometry passes ~3 ms slower, a clock-state flip), geometry pass +0.32 / −0.41 / −0.57 / −0.83 / −0.50 ms (median −0.50 ms, −5 %). Reports `benchmark/2026-11-05_023821` … `_025151` (local).

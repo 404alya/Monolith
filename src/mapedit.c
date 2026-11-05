@@ -1709,7 +1709,7 @@ static bool MaterialLineIs(const Patch *P, int l, const char *name, Stmt *st)
 // and numbers, samplers a name and a path, the others the numbers or the quoted path after them
 static int KeyEnd(const Stmt *st, int k)
 {
-    static const char *const WORD[] = { "filter", "wrap", "cull", "transparency", "blend", "unlit", "instanced", "inherit",
+    static const char *const WORD[] = { "filter", "wrap", "cull", "transparency", "prepass", "blend", "unlit", "instanced", "inherit",
                                         "paint_filter" };
     char key[32];
     if (!TokCopy(st, k, key, sizeof(key)) || key[0] == '-') return k + 1;

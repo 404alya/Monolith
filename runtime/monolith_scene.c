@@ -115,6 +115,10 @@
 //         emission R G B  emission_energy f  emission_map "p"
 //         uv_scale u v  uv_offset u v  alpha_cutoff f (0 = never discards; allows the depth
 //         pre-pass)  cull back|front|none  transparency off|prepass|alpha
+//         prepass on|off   [on] off: this material is never drawn in the depth pre-pass, only once in
+//                                    the shading pass (for a cheap shader on very many triangles, where
+//                                    the pre-pass would only double the vertex cost). With R3D patch 28;
+//                                    upstream R3D always pre-passes, so the key changes nothing there
 //         blend alpha|additive|add_alpha|multiply|premultiplied  unlit on|off  priority n
 //         inherit albedo|normal|orm|emission|all   (model overrides: keep the model's own map)
 //         wrap repeat|clamp|mirror   wrapping of this material's textures and samplers
@@ -295,6 +299,7 @@ typedef struct {
     int shaderLine, mapLine[MAP_COUNT];  // map lines of the keys, for load errors
     int wrap;                           // texture wrapping: 0 repeat (default), 1 clamp, 2 mirror
     bool instanced;                     // `instanced on`: boxes stay instanced cubes
+    bool noPrepass;                     // `prepass off`: no depth pre-pass draw (R3D patch 28, MaterialDrawMode)
     bool hasFaces;                      // `uv_faces`: uvFaces[f] is the texture cell of box face f (+x -x +y -y +z -z)
     unsigned char uvFaces[6];
     unsigned char filter;               // `filter`: TEX_TRILINEAR (default) or TEX_NEAREST, for its four maps
@@ -3035,6 +3040,11 @@ static bool ParseMaterial(Parser *P, Token *tok, int n)
             ONE_WORD();
             if (!Keyword(P, v[0], TR, 3, "transparency mode", &e)) return false;
             m->transparencyMode = (R3D_TransparencyMode)e;
+        } else if (strcmp(k, "prepass") == 0) {
+            bool on;
+            ONE_WORD();
+            if (!OnOff(P, v[0], &on)) return false;
+            D->noPrepass = !on;
         } else if (strcmp(k, "blend") == 0) {
             static const char *const BL[] = { "alpha", "additive", "add_alpha", "multiply", "premultiplied" };
             int e;
@@ -3998,10 +4008,10 @@ static bool ParseText(Parser *P, const char *text, int size)
 // reader (CmRead*) in ReadCompiled's list after the sections its records point into, and the
 // matching section writer (CmPut*). The layout goes into docs/compiled-map.md.
 
-#define CM_VERSION          5           // MS_COMPILED_VERSION: bump on any change to a record or section
+#define CM_VERSION          6           // MS_COMPILED_VERSION: bump on any change to a record or section
 #define CM_VERSION_OLDEST   2           // the oldest version still read (2: no box turns section; 2 and 3:
                                         // materials without uvFaces and filter; 2 to 4: materials without
-                                        // paint, no paint section)
+                                        // paint, no paint section; 2 to 5: materials without noPrepass)
 #define CM_BYTE_ORDER       0x01020304u
 #define CM_NONE             0xFFFFFFFFu // a string field without a string
 #define CM_MAX_ENV          4096        // env records (the key tables have ~120 keys)
@@ -4048,6 +4058,7 @@ typedef struct {
 // 255 = none); filter: TEX_* (`filter`); pad: 0. A version 2 or 3 record ends before uvFaces.
 // Version 5: paint: the paint atlas (`paint`, CM_NONE for none); paintFilter: TEX_* (`paint_filter`);
 // pad2: 0. A version 4 record ends before paint.
+// Version 6: noPrepass: 0 or 1 (`prepass off`). A version 5 record ends before noPrepass.
 typedef struct {
     uint32_t name, shader, maps[MAP_COUNT];     // maps: albedo, normal, orm, emission
     int32_t line, shaderLine, mapLine[MAP_COUNT];
@@ -4060,10 +4071,12 @@ typedef struct {
     uint8_t uvFaces[6], filter, pad;            // version 4
     uint32_t paint;                             // version 5
     uint8_t paintFilter, pad2[3];
+    uint32_t noPrepass;                         // version 6
 } CmMaterial;
 
 #define CM_MATERIAL_V3_SIZE ((uint32_t)offsetof(CmMaterial, uvFaces))  // a version 2 / 3 material record
 #define CM_MATERIAL_V4_SIZE ((uint32_t)offsetof(CmMaterial, paint))    // a version 4 material record
+#define CM_MATERIAL_V5_SIZE ((uint32_t)offsetof(CmMaterial, noPrepass)) // a version 5 material record
 
 // A `paint` statement (version 5), its entity resolved to the object: material (CM_NONE: the model
 // slot's own material), kind (0 a box, 1 a model instance), object (index into the boxes or models
@@ -4241,11 +4254,12 @@ static void CmRecord(const CmReader *R, int id, uint32_t i, void *out)
 }
 
 // The record size of section `id` in a file of `version` (a material had no uvFaces before 4, no
-// paint before 5)
+// paint before 5, no noPrepass before 6)
 static uint32_t CmRecordSize(uint32_t version, uint32_t id)
 {
     if (id == CM_MATERIALS && version < 4) return CM_MATERIAL_V3_SIZE;
     if (id == CM_MATERIALS && version < 5) return CM_MATERIAL_V4_SIZE;
+    if (id == CM_MATERIALS && version < 6) return CM_MATERIAL_V5_SIZE;
     return CM_SECTION[id].size;
 }
 
@@ -4501,6 +4515,7 @@ static bool CmMaterialInRange(const CmMaterial *c)
            c->inherit <= 15 &&
            c->unlit <= 1 &&
            c->instanced <= 1 &&
+           c->noPrepass <= 1 &&
            c->filter <= TEX_NEAREST &&
            c->pad == 0 &&
            c->paintFilter <= TEX_NEAREST &&
@@ -4547,6 +4562,7 @@ static void CmFillMaterial(const CmMaterial *c, MS_Material *M, MatDef *D)
     D->wrap = c->wrap;
     D->inherit = c->inherit;
     D->instanced = c->instanced == 1;
+    D->noPrepass = c->noPrepass == 1;
     D->hasFaces = c->uvFaces[0] != 255;
     if (D->hasFaces) memcpy(D->uvFaces, c->uvFaces, sizeof(D->uvFaces));
     D->filter = c->filter;
@@ -5382,7 +5398,7 @@ static void CmPutMaterials(CmWriter *W, const SceneData *d)
             .uniformFirst = W->count[CM_UNIFORMS], .uniformCount = (uint32_t)D->uniformCount,
             .samplerFirst = W->count[CM_SAMPLERS], .samplerCount = (uint32_t)D->samplerCount,
             .uvFaces = { 255, 255, 255, 255, 255, 255 }, .filter = D->filter,
-            .paintFilter = D->paintFilter,
+            .paintFilter = D->paintFilter, .noPrepass = D->noPrepass,
         };
         if (D->hasFaces) memcpy(c.uvFaces, D->uvFaces, sizeof(c.uvFaces));
         for (int k = 0; k < MAP_COUNT; k++) {
@@ -8409,6 +8425,9 @@ static void MaterialDrawMode(SceneData *d, int i, char *err, int errSize)
     // which for the instanced unit cube are the cube at the origin, so a mesh would be lit differently.
     // Those that also never discard can hide another box's face (see FindHiddenFaces)
     D->merge = !D->instanced && !needsCube && m->cullMode == R3D_CULL_BACK && m->transparencyMode == R3D_TRANSPARENCY_OPAQUE;
+#ifdef MS_PATCHED_R3D   // R3D patch 28; upstream R3D always pre-passes
+    m->noDepthPrepass = D->noPrepass;
+#endif
     D->occluder = D->merge && !cutout && m->billboardMode == R3D_BILLBOARD_DISABLED && m->albedo.color.a == 255 &&
                   !D->maps[MAP_ALBEDO] && m->alphaCutoff <= 1.0f;
 }

@@ -182,6 +182,12 @@ Lessons:
 - **Draw order is part of the look.** R3D sorts draws by its shader serial (patch 17) before textures, and the first draw wins at equal depth. A material that gains a shader (or an alias made again by a live edit) moved in that order and changed which of two touching surfaces showed (157 pixels where trunks meet the ground, from an alpha-0 paint entry). R3D patch 27 lets the caller set the sort key; the runtime gives each scene material its load's key whatever is painted.
 - **R3D's surface-shader parser is textual:** entry points are found by the text `void vertex` / `void fragment`, global code goes into both stages, varyings only into the stage sections, and a token starting with `flat ` is taken for a varying. Wrapping a shader means renaming its entry functions under stage guards and writing its varyings as `in` / `out` in place; the 16 KB source limit is met by stripping comments.
 
+## Private maps and the weed pre-pass (2026-11-05)
+
+- **`maps/monolith` is a submodule of its own closed-source repository** (`113f06a`): this public repo holds only the pointer, never the package's files. Map changes are committed in the submodule, then the pointer here. Merging a newer package with local work: three-way, with the pre-bake backup as base, keeping all of the newer package's content and adding only the bakes and engine-driven keys.
+- **R3D patch 28 (`prepass off`):** measured first (flat `fragment()` saved nothing, removing the weeds 2.2 ms), so the weeds' cost was triangles drawn twice. A per-material opt-out was chosen over a heuristic (triangles ÷ shader cost isn't known to R3D) and over greedy-meshing the voxels (larger, later). Gain −0.5 ms on machine C, smaller than the estimate (~1 ms): the depth-only draws were cheaper than the shading draws.
+- **Volumetric fog on an integrated GPU:** the developer asked why it is heavy before making it cheaper. The answer (r3d-pitfalls §1): the map's fade turns off the shader's shortcuts, so sky pixels march fully, and the per-step lookup dominates. Next: skip lookups in uniformly lit or shadowed air (bit-identical), then a closed form for fully lit rays.
+
 ## The instruction files
 
 Superseded layouts, for reading old bundles, commits and notes; the current layout is `CLAUDE.md` + `.claude/skills/` + `docs/`.

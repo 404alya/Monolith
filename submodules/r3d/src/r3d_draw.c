@@ -1586,7 +1586,10 @@ bool geometry_call_prepassable(const r3d_render_call_t* call)
     const R3D_Material* material = &call->mesh.material;
     R3D_CompareMode depthMode = material->depth.mode;
     R3D_StencilState stencil = material->stencil;
-    return material->alphaCutoff <= 0.0f
+    // Local patch 28: a material may opt out (cheap shader, many triangles: the pre-pass would
+    // only double its vertex cost); it is then drawn once, as any non-prepassable draw
+    return !material->noDepthPrepass
+        && material->alphaCutoff <= 0.0f
         && (depthMode == R3D_COMPARE_LESS || depthMode == R3D_COMPARE_LEQUAL)
         && stencil.mode == R3D_COMPARE_ALWAYS
         && stencil.opZFail == R3D_STENCIL_KEEP
