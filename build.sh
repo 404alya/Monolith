@@ -131,8 +131,9 @@ if [[ $WIN == 1 ]]; then
   # builds before --export needed the repo (src/export.c)
   rm -rf "$OUT/resources" "$OUT/maps" "$OUT/runtime"
   cp -r "$ROOT/maps" "$OUT/maps"
-  # The editor's font is compiled in (src/font_outfit.h); the OFL wants its licence next to it
+  # The editor's fonts are compiled in (src/font_outfit.h, src/font_pixelify.h); the OFL wants their licences next to them
   cp "$ROOT/resources/fonts/outfit/OFL.txt" "$OUT/OFL-Outfit.txt"
+  cp "$ROOT/resources/fonts/pixelify/OFL.txt" "$OUT/OFL-PixelifySans.txt"
 
   echo "built: build/win/monolith.exe"
   if [[ "${1:-}" == "run" ]]; then
@@ -230,8 +231,9 @@ GLIBC_WRAP=acosf,asinf,atan2f,sqrtf,fmod,fmodf,hypot,hypotf,__isoc23_strtoul,__i
 
 rm -rf "$OUT/resources" "$OUT/maps" "$OUT/runtime"
 cp -r "$ROOT/maps" "$OUT/maps"
-# The editor's font is compiled in (src/font_outfit.h); the OFL wants its licence next to it
+# The editor's fonts are compiled in (src/font_outfit.h, src/font_pixelify.h); the OFL wants their licences next to them
 cp "$ROOT/resources/fonts/outfit/OFL.txt" "$OUT/OFL-Outfit.txt"
+cp "$ROOT/resources/fonts/pixelify/OFL.txt" "$OUT/OFL-PixelifySans.txt"
 
 echo "built: ${OUT#"$ROOT/"}/monolith"
 # The profiling tool runs perf on the binary next to it. Not a game flag: the game stays as it is.

@@ -45,7 +45,7 @@
 #include <time.h>
 
 #define PAINT_DIR       "textures/paint/"
-#define DRAW_COLOR      (Color){ 120, 210, 255, 255 }
+#define CURSOR_COLOR    (Color){ 120, 210, 255, 255 }   // the brush cursor (scene-side: drawn on the surface in 3D)
 #define WARN_TIME       3.0f
 #define SUBDIV_DEPTH    10
 #define STROKE_KEY      1000        // EditModeConfirm's key for a stroke (LMB again within 3 s)
@@ -2696,8 +2696,11 @@ int DrawModeDrawHud(const DrawMode *dm, const EditMode *em, int x, int y)
     int n = EditModeUnsaved(em);
     if (n > 0) snprintf(unsaved, sizeof(unsaved), "  |  %d unsaved edit%s", n, n == 1 ? "" : "s");
     Color c = dm->color;
-    UiHudText(TextFormat("DRAW  %s%s  #%02X%02X%02X a%d%s%s", PEN_NAMES[dm->pen], dm->pen == PEN_FILL ? "" : TextFormat(" %d px", dm->size),
-                         c.r, c.g, c.b, c.a, target, unsaved), x, y, UI_HUD_LINE, UI_S, Fade(DRAW_COLOR, 0.95f));
+    // The mode name as a mark in the draw mode's colour, the rest in HUD text (their backdrop
+    // strips abut: UiHudText's starts 6 px left of its text)
+    int rx = x + UiHudMark("DRAW", x, y, UI_HUD_LINE, UI_S, UI_MODE_DRAW);
+    UiHudText(TextFormat("%s%s  #%02X%02X%02X a%d%s%s", PEN_NAMES[dm->pen], dm->pen == PEN_FILL ? "" : TextFormat(" %d px", dm->size),
+                         c.r, c.g, c.b, c.a, target, unsaved), rx, y, UI_HUD_LINE, UI_S, UI_TEXT);
     return UI_HUD_LINE;
 }
 
@@ -2706,12 +2709,13 @@ int DrawModeDrawMessages(const DrawMode *dm, int x, int y)
     if (!dm->active) return 0;
     int y0 = y;
     if (dm->refusal[0] && !dm->onPanel) {
-        UiHudText(dm->refusal, x, y, UI_HUD_LINE, UI_S, UI_ERROR);
+        UiHudMark(dm->refusal, x, y, UI_HUD_LINE, UI_S, UI_ERROR);
         y += UI_HUD_LINE;
     }
     if (dm->messageTime > 0.0f) {
-        Color mc = dm->messageError ? UI_ERROR : DRAW_COLOR;
-        UiHudText(dm->message, x, y, UI_HUD_LINE, UI_S, Fade(mc, fminf(dm->messageTime, 1.0f)));
+        float fade = fminf(dm->messageTime, 1.0f);
+        if (dm->messageError) UiHudMark(dm->message, x, y, UI_HUD_LINE, UI_S, UiAlpha(UI_ERROR, fade));
+        else UiHudText(dm->message, x, y, UI_HUD_LINE, UI_S, UiAlpha(UI_TEXT, fade));
         y += UI_HUD_LINE;
     }
     return y - y0;
@@ -3018,7 +3022,7 @@ void DrawModeDrawCursor(const DrawMode *dm, Camera3D cam)
     if (g->uv.x < 0.0f || g->w <= 0 || g->h <= 0) return;     // (a model before its unwrap: no paint coordinates yet)
     DesignerBeginOverlay3D(cam);
     cursorEye = cam.position;
-    Color col = Fade(DRAW_COLOR, 0.95f);
+    Color col = Fade(CURSOR_COLOR, 0.95f);
     if (dm->pen == PEN_FILL) CursorFill(dm, col);
     else {
         // The pen's footprint in the rectangle's texels about the hit (docs/painting.md 7.2)
@@ -3032,7 +3036,7 @@ void DrawModeDrawCursor(const DrawMode *dm, Camera3D cam)
             // soft pen's solid core a fainter ring inside)
             CursorRing(dm, tx, ty, s * 0.5f, tx, ty, col, dm->pen == PEN_ERASER);
             if (dm->pen == PEN_SOFT && dm->hardness > 0.05f && dm->hardness < 0.95f)
-                CursorRing(dm, tx, ty, s * 0.5f * dm->hardness, tx, ty, Fade(DRAW_COLOR, 0.45f), false);
+                CursorRing(dm, tx, ty, s * 0.5f * dm->hardness, tx, ty, Fade(CURSOR_COLOR, 0.45f), false);
         }
     }
     DesignerEndOverlay3D();

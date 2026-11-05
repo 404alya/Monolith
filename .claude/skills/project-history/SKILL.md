@@ -94,6 +94,15 @@ The editor's text moved from raylib's 10 px bitmap font (scaled to 16–24 px: b
 - **Rounded shapes from the atlas, not raylib's `DrawRectangleRounded*`:** the first version with raylib's rounded rectangles made the overlay +0.14 ms per frame (0.22 → 0.36 ms, measured around the UI block); nine-slices from atlas discs brought it to +0.05 ms, and key caps baked per line size (3 quads each) to within ~0.005 ms of the old UI.
 - **Loaded on first use**, so headless and plain `--shot` runs never create it; plain shots and `view.png` in bundles stay pixel-identical. `view-marked.png` labels changed with the look.
 
+## The editor UI restyle (2026-11-05)
+
+The editor UI read as generic (a warm amber accent, pastel status colours, pills and bordered boxes everywhere). It now follows the developer's site, notfound404.dev; the spec is `docs/ui-design.md`. The choices:
+- **Monochrome, colour only as meaning:** translucent black panels, white text at the site's alpha tiers, no accent colour (focus and selection are pure white). Pink / green / orange / yellow / red appear only as a status mark (a 2 px bar + text, the site's `border-l-2` badges), so a colour on screen always says something.
+- **No backdrop blur:** it would need an extra pass over the scene every frame; translucency plus a baked soft halo (8 quads, the site's dark box-shadow) stand in. No hero glow and no custom cursor (an editor over a live scene has neither; the site's cursor script is empty anyway). No `active:scale-90` (scaled text blurs).
+- **Pixelify Sans, ×3, titles only:** a pixel face is crisp only on its grid (≈ 91/1000 em), which no integer pixel height of stb_truetype matches. It is rasterised at 13 px (cell ≈ 1 px), thresholded into whole pixels and enlarged ×3 with nearest sampling: one crisp size (capitals 21 px). The developer chose ×3 over ×2 (14 px capitals looked thin next to Outfit); at a 39 px line it is too tall for the HUD's 20 px lines, so HUD mode names are marks in Outfit.
+- **Request images unchanged:** the region / volume number tabs that `view-marked.png` carries keep the old filled pill (`UiTag`), and the outline colours are scene-side constants, so the request subagents see the same markers as before.
+- **Before / after gallery:** one script makes a `--shot --shot-hud` per surface on one map (a dark floor and a bright sky in view); the same script made both galleries.
+
 ## CPU profiling (2026-10-25)
 
 A measuring round, no optimisation: where the CPU's time goes in a frame and in a map load, on machine A (AMD CPU, NVIDIA driver). The method is the `benchmarking` skill's "CPU profiling"; the numbers and the ranked candidates are in `measurements.md`. The choices:

@@ -157,6 +157,13 @@ Outfit embedded font + restyled overlay (`src/ui.c`) against the build before it
   - Key caps baked per line size into the atlas, drawn as 3-slices: **0.220 vs 0.216 ms reused (+0.004), 0.247 vs 0.235 ms spinning (+0.011)**, 4 interleaved pairs each; whole frames 0.611 → 0.613 ms and 5.31 → 5.33 ms (+0.3%).
 - Final full runs (600 frames, uninstrumented), interleaved: still + reuse 4 pairs −0.5 / +3.5 / +6.3 / +0.8% (median +2.2%), spinning 3 pairs −2.5 / +1.2 / +5.8% — within the clock-state noise.
 
+## Editor UI restyle (2026-11-05, machine A)
+
+The restyle after notfound404.dev (`docs/ui-design.md`: translucent panels with a baked halo, Pixelify titles, status marks, flat key caps) against HEAD `113f06a`. Machine A: NVIDIA GeForce RTX 4050 Laptop GPU, driver 615.71.09, AMD Ryzen 7 7435HS, Linux 7.2.5-1-cachyos. Default map, `--bench --headless --bench-still --frame-reuse --bench-window 4 --bench-frames 150`, `__GL_SYNC_TO_VBLANK=0`.
+- **The UI block itself** (instrumented scratch builds as above: `rlDrawRenderBatchActive` + `glFinish` + `GetTime` around the HUD / overlay block, never committed), 4 interleaved pairs: base 0.1405 / 0.1417 / 0.1419 / 0.1386 ms, restyle 0.1509 / 0.1257 / 0.1247 / 0.1343 ms per frame; means 0.141 vs. 0.134 ms (−5 %, within the noise). The spectator HUD only: the bench opens no panel.
+- **Atlas:** 1024 × 808 → 1024 × 1047 gray-alpha (1.65 → 2.14 MB), from the Pixelify face (one size, ×3) and the 43 × 43 halo sprite.
+- Plain `--bench --headless` full runs not made: the batching is unchanged (one texture, text and shapes in one batch) and plain shots draw no UI.
+
 ## CPU profile: frames and map loads (2026-10-25, machine A)
 
 Measuring only; nothing below is implemented. Method: the `benchmarking` skill, "CPU profiling" (`./build.sh profile`, `tools/profile.sh`). Setup: NVIDIA GeForce RTX 4050 Laptop GPU, driver 615.71.09, AMD Ryzen 7 7435HS, Linux 7.2.5-1-cachyos, 1920 × 1006 headless, ultra; perf 7.2.11, `cycles:u` every 5,692,478 cycles (`perf_event_max_sample_rate` was 2000, lowered by the kernel itself), `--call-graph dwarf,16384`, `__GL_YIELD=USLEEP`, no throttle events in any run used here. Data in `benchmark/profile/2026-10-25_round3/` (frames, 2 runs per configuration of 2400 frames per view, still 6000) and `_round2/` (loads, 5 runs per map); `_round1/` was throttled and is not used.

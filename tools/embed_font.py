@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""Turn TrueType fonts into a C header that the editor compiles in (src/font_outfit.h).
+"""Turn TrueType fonts into a C header that the editor compiles in (src/font_outfit.h,
+src/font_pixelify.h).
 
     python3 -I tools/embed_font.py src/font_outfit.h \
         OUTFIT_REGULAR=resources/fonts/outfit/Outfit-Regular.ttf \
         OUTFIT_SEMIBOLD=resources/fonts/outfit/Outfit-SemiBold.ttf
+    python3 -I tools/embed_font.py src/font_pixelify.h \
+        PIXELIFY_REGULAR=resources/fonts/pixelify/PixelifySans-Regular.ttf
 
 For each NAME=file the header gets the file's bytes (NAME, NAME_SIZE) and the codepoints the
 font has a glyph for, in ascending order, out of ASCII, Latin-1 and Latin Extended-A

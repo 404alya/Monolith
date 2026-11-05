@@ -419,6 +419,13 @@ static void FitText(const char *text, int x, int y, int size, int room, Color c)
     UiText(cut, x, y, size, c);
 }
 
+// A status in a row: a mark's 2 px bar in c, then the text (fitted to `room`) in c
+static void FitMark(const char *text, int x, int y, int size, int room, Color c)
+{
+    DrawRectangle(x, y + 2, 2, UiLineHeight(size) - 4, c);
+    FitText(text, x + 8, y, size, room - 8, c);
+}
+
 static void DrawModelRow(int item, Rectangle row, bool selected, void *user)
 {
     const ModelPicker *p = user;
@@ -438,13 +445,14 @@ static void DrawModelRow(int item, Rectangle row, bool selected, void *user)
     int tx = x + THUMB_SHOW + 16, room = (int)(row.x + row.width) - 10 - tx;
     // the file (without "models/"), then triangles and size, then the licence
     const char *name = strncmp(pm->path, "models/", 7) == 0 ? pm->path + 7 : pm->path;
-    FitText(name, tx, y + 8, UI_M, room, selected ? UI_INK : UI_TEXT);
+    FitText(name, tx, y + 8, UI_M, room, selected ? UI_HOT : UI_BODY);
     const char *info = pm->failed ? "the file did not load"
                      : !pm->infoReady ? "..."
                      : TextFormat("%d triangles   %.2f x %.2f x %.2f m", pm->triangles, pm->size.x, pm->size.y, pm->size.z);
-    FitText(info, tx, y + 8 + 28, UI_S, room, pm->failed ? UI_ERROR : UI_DIM);
-    if (pm->licence[0]) FitText(pm->licence, tx, y + 8 + 52, UI_S, room, UI_OK);
-    else FitText("no licence row in ASSETS.md", tx, y + 8 + 52, UI_S, room, UI_WARN);
+    if (pm->failed) FitMark(info, tx, y + 8 + 28, UI_S, room, UI_ERROR);
+    else FitText(info, tx, y + 8 + 28, UI_S, room, UI_DIM);
+    if (pm->licence[0]) FitMark(pm->licence, tx, y + 8 + 52, UI_S, room, UI_OK);
+    else FitMark("no licence row in ASSETS.md", tx, y + 8 + 52, UI_S, room, UI_WARN);
 }
 
 // On the right, its bottom above the help bars and toasts (the HUD lines stay free), as the

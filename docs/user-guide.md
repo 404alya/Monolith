@@ -13,7 +13,7 @@ The HUD at the top shows what is going on (the mode, the effects, the selection,
 | WASD + mouse | walk and look; Shift runs, Space jumps |
 | F | fly (no collision): Space up, Ctrl down, Shift ×4 |
 | TAB | switch to spectator mode and back |
-| 1–6 | toggle volumetric fog, distance fog, SSAO, SSIL, bloom, sun (relative to what the map sets; they survive reloads). The HUD's top line shows each one green when on and dimmed when off |
+| 1–6 | toggle volumetric fog, distance fog, SSAO, SSIL, bloom, sun (relative to what the map sets; they survive reloads). The HUD's top line shows each one white when on and faint when off |
 | F1 | hide / show the HUD |
 | F2 | graphics settings panel |
 | F3 / Shift+F3 / F4 | render inspector (spectator mode): outlines, its panel, buffer views (*Render inspector* below) |
@@ -178,7 +178,7 @@ Removing and giving ids are manual edits like any other: live, undoable with Ctr
 
 ## Graphics settings (F2)
 
-The panel has a preset selector, rows for display, shadows, ambient occlusion, fog, post-processing and performance, the editor's **Save edits** row (manual / auto, see *Editing by hand*; not a graphics setting and not part of a preset), and a live frame time readout. Use the arrow keys or the mouse; values that differ from the preset are blue. Heavy changes (shadow map size, AO mode, fog cache, preset) take a frame to apply; a new shadow map size reloads the map (about a second, your selection is kept). Esc or F2 closes and saves.
+The panel has a preset selector, rows for display, shadows, ambient occlusion, fog, post-processing and performance, the editor's **Save edits** row (manual / auto, see *Editing by hand*; not a graphics setting and not part of a preset), and a live frame time readout. Use the arrow keys or the mouse; values that differ from the preset are pink, with a pink bar beside them. Heavy changes (shadow map size, AO mode, fog cache, preset) take a frame to apply; a new shadow map size reloads the map (about a second, your selection is kept). Esc or F2 closes and saves.
 
 **The map is the source of the look.** Every setting is relative to the map: **ultra** shows exactly what the map describes, and an effect the map turns off stays off.
 

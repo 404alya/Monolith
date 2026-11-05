@@ -2429,8 +2429,13 @@ static int Run(int argc, char **argv)
             if (drawUi && (mapMessageError || mapMessageTime > 0.0f) && !designer.promptOpen) {
                 float a = mapMessageError ? 1.0f : fminf(mapMessageTime, 1.0f);
                 int y = GetScreenHeight() - 36;
-                DrawRectangle(6, y, UiMeasure(mapMessage, UI_M) + 12, 26, Fade(UI_BACKDROP, a));
-                UiText(mapMessage, 12, y + (26 - UiLineHeight(UI_M)) / 2, UI_M, Fade(mapMessageError ? UI_ERROR : UI_INK, a));
+                if (mapMessageError) UiHudMark(mapMessage, 12, y, 26, UI_M, UI_ERROR);   // (a broken map: stays)
+                else {
+                    // Fades as a whole (the alphas scaled, not replaced)
+                    Color strip = UiAlpha(UI_BACKDROP, a), ink = UiAlpha(UI_INK, a);
+                    DrawRectangle(6, y, UiMeasure(mapMessage, UI_M) + 12, 26, strip);
+                    UiText(mapMessage, 12, y + (26 - UiLineHeight(UI_M)) / 2, UI_M, ink);
+                }
             }
             // The prompt box shows even with the HUD off (Enter opened it, it must be visible)
             if (drawUi && designerUi) DesignerDrawPrompt(&designer, GetScreenWidth(), GetScreenHeight());

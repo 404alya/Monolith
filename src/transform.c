@@ -48,7 +48,6 @@
 #define COLOR_X     (Color){ 235, 80, 80, 255 }
 #define COLOR_Y     (Color){ 120, 215, 90, 255 }
 #define COLOR_Z     (Color){ 80, 145, 255, 255 }
-#define MODAL_COLOR (Color){ 255, 214, 90, 255 }
 #define SCALE_NEAR_PX   30.0f   // closer to the pivot than this at the start: the ratio is eased
 // Rotate, two ways to read the mouse:
 //   - the axis lies across the view (more than ROT_TRACK_MIN_SIN off the line of sight: a
@@ -1127,7 +1126,8 @@ void TransformDrawGizmo(TransformModal *t, Designer *d, Camera3D cam)
     int l = snprintf(text, sizeof(text), "%s\xC2\xB0", Degrees(t->value[0]));
     if (t->typed[0]) snprintf(text + l, sizeof(text) - (size_t)l, "  typed");
     else if (t->snapping) snprintf(text + l, sizeof(text) - (size_t)l, "  snap %s\xC2\xB0", Degrees(t->angleStep));
-    UiHudText(text, (int)cur.x + 14, (int)cur.y + 10, UI_HUD_LINE, UI_S, t->noChange || t->commitCount == 0 ? UI_ERROR : UI_INK);
+    if (t->noChange || t->commitCount == 0) UiHudMark(text, (int)cur.x + 14, (int)cur.y + 10, UI_HUD_LINE, UI_S, UI_ERROR);
+    else UiHudText(text, (int)cur.x + 14, (int)cur.y + 10, UI_HUD_LINE, UI_S, UI_INK);
 }
 
 // #endregion
@@ -1206,11 +1206,14 @@ int TransformDrawHud(const TransformModal *t, int x, int y)
     else snap = t->kind == TRANSFORM_ROTATE ? TextFormat("snap off (%g deg)", t->angleStep) : "snap off";
     const char *typed = t->typed[0] ? TextFormat("typed: %s_", t->typed) : "type a value";
     // (state only: the modal's keys are in the keybindings panel, ESC)
-    UiHudHints(TextFormat("%s  %s  %s|%s|%s", kind, value, space, typed, snap),
-               x, y, UI_HUD_LINE, UI_S, Fade(MODAL_COLOR, 0.95f));
+    // the modal's name as the edit mode's mark, then the state in UI_TEXT (the two backdrop
+    // strips join: UiHudText's 6 px pad on either side)
+    int dx = UiHudMark(kind, x, y, UI_HUD_LINE, UI_S, UI_MODE_EDIT);
+    UiHudHints(TextFormat("%s  %s|%s|%s", value, space, typed, snap), x + dx, y, UI_HUD_LINE, UI_S,
+               UI_TEXT);
     y += UI_HUD_LINE;
     if (t->refusal[0]) {
-        UiHudText(t->refusal, x, y, UI_HUD_LINE, UI_S, UI_ERROR);
+        UiHudMark(t->refusal, x, y, UI_HUD_LINE, UI_S, UI_ERROR);
         y += UI_HUD_LINE;
     }
     return y - y0;

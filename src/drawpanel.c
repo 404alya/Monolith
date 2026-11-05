@@ -130,7 +130,7 @@ static void Header(Ctx *c, const char *name, const char *hints)
     if (Drawing(c)) {
         DrawRectangle(c->x, c->y + 4, c->w, 1, UI_LINE);
         int ty = c->y + 8;
-        UiTextBold(name, c->x, ty, UI_S, UI_ACCENT);
+        UiTextBold(name, c->x, ty - 1, UI_M, UI_INK);
         if (hints) UiHints(hints, c->x + c->w - UiHintsWidth(hints, UI_XS), ty + 1, UI_XS, UI_DIM);
     }
     c->y += HEAD_H;
@@ -186,9 +186,11 @@ static bool PixelLookShown(const DrawMode *dm)
 static void Title(Ctx *c)
 {
     if (Drawing(c)) {
-        UiTextBold("Draw", c->x, c->y + (TITLE_H - UiLineHeight(UI_L)) / 2, UI_L, UI_ACCENT);
+        // (the pixel title's capitals, ~21 px from ~6 px below the y given, start where the old
+        // title's did: 3 px into the title line; the hints sit on their middle)
+        UiTitle("Draw", c->x, c->y - 3, UI_INK);
         const char *hints = "{TAB} hide|{B} leave";
-        UiHints(hints, c->x + c->w - UiHintsWidth(hints, UI_XS), c->y + (TITLE_H - UiLineHeight(UI_XS)) / 2, UI_XS, UI_DIM);
+        UiHints(hints, c->x + c->w - UiHintsWidth(hints, UI_XS), c->y + 14 - UiLineHeight(UI_XS) / 2, UI_XS, UI_DIM);
     }
     c->y += TITLE_H;
 }
@@ -217,18 +219,18 @@ static void PenIcon(PenKind k, int cx, int cy, Color ink)
         DrawRectangle(cx - 7, cy - 7, 14, 14, ink);
         break;
     case PEN_SOFT:
-        UiRoundRect((Rectangle){ (float)(cx - 10), (float)(cy - 10), 20, 20 }, 10, Fade(ink, 0.22f), BLANK);
-        UiRoundRect((Rectangle){ (float)(cx - 8), (float)(cy - 8), 16, 16 }, 8, Fade(ink, 0.35f), BLANK);
+        UiRoundRect((Rectangle){ (float)(cx - 10), (float)(cy - 10), 20, 20 }, 10, UiAlpha(ink, 0.22f), BLANK);
+        UiRoundRect((Rectangle){ (float)(cx - 8), (float)(cy - 8), 16, 16 }, 8, UiAlpha(ink, 0.35f), BLANK);
         UiRoundRect((Rectangle){ (float)(cx - 5), (float)(cy - 5), 10, 10 }, 5, ink, BLANK);
         break;
     case PEN_ERASER:
         UiRoundRect((Rectangle){ (float)(cx - 10), (float)(cy - 6), 20, 12 }, 3, BLANK, ink);
         UiRoundRect((Rectangle){ (float)(cx - 10), (float)(cy - 6), 9, 12 }, 3, ink, BLANK);
-        DrawRectangle(cx - 10, cy + 8, 20, 1, Fade(ink, 0.5f));
+        DrawRectangle(cx - 10, cy + 8, 20, 1, UiAlpha(ink, 0.5f));
         break;
     case PEN_FILL:
         UiRoundRect((Rectangle){ (float)(cx - 9), (float)(cy - 9), 18, 18 }, 3, BLANK, ink);
-        DrawRectangle(cx - 6, cy - 6, 12, 12, Fade(ink, 0.75f));
+        DrawRectangle(cx - 6, cy - 6, 12, 12, UiAlpha(ink, 0.75f));
         break;
     default: break;
     }
@@ -245,11 +247,11 @@ static void SectionPen(Ctx *c)
         bool on = dm->pen == (PenKind)k;
         if (Button(c, r, NULL, on)) dm->pen = (PenKind)k;
         if (Drawing(c)) {
-            Color ink = on ? UI_ACCENT : UI_INK;
+            Color ink = on ? UI_ON_INK : UI_INK;       // (on: the button is white)
             int cx = (int)(r.x + r.width / 2);
             PenIcon((PenKind)k, cx, (int)r.y + 13, ink);
             int tw = UiMeasure(PEN_NAMES[k], UI_XS);
-            UiText(PEN_NAMES[k], cx - tw / 2, (int)r.y + PEN_H - UiLineHeight(UI_XS) - 3, UI_XS, on ? UI_ACCENT : UI_DIM);
+            UiText(PEN_NAMES[k], cx - tw / 2, (int)r.y + PEN_H - UiLineHeight(UI_XS) - 3, UI_XS, on ? UI_ON_INK : UI_DIM);
         }
     }
     c->y += PEN_H + GAP;
@@ -317,11 +319,10 @@ static void SectionColor(Ctx *c)
     DrawPanel *p = c->p;
     Header(c, "Colour", "{ALT}+LMB picks|{X} swap");
     static const char *names[4] = { "R", "G", "B", "A" };
-    static const Color inks[4] = { { 255, 140, 130, 255 }, { 140, 225, 140, 255 }, { 140, 180, 255, 255 }, { 238, 236, 230, 200 } };
     for (int k = 0; k < 4; k++) {
         unsigned char *ch = k == 0 ? &dm->color.r : k == 1 ? &dm->color.g : k == 2 ? &dm->color.b : &dm->color.a;
         Rectangle sr, fr;
-        Row(c, names[k], CHANNEL_W, inks[k], &sr, &fr);
+        Row(c, names[k], CHANNEL_W, UI_TEXT, &sr, &fr);
         float v = (float)*ch;
         if (Slider(c, W_R_S + k, sr, &v, 0.0f, 255.0f, 1.0f)) *ch = (unsigned char)ClampI((int)roundf(v), 0, 255);
         v = (float)*ch;
@@ -352,7 +353,7 @@ static void SectionColor(Ctx *c)
         Rectangle r = { (float)(c->x + k * (sz + 4)), (float)c->y, (float)sz, 22 };
         if (k < dm->recentCount) {
             if (Swatch(c, r, dm->recent[k], SameColor(dm->recent[k], dm->color))) dm->color = dm->recent[k];
-        } else if (Drawing(c) && dm->recentCount > 0) DrawRectangleLinesEx(r, 1.0f, Fade(UI_LINE, 0.6f));
+        } else if (Drawing(c) && dm->recentCount > 0) DrawRectangleLinesEx(r, 1.0f, UiAlpha(UI_LINE, 0.6f));
         // (with none yet the row shows its label alone, not the label over empty boxes)
     }
     if (dm->recentCount == 0) Text(c, "recent colours", c->x + 8, c->y + (22 - UiLineHeight(UI_XS)) / 2, UI_XS, UI_FAINT);
@@ -420,13 +421,14 @@ static void SectionFaces(Ctx *c)
     int left = c->x + (c->w - (6 * bw + 5 * GAP)) / 2;
     for (int f = 0; f < 6; f++) {
         Rectangle r = { (float)(left + f * (bw + GAP)), (float)c->y, (float)bw, BUTTON_H };
-        if (Button(c, r, NULL, p->faces[f] != cells[f])) p->faces[f] = (unsigned char)((p->faces[f] + 1) % 6);
+        bool lit = p->faces[f] != cells[f];
+        if (Button(c, r, NULL, lit)) p->faces[f] = (unsigned char)((p->faces[f] + 1) % 6);
         if (Drawing(c)) {
             const char *n = TextFormat("%d", p->faces[f] < 6 ? p->faces[f] : 0);
             int nw = UiMeasureBold(n, UI_M), fw = UiMeasure(FACE_NAMES[f], UI_XS);
             int x = (int)r.x + ((int)r.width - fw - 5 - nw) / 2;
-            UiText(FACE_NAMES[f], x, (int)r.y + (BUTTON_H - UiLineHeight(UI_XS)) / 2 + 1, UI_XS, UI_DIM);
-            UiTextBold(n, x + fw + 5, (int)r.y + (BUTTON_H - UiLineHeight(UI_M)) / 2, UI_M, UI_INK);
+            UiText(FACE_NAMES[f], x, (int)r.y + (BUTTON_H - UiLineHeight(UI_XS)) / 2 + 1, UI_XS, lit ? UiAlpha(UI_ON_INK, 0.6f) : UI_DIM);
+            UiTextBold(n, x + fw + 5, (int)r.y + (BUTTON_H - UiLineHeight(UI_M)) / 2, UI_M, lit ? UI_ON_INK : UI_INK);
         }
     }
     c->y += BUTTON_H + GAP;
@@ -557,7 +559,7 @@ void DrawPanelDraw(DrawPanel *p, const DrawMode *dm, int y)
     p->rect = PanelRect(p, y);
     ClampScroll(p);
     bool scrolls = p->contentH > (int)p->rect.height;
-    UiPanel(p->rect, UI_PANEL, UI_LINE);
+    UiSheet(p->rect);
     if (scrolls) BeginScissorMode((int)p->rect.x + 1, (int)p->rect.y + 1, (int)p->rect.width - 2, (int)p->rect.height - 2);
     c = (Ctx){ .p = p, .dm = &view, .pass = PASS_DRAW, .y = y - p->scroll };
     UiWidgetsBegin(UI_WIDGETS_DRAW, p->interactive && !IsCursorHidden(), p->rect);
@@ -565,14 +567,14 @@ void DrawPanelDraw(DrawPanel *p, const DrawMode *dm, int y)
     UiWidgetsEnd();
     if (scrolls) {
         EndScissorMode();
-        // a thin track and a thumb of the visible share
+        // a 2 px track and a thumb of the visible share
         int trackH = (int)p->rect.height - 12, thumbH = trackH * (int)p->rect.height / p->contentH;
         if (thumbH < 16) thumbH = 16;
         int most = p->contentH - (int)p->rect.height;
         int thumbY = (int)p->rect.y + 6 + (most > 0 ? (trackH - thumbH) * p->scroll / most : 0);
         int tx = (int)(p->rect.x + p->rect.width) - 5;
         DrawRectangle(tx, (int)p->rect.y + 6, 2, trackH, UI_LINE);
-        DrawRectangle(tx - 1, thumbY, 4, thumbH, UI_DIM);
+        DrawRectangle(tx, thumbY, 2, thumbH, UI_DIM);
     }
 }
 

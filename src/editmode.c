@@ -48,7 +48,6 @@
 #include <ctype.h>
 #include <math.h>
 
-#define EDIT_COLOR      (Color){ 255, 214, 90, 255 }
 #define STEP_TURN_DEG   90.0    // R / SHIFT+R (docs/live-editing.md 11.10)
 #define WARN_TIME       3.0f
 
@@ -637,6 +636,14 @@ static void HudText(const char *text, int x, int y, Color c)
     UiHudText(text, x, y, UI_HUD_LINE, UI_S, c);
 }
 
+// A HUD line that starts with a mark (the mode's name, a status: its bar and text in c) and goes
+// on with hints in UI_TEXT; the two backdrop strips join (UiHudText's 6 px pad on either side)
+static void HudMarkHints(const char *name, Color c, const char *markup, int x, int y)
+{
+    int dx = UiHudMark(name, x, y, UI_HUD_LINE, UI_S, c);
+    UiHudHints(markup, x + dx, y, UI_HUD_LINE, UI_S, UI_TEXT);
+}
+
 int EditModeDrawHud(const EditMode *m, const Designer *d, int x, int y)
 {
     int y0 = y;
@@ -644,8 +651,8 @@ int EditModeDrawHud(const EditMode *m, const Designer *d, int x, int y)
     if (m->active) {
         y += TransformDrawHud(&m->modal, x, y);
         // (state only: the keys are in the keybindings panel, ESC)
-        UiHudText(TextFormat("EDIT MODE  |  snap %g m, %g deg  |  gizmo %s", DesignerSnap(d), DesignerAngleSnap(d),
-                             m->modal.gizmoLocal ? "local" : "global"), x, y, UI_HUD_LINE, UI_S, Fade(EDIT_COLOR, 0.95f));
+        HudMarkHints("EDIT MODE", UI_MODE_EDIT, TextFormat("snap %g m, %g deg|gizmo %s", DesignerSnap(d), DesignerAngleSnap(d),
+                                                           m->modal.gizmoLocal ? "local" : "global"), x, y);
         y += UI_HUD_LINE;
         char sel[160] = "nothing selected";
         if (d->selectedCount > 0) {
@@ -661,12 +668,11 @@ int EditModeDrawHud(const EditMode *m, const Designer *d, int x, int y)
     // Unsaved edits and the ones a rebase could not apply: in every spectator mode
     int unsaved = EditModeUnsaved(m);
     if (unsaved > 0) {
-        UiHudHints(TextFormat("%d unsaved edit%s|{CTRL+S} save", unsaved, unsaved == 1 ? "" : "s"), x, y, UI_HUD_LINE, UI_S,
-                   Fade(EDIT_COLOR, 0.95f));
+        HudMarkHints(TextFormat("%d unsaved edit%s", unsaved, unsaved == 1 ? "" : "s"), UI_CHANGED, "{CTRL+S} save", x, y);
         y += UI_HUD_LINE;
     }
     for (int i = 0; i < m->ed.failedCount; i++) {
-        HudText(m->ed.failed[i].what, x, y, (Color){ 255, 110, 90, 255 });
+        UiHudMark(m->ed.failed[i].what, x, y, UI_HUD_LINE, UI_S, UI_ERROR);
         y += UI_HUD_LINE;
     }
     if (m->ed.failedCount > 0) {
@@ -681,16 +687,19 @@ int EditModeDrawHud(const EditMode *m, const Designer *d, int x, int y)
         const char *hint = TextFormat("{ENTER} set|{ESC} cancel|empty: the next free id (%d)|1..2147483647, unique in the map",
                                       m->idNext);
         int w = 24 + (int)fmaxf((float)UiMeasureBold(title, UI_S), (float)UiHintsWidth(hint, UI_S));
-        UiPanel((Rectangle){ (float)(x - 6), (float)(y - 4), (float)w, 88 }, UI_PANEL, Fade(EDIT_COLOR, 0.9f));
-        UiTextBold(title, x + 6, y + 4, UI_S, EDIT_COLOR);
-        UiPanel((Rectangle){ (float)(x + 6), (float)(y + 28), 160, 26 }, (Color){ 0, 0, 0, 200 }, Fade(EDIT_COLOR, 0.5f));
-        UiText(TextFormat("%s_", m->idText), x + 14, y + 28 + (26 - UiLineHeight(UI_M)) / 2, UI_M, UI_INK);
+        UiSheet((Rectangle){ (float)(x - 6), (float)(y - 4), (float)w, 88 });
+        UiTextBold(title, x + 6, y + 4, UI_S, UI_INK);
+        UiPanel((Rectangle){ (float)(x + 6), (float)(y + 28), 160, 26 }, UI_INSET, UI_LINE);
+        int ty = y + 28 + (26 - UiLineHeight(UI_M)) / 2;
+        UiText(m->idText, x + 14, ty, UI_M, UI_INK);
+        UiText("_", x + 14 + UiMeasure(m->idText, UI_M), ty, UI_M, UI_HOT);
         UiHints(hint, x + 6, y + 60, UI_S, UI_DIM);
         y += 92;
     }
     if (m->messageTime > 0.0f) {
-        Color c = m->messageError ? (Color){ 255, 110, 90, 255 } : EDIT_COLOR;
-        HudText(m->message, x, y, Fade(c, fminf(m->messageTime, 1.0f)));
+        float a = fminf(m->messageTime, 1.0f);
+        if (m->messageError) UiHudMark(m->message, x, y, UI_HUD_LINE, UI_S, UiAlpha(UI_ERROR, a));
+        else HudText(m->message, x, y, UiAlpha(UI_INK, a));
         y += UI_HUD_LINE;
     }
     return y - y0;

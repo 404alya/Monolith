@@ -406,15 +406,16 @@ static void DrawItemRow(int item, Rectangle row, bool selected, void *user)
     UiText(kind == 'm' ? "material" : "shader", x, ty + 2, UI_XS, UI_DIM);
     x += 64;
     // the counts and the state on the right; the name gets what is left
+    // (the state is a mark: white when isolated (on), dim when hidden (off))
     const char *state = isolated ? "isolated" : hidden ? "hidden" : "";
     const char *counts = TextFormat("%d range%s  %lld tris", in->itemRanges[item], in->itemRanges[item] == 1 ? "" : "s", in->itemTris[item]);
     int right = (int)(row.x + row.width) - 10;
-    int sw = state[0] ? UiMeasure(state, UI_S) : 0;
-    if (state[0]) UiText(state, right - sw, ty + 1, UI_S, isolated ? UI_ACCENT : UI_WARN);
+    int sw = state[0] ? UiMarkWidth(state) : 0;
+    if (state[0]) UiMark(state, right - sw, (int)row.y + ((int)row.height - UI_PILL_H) / 2, isolated ? UI_HOT : UI_DIM);
     int cw = UiMeasure(counts, UI_S);
     int cx = right - (sw ? sw + 14 : 0) - cw;
     UiText(counts, cx, ty + 1, UI_S, UI_DIM);
-    Color ink = hidden ? UI_FAINT : selected ? UI_INK : UI_TEXT;
+    Color ink = hidden ? UI_FAINT : selected ? UI_HOT : UI_BODY;
     // (cut a long name by characters until it fits before the counts)
     int room = cx - 12 - x;
     if (UiMeasure(name, UI_M) <= room) { UiText(name, x, ty, UI_M, ink); return; }
@@ -442,7 +443,11 @@ void InspectorDrawPanel(Inspector *in, int screenW, int screenH)
     if (!in->panelOpen || !in->scene) return;
     if (in->list.dirty) UiListRefilter(&in->list, ItemCount(in), MatchItem, in);
     Rectangle r = PanelRect(screenW, screenH);
-    in->visibleRows = UiListDraw(&in->list, r, "Render inspector: materials and shaders", 24, DrawItemRow, in,
+    // (the pixel title is wide: on a narrow panel the subtitle goes rather than run past the edge
+    // and over the count)
+    const char *title = "Render inspector: materials and shaders";
+    if (UiTitleWidth(title) > (int)r.width - 32 - 16 - UiMeasure(TextFormat("%d", in->list.rowCount), UI_S)) title = "Render inspector";
+    in->visibleRows = UiListDraw(&in->list, r, title, 24, DrawItemRow, in,
                                  "{UP}/{DOWN} select|{SPACE} hide / show|{I} isolate (again: all)|type to filter|{ESC} close");
 }
 
@@ -648,10 +653,12 @@ static bool DrawLabel(const Inspector *in, int r, Vector2 p, int w, int h, Recta
     }
     rects[(*n)++] = rect;
     Color c = RangeColor(in, R);
-    UiPanel(rect, UI_PANEL, hovered ? UI_ACCENT : UI_LINE);
-    DrawRectangle((int)rect.x + 1, (int)rect.y + 4, 3, (int)rect.height - 8, c);
-    UiTextBold(head, (int)rect.x + 9, (int)rect.y + 4, UI_S, UI_INK);
-    UiText(line, (int)rect.x + 9, (int)rect.y + 4 + UiLineHeight(UI_S) + 1, UI_XS, UI_DIM);
+    // the hovered label lifts off the others (the panel's halo, white text); the bar is its outline's colour
+    if (hovered) UiSheet(rect);
+    else UiRoundRect(rect, UI_RADIUS, UI_PANEL, BLANK);
+    DrawRectangle((int)rect.x + 2, (int)rect.y + 4, 2, (int)rect.height - 8, c);
+    UiTextBold(head, (int)rect.x + 9, (int)rect.y + 4, UI_S, hovered ? UI_HOT : UI_INK);
+    UiText(line, (int)rect.x + 9, (int)rect.y + 4 + UiLineHeight(UI_S) + 1, UI_XS, hovered ? UI_TEXT : UI_DIM);
     return true;
 }
 

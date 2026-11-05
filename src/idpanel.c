@@ -247,8 +247,8 @@ static void DrawItemRow(int item, Rectangle row, bool selected, void *user)
     int ty = (int)row.y + ((int)row.height - UiLineHeight(UI_M)) / 2;
     int sy = (int)row.y + ((int)row.height - UiLineHeight(UI_S)) / 2;
     int x = (int)row.x + 12, right = (int)(row.x + row.width) - 10;
-    Color ink = selected ? UI_INK : UI_TEXT;
-    UiTextBold(TextFormat("id %d", it->id), x, ty, UI_M, UI_ACCENT);
+    Color ink = selected ? UI_HOT : UI_BODY;
+    UiTextBold(TextFormat("id %d", it->id), x, ty, UI_M, selected ? UI_HOT : UI_INK);
     x += 96;
     UiText(TextFormat("line %d", it->line), x, sy, UI_S, UI_DIM);
     x += 86;

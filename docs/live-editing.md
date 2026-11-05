@@ -470,10 +470,11 @@ typedef struct {
 `UiListKeys` handles UP / DOWN / PGUP / PGDN / HOME / END, typed characters and BACKSPACE
 (CTRL+BACKSPACE: the whole filter) and leaves ENTER, ESC, DELETE and the rest to the panel.
 `UiListRefilter` rebuilds `rows[]` with the panel's match callback. `UiListDraw` draws the panel
-in the settings panel's look: `UI_PANEL` with a `UI_LINE` border, a `UI_L` bold title in
-`UI_ACCENT`, the filter field (`UI_RAISED`, a cursor, a dim placeholder "type to filter"),
-`UI_M` rows of 24 px (a row callback draws the columns), the selected row on `UI_RAISED` with an
-accent bar, a thin scroll bar, and a `UiHints` footer. Rows taller than 24 px (the picker's
+in the panels' look ([ui-design.md](ui-design.md) §4): the panel (`UiSheet`: translucent black
+with a soft halo), a Pixelify title (`UiTitle`) and the row count, the filter field (`UI_INSET`, a
+white cursor, a faint placeholder "type to filter"), `UI_M` rows of 24 px (a row callback draws the
+columns), the selected row square on `UI_ROW` with a white 2 px bar, a 2 px scroll bar, and a
+`UiHints` footer. Rows taller than 24 px (the picker's
 thumbnails) pass their height.
 
 ## 9. Verification
@@ -1197,9 +1198,9 @@ round's scratch folder `phase3b/`):
 **The list widget** (`src/ui.c`, region "The list widget"): `UiListKeys` (UP / DOWN / PGUP / PGDN with key
 repeat, HOME / END, UTF-8 typed characters, BACKSPACE by code point, CTRL+BACKSPACE the whole filter),
 `UiListRefilter` (keeps the selected item selected while it passes), `UiListDraw` (the settings panel's
-look per §8.4: `UI_PANEL` + `UI_LINE`, a `UI_L` bold title in `UI_ACCENT` with the row count, the filter
-field with a blinking cursor or "type to filter", rows of the caller's height with the selected one on
-`UI_RAISED` with an accent bar, a thin scroll bar, a `UiHints` footer; returns the rows that fit, which the
+look per §8.4, restyled 2026-11-05 per [ui-design.md](ui-design.md): the panel, a title with the row
+count, the filter field with a blinking cursor or "type to filter", rows of the caller's height with the
+selected one marked, a thin scroll bar, a `UiHints` footer; returns the rows that fit, which the
 panel passes to the next `UiListKeys` for PGUP / PGDN). Heap arrays that only grow; `UiListFree`.
 
 **Verification** (machine A: RTX 4050 Laptop, driver 615.71.09, Ryzen 7 7435HS):

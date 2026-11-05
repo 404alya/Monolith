@@ -1876,26 +1876,27 @@ void DesignerDrawOverlay(const Designer *d, Camera3D cam, bool hover)
     EndOverlay3D();
 }
 
-// Help bar of a mode at the bottom centre: the mode's pill, then its key hints (UiHints markup)
+// Help bar of a mode at the bottom centre: the mode's name as a mark in the colour of its frames
+// on screen (REGION_COLOR / VOLUME_COLOR), then its key hints (UiHints markup)
 static void DrawHelpBar(const char *mode, Color modeColor, const char *hints, int w, int h)
 {
-    int pw = UiPillWidth(mode), tw = pw + 10 + UiHintsWidth(hints, UI_S);
+    int pw = UiMarkWidth(mode), tw = pw + 10 + UiHintsWidth(hints, UI_S);
     int x = (w - tw) / 2, y = h - 66;
-    UiPanel((Rectangle){ (float)(x - 10), (float)y, (float)(tw + 20), 30 }, UI_PANEL, UI_LINE);
-    UiPill(mode, x, y + 5, modeColor, (Color){ 16, 16, 18, 255 });
+    UiSheet((Rectangle){ (float)(x - 10), (float)y, (float)(tw + 20), 30 });
+    UiMark(mode, x, y + 5, modeColor);
     UiHints(hints, x + pw + 10, y + (30 - UiLineHeight(UI_S)) / 2, UI_S, UI_INK);
 }
 
 // Volume label: a pill with the text, centred above screen point p (kept on screen)
 static void DrawVolumeTab(Vector2 p, const char *text, int w, int h)
 {
-    int tw = UiPillWidth(text), th = UI_PILL_H;
+    int tw = UiTagWidth(text), th = UI_PILL_H;
     int lx = (int)p.x - tw / 2, ly = (int)p.y - th - 4;
     if (lx + tw > w - 1) lx = w - 1 - tw;
     if (lx < 1) lx = 1;
     if (ly + th > h - 1) ly = h - 1 - th;
     if (ly < 1) ly = 1;
-    UiPill(text, lx, ly, VOLUME_COLOR, (Color){ 10, 24, 18, 255 });
+    UiTag(text, lx, ly, VOLUME_COLOR, (Color){ 10, 24, 18, 255 });
 }
 
 // The tab of volume `v` at the middle of its top face, if that is in front of the camera
@@ -2028,7 +2029,7 @@ int DesignerDrawHud(const Designer *d, int x, int y)
         if (ungrouped && n < (int)sizeof(text) - 40) n += snprintf(text + n, sizeof(text) - n, "%s(no group)", shown ? ", " : "");
         if (more && n < (int)sizeof(text) - 40) n += snprintf(text + n, sizeof(text) - n, " +%d more", more);
         snprintf(text + n, sizeof(text) - n, "]");
-        HudText(text, x, y, Fade(SEL_COLOR, 0.95f));
+        UiHudMark(text, x, y, UI_HUD_LINE, UI_S, SEL_COLOR);    // (the outline's colour)
     }
     y += 20;
 
@@ -2071,7 +2072,7 @@ int DesignerDrawHud(const Designer *d, int x, int y)
             snprintf(text + n, sizeof(text) - n, "  |  V%d min %.2f %.2f %.2f  max %.2f %.2f %.2f%s", d->activeVolume + 1,
                      v.min.x, v.min.y, v.min.z, v.max.x, v.max.y, v.max.z, d->volumeMode ? "  (arrows edit it)" : "");
         }
-        HudText(text, x, y, Fade(VOLUME_COLOR, 0.95f));
+        UiHudMark(text, x, y, UI_HUD_LINE, UI_S, VOLUME_COLOR);  // (the frames' colour)
         y += 20;
     }
     return y - y0;
@@ -2120,12 +2121,12 @@ static void DrawRegionFrame(Rectangle r, int number, bool size, int w)
     if (number > 0 && size) snprintf(text, sizeof(text), "%d   %.0f x %.0f", number, r.width, r.height);
     else if (number > 0) snprintf(text, sizeof(text), "%d", number);
     else snprintf(text, sizeof(text), "%.0f x %.0f", r.width, r.height);
-    int tw = UiPillWidth(text), th = UI_PILL_H;
+    int tw = UiTagWidth(text), th = UI_PILL_H;
     // Above the top-left corner, or inside the rect at the top of the screen; kept on screen
     int lx = (int)r.x, ly = r.y >= th + 4 ? (int)r.y - th - 4 : (int)r.y + 4;
     if (lx + tw > w - 1) lx = w - 1 - tw;
     if (lx < 1) lx = 1;
-    UiPill(text, lx, ly, REGION_COLOR, (Color){ 20, 10, 20, 255 });
+    UiTag(text, lx, ly, REGION_COLOR, (Color){ 20, 10, 20, 255 });
 }
 
 void DesignerDrawRegions(const Designer *d, int w, int h, bool marked)
@@ -2174,7 +2175,7 @@ void DesignerDrawPrompt(Designer *d, int w, int h)
 
         int boxH = PROMPT_HEADER_H + visible * PROMPT_LINE_H + 2 * PROMPT_PAD;
         Rectangle box = { PROMPT_MARGIN, (float)(h - PROMPT_MARGIN - boxH), (float)(w - 2 * PROMPT_MARGIN), (float)boxH };
-        UiPanel(box, UI_PANEL, UI_LINE);
+        UiSheet(box);
 
         int tx = (int)box.x + PROMPT_PAD, ty = (int)box.y + PROMPT_PAD;
         char regions[64] = "";
@@ -2211,7 +2212,7 @@ void DesignerDrawPrompt(Designer *d, int w, int h)
             UiText(buf, tx, ly, PROMPT_FONT, ink);
             if (i == cursorLine && fmod(GetTime(), 1.0) < 0.6) {
                 float cx = tx + TextSpanWidth(d->prompt, l.start, d->cursor);
-                DrawRectangle((int)cx, ly, 2, UiLineHeight(PROMPT_FONT), UI_CURSOR);
+                DrawRectangle((int)cx, ly, 2, UiLineHeight(PROMPT_FONT), UI_HOT);
             }
         }
         // Scroll hints

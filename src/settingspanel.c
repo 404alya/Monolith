@@ -160,23 +160,25 @@ int PanelUpdate(SettingsPanel *p, GfxSettings *s, float dt, int w, int h)
     return -1;
 }
 
+// A footer button: the keyboard's selection draws it on (white, black text), as UiButton
 static void Button(Rectangle r, const char *text, bool selected)
 {
-    UiPanel(r, selected ? (Color){ 70, 64, 56, 255 } : UI_RAISED, selected ? UI_ACCENT : UI_LINE);
+    UiRoundRect(r, UI_RADIUS, selected ? UI_INK : UI_RAISED, BLANK);
     int tw = UiMeasure(text, FONT);
-    UiText(text, (int)(r.x + (r.width - tw) / 2), (int)(r.y + (r.height - UiLineHeight(FONT)) / 2), FONT, UI_INK);
+    UiText(text, (int)(r.x + (r.width - tw) / 2), (int)(r.y + (r.height - UiLineHeight(FONT)) / 2), FONT,
+           selected ? UI_ON_INK : UI_INK);
 }
 
 void PanelDraw(const SettingsPanel *p, const GfxSettings *s, int w, int h, bool reused)
 {
     if (!p->open) return;
     Layout L = MakeLayout(w, h);
-    DrawRectangle(0, 0, w, h, (Color){ 0, 0, 0, 90 });
-    UiPanel(L.panel, (Color){ 18, 18, 20, 236 }, UI_LINE);
+    DrawRectangle(0, 0, w, h, UI_SCRIM);
+    UiSheet(L.panel);
 
     // Title + frame time
     int tx = (int)L.panel.x + PAD, ty = (int)L.panel.y + 18;
-    UiTextBold("Graphics settings", tx, ty, UI_XL, UI_INK);
+    UiTitle("Graphics settings", tx, ty - 6, UI_INK);
     const char *gpu = p->gpuMs >= 0.0f ? TextFormat("GPU %.2f ms", p->gpuMs)
                     : R3D_IsProfilerAvailable() ? "GPU -" : "GPU: profiler not built in";
     const char *timing = TextFormat("%d fps   %.2f ms   %s%s", GetFPS(), p->msAvg, gpu, reused ? "   (cached frame)" : "");
@@ -193,27 +195,32 @@ void PanelDraw(const SettingsPanel *p, const GfxSettings *s, int w, int h, bool 
     ref.frameReuse = defaults.frameReuse;
 
     for (int g = 0; g < GFX_GROUP_COUNT; g++)
-        if (L.header[g]) UiTextBold(GfxGroupName((GfxGroup)g), L.headerX[g], L.header[g], FONT, UI_ACCENT);
+        if (L.header[g]) UiTextBold(GfxGroupName((GfxGroup)g), L.headerX[g], L.header[g], FONT, UI_INK);
     for (int r = 0; r < GfxRowCount() && r < 64; r++) {
         Rectangle row = L.row[r];
         bool sel = p->sel == r;
-        if (sel) UiPanel((Rectangle){ row.x - 6, row.y, row.width + 12, row.height }, (Color){ 255, 255, 255, 22 }, BLANK);
+        if (sel) {
+            // a list row's selection: square, a white 2 px bar on the left
+            DrawRectangleRec((Rectangle){ row.x - 6, row.y, row.width + 12, row.height }, UI_ROW);
+            DrawRectangle((int)row.x - 6, (int)row.y, 2, (int)row.height, UI_HOT);
+        }
         int ty2 = (int)(row.y + (row.height - UiLineHeight(FONT)) / 2);
-        UiText(GfxRowLabel(r), (int)row.x + 10, ty2, FONT, sel ? UI_INK : (Color){ 220, 218, 212, 220 });
+        UiText(GfxRowLabel(r), (int)row.x + 10, ty2, FONT, sel ? UI_HOT : UI_BODY);
         if (GfxRowNeedsRestart(r))
-            UiPill("restart", (int)row.x + 10 + UiMeasure(GfxRowLabel(r), FONT) + 10, (int)row.y + (ROW_H - UI_PILL_H) / 2,
-                   (Color){ 238, 236, 230, 40 }, UI_DIM);
+            UiMark("restart", (int)row.x + 10 + UiMeasure(GfxRowLabel(r), FONT) + 10, (int)row.y + (ROW_H - UI_PILL_H) / 2,
+                   UI_WARN);
         char v[64], rv[64];
         GfxRowFormat(s, r, v, sizeof(v));
         GfxRowFormat(&ref, r, rv, sizeof(rv));
         bool differs = GfxRowKindOf(r) == GFX_ROW_VALUE && strcmp(v, rv) != 0;
         Rectangle vr = ValueRect(row);
-        Color arrow = sel ? UI_ACCENT : (Color){ 238, 236, 230, 70 };
+        Color arrow = sel ? UI_HOT : UI_FAINT;
         UiText("<", (int)vr.x + 4, ty2, FONT, arrow);
         UiText(">", (int)(vr.x + vr.width) - ARROW_W + 6, ty2, FONT, arrow);
-        int vw = UiMeasure(v, FONT);
-        UiText(v, (int)(vr.x + (vr.width - vw) / 2), ty2, FONT,
-                 GfxRowKindOf(r) == GFX_ROW_PRESET ? UI_ACCENT : differs ? UI_CHANGED : UI_INK);
+        // a value changed from the preset is a status mark: its bar left of the value, both pink
+        int vw = UiMeasure(v, FONT), vx = (int)(vr.x + (vr.width - vw) / 2);
+        if (differs) DrawRectangle(vx - 8, (int)row.y + 4, 2, (int)row.height - 8, UI_CHANGED);
+        UiText(v, vx, ty2, FONT, GfxRowKindOf(r) == GFX_ROW_PRESET || sel ? UI_HOT : differs ? UI_CHANGED : UI_INK);
     }
 
     // Footer: the selected row's hint, status, buttons
@@ -222,10 +229,10 @@ void PanelDraw(const SettingsPanel *p, const GfxSettings *s, int w, int h, bool 
     const char *hint = p->sel < GfxRowCount() ? GfxRowHint(p->sel)
                      : p->sel == ResetItem() ? TextFormat("every setting back to the %s preset", MS_QualityName(s->base))
                      : "close the panel (F2 / ESC)";
-    UiText(hint, tx, fy + 10, UI_S, UI_INK);
+    UiText(hint, tx, fy + 10, UI_S, UI_TEXT);
     if (p->statusTime > 0.0f && p->status[0])
-        UiText(p->status, tx, fy + 34, UI_S, Fade(UI_ACCENT, fminf(p->statusTime, 1.0f)));
-    UiHints("{UP}/{DOWN} select|{LEFT}/{RIGHT} change|mouse: arrows / wheel|blue = changed from the preset",
+        UiText(p->status, tx, fy + 34, UI_S, UiAlpha(UI_INK, fminf(p->statusTime, 1.0f)));
+    UiHints("{UP}/{DOWN} select|{LEFT}/{RIGHT} change|mouse: arrows / wheel|pink = changed from the preset",
             tx, (int)L.close.y + (28 - UiLineHeight(UI_XS)) / 2, UI_XS, UI_DIM);
     Button(L.reset, "Reset to preset", p->sel == ResetItem());
     Button(L.close, "Close", p->sel == CloseItem());

@@ -224,7 +224,7 @@ static void DrawRow(int item, Rectangle row, bool selected, void *user)
     const KeyRow *r = &ROWS[item];
     int ty = (int)row.y + ((int)row.height - UiLineHeight(UI_S)) / 2;
     int x = (int)row.x + 12;
-    UiTextBold(r->keys, x, ty, UI_S, UI_ACCENT);
+    UiTextBold(r->keys, x, ty, UI_S, selected ? UI_HOT : UI_INK);
     int ax = x + KEYS_W;
     if (k->list.filterLen > 0) {
         // searching every section: say which one the row is from
@@ -232,11 +232,12 @@ static void DrawRow(int item, Rectangle row, bool selected, void *user)
         UiText(sec, ax, ty, UI_S, UI_DIM);
         ax += UiMeasure(sec, UI_S) + 8;
     }
-    UiText(r->action, ax, ty, UI_S, selected ? UI_INK : UI_TEXT);
+    UiText(r->action, ax, ty, UI_S, selected ? UI_HOT : UI_BODY);
 }
 
 void KeysDraw(KeysPanel *k, int screenW, int screenH)
 {
+    if (k->menu || k->open) DrawRectangle(0, 0, screenW, screenH, UI_SCRIM);     // modal: dim the scene
     if (k->menu) {
         // One button in the middle of the screen
         const char *label = "See keybindings";
@@ -244,12 +245,14 @@ void KeysDraw(KeysPanel *k, int screenW, int screenH)
         const char *hint = "{ENTER} open|{ESC} back";
         int pw = (bw > UiHintsWidth(hint, UI_S) ? bw : UiHintsWidth(hint, UI_S)) + 48, ph = bh + 70;
         Rectangle panel = { (float)((screenW - pw) / 2), (float)((screenH - ph) / 2), (float)pw, (float)ph };
-        UiPanel(panel, UI_PANEL, UI_LINE);
+        UiSheet(panel);
         k->button = (Rectangle){ panel.x + (pw - bw) / 2.0f, panel.y + 20, (float)bw, (float)bh };
+        // as UiButton: rest raised, hover lighter with white text, held white with black text
         bool hover = CheckCollisionPointRec(GetMousePosition(), k->button);
-        UiPanel(k->button, hover ? UI_ACCENT : UI_RAISED, UI_ACCENT);
+        bool held = hover && IsMouseButtonDown(MOUSE_BUTTON_LEFT);
+        UiRoundRect(k->button, UI_RADIUS, held ? UI_INK : hover ? UI_HOVER : UI_RAISED, BLANK);
         UiTextBold(label, (int)k->button.x + 24, (int)k->button.y + (bh - UiLineHeight(UI_L)) / 2, UI_L,
-                   hover ? (Color){ 16, 16, 18, 255 } : UI_INK);
+                   held ? UI_ON_INK : hover ? UI_HOT : UI_INK);
         UiHints(hint, (int)panel.x + (pw - UiHintsWidth(hint, UI_S)) / 2, (int)(k->button.y + bh + 14), UI_S, UI_DIM);
         return;
     }
@@ -268,8 +271,11 @@ void KeysDraw(KeysPanel *k, int screenW, int screenH)
             Refilter(k);
             on = true;
         }
-        UiPanel(tab, on ? UI_RAISED : UI_PANEL, on ? UI_ACCENT : UI_LINE);
-        UiText(SECTIONS[s], tx + 10, ty + (28 - UiLineHeight(UI_S)) / 2, UI_S, on ? UI_ACCENT : UI_DIM);
+        // a toggle button on a dark base (legible over a bright sky): on = white with black text
+        bool hover = !on && k->interactive && CheckCollisionPointRec(GetMousePosition(), tab);
+        UiRoundRect(tab, UI_RADIUS, UI_PANEL, BLANK);
+        UiRoundRect(tab, UI_RADIUS, on ? UI_INK : hover ? UI_HOVER : UI_RAISED, BLANK);
+        UiText(SECTIONS[s], tx + 10, ty + (28 - UiLineHeight(UI_S)) / 2, UI_S, on ? UI_ON_INK : hover ? UI_HOT : UI_BODY);
         tx += tw + 6;
     }
     const char *title = k->list.filterLen > 0 ? "Keybindings: every section" : TextFormat("Keybindings: %s", SECTIONS[k->section]);

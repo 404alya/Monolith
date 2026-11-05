@@ -1989,7 +1989,7 @@ int LauncherDrawHud(int x, int y)
     Color cc;
     const char *coordText = CoordinatorLine(&cc);
     if (coordText) {
-        UiHudText(coordText, x, y, step, size, cc);
+        UiHudMark(coordText, x, y, step, size, cc);
         rows++;
     }
     long below = 1L << 30;      // walk the list from the newest request down
@@ -2001,42 +2001,40 @@ int LauncherDrawHud(int x, int y)
         below = q->seq;
 
         const char *text;
-        Color c = { 235, 232, 225, 220 };
+        Color c = UI_TEXT;          // queued, running (a white bar)
         int t = (int)(clockTime - q->submitTime);
         if (q->queue && q->done) {
             float age = (float)(clockTime - q->doneTime);
             if (age > DONE_SHOW_TIME) continue;
             bool ok = strcmp(q->state, "failed") != 0 && strcmp(q->state, "cancelled") != 0;
-            Color base = ok ? (Color){ 150, 230, 150, 255 } : strcmp(q->state, "failed") == 0 ? (Color){ 255, 170, 110, 255 } : (Color){ 190, 190, 190, 255 };
-            c = Fade(base, fminf((DONE_SHOW_TIME - age) / DONE_FADE_TIME, 1.0f));
+            Color base = ok ? UI_OK : strcmp(q->state, "failed") == 0 ? UI_WARN : UI_DIM;     // (dim: cancelled)
+            c = UiAlpha(base, (DONE_SHOW_TIME - age) / DONE_FADE_TIME);
             text = TextFormat("[%d] [%s] %s: %s", q->number, ok ? "done" : q->state, q->slug, q->summary);
         } else if (q->queue) {
             const char *cancel = q->cancelAsked ? ", cancelling" : "";
             if (strcmp(q->state, "question") == 0) {
-                c = (Color){ 255, 225, 120, 240 };
+                c = UI_ASK;
                 text = TextFormat("[%d] [?] %s: %s (answer in the coordinator terminal)", q->number, q->slug, q->summary);
             } else if (strcmp(q->state, "claimed") == 0)
                 text = TextFormat("[%d] ... %s running (%02d:%02d%s)", q->number, q->slug, t / 60, t % 60, cancel);
-            else {
-                c = (Color){ 200, 205, 215, 200 };
+            else
                 text = TextFormat("[%d] queued %s (%02d:%02d%s)", q->number, q->slug, t / 60, t % 60, cancel);
-            }
         } else if (q->done) {
             float age = (float)(clockTime - q->doneTime);
             if (age > DONE_SHOW_TIME) {
                 // After its 20 s a finished request stays as a dim line while its terminal
                 // is still open, so it can still be closed by number (K / CTRL+K n)
                 if (!WindowMaybeOpen(q)) continue;
-                c = (Color){ 150, 230, 150, 110 };
+                c = UiAlpha(UI_OK, 110.0f / 255.0f);
                 text = TextFormat("[%d] done %s (terminal open)", q->number, q->slug);
             } else {
-                c = Fade((Color){ 150, 230, 150, 255 }, fminf((DONE_SHOW_TIME - age) / DONE_FADE_TIME, 1.0f));
+                c = UiAlpha(UI_OK, (DONE_SHOW_TIME - age) / DONE_FADE_TIME);
                 if (WindowMaybeOpen(q)) c.a = (unsigned char)fmaxf(c.a, 110.0f);
                 text = TextFormat("[%d] [done] %s: %s", q->number, q->slug, q->summary);
             }
         } else {
             if (!q->term.launched) {
-                c = (Color){ 255, 170, 110, 230 };
+                c = UI_WARN;
                 text = TextFormat("[%d] [!] %s not launched, run it by hand (see log), waiting (%02d:%02d)", q->number, q->slug, t / 60, t % 60);
             } else if (q->term.exited)
                 // Not necessarily a failure: some terminals hand the window to a daemon
@@ -2045,7 +2043,7 @@ int LauncherDrawHud(int x, int y)
             else
                 text = TextFormat("[%d] ... %s running (%02d:%02d)", q->number, q->slug, t / 60, t % 60);
         }
-        UiHudText(text, x, y + rows * step, step, size, c);
+        UiHudMark(text, x, y + rows * step, step, size, c);
         rows++;
     }
     return rows * step;
@@ -2866,15 +2864,16 @@ static const char *CoordinatorLine(Color *c)
         else running++;
     }
     if (!listed) return NULL;
-    *c = (Color){ 200, 205, 215, 200 };
+    *c = UI_TEXT;
     if (coord.alive == 1) {
         if (!queued && !running) return "coordinator: running, idle";
         return TextFormat("coordinator: running, %d queued, %d running", queued, running);
     }
     if (CoordinatorStarting()) return "coordinator: starting ...";
-    *c = (Color){ 255, 170, 110, 230 };
+    *c = UI_WARN;
     if (coord.error[0]) return TextFormat("coordinator: not started: %s (the requests stay queued)", coord.error);
-    if (!queued && !running) { *c = (Color){ 200, 205, 215, 160 }; return "coordinator: not running"; }
+    *c = UI_DIM;
+    if (!queued && !running) return "coordinator: not running";
     return "coordinator: not running (the next request starts one; queued requests wait for it)";
 }
 
