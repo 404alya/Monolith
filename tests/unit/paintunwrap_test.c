@@ -304,13 +304,12 @@ static const char *scratchDir;
 // Unwraps `in` twice and checks everything; name labels the output line
 static void Check(const char *name, const PaintUnwrapInput *in, int meshCount)
 {
-    char err[512] = "";
     MS_PaintUnwrap u, again;
     double t0 = Now();
-    bool ok = PaintUnwrapMeshes(in, meshCount, TEXELS, &u, err, sizeof(err));
+    bool ok = PaintUnwrapMeshes(in, meshCount, TEXELS, &u);
     double ms = (Now() - t0) * 1000.0;
-    if (!ok) { FAIL("%s: %s", name, err); return; }
-    if (!PaintUnwrapMeshes(in, meshCount, TEXELS, &again, err, sizeof(err))) { FAIL("%s: second run: %s", name, err); MS_PaintUnwrapFree(&u); return; }
+    if (!ok) { FAIL("%s: %s", name, MS_LastError()); return; }
+    if (!PaintUnwrapMeshes(in, meshCount, TEXELS, &again)) { FAIL("%s: second run: %s", name, MS_LastError()); MS_PaintUnwrapFree(&u); return; }
     bool same = SameUnwrap(&u, &again);
     if (!same) FAIL("%s: two runs differ", name);
     MS_PaintUnwrapFree(&again);
@@ -466,11 +465,11 @@ static void BadInputCases(void)
     static const unsigned int badIdx[3] = { 0, 1, 7 }, shortIdx[2] = { 0, 1 };
     PaintUnwrapInput cases[3] = { { pos, NULL, badIdx, 3, 3, 0 }, { pos, NULL, shortIdx, 3, 2, 0 }, { pos, NULL, badIdx, 3, 3, -1 } };
     for (int i = 0; i < 3; i++) {
-        char err[256] = "";
+        MS_ClearError();            // (so a refusal without a message would show)
         MS_PaintUnwrap u;
-        if (PaintUnwrapMeshes(&cases[i], 1, TEXELS, &u, err, sizeof(err))) { FAIL("bad input %d accepted", i); MS_PaintUnwrapFree(&u); }
-        else if (!err[0] || u.meshCount || u.meshes) FAIL("bad input %d: no message or not empty", i);
-        else printf("ok   bad input refused: %s\n", err);
+        if (PaintUnwrapMeshes(&cases[i], 1, TEXELS, &u)) { FAIL("bad input %d accepted", i); MS_PaintUnwrapFree(&u); }
+        else if (!MS_LastError()[0] || u.meshCount || u.meshes) FAIL("bad input %d: no message or not empty", i);
+        else printf("ok   bad input refused: %s\n", MS_LastError());
     }
 }
 
@@ -551,16 +550,15 @@ static void ModelCase(const char *path)
 // PaintUnwrapModelFile on a loaded package must equal the direct unwrap of the same file
 static void SceneCase(const char *package)
 {
-    char err[512];
-    MS_Scene *scene = MS_Load(package, NULL, err, sizeof(err));
-    if (!scene) { FAIL("--scene %s: %s", package, err); return; }
+    MS_Scene *scene = MS_Load(package, NULL);
+    if (!scene) { FAIL("--scene %s: %s", package, MS_LastError()); return; }
     for (int f = 0; f < scene->modelFileCount; f++) {
         const MS_ModelFile *mf = &scene->modelFiles[f];
         MS_PaintUnwrap viaScene;
-        if (!PaintUnwrapModelFile(scene, f, TEXELS, &viaScene, err, sizeof(err))) {
+        if (!PaintUnwrapModelFile(scene, f, TEXELS, &viaScene)) {
             R3D_MeshData probe;
             if (!MS_ModelMeshData(scene, f, 0, &probe)) printf("skip %s: PaintUnwrapModelFile (MS_ModelMeshData: phase-0 stub)\n", mf->path);
-            else FAIL("PaintUnwrapModelFile %s: %s", mf->path, err);
+            else FAIL("PaintUnwrapModelFile %s: %s", mf->path, MS_LastError());
             continue;
         }
         char full[1100];
@@ -568,7 +566,7 @@ static void SceneCase(const char *package)
         R3D_Model model = R3D_LoadModelEx(full, R3D_IMPORT_RETAIN_MESH_DATA);
         ModelInput mi = { 0 };
         MS_PaintUnwrap direct;
-        if (!ModelInputs(&model, &mi) || !PaintUnwrapMeshes(mi.in, mi.count, PAINTUNWRAP_TEXELS, &direct, err, sizeof(err)))
+        if (!ModelInputs(&model, &mi) || !PaintUnwrapMeshes(mi.in, mi.count, PAINTUNWRAP_TEXELS, &direct))
             FAIL("%s: direct unwrap", mf->path);
         else {
             direct.fileHash = viaScene.fileHash;
@@ -614,5 +612,6 @@ int main(int argc, char **argv)
         CloseWindow();
     }
     printf("%s: %d failure%s\n", failures ? "FAIL" : "OK", failures, failures == 1 ? "" : "s");
+    MS_ClearError();
     return failures ? 1 : 0;
 }

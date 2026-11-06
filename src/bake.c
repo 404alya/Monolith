@@ -44,7 +44,7 @@
 
 // One level: an R3D render of the quad into a size x size target, twice (albedo, ORM);
 // returns the RGBA tile (top-down rows as described above) or an empty image
-static Image BakeLevel(const BakeArgs *a, int level, char *err, int errSize)
+static Image BakeLevel(const BakeArgs *a, int level)
 {
     int px = a->size >> level;
     float period = (float)a->size / a->texels;
@@ -53,13 +53,13 @@ static Image BakeLevel(const BakeArgs *a, int level, char *err, int errSize)
              "#define MS_BAKE 1\n#define MS_BAKE_FACE %d\n#define MS_BAKE_LEVEL %d\n#define MS_BAKE_PERIOD %.9g\n#define MS_BAKE_TEXELS %.9g\n",
              (int)a->face, level, period, a->texels);
     MS_LoadOptions opt = { .shaderDefines = a->shaderFile ? defines : NULL, .shaderDefinesFile = a->shaderFile };
-    MS_Scene *s = MS_Load(a->mapPath, &opt, err, errSize);
+    MS_Scene *s = MS_Load(a->mapPath, &opt);
     if (!s) return (Image){ 0 };
     const MS_Material *mat = NULL;
     for (int i = 0; i < s->materialCount; i++)
         if (strcmp(s->materials[i].name, a->material) == 0) mat = &s->materials[i];
     if (!mat) {
-        snprintf(err, errSize, "%s: no material \"%s\"", s->path, a->material);
+        MS_SetError("%s: no material \"%s\"", s->path, a->material);
         MS_Unload(s);
         return (Image){ 0 };
     }
@@ -118,10 +118,9 @@ int BakeSurface(const BakeArgs *a)
 
     // A parse first: a broken map fails before any window, and R3D's init hints (the sun's
     // shadow map size) match the map, as in a --shot
-    char err[512];
-    MS_Scene *peek = MS_Load(a->mapPath, &(MS_LoadOptions){ .noGpu = true }, err, sizeof(err));
+    MS_Scene *peek = MS_Load(a->mapPath, &(MS_LoadOptions){ .noGpu = true });
     if (!peek) {
-        fprintf(stderr, "monolith: cannot load the map\n%s\n", err);
+        fprintf(stderr, "monolith: cannot load the map\n%s\n", MS_LastError());
         return 1;
     }
     const MS_Material *mat = NULL;
@@ -148,9 +147,9 @@ int BakeSurface(const BakeArgs *a)
     Image atlas = GenImageColor(w, a->size, BLANK);
     bool ok = true;
     for (int level = 0; level < a->levels && ok; level++) {
-        Image tile = BakeLevel(a, level, err, sizeof(err));
+        Image tile = BakeLevel(a, level);
         if (!tile.data) {
-            fprintf(stderr, "monolith: cannot bake \"%s\"\n%s\n", a->material, err);
+            fprintf(stderr, "monolith: cannot bake \"%s\"\n%s\n", a->material, MS_LastError());
             ok = false;
             break;
         }

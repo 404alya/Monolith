@@ -79,8 +79,8 @@ Declared in `runtime/monolith_scene.h` in a `MONOLITH_EDITOR` block ("Live edits
 build and `--export` don't have it; `tests/unit/export_strip_test.sh` checks that.
 
 ```c
-MS_ReloadResult MS_EditSetText(MS_Scene *s, const char *text, int size, MS_EditStats *stats,
-                               char *err, int errSize);
+MS_ReloadResult MS_EditSetText(MS_Scene *s, const char *text, int size, MS_EditStats *stats);
+                               // MS_RELOAD_FAILED: "file:line: message" in MS_LastError()
 void MS_EditMarkSaved(MS_Scene *s);
 bool MS_EditPreviewBegin(MS_Scene *s, const MS_ObjRef *objs, int count);
 bool MS_EditPreviewSet(MS_Scene *s, const MS_Transform *transforms);

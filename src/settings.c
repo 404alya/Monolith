@@ -403,9 +403,9 @@ const char *GfxKeyHelp(void)
     return buf;
 }
 
-bool GfxLoad(GfxSettings *s, const char *path, char *err, int errSize)
+bool GfxLoad(GfxSettings *s, const char *path, int *ignored)
 {
-    if (errSize > 0) err[0] = 0;
+    *ignored = 0;
     FILE *f = fopen(path, "r");
     if (!f) return false;
     char *line = NULL;      // whole lines: a fixed buffer split long ones into two (QA2 F15)
@@ -428,7 +428,7 @@ bool GfxLoad(GfxSettings *s, const char *path, char *err, int errSize)
     }
     free(line);
     fclose(f);
-    if (bad && errSize > 0) snprintf(err, errSize, "%s: %d line%s ignored", path, bad, bad == 1 ? "" : "s");
+    *ignored = bad;
     return true;
 }
 

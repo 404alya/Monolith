@@ -1224,9 +1224,8 @@ static bool EnsureUnwrap(DrawMode *dm, int file, int slot, int texels, char *why
     free(row);
     DrawUnwrap u = { 0 };
     double t0 = GetTime();
-    char err[300];
-    if (!PaintUnwrapModelFile(scene, file, texels, &u.u, err, sizeof(err))) {
-        snprintf(why, (size_t)whySize, "%s can't be unwrapped for paint: %s", path, err);
+    if (!PaintUnwrapModelFile(scene, file, texels, &u.u)) {
+        snprintf(why, (size_t)whySize, "%s can't be unwrapped for paint: %s", path, MS_LastError());
         return false;
     }
     u.modelPath = MS_StrDup(path);
@@ -2669,10 +2668,9 @@ void DrawModeSync(DrawMode *dm, EditMode *em, bool newScene)
     // paint alone change no text: one live edit of the same text loads the atlases from memory (an
     // atlas of another size than its PNG: a new texture), then their pixels go up
     MapEditor *E = &dm->em->ed;
-    char err[512];
     if (provided > 0 && E->work && E->workHash == scene->hash &&
-        MS_EditSetText(scene, E->work, E->workSize, &E->lastStats, err, sizeof(err)) != MS_RELOADED)
-        TraceLog(LOG_WARNING, "monolith: draw: the paint atlases could not be loaded again: %s", err);
+        MS_EditSetText(scene, E->work, E->workSize, &E->lastStats) != MS_RELOADED)
+        TraceLog(LOG_WARNING, "monolith: draw: the paint atlases could not be loaded again: %s", MS_LastError());
     for (int i = 0; i < dm->atlasCount; i++)
         if (dm->atlases[i].provided) Upload(&dm->atlases[i], 0, 0, dm->atlases[i].img.width, dm->atlases[i].img.height);
 }
@@ -3199,8 +3197,7 @@ static void PrintState(DrawMode *dm, EditMode *em)
 // The map (or a package file) changed on disk: the hot reload's path (reload, rebase, paint hooks)
 static bool ScriptReload(DrawMode *dm, EditMode *em, Designer *d, char *msg, int msgSize)
 {
-    char err[512];
-    if (MS_Reload(scene, NULL, err, sizeof(err)) != MS_RELOADED) { snprintf(msg, msgSize, "the reload failed: %.400s", err); return false; }
+    if (MS_Reload(scene, NULL) != MS_RELOADED) { snprintf(msg, msgSize, "the reload failed: %s", MS_LastError()); return false; }
     DrawModeBeforeSync(dm);
     EditModeSync(em, d, false);
     DrawModeSync(dm, em, false);
@@ -3229,10 +3226,9 @@ static bool ScriptStroke(DrawMode *dm, EditMode *em, Camera3D cam, int w, int h,
             }
             // (the unwrap goes live with a text edit; until the first stroke's, the script makes one now
             // to read the paint coordinates: the same text again)
-            char err[400];
             MapEditor *E = &em->ed;
-            if (MS_EditSetText(scene, E->work, E->workSize, &E->lastStats, err, sizeof(err)) != MS_RELOADED) {
-                snprintf(msg, msgSize, "the unwrap can't go live: %s", err);
+            if (MS_EditSetText(scene, E->work, E->workSize, &E->lastStats) != MS_RELOADED) {
+                snprintf(msg, msgSize, "the unwrap can't go live: %s", MS_LastError());
                 return false;
             }
         }
@@ -3261,11 +3257,11 @@ static bool ScriptStroke(DrawMode *dm, EditMode *em, Camera3D cam, int w, int h,
     int samples = dm->stroke ? dm->stroke->sampleCount : 0;
     bool allocated = scene->version != version;
     bool failed = dm->messageError;
-    char err[256];
-    snprintf(err, sizeof(err), "%s", dm->message);
+    char failMessage[256];         // (the stroke's own message: StrokeEnd replaces it)
+    snprintf(failMessage, sizeof(failMessage), "%s", dm->message);
     StrokeEnd(dm, em);
     snprintf(msg, msgSize, "%s (%d sample%s%s)%s%s", dm->message, samples, samples == 1 ? "" : "s", allocated ? ", allocated" : "",
-             failed ? " -- " : "", failed ? err : "");
+             failed ? " -- " : "", failed ? failMessage : "");
     return !failed && !dm->messageError;
 }
 

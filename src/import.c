@@ -295,9 +295,8 @@ static bool ImportInto(const char *mapsDir, const char *projectDirIn, const char
     AbsPathOf(pkgRel, package, sizeof(package));
     snprintf(mapFile, sizeof(mapFile), "%s/%s.map", package, mapName);
     snprintf(brief, sizeof(brief), "%s/MAP.md", package);
-    char err[512];
-    MS_Scene *s = MS_Load(package, &(MS_LoadOptions){ .noGpu = true }, err, sizeof(err));
-    if (!s) { fprintf(stderr, "monolith: --import: %s\n", err); return false; }
+    MS_Scene *s = MS_Load(package, &(MS_LoadOptions){ .noGpu = true });
+    if (!s) { fprintf(stderr, "monolith: --import: %s\n", MS_LastError()); return false; }
 
     // Bundle folder: stamp + "import-<name>" (slug: lower case, [a-z0-9-])
     char slug[80] = "import-";

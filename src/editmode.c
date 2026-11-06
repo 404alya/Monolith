@@ -527,9 +527,8 @@ void EditModeSync(EditMode *m, Designer *d, bool newScene)
         // The renderer restarted and loaded the same file: the working copy goes live again
         E->loadVersion = scene->loadVersion;
         if (E->workHash != scene->hash) {
-            char err[512];
-            if (MS_EditSetText(scene, E->work, E->workSize, &E->lastStats, err, sizeof(err)) != MS_RELOADED)
-                Say(m, true, TextFormat("the unsaved edits could not be shown again: %s", err));
+            if (MS_EditSetText(scene, E->work, E->workSize, &E->lastStats) != MS_RELOADED)
+                Say(m, true, TextFormat("the unsaved edits could not be shown again: %s", MS_LastError()));
             DesignerSync(d);
         }
         return;

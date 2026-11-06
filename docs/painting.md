@@ -914,9 +914,9 @@ The one screening run (exported `pine_forest`, `--bench-frames 150`, RTX 4050 La
 measurement): all views 3.267 ms avg (306 FPS), per view 2.83–4.11 ms, 0 shadow updates in timed frames.
 
 **The paint unwrap** (`src/paintunwrap.c/.h`, §4.5). `PaintUnwrapMeshes(meshes, count, texelsHint,
-out, err, errSize)` over plain arrays (positions float3, UVs float2 or NULL, indices or NULL for
-unindexed, the slot) → `MS_PaintUnwrap`; `PaintUnwrapModelFile(scene, file, out, err, errSize)` (the
-signature of the task; texelsHint `PAINTUNWRAP_TEXELS` = 1024) reads the meshes through
+out)` over plain arrays (positions float3, UVs float2 or NULL, indices or NULL for
+unindexed, the slot) → `MS_PaintUnwrap`; `PaintUnwrapModelFile(scene, file, texelsHint, out)` (false: the reason in `MS_LastError()`, the
+runtime's last error, which the editor's modules share; the signature of the task, without its error buffer; texelsHint `PAINTUNWRAP_TEXELS` = 1024) reads the meshes through
 `MS_ModelMeshData` (as the header declares it: `R3D_MeshData *out`, not §8.2's `const R3D_MeshData
 **`), converts R3D's float16 UVs, takes the slots from `model.meshMaterials`, refuses skinned files and
 sets `fileHash` (FNV-1a 64 of the file). Per slot, in the order slots first appear, one xatlas atlas

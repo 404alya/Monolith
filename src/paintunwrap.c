@@ -13,7 +13,6 @@
 // xatlas is compiled with XA_MULTITHREADED=0 (build.sh): the same input gives the same bytes.
 #include "paintunwrap.h"
 #include "vendor/xatlas/xatlas_c.h"
-#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,15 +28,6 @@
 #define UNWRAP_SHRINK 0.9f          // texels per unit, per repack that needed a second atlas
 #define UNWRAP_MAX_REPACKS 80       // (0.9^80 ~ 2e-4 of the estimate: far below any real need)
 #define UNWRAP_MAX_PASSES 8         // unwraps of a slot while folds overlap (each splits them off)
-
-static void UnwrapError(char *err, int errSize, const char *fmt, ...)
-{
-    if (!err || errSize <= 0) return;
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(err, (size_t)errSize, fmt, ap);
-    va_end(ap);
-}
 
 static void FreeUnwrap(MS_PaintUnwrap *u)
 {
@@ -57,29 +47,29 @@ static int TriangleCorners(const PaintUnwrapInput *m)
 }
 
 // Checks one input mesh before xatlas sees it (xatlas only reports a bad index as an error code)
-static bool CheckInput(const PaintUnwrapInput *m, int i, char *err, int errSize)
+static bool CheckInput(const PaintUnwrapInput *m, int i)
 {
     int corners = TriangleCorners(m);
     if (m->vertexCount < 0 || m->indexCount < 0) {
-        UnwrapError(err, errSize, "paint unwrap: mesh %d: negative count", i);
+        MS_SetError("paint unwrap: mesh %d: negative count", i);
         return false;
     }
     if (corners % 3 != 0) {
-        UnwrapError(err, errSize, "paint unwrap: mesh %d: %d indices are not whole triangles", i, corners);
+        MS_SetError("paint unwrap: mesh %d: %d indices are not whole triangles", i, corners);
         return false;
     }
     if (m->vertexCount > 0 && !m->positions) {
-        UnwrapError(err, errSize, "paint unwrap: mesh %d: no positions", i);
+        MS_SetError("paint unwrap: mesh %d: no positions", i);
         return false;
     }
     if (m->slot < 0) {
-        UnwrapError(err, errSize, "paint unwrap: mesh %d: slot %d", i, m->slot);
+        MS_SetError("paint unwrap: mesh %d: slot %d", i, m->slot);
         return false;
     }
     if (m->indices) {
         for (int k = 0; k < m->indexCount; k++) {
             if (m->indices[k] < (unsigned int)m->vertexCount) continue;
-            UnwrapError(err, errSize, "paint unwrap: mesh %d: index %d is %u, the mesh has %d vertices", i, k,
+            MS_SetError("paint unwrap: mesh %d: index %d is %u, the mesh has %d vertices", i, k,
                         m->indices[k], m->vertexCount);
             return false;
         }
@@ -97,7 +87,7 @@ static unsigned short ToUnorm16(float texels, float r)
 
 // Packs the charts into one r x r atlas: xatlas's estimate first (single atlas, any size), then
 // fixed r x r packs with fewer texels per unit until one atlas holds every chart
-static bool PackIntoOne(xatlasAtlas *atlas, int r, char *err, int errSize)
+static bool PackIntoOne(xatlasAtlas *atlas, int r)
 {
     xatlasPackOptions pack;
     xatlasPackOptionsInit(&pack);
@@ -109,7 +99,7 @@ static bool PackIntoOne(xatlasAtlas *atlas, int r, char *err, int errSize)
     if (atlas->chartCount == 0) return true;   // (only degenerate triangles: nothing to place)
     float tpu = atlas->texelsPerUnit;
     if (!(tpu > 0.0f)) {
-        UnwrapError(err, errSize, "paint unwrap: xatlas found no texel scale (no charts?)");
+        MS_SetError("paint unwrap: xatlas found no texel scale (no charts?)");
         return false;
     }
     for (int i = 0; i < UNWRAP_MAX_REPACKS; i++) {
@@ -118,7 +108,7 @@ static bool PackIntoOne(xatlasAtlas *atlas, int r, char *err, int errSize)
         if (atlas->atlasCount == 1 && atlas->width == (uint32_t)r && atlas->height == (uint32_t)r) return true;
         tpu *= UNWRAP_SHRINK;
     }
-    UnwrapError(err, errSize, "paint unwrap: the charts don't fit into one %d x %d domain", r, r);
+    MS_SetError("paint unwrap: the charts don't fit into one %d x %d domain", r, r);
     return false;
 }
 
@@ -137,18 +127,18 @@ static void ClearSlot(const int *list, int count, MS_PaintUnwrap *out)
 // One xatlas run over the meshes list[0..count) (all of one slot) into out->meshes[list[k]].
 // faceGroup[k] (NULL: all 0) keeps faces of different groups out of each other's charts.
 static bool UnwrapPass(const PaintUnwrapInput *meshes, const int *list, int count, uint32_t *const *faceGroup, int r,
-                       MS_PaintUnwrap *out, char *err, int errSize)
+                       MS_PaintUnwrap *out)
 {
     xatlasAtlas *atlas = xatlasCreate();
     if (!atlas) {
-        UnwrapError(err, errSize, "paint unwrap: out of memory");
+        MS_SetError("paint unwrap: out of memory");
         return false;
     }
     bool ok = false;
     int *added = malloc(sizeof(int) * (size_t)(count > 0 ? count : 1));    // atlas mesh -> input mesh
     int addedCount = 0;
     if (!added) {
-        UnwrapError(err, errSize, "paint unwrap: out of memory");
+        MS_SetError("paint unwrap: out of memory");
         goto done;
     }
 
@@ -173,7 +163,7 @@ static bool UnwrapPass(const PaintUnwrapInput *meshes, const int *list, int coun
         decl.faceMaterialData = faceGroup ? faceGroup[k] : NULL;
         xatlasAddMeshError e = xatlasAddMesh(atlas, &decl, (uint32_t)count);
         if (e != XATLAS_ADD_MESH_ERROR_SUCCESS) {
-            UnwrapError(err, errSize, "paint unwrap: mesh %d: %s", list[k], xatlasAddMeshErrorString(e));
+            MS_SetError("paint unwrap: mesh %d: %s", list[k], xatlasAddMeshErrorString(e));
             goto done;
         }
         added[addedCount++] = list[k];
@@ -183,9 +173,9 @@ static bool UnwrapPass(const PaintUnwrapInput *meshes, const int *list, int coun
     xatlasChartOptions charts;
     xatlasChartOptionsInit(&charts);
     xatlasComputeCharts(atlas, &charts);
-    if (!PackIntoOne(atlas, r, err, errSize)) goto done;
+    if (!PackIntoOne(atlas, r)) goto done;
     if (atlas->meshCount != (uint32_t)addedCount) {
-        UnwrapError(err, errSize, "paint unwrap: xatlas returned %u meshes for %d", atlas->meshCount, addedCount);
+        MS_SetError("paint unwrap: xatlas returned %u meshes for %d", atlas->meshCount, addedCount);
         goto done;
     }
 
@@ -195,7 +185,7 @@ static bool UnwrapPass(const PaintUnwrapInput *meshes, const int *list, int coun
         const PaintUnwrapInput *m = &meshes[added[k]];
         MS_PaintUnwrapMesh *o = &out->meshes[added[k]];
         if (xm->indexCount != (uint32_t)TriangleCorners(m)) {
-            UnwrapError(err, errSize, "paint unwrap: mesh %d: xatlas returned %u indices for %d", added[k],
+            MS_SetError("paint unwrap: mesh %d: xatlas returned %u indices for %d", added[k],
                         xm->indexCount, TriangleCorners(m));
             goto done;
         }
@@ -205,13 +195,13 @@ static bool UnwrapPass(const PaintUnwrapInput *meshes, const int *list, int coun
         o->uv = malloc(sizeof(unsigned short) * 2 * (size_t)(xm->vertexCount ? xm->vertexCount : 1));
         o->indices = malloc(sizeof(unsigned int) * (size_t)(xm->indexCount ? xm->indexCount : 1));
         if (!o->source || !o->uv || !o->indices) {
-            UnwrapError(err, errSize, "paint unwrap: out of memory");
+            MS_SetError("paint unwrap: out of memory");
             goto done;
         }
         for (uint32_t v = 0; v < xm->vertexCount; v++) {
             const xatlasVertex *xv = &xm->vertexArray[v];
             if (xv->xref >= (uint32_t)m->vertexCount) {
-                UnwrapError(err, errSize, "paint unwrap: mesh %d: xatlas vertex %u refers to vertex %u", added[k], v, xv->xref);
+                MS_SetError("paint unwrap: mesh %d: xatlas vertex %u refers to vertex %u", added[k], v, xv->xref);
                 goto done;
             }
             o->source[v] = xv->xref;
@@ -221,7 +211,7 @@ static bool UnwrapPass(const PaintUnwrapInput *meshes, const int *list, int coun
         }
         for (uint32_t i = 0; i < xm->indexCount; i++) {
             if (xm->indexArray[i] >= xm->vertexCount) {
-                UnwrapError(err, errSize, "paint unwrap: mesh %d: xatlas index %u out of range", added[k], i);
+                MS_SetError("paint unwrap: mesh %d: xatlas index %u out of range", added[k], i);
                 goto done;
             }
             o->indices[i] = xm->indexArray[i];
@@ -377,8 +367,7 @@ done:
 
 // Unwraps one slot: a pass, then while folds overlap, each overlapping triangle becomes a chart of
 // its own (an xatlas material group of its own) and the slot is unwrapped again
-static bool UnwrapSlot(const PaintUnwrapInput *meshes, const int *list, int count, int r, MS_PaintUnwrap *out,
-                       char *err, int errSize)
+static bool UnwrapSlot(const PaintUnwrapInput *meshes, const int *list, int count, int r, MS_PaintUnwrap *out)
 {
     uint32_t **group = calloc((size_t)(count > 0 ? count : 1), sizeof(uint32_t *));
     bool **flag = calloc((size_t)(count > 0 ? count : 1), sizeof(bool *));
@@ -389,16 +378,16 @@ static bool UnwrapSlot(const PaintUnwrapInput *meshes, const int *list, int coun
         flag[k] = calloc(faces, sizeof(bool));
         ok = group[k] && flag[k];
     }
-    if (!ok) UnwrapError(err, errSize, "paint unwrap: out of memory");
+    if (!ok) MS_SetError("paint unwrap: out of memory");
     for (int pass = 0; ok; pass++) {
         ClearSlot(list, count, out);
-        ok = UnwrapPass(meshes, list, count, pass ? group : NULL, r, out, err, errSize);
+        ok = UnwrapPass(meshes, list, count, pass ? group : NULL, r, out);
         if (!ok) break;
         int folds = FindOverlaps(meshes, list, count, out, flag);
         if (folds == 0) break;
-        if (folds < 0) { UnwrapError(err, errSize, "paint unwrap: out of memory"); ok = false; break; }
+        if (folds < 0) { MS_SetError("paint unwrap: out of memory"); ok = false; break; }
         if (pass == UNWRAP_MAX_PASSES - 1) {
-            UnwrapError(err, errSize, "paint unwrap: slot %d: %d triangles still overlap after %d passes",
+            MS_SetError("paint unwrap: slot %d: %d triangles still overlap after %d passes",
                         meshes[list[0]].slot, folds, UNWRAP_MAX_PASSES);
             ok = false;
             break;
@@ -414,16 +403,15 @@ static bool UnwrapSlot(const PaintUnwrapInput *meshes, const int *list, int coun
     return ok;
 }
 
-bool PaintUnwrapMeshes(const PaintUnwrapInput *meshes, int meshCount, int texelsHint, MS_PaintUnwrap *out,
-                       char *err, int errSize)
+bool PaintUnwrapMeshes(const PaintUnwrapInput *meshes, int meshCount, int texelsHint, MS_PaintUnwrap *out)
 {
     memset(out, 0, sizeof(*out));
     if (meshCount < 0 || (meshCount > 0 && !meshes)) {
-        UnwrapError(err, errSize, "paint unwrap: no meshes");
+        MS_SetError("paint unwrap: no meshes");
         return false;
     }
     for (int i = 0; i < meshCount; i++)
-        if (!CheckInput(&meshes[i], i, err, errSize)) return false;
+        if (!CheckInput(&meshes[i], i)) return false;
     int r = texelsHint < UNWRAP_MIN_TEXELS ? UNWRAP_MIN_TEXELS : texelsHint > UNWRAP_MAX_TEXELS ? UNWRAP_MAX_TEXELS : texelsHint;
 
     // Quiet (warnings would go to stdout) and the C library's allocator
@@ -432,7 +420,7 @@ bool PaintUnwrapMeshes(const PaintUnwrapInput *meshes, int meshCount, int texels
     bool *done = calloc((size_t)(meshCount > 0 ? meshCount : 1), sizeof(bool));
     int *list = malloc(sizeof(int) * (size_t)(meshCount > 0 ? meshCount : 1));
     bool ok = out->meshes && done && list;
-    if (!ok) UnwrapError(err, errSize, "paint unwrap: out of memory");
+    if (!ok) MS_SetError("paint unwrap: out of memory");
     else {
         out->meshCount = meshCount;
         for (int i = 0; i < meshCount; i++) out->meshes[i].slot = meshes[i].slot;
@@ -447,7 +435,7 @@ bool PaintUnwrapMeshes(const PaintUnwrapInput *meshes, int meshCount, int texels
             list[count++] = j;
             done[j] = true;
         }
-        ok = UnwrapSlot(meshes, list, count, r, out, err, errSize);
+        ok = UnwrapSlot(meshes, list, count, r, out);
     }
     free(done);
     free(list);
@@ -495,33 +483,33 @@ static bool HashFile(const char *path, unsigned long long *hash)
     return ok;
 }
 
-bool PaintUnwrapModelFile(const MS_Scene *scene, int file, int texelsHint, MS_PaintUnwrap *out, char *err, int errSize)
+bool PaintUnwrapModelFile(const MS_Scene *scene, int file, int texelsHint, MS_PaintUnwrap *out)
 {
     memset(out, 0, sizeof(*out));
     if (!scene || file < 0 || file >= scene->modelFileCount) {
-        UnwrapError(err, errSize, "paint unwrap: no model file %d", file);
+        MS_SetError("paint unwrap: no model file %d", file);
         return false;
     }
     const MS_ModelFile *mf = &scene->modelFiles[file];
     if (!mf->loaded) {
-        UnwrapError(err, errSize, "paint unwrap: %s is not loaded", mf->path);
+        MS_SetError("paint unwrap: %s is not loaded", mf->path);
         return false;
     }
     if (mf->model.skeleton.boneCount > 0) {
-        UnwrapError(err, errSize, "paint unwrap: %s is skinned", mf->path);
+        MS_SetError("paint unwrap: %s is skinned", mf->path);
         return false;
     }
     int meshCount = mf->model.meshCount;
     PaintUnwrapInput *in = calloc((size_t)(meshCount > 0 ? meshCount : 1), sizeof(PaintUnwrapInput));
     float **arrays = calloc((size_t)(meshCount > 0 ? meshCount : 1) * 2, sizeof(float *));
     bool ok = in && arrays;
-    if (!ok) UnwrapError(err, errSize, "paint unwrap: out of memory");
+    if (!ok) MS_SetError("paint unwrap: out of memory");
 
     // Positions and UVs as floats (R3D keeps UVs as float16)
     for (int m = 0; ok && m < meshCount; m++) {
         R3D_MeshData md;
         if (!MS_ModelMeshData(scene, file, m, &md)) {
-            UnwrapError(err, errSize, "paint unwrap: %s: no mesh data for mesh %d", mf->path, m);
+            MS_SetError("paint unwrap: %s: no mesh data for mesh %d", mf->path, m);
             ok = false;
             break;
         }
@@ -529,7 +517,7 @@ bool PaintUnwrapModelFile(const MS_Scene *scene, int file, int texelsHint, MS_Pa
         float *pos = arrays[2 * m] = malloc(sizeof(float) * 3 * (size_t)(vc ? vc : 1));
         float *uv = arrays[2 * m + 1] = malloc(sizeof(float) * 2 * (size_t)(vc ? vc : 1));
         if (!pos || !uv) {
-            UnwrapError(err, errSize, "paint unwrap: out of memory");
+            MS_SetError("paint unwrap: out of memory");
             ok = false;
             break;
         }
@@ -549,13 +537,13 @@ bool PaintUnwrapModelFile(const MS_Scene *scene, int file, int texelsHint, MS_Pa
             .slot = slot < 0 ? 0 : slot,
         };
     }
-    if (ok) ok = PaintUnwrapMeshes(in, meshCount, texelsHint, out, err, errSize);
+    if (ok) ok = PaintUnwrapMeshes(in, meshCount, texelsHint, out);
     if (ok) {
         size_t size = strlen(scene->root) + strlen(mf->path) + 1;
         char *full = malloc(size);
         if (full) snprintf(full, size, "%s%s", scene->root, mf->path);
         if (!full || !HashFile(full, &out->fileHash)) {
-            UnwrapError(err, errSize, "paint unwrap: can't read %s%s", scene->root, mf->path);
+            MS_SetError("paint unwrap: can't read %s%s", scene->root, mf->path);
             FreeUnwrap(out);
             ok = false;
         }

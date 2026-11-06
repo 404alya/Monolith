@@ -714,7 +714,8 @@ struct MS_Private {
     MS_LoadOptions opt;
     MS_RenderSettings rs;
 #ifdef MONOLITH_EDITOR
-    char error[512];
+    char *error;                        // MS_Error: the last failed (re)load's message (heap), NULL = ""
+    bool errorOom;                      //   ... and building that copy ran out of memory
 
     // Hot reload: the files of the last load attempt and their mtimes, the combined hash
     // of the last attempt's contents
@@ -823,33 +824,113 @@ char *MS_StrDup(const char *s)
     return MS_StrNDup(s, strlen(s));
 }
 
-// Cuts a string that was cut at s[len] back to its last whole UTF-8 character, so a cut message
-// never ends in half a character (bytes that weren't valid UTF-8 to begin with are left alone)
-static void TrimUtf8Tail(char *s, size_t len)
+// The calling thread's last error (MS_LastError): a heap string with no length limit. NULL
+// with errOom false is "" (nothing to free); errOom: building the last message ran out of
+// memory, and MS_LastError() is the static "out of memory" instead. Per thread, so a program's
+// own threads never see another thread's message.
+static _Thread_local char *errText;
+static _Thread_local size_t errLen;
+static _Thread_local bool errOom;
+
+// The last error becomes (append: the last error +) "<path>: " (line > 0: "<path>:<line>: ";
+// path NULL: no prefix) + the printf-formatted message. The new text is built in a new string
+// before the old one is freed, so arguments may point into the last error itself. Out of memory:
+// the last error becomes "out of memory" (never half a message).
+static void ErrPutV(bool append, const char *path, int line, const char *fmt, va_list ap)
 {
-    size_t k = 0;   // continuation bytes (10xxxxxx) at the end
-    while (k < 3 && k < len && ((unsigned char)s[len - 1 - k] & 0xC0) == 0x80) k++;
-    if (k == len) return;
-    unsigned char lead = (unsigned char)s[len - 1 - k];
-    size_t need = lead >= 0xF0 ? 4 : lead >= 0xE0 ? 3 : lead >= 0xC0 ? 2 : 1;
-    if (need > 1 && k + 1 < need) s[len - 1 - k] = '\0';
+    size_t keep = append && !errOom ? errLen : 0;
+    int pre = !path ? 0 : line > 0 ? snprintf(NULL, 0, "%s:%d: ", path, line) : snprintf(NULL, 0, "%s: ", path);
+    va_list measure;
+    va_copy(measure, ap);
+    int body = vsnprintf(NULL, 0, fmt, measure);
+    va_end(measure);
+    if (pre < 0) pre = 0;       // (an encoding error: nothing to show; %ls is never used)
+    if (body < 0) body = 0;
+
+    size_t total = keep + (size_t)pre + (size_t)body;
+    char *s = total < SIZE_MAX ? malloc(total + 1) : NULL;
+    if (!s) {
+        free(errText);
+        errText = NULL;
+        errLen = 0;
+        errOom = true;
+        return;
+    }
+    if (keep) memcpy(s, errText, keep);
+    s[keep] = '\0';
+    if (pre && line > 0) snprintf(s + keep, (size_t)pre + 1, "%s:%d: ", path, line);
+    else if (pre) snprintf(s + keep, (size_t)pre + 1, "%s: ", path);
+    if (body) vsnprintf(s + keep + pre, (size_t)body + 1, fmt, ap);
+    s[total] = '\0';
+    free(errText);
+    errText = s;
+    errLen = total;
+    errOom = false;
 }
 
-// Writes "<path>: <message>" (line > 0: "<path>:<line>: <message>") straight into the caller's
-// buffer err of errSize bytes, with no message buffer in between: the caller's size is the only
-// limit. A message that doesn't fit is cut at its end (the file and the start of the message
-// stay), NUL-terminated and never inside a UTF-8 character. No allocation: this is also the
-// out-of-memory path.
-static void MsErrorV(char *err, int errSize, const char *path, int line, const char *fmt, va_list ap)
+// Sets the last error to a printf-formatted message; returns false, so a check can
+// `return ErrSet(…)`. The content (paths, names, tokens) goes in as arguments: no stack buffer.
+static bool ErrSet(const char *fmt, ...) MS_PRINTF_LIKE(1, 2);
+static bool ErrSet(const char *fmt, ...)
 {
-    if (!err || errSize <= 0) return;
-    int n = line > 0 ? snprintf(err, (size_t)errSize, "%s:%d: ", path, line) : snprintf(err, (size_t)errSize, "%s: ", path);
-    if (n < 0) { err[0] = '\0'; return; }
-    if (n >= errSize) { TrimUtf8Tail(err, (size_t)errSize - 1); return; }
-    int m = vsnprintf(err + n, (size_t)(errSize - n), fmt, ap);
-    if (m < 0) err[n] = '\0';
-    else if (m >= errSize - n) TrimUtf8Tail(err, (size_t)errSize - 1);
+    va_list ap;
+    va_start(ap, fmt);
+    ErrPutV(false, NULL, 0, fmt, ap);
+    va_end(ap);
+    return false;
 }
+
+// Appends a printf-formatted piece to the last error (lists of names); returns false
+static bool ErrAppendF(const char *fmt, ...) MS_PRINTF_LIKE(1, 2);
+static bool ErrAppendF(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    ErrPutV(true, NULL, 0, fmt, ap);
+    va_end(ap);
+    return false;
+}
+
+// A successful call: the last error becomes "" (its memory is kept for the next message)
+static void ErrClear(void)
+{
+    if (errText) errText[0] = '\0';
+    errLen = 0;
+    errOom = false;
+}
+
+const char *MS_LastError(void)
+{
+    return errOom ? "out of memory" : errText ? errText : "";
+}
+
+void MS_ClearError(void)
+{
+    free(errText);
+    errText = NULL;
+    errLen = 0;
+    errOom = false;
+}
+
+#ifdef MONOLITH_EDITOR
+bool MS_SetError(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    ErrPutV(false, NULL, 0, fmt, ap);
+    va_end(ap);
+    return false;
+}
+
+bool MS_AppendError(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    ErrPutV(true, NULL, 0, fmt, ap);
+    va_end(ap);
+    return false;
+}
+#endif
 
 static unsigned long long Fnv1a64Update(unsigned long long h, const void *data, size_t size)
 {
@@ -862,39 +943,43 @@ static unsigned long long Fnv1a64Update(unsigned long long h, const void *data, 
 }
 #define FNV_OFFSET 14695981039346656037ULL
 
-// Reads a whole file of at most maxBytes (malloc'd, NUL-terminated). NULL with a message in err on failure.
-static char *ReadWholeFile(const char *path, long maxBytes, int *size, char *err, int errSize)
+// Reads a whole file of at most maxBytes (malloc'd, NUL-terminated). NULL on failure, with the
+// reason in the last error when `report` (else the last error is left alone: a caller that
+// only tries a file, or will say why itself).
+static char *ReadWholeFile(const char *path, long maxBytes, int *size, bool report)
 {
+#define READ_FAIL(...) do { if (report) ErrSet(__VA_ARGS__); } while (0)
     FILE *f = fopen(path, "rb");
-    if (!f) { snprintf(err, errSize, "%s: cannot open file", path); return NULL; }
+    if (!f) { READ_FAIL("%s: cannot open file", path); return NULL; }
     char *buf = NULL;
     long len = -1;
     if (fseek(f, 0, SEEK_END) == 0) len = ftell(f);
     else {
-        snprintf(err, errSize, "%s: cannot seek to the end: %s", path, strerror(errno));
+        READ_FAIL("%s: cannot seek to the end: %s", path, strerror(errno));
         fclose(f);
         return NULL;
     }
 
     signed char start = (signed char)fseek(f, 0, SEEK_SET);
     if (start != 0) {
-        snprintf(err, errSize, "%s: cannot seek to the start: %s", path, strerror(errno));
+        READ_FAIL("%s: cannot seek to the start: %s", path, strerror(errno));
         fclose(f);
         return NULL;
     }
 
     if (len < 0 || len > maxBytes)
-        snprintf(err, errSize, "%s: cannot read file (or larger than %ld MB)", path, maxBytes / (1024 * 1024));
+        READ_FAIL("%s: cannot read file (or larger than %ld MB)", path, maxBytes / (1024 * 1024));
     else if (!(buf = malloc(len + 1)))
-        snprintf(err, errSize, "%s: out of memory", path);
+        READ_FAIL("%s: out of memory", path);
     else if ((long)fread(buf, 1, len, f) != len) {
-        snprintf(err, errSize, "%s: read error", path);
+        READ_FAIL("%s: read error", path);
         free(buf);
         buf = NULL;
     }
     fclose(f);
     if (buf) { buf[len] = '\0'; *size = (int)len; }
     return buf;
+#undef READ_FAIL
 }
 
 #ifdef MONOLITH_EDITOR
@@ -916,22 +1001,23 @@ static unsigned long long CombinedHash(const char *text, int size, char *const *
 #endif
 
 // The map file of a package folder with extension `ext`: <dir>/<base><ext>, else the folder's only
-// file with that extension. 1 = found (in out), 0 = none or several (*count of them, their names
-// in `names`), -1 = path too long.
-static int PackageFile(const char *dir, const char *base, const char *ext, char *out, int outSize, int *count,
-                       char *names, int namesSize)
+// file with that extension. 1 = found (in out), 0 = none or several (*count of them; several: the
+// last error becomes their names, each after a space, for the caller to put into its message),
+// -1 = path too long.
+static int PackageFile(const char *dir, const char *base, const char *ext, char *out, int outSize, int *count)
 {
     char cand[MS_PATH_MAX + 80];
-    snprintf(cand, sizeof(cand), "%s/%s%s", dir, base, ext);
     *count = 0;
+    if (snprintf(cand, sizeof(cand), "%s/%s%s", dir, base, ext) >= (int)sizeof(cand)) return -1;
     if (FileExists(cand)) return snprintf(out, outSize, "%s", cand) < outSize ? 1 : -1;
     FilePathList list = LoadDirectoryFilesEx(dir, ext, false);
     *count = (int)list.count;
-    signed char found = (signed char)(list.count == 1 && snprintf(out, outSize, "%s", list.paths[0]) < outSize);
-    int n = 0;
-    if (namesSize > 0) names[0] = '\0';
-    for (unsigned i = 0; i < list.count && n >= 0 && n < namesSize; i++)
-        n += snprintf(names + n, namesSize - n, " %s", GetFileName(list.paths[i]));
+    signed char found = 0;
+    if (list.count == 1) found = (signed char)(snprintf(out, outSize, "%s", list.paths[0]) < outSize ? 1 : -1);
+    if (list.count > 1) {
+        ErrSet("%s", "");
+        for (unsigned i = 0; i < list.count; i++) ErrAppendF(" %s", GetFileName(list.paths[i]));
+    }
     UnloadDirectoryFiles(list);
     return found;
 }
@@ -939,8 +1025,9 @@ static int PackageFile(const char *dir, const char *base, const char *ext, char 
 // A package folder or a map file. A folder's map: editor builds read its text, <name>.map (else
 // its only .map file), and a compiled map when there is no text; game builds read only compiled
 // maps, <name>.mapb (else the folder's only .mapb file)
-static bool ResolveMapPath(const char *in, char *out, int outSize, char *err, int errSize)
+static bool ResolveMapPath(const char *in, char *out, int outSize)
 {
+    if (strlen(in) >= (size_t)outSize) return ErrSet("%s: path too long", in);
     if (!DirectoryExists(in)) {
         snprintf(out, outSize, "%s", in);
         return true;
@@ -952,27 +1039,27 @@ static bool ResolveMapPath(const char *in, char *out, int outSize, char *err, in
     const char *base = dir;
     for (const char *c = dir; *c; c++)
         if (*c == '/' || *c == '\\') base = c + 1;
-    char names[512];
     int count, found;
+    // (several files: PackageFile left their names in the last error, which the message quotes)
 #ifdef MONOLITH_EDITOR
-    found = PackageFile(dir, base, ".map", out, outSize, &count, names, sizeof(names));
+    found = PackageFile(dir, base, ".map", out, outSize, &count);
     if (found == 1) return true;
     if (found == 0 && count == 0) {
         int compiledCount;
-        found = PackageFile(dir, base, ".mapb", out, outSize, &compiledCount, names, sizeof(names));
+        found = PackageFile(dir, base, ".mapb", out, outSize, &compiledCount);
         if (found == 1) return true;
     }
-    if (found < 0) snprintf(err, errSize, "%s: path too long", dir);
-    else snprintf(err, errSize, "%s: no %s.map in the package folder and %s%s", dir, base,
-                  count ? "more than one other .map file:" : "no other .map file", count ? names : "");
+    if (found < 0) ErrSet("%s: path too long", dir);
+    else ErrSet("%s: no %s.map in the package folder and %s%s", dir, base,
+                count ? "more than one other .map file:" : "no other .map file", count ? MS_LastError() : "");
 #else
-    found = PackageFile(dir, base, ".mapb", out, outSize, &count, names, sizeof(names));
+    found = PackageFile(dir, base, ".mapb", out, outSize, &count);
     if (found == 1) return true;
-    if (found < 0) snprintf(err, errSize, "%s: path too long", dir);
+    if (found < 0) ErrSet("%s: path too long", dir);
     else if (count == 0)
-        snprintf(err, errSize, "%s: no %s.mapb in the package folder (this program reads compiled maps: compile the "
-                 "map's text with monolith)", dir, base);
-    else snprintf(err, errSize, "%s: no %s.mapb in the package folder and more than one other .mapb file:%s", dir, base, names);
+        ErrSet("%s: no %s.mapb in the package folder (this program reads compiled maps: compile the "
+               "map's text with monolith)", dir, base);
+    else ErrSet("%s: no %s.mapb in the package folder and more than one other .mapb file:%s", dir, base, MS_LastError());
 #endif
     return false;
 }
@@ -1372,26 +1459,38 @@ bool MS_EnvKeyRange(const char *key, float *lo, float *hi, bool *loOpen)
 }
 #endif
 
+// "<path>: <message>" (line > 0: "<path>:<line>: <message>") as the last error; returns false
+static bool ErrAt(const char *path, int line, const char *fmt, ...) MS_PRINTF_LIKE(3, 4);
+static bool ErrAt(const char *path, int line, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    ErrPutV(false, path, line, fmt, ap);
+    va_end(ap);
+    return false;
+}
+
 // The checks an env value must pass once read (`key` = its full name, p = the value of `type`):
-// false with the reason in msg. One place for both the text parser and compiled maps.
-static bool CheckEnvValue(const char *key, int type, const void *p, char *msg, int msgSize)
+// false with "<path>[:<line>]: <reason>" in the last error. One place for both the text parser
+// and compiled maps.
+static bool CheckEnvValue(const char *key, int type, const void *p, const char *path, int line)
 {
     int i = type == T_I ? *(const int *)p : 0;
     if (strcmp(key, "shadow.size") == 0 && (i < 256 || i > 16384)) {
-        snprintf(msg, msgSize, "shadow.size must be 256..16384");
+        ErrAt(path, line, "shadow.size must be 256..16384");
         return false;
     }
     if ((strcmp(key, "sky.size") == 0 || strcmp(key, "ambientSky.size") == 0) && (i < 16 || i > 4096)) {
-        snprintf(msg, msgSize, "sky sizes must be 16..4096");
+        ErrAt(path, line, "sky sizes must be 16..4096");
         return false;
     }
     if (strcmp(key, "sun.range") == 0 && !(*(const float *)p > 0.0f)) {
-        snprintf(msg, msgSize, "sun.range must be > 0");
+        ErrAt(path, line, "sun.range must be > 0");
         return false;
     }
     // Directions (sun.direction, sky.sunDirection, ambientSky.sunDirection); shadow.home is a point
     if (type == T_V3 && strcmp(key, "shadow.home") != 0 && Vector3Length(*(const Vector3 *)p) == 0.0f) {
-        snprintf(msg, msgSize, "%s must not be 0 0 0", key);
+        ErrAt(path, line, "%s must not be 0 0 0", key);
         return false;
     }
     for (int k = 0; k < COUNT(ENV_RANGES); k++) {
@@ -1408,7 +1507,7 @@ static bool CheckEnvValue(const char *key, int type, const void *p, char *msg, i
         snprintf(lo, sizeof(lo), "%g", r->lo);
         snprintf(hi, sizeof(hi), "%g", r->hi);
 #endif
-        snprintf(msg, msgSize, "%s must be %s %s and <= %s", key, r->loOpen ? ">" : ">=", lo, hi);
+        ErrAt(path, line, "%s must be %s %s and <= %s", key, r->loOpen ? ">" : ">=", lo, hi);
         return false;
     }
     return true;
@@ -1738,9 +1837,8 @@ static const unsigned char UNWRAP_MAGIC[10] = { 'M', 'S', 'P', 'A', 'I', 'N', 'T
 static bool UnwrapRead(const char *path, Unwrap *out)
 {
     memset(out, 0, sizeof(*out));
-    char err[MS_PATH_MAX + 64];
     int size = 0;
-    unsigned char *b = (unsigned char *)ReadWholeFile(path, MS_MAX_COMPILED_BYTES, &size, err, sizeof(err));
+    unsigned char *b = (unsigned char *)ReadWholeFile(path, MS_MAX_COMPILED_BYTES, &size, false);
     if (!b) return false;
     bool ok = size >= 30 && memcmp(b, UNWRAP_MAGIC, 10) == 0 && Le32(b + 10) == 1;
     uint32_t meshes = ok ? Le32(b + 14) : 0;
@@ -2262,8 +2360,6 @@ typedef struct {
     SceneData *d;
     const char *path;           // for messages
     int line;                   // 0 = no line in messages
-    char *err;
-    int errSize;
     MS_Ref cur;                 // stamped on every object (line, statement, group, material)
     int prim;                   // statement counter
     bool badNumber;             // the last failed Box() overflowed float, rather than the scene being full
@@ -2276,12 +2372,12 @@ typedef struct {
 } Parser;
 
 // Writes "<file>:<line>: <message>" ("<file>: <message>" outside a line) into the parser's
-// message buffer (MsErrorV); returns false, so a check can `return FailF(…)`
+// last error (ErrPutV); returns false, so a check can `return FailF(…)`
 static bool FailF(Parser *P, const char *fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
-    MsErrorV(P->err, P->errSize, P->path, P->line, fmt, ap);
+    ErrPutV(false, P->path, P->line, fmt, ap);
     va_end(ap);
     return false;
 }
@@ -3294,12 +3390,11 @@ static bool ParseEnv(Parser *P, Token *tok, int n)
     if (n < 3 || tok[1].quoted) return Fail(P, "env takes a key and a value: env fog.density 0.01", NULL);
     const char *key = tok[1].s;
     EnvDef *e = &P->d->env;
-    char m[160];
     for (int i = 0; i < COUNT(ENV_KEYS); i++)
         if (strcmp(ENV_KEYS[i].key, key) == 0) {
             void *dst = (char *)&e->env + ENV_KEYS[i].off;
             if (!ParseValue(P, ENV_KEYS[i].type, &tok[2], n - 2, dst)) return false;
-            return CheckEnvValue(key, ENV_KEYS[i].type, dst, m, sizeof(m)) || Fail(P, "%s", m);
+            return CheckEnvValue(key, ENV_KEYS[i].type, dst, P->path, P->line);
         }
     for (int i = 0; i < COUNT(DEF_KEYS); i++) {
         if (strcmp(DEF_KEYS[i].key, key) != 0) continue;
@@ -3307,7 +3402,7 @@ static bool ParseEnv(Parser *P, Token *tok, int n)
         if (!ParseValue(P, DEF_KEYS[i].type, &tok[2], n - 2, dst)) return false;
         if (strcmp(key, "shadow.home") == 0) e->homeSet = true;
         if (strcmp(key, "fogCache.region") == 0) e->fogRegionSet = true;
-        return CheckEnvValue(key, DEF_KEYS[i].type, dst, m, sizeof(m)) || Fail(P, "%s", m);
+        return CheckEnvValue(key, DEF_KEYS[i].type, dst, P->path, P->line);
     }
     bool amb = strncmp(key, "ambientSky.", 11) == 0;
     if (amb || strncmp(key, "sky.", 4) == 0) {
@@ -3316,7 +3411,7 @@ static bool ParseEnv(Parser *P, Token *tok, int n)
             R3D_ProceduralSky *sky = amb ? &e->ambient : &e->sky;
             void *dst = (char *)sky + SKY_KEYS[k].off;
             if (!ParseValue(P, SKY_KEYS[k].type, &tok[2], n - 2, dst)) return false;
-            if (!CheckEnvValue(key, SKY_KEYS[k].type, dst, m, sizeof(m))) return Fail(P, "%s", m);
+            if (!CheckEnvValue(key, SKY_KEYS[k].type, dst, P->path, P->line)) return false;
             if (amb) e->ambientSet |= 1u << k;
             else if (strcmp(SKY_KEYS[k].key, "sunDirection") == 0) e->skySunDirSet = true;
             return true;
@@ -3572,10 +3667,10 @@ static bool MtlDeps(Parser *P, const char *modelRel, const char *mtlRel, const c
 // An .mtl file the OBJ importer reads (package-relative): its texture maps
 static bool MtlFileDeps(Parser *P, const char *modelRel, const char *mtlRel, bool lastMustExist)
 {
-    char full[MS_PATH_MAX], e[256];
+    char full[MS_PATH_MAX];
     if (snprintf(full, sizeof(full), "%s%s", P->d->root, mtlRel) >= (int)sizeof(full)) return Fail(P, "path too long: \"%s\"", mtlRel);
     int size;
-    char *mtl = ReadWholeFile(full, MS_FILE_MAX, &size, e, sizeof(e));
+    char *mtl = ReadWholeFile(full, MS_FILE_MAX, &size, false);
     if (!mtl) return Fail(P, "cannot read the material library \"%s\" (or larger than 4 MB)", mtlRel);
     bool ok = MtlDeps(P, modelRel, mtlRel, mtl, (size_t)size, lastMustExist);
     free(mtl);
@@ -3636,28 +3731,27 @@ static bool ModelDeps(Parser *P, const char *modelRel, const char *full)
     }
     // .gltf (or a text glTF named .glb) and .obj: the whole text
     int size;
-    char e[256];
-    char *text = ReadWholeFile(full, MS_FILE_MAX, &size, e, sizeof(e));
+    char *text = ReadWholeFile(full, MS_FILE_MAX, &size, false);
     if (!text) return Fail(P, "cannot read the model file \"%s\" (or larger than 4 MB)", modelRel);
     bool ok = gltf ? GltfUriDeps(P, modelRel, text, (size_t)size) : ObjDeps(P, modelRel, text, (size_t)size);
     free(text);
     return ok;
 }
 
-bool MS_CheckModelReferences(const char *root, const char *modelRel, char *err, int errSize)
+bool MS_CheckModelReferences(const char *root, const char *modelRel)
 {
-    if (errSize > 0) err[0] = 0;
+    ErrClear();
     SceneData *d = calloc(1, sizeof(SceneData));
     char *full = d ? MS_StrDup(TextFormat("%s%s", root, modelRel)) : NULL;
     char *rootCopy = MS_StrDup(root);
     bool ok = false;
     if (d && full && rootCopy) {
         d->root = rootCopy;
-        Parser P = { .d = d, .path = modelRel, .err = err, .errSize = errSize };
+        Parser P = { .d = d, .path = modelRel };
         ok = ModelDeps(&P, modelRel, full);
         for (int i = 0; i < d->depCount; i++) free(d->deps[i]);
         free(d->deps);
-    } else snprintf(err, errSize, "out of memory");
+    } else ErrSet("out of memory");
     free(rootCopy);
     free(full);
     free(d);
@@ -3814,11 +3908,7 @@ static bool AddStatement(Parser *P, const Placement *pl, const Token *tok, int n
     if (pl->hasId) {
         key = (unsigned int)pl->id;
         slot = StmtSlot(d, key);
-        if (*slot) {
-            char msg[96];
-            snprintf(msg, sizeof(msg), "duplicate id %d (also on line %d)", pl->id, d->stmtLines[*slot - 1]);
-            return Fail(P, "%s", msg);
-        }
+        if (*slot) return FailF(P, "duplicate id %d (also on line %d)", pl->id, d->stmtLines[*slot - 1]);
     } else {
         unsigned long long h = FNV_OFFSET;
         for (int i = 0; i < n; i++) {
@@ -4228,17 +4318,15 @@ typedef struct {
     uint32_t version;               // the file's CM_VERSION
     const char *str;                // the string table (NUL-terminated: checked)
     uint32_t strSize;
-    char *err;                      // the message buffer: "<file>: <message>"
-    int errSize;
 } CmReader;
 
-// Writes "<file>: <message>" into the reader's message buffer (MsErrorV); returns false, so a check can
+// Writes "<file>: <message>" into the last error (ErrPutV); returns false, so a check can
 // `return CmFail(…)`
 static bool CmFail(CmReader *R, const char *fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
-    MsErrorV(R->err, R->errSize, R->d->path, 0, fmt, ap);
+    ErrPutV(false, R->d->path, 0, fmt, ap);
     va_end(ap);
     return false;
 }
@@ -5084,8 +5172,7 @@ static bool CmReadEnvRecord(CmReader *R, const CmEnv *c)
     }
 
     // The checks across keys and the "set by the map" flags, exactly as the parser leaves them
-    char msg[160];
-    if (!CheckEnvValue(key, type, dst, msg, sizeof(msg))) return CmFail(R, "%s", msg);
+    if (!CheckEnvValue(key, type, dst, R->d->path, 0)) return false;
     if (strcmp(key, "shadow.home") == 0) e->homeSet = true;
     if (strcmp(key, "fogCache.region") == 0) e->fogRegionSet = true;
     if (sky >= 0 && amb) e->ambientSet |= 1u << sky;
@@ -5147,14 +5234,12 @@ static bool CmCheckNotEmpty(CmReader *R)
 // The header and the section table are checked before anything else is read. Then the sections,
 // in an order the data fixes: a record is checked against the records it points into, so those
 // are read first. The order is also the order of the messages when a file has several faults.
-static bool ReadCompiled(SceneData *d, const char *bytes, int size, char *err, int errSize)
+static bool ReadCompiled(SceneData *d, const char *bytes, int size)
 {
     CmReader R = {
         .d = d,
         .bytes = (const unsigned char *)bytes,
-        .size = (uint32_t)size,
-        .err = err,
-        .errSize = errSize
+        .size = (uint32_t)size
     };
 
     // The header and the section table first
@@ -5540,8 +5625,7 @@ static void CmPutDeps(CmWriter *W, const SceneData *d)
 // order), then the sections in id order, each at a multiple of 8 with zero padding. *outSize and
 // the malloc'd bytes, or NULL with a message (out of memory, too large).
 static unsigned char *CmAssemble(const CmWriter *W, const SceneData *d, uint32_t srcNameOff,
-                                 unsigned long long srcHash, long long srcSize, int *outSize,
-                                 char *err, int errSize)
+                                 unsigned long long srcHash, long long srcSize, int *outSize)
 {
     // The layout: each section's offset, and the file's size
     uint64_t total = sizeof(CmHeader) + CM_SECTIONS * sizeof(CmSection);
@@ -5554,10 +5638,10 @@ static unsigned char *CmAssemble(const CmWriter *W, const SceneData *d, uint32_t
 
     // The buffer, zeroed (the padding), unless a writer ran out of memory or the file is too large
     unsigned char *out = NULL;
-    if (W->oom) snprintf(err, errSize, "%s: out of memory", d->path);
+    if (W->oom) ErrSet("%s: out of memory", d->path);
     else if (total > MS_MAX_COMPILED_BYTES)
-        snprintf(err, errSize, "%s: the compiled map would be larger than 256 MB", d->path);
-    else if (!(out = calloc(1, (size_t)total))) snprintf(err, errSize, "%s: out of memory", d->path);
+        ErrSet("%s: the compiled map would be larger than 256 MB", d->path);
+    else if (!(out = calloc(1, (size_t)total))) ErrSet("%s: out of memory", d->path);
     if (!out) return NULL;
 
     // The header
@@ -5589,10 +5673,10 @@ static unsigned char *CmAssemble(const CmWriter *W, const SceneData *d, uint32_t
 // The compiled file of d (parsed, before FinishParse) in a malloc'd buffer; srcName, srcHash,
 // srcSize describe the map text it came from. NULL with a message on failure.
 static unsigned char *WriteCompiled(const SceneData *d, const char *srcName, unsigned long long srcHash,
-                                    long long srcSize, int *outSize, char *err, int errSize)
+                                    long long srcSize, int *outSize)
 {
     if (!IsLittleEndianHost()) {
-        snprintf(err, errSize, "%s: compiled maps are little-endian; this host is not", d->path);
+        ErrSet("%s: compiled maps are little-endian; this host is not", d->path);
         return NULL;
     }
 
@@ -5613,7 +5697,7 @@ static unsigned char *WriteCompiled(const SceneData *d, const char *srcName, uns
     CmPutDeps(&W, d);
 
     // The file, then the writer's buffers freed
-    unsigned char *out = CmAssemble(&W, d, srcNameOff, srcHash, srcSize, outSize, err, errSize);
+    unsigned char *out = CmAssemble(&W, d, srcNameOff, srcHash, srcSize, outSize);
     for (int id = 1; id <= CM_SECTIONS; id++) free(W.sec[id].b);
     free(W.strSlot);
     return out;
@@ -6359,7 +6443,7 @@ static void ColliderBvhBuild(SceneData *d, const BoundingBox *c, int ni, int fir
 }
 
 // The queries' BVH over the colliders (noGpu loads too: tools pick and collide as well)
-static bool BuildColliderBvh(SceneData *d, char *err, int errSize)
+static bool BuildColliderBvh(SceneData *d)
 {
     int n;
     const BoundingBox *c = PublishedColliders(d, &n);
@@ -6367,7 +6451,7 @@ static bool BuildColliderBvh(SceneData *d, char *err, int errSize)
     d->colliderOrder = malloc(sizeof(int) * (size_t)n);
     d->colliderNodes = malloc(sizeof(BvhNode) * 2 * (size_t)n);
     if (!d->colliderOrder || !d->colliderNodes) {
-        snprintf(err, errSize, "%s: out of memory (collider BVH)", d->path);
+        ErrSet("%s: out of memory (collider BVH)", d->path);
         return false;
     }
     for (int i = 0; i < n; i++) d->colliderOrder[i] = i;
@@ -6401,13 +6485,13 @@ static bool InitData(SceneData *d, const char *mapPath)
 
 #ifdef MONOLITH_EDITOR
 // Fills d (after InitData) from the map text: the parsed scene, before FinishParse
-static bool ParseScene(SceneData *d, const char *text, int size, char *err, int errSize)
+static bool ParseScene(SceneData *d, const char *text, int size)
 {
     if (!DefaultMaterial(d)) {
-        snprintf(err, errSize, "%s: out of memory", d->path);
+        ErrSet("%s: out of memory", d->path);
         return false;
     }
-    Parser P = { .d = d, .path = d->path, .err = err, .errSize = errSize };
+    Parser P = { .d = d, .path = d->path };
     bool ok = ParseText(&P, text, size);
     free(P.lineBuf);
     free(P.tok);
@@ -6418,7 +6502,7 @@ static bool ParseScene(SceneData *d, const char *text, int size, char *err, int 
 // A material's texture (or a sampler's: filter TEX_TRILINEAR; a paint atlas: premul), loaded once per
 // path, colour space, kind, wrap and filter
 static Texture2D GetTextureEx(SceneData *d, const char *rel, bool isColor, bool data, bool premul, int wrap, int filter,
-                              int line, char *err, int errSize)
+                              int line)
 {
     char full[MS_PATH_MAX + MS_PATH_MAX];
     snprintf(full, sizeof(full), "%s%s", d->root, rel);
@@ -6438,7 +6522,7 @@ static Texture2D GetTextureEx(SceneData *d, const char *rel, bool isColor, bool 
     char *path = MS_StrDup(full);
     if (!path || !MS_RESERVE(d->textures, d->textureCap, d->textureCount + 1)) {
         free(path);
-        snprintf(err, errSize, "%s:%d: out of memory", d->srcPath, line);
+        ErrSet("%s:%d: out of memory", d->srcPath, line);
         return (Texture2D){ 0 };
     }
     // R3D's default wrap is clamp, which would make uv_scale > 1 useless; map materials repeat
@@ -6481,7 +6565,7 @@ static Texture2D GetTextureEx(SceneData *d, const char *rel, bool isColor, bool 
     d->times.textures += (GetTime() - t0) * 1000.0;
     if (tex.id == 0) {
         free(path);
-        snprintf(err, errSize, "%s:%d: cannot load the texture \"%s\"", d->srcPath, line, rel);
+        ErrSet("%s:%d: cannot load the texture \"%s\"", d->srcPath, line, rel);
         return tex;
     }
     TexEntry *e = &d->textures[d->textureCount++];
@@ -6495,10 +6579,9 @@ static Texture2D GetTextureEx(SceneData *d, const char *rel, bool isColor, bool 
     return tex;
 }
 
-static Texture2D GetTexture(SceneData *d, const char *rel, bool isColor, bool data, int wrap, int filter, int line,
-                            char *err, int errSize)
+static Texture2D GetTexture(SceneData *d, const char *rel, bool isColor, bool data, int wrap, int filter, int line)
 {
-    return GetTextureEx(d, rel, isColor, data, false, wrap, filter, line, err, errSize);
+    return GetTextureEx(d, rel, isColor, data, false, wrap, filter, line);
 }
 
 // --- Models: load, pick data (BVH), transforms, draw groups
@@ -6672,14 +6755,14 @@ static void BuildModelPick(MS_ModelFile *F, ModelPick *mp, bool keepData)
 static void PaintLoadUnwrap(SceneData *d, int file);
 
 // Loads model file i of `d` (GPU). On failure: "map:line: message"
-static bool LoadModelFile(SceneData *d, int i, char *err, int errSize)
+static bool LoadModelFile(SceneData *d, int i)
 {
     MS_ModelFile *F = &d->modelFiles[i];
     char full[MS_PATH_MAX + MS_PATH_MAX];
     snprintf(full, sizeof(full), "%s%s", d->root, F->path);
     F->model = R3D_LoadModelEx(full, R3D_IMPORT_RETAIN_MESH_DATA);
     if (F->model.meshCount <= 0 || !F->model.meshes) {
-        snprintf(err, errSize, MODEL_LOAD_ERROR, d->srcPath, F->line, F->path);
+        ErrSet(MODEL_LOAD_ERROR, d->srcPath, F->line, F->path);
         return false;
     }
     F->loaded = true;
@@ -6695,10 +6778,10 @@ static bool LoadModelFile(SceneData *d, int i, char *err, int errSize)
 }
 
 // Loads every model file of `d` (GPU). On failure: "map:line: message"
-static bool LoadModelFiles(SceneData *d, char *err, int errSize)
+static bool LoadModelFiles(SceneData *d)
 {
     for (int i = 0; i < d->modelFileCount; i++)
-        if (!LoadModelFile(d, i, err, errSize)) return false;
+        if (!LoadModelFile(d, i)) return false;
     return true;
 }
 
@@ -6720,7 +6803,7 @@ extern const char *aiGetErrorString(void);
 #define MS_AI_SCENE_FLAGS_INCOMPLETE 0x1u
 
 // On failure: "map:line: message" (the GPU load's wording)
-static bool CheckModelFiles(SceneData *d, char *err, int errSize)
+static bool CheckModelFiles(SceneData *d)
 {
     for (int i = 0; i < d->modelFileCount; i++) {
         const MS_ModelFile *F = &d->modelFiles[i];
@@ -6732,7 +6815,7 @@ static bool CheckModelFiles(SceneData *d, char *err, int errSize)
                                                                          ? aiGetErrorString() : "no meshes in the file");
         if (sc) aiReleaseImport(sc);
         if (!ok) {
-            snprintf(err, errSize, MODEL_LOAD_ERROR, d->srcPath, F->line, F->path);
+            ErrSet(MODEL_LOAD_ERROR, d->srcPath, F->line, F->path);
             return false;
         }
     }
@@ -6786,14 +6869,14 @@ static BoundingBox RotatedFileBounds(const SceneData *d, const MS_ModelInstance 
 
 // Transforms, world bounds and colliders of every instance (file bounds: zero box when the
 // files were not loaded); then the collider list (boxes first)
-static bool ResolveModels(SceneData *d, char *err, int errSize)
+static bool ResolveModels(SceneData *d)
 {
     RotBoundsCache cache = { 0 };
     int nc = d->boxCount;
     if (d->modelCount > 0) {
         d->colliders = malloc(sizeof(BoundingBox) * ((size_t)d->boxCount + (size_t)d->modelColliderCount));
         if (!d->colliders) {
-            snprintf(err, errSize, "%s: out of memory", d->path);
+            ErrSet("%s: out of memory", d->path);
             return false;
         }
         if (d->boxCount > 0) memcpy(d->colliders, d->boxes, sizeof(BoundingBox) * d->boxCount);
@@ -6914,7 +6997,7 @@ static int SlotMaterial(const SceneData *d, const MS_ModelInstance *M, int s)
 
 // One draw group per (file, materials, shadow): instance buffers with position, rotation
 // and scale, and the R3D_Model copy it is drawn with. GPU; after ResolveModels.
-static bool BuildModelGroups(SceneData *d, char *err, int errSize)
+static bool BuildModelGroups(SceneData *d)
 {
     if (d->modelCount == 0) return true;
     int maxSlots = 1;
@@ -6925,7 +7008,7 @@ static bool BuildModelGroups(SceneData *d, char *err, int errSize)
     int *tmp = malloc(sizeof(int) * maxSlots);
     if (!d->modelGroups || !groupOf || !tmp) {
         free(groupOf); free(tmp);
-        snprintf(err, errSize, "%s: out of memory", d->path);
+        ErrSet("%s: out of memory", d->path);
         return false;
     }
     for (int i = 0; i < d->modelCount; i++) {
@@ -6959,7 +7042,7 @@ static bool BuildModelGroups(SceneData *d, char *err, int errSize)
     CellItem *items = malloc(sizeof(CellItem) * (d->modelCount > 0 ? d->modelCount : 1));
     if (!items) {
         free(groupOf);
-        snprintf(err, errSize, "%s: out of memory", d->path);
+        ErrSet("%s: out of memory", d->path);
         return false;
     }
     for (int i = 0; i < d->modelCount; i++) items[i] = MakeCellItem(groupOf[i], i, d->models[i].bounds, MS_MODEL_CELL_SIZE);
@@ -7054,7 +7137,7 @@ static bool BuildModelGroups(SceneData *d, char *err, int errSize)
     }
     free(items);
     free(groupOf);
-    if (!ok) snprintf(err, errSize, "%s: out of memory (model instances)", d->path);
+    if (!ok) ErrSet("%s: out of memory (model instances)", d->path);
     return ok;
 }
 
@@ -7642,11 +7725,11 @@ static void KeepBoxIndex(SceneData *d, const CellItem *items, int n, unsigned ch
 // and it casts the same shadow (a hidden face lies inside an opaque box, so it was never the
 // nearest depth of any shadow texel). The others get an instance buffer of unit cubes (centre and
 // size per box) shared by their ranges. `unit` draws a mesh as an instance (see MS_DrawGeometry).
-static bool UploadBoxes(SceneData *d, char *err, int errSize)
+static bool UploadBoxes(SceneData *d)
 {
     CellItem *items = malloc(sizeof(CellItem) * (d->boxCount > 0 ? d->boxCount : 1));
     if (!items) {
-        snprintf(err, errSize, "%s: out of memory", d->path);
+        ErrSet("%s: out of memory", d->path);
         return false;
     }
     bool anyMerge = false;
@@ -7708,7 +7791,7 @@ static bool UploadBoxes(SceneData *d, char *err, int errSize)
 #endif
     free(hidden);
     free(items);
-    if (!ok) snprintf(err, errSize, "%s: out of memory (box meshes)", d->path);
+    if (!ok) ErrSet("%s: out of memory (box meshes)", d->path);
     return ok;
 }
 
@@ -7768,8 +7851,8 @@ static char *ShaderSourceText(const SceneData *d, const char *rel)
 }
 
 // A material's shader file (rel NULL: the empty shader of painted materials without one): found or
-// added with its source scanned. NULL when out of memory (err says so).
-static ShaderFile *ShaderFileOf(SceneData *d, const char *rel, int line, char *err, int errSize)
+// added with its source scanned. NULL when out of memory (the last error says so).
+static ShaderFile *ShaderFileOf(SceneData *d, const char *rel, int line)
 {
     for (int i = 0; i < d->shaderFileCount; i++) {
         const char *r = d->shaderFiles[i].rel;
@@ -7777,7 +7860,7 @@ static ShaderFile *ShaderFileOf(SceneData *d, const char *rel, int line, char *e
     }
     ShaderFile *f = MS_PUSH(d->shaderFiles, d->shaderFileCount, d->shaderFileCap);
     if (!f) {
-        snprintf(err, errSize, "%s:%d: out of memory", d->srcPath, line);
+        ErrSet("%s:%d: out of memory", d->srcPath, line);
         return NULL;
     }
     *f = (ShaderFile){ .rel = rel, .scanned = true };
@@ -7793,10 +7876,10 @@ static ShaderFile *ShaderFileOf(SceneData *d, const char *rel, int line, char *e
 }
 
 // The compiled shader of a material's shader file: compiled by the first material that draws with
-// it. NULL when it fails to load or out of memory (err says which).
-static ShaderFile *GetShaderFile(SceneData *d, const MS_Material *M, const MatDef *D, char *err, int errSize)
+// it. NULL when it fails to load or out of memory (the last error says which).
+static ShaderFile *GetShaderFile(SceneData *d, const MS_Material *M, const MatDef *D)
 {
-    ShaderFile *f = ShaderFileOf(d, M->shader, D->shaderLine, err, errSize);
+    ShaderFile *f = ShaderFileOf(d, M->shader, D->shaderLine);
     if (!f || f->shader) return f;
     double t0 = GetTime();
 #ifdef MONOLITH_EDITOR
@@ -7814,7 +7897,7 @@ static ShaderFile *GetShaderFile(SceneData *d, const MS_Material *M, const MatDe
     d->times.shaderLoads++;
     d->times.shaders += (GetTime() - t0) * 1000.0;
     if (!f->shader) {
-        snprintf(err, errSize, "%s:%d: cannot load the surface shader \"%s\" (see the log)", d->srcPath, D->shaderLine, M->shader);
+        ErrSet("%s:%d: cannot load the surface shader \"%s\" (see the log)", d->srcPath, D->shaderLine, M->shader);
         return NULL;
     }
     return f;
@@ -8106,13 +8189,13 @@ static void ShaderSortKey(R3D_SurfaceShader *shader, unsigned int key)
 // The paint alias of painted material i: the paint version of its shader (or of the empty one),
 // its uniforms and samplers, and its atlas as ms_paint (ms_paintTable: PaintBindTable). A shader
 // that can't take the paint stage demotes the material (it draws as unpainted). On failure (out of
-// memory, an unreadable texture) err says why.
-static bool BuildPaintedShader(SceneData *d, int i, char *err, int errSize)
+// memory, an unreadable texture) the last error says why.
+static bool BuildPaintedShader(SceneData *d, int i)
 {
     MS_Material *M = &d->materials[i];
     MatDef *D = &d->matDefs[i];
     R3D_Material *m = &M->material;
-    ShaderFile *f = ShaderFileOf(d, M->shader, D->shaderLine, err, errSize);
+    ShaderFile *f = ShaderFileOf(d, M->shader, D->shaderLine);
     if (!f) return false;
     R3D_SurfaceShader *ps = PaintShaderOf(d, f);
     if (!ps) {
@@ -8120,18 +8203,18 @@ static bool BuildPaintedShader(SceneData *d, int i, char *err, int errSize)
         return true;
     }
     if (!(m->shader = R3D_LoadSurfaceShaderAlias(ps))) {
-        snprintf(err, errSize, "%s:%d: out of memory", d->srcPath, D->shaderLine);
+        ErrSet("%s:%d: out of memory", d->srcPath, D->shaderLine);
         return false;
     }
     ShaderSortKey(m->shader, M->shader ? (unsigned int)i + 1 : 0);
     for (int u = 0; u < D->uniformCount; u++) R3D_SetSurfaceShaderUniform(m->shader, D->uniforms[u].name, D->uniforms[u].v);
     for (int s = 0; s < D->samplerCount; s++) {
         Texture2D tex = GetTexture(d, D->samplers[s].path, true, D->samplers[s].data, D->wrap, TEX_TRILINEAR,
-                                   D->samplers[s].line, err, errSize);
+                                   D->samplers[s].line);
         if (!tex.id) return false;
         R3D_SetSurfaceShaderSampler(m->shader, D->samplers[s].name, tex);
     }
-    D->paintTex = GetTextureEx(d, D->paint, true, false, true, 1, D->paintFilter, D->paintLine, err, errSize);
+    D->paintTex = GetTextureEx(d, D->paint, true, false, true, 1, D->paintFilter, D->paintLine);
     if (!D->paintTex.id) return false;
     R3D_SetSurfaceShaderSampler(m->shader, "ms_paint", D->paintTex);
     return true;
@@ -8139,12 +8222,12 @@ static bool BuildPaintedShader(SceneData *d, int i, char *err, int errSize)
 
 // The atlases and paint aliases of the model slots painted with their own material (an alias of
 // the empty shader's paint version each)
-static bool BuildOwnAtlases(SceneData *d, char *err, int errSize)
+static bool BuildOwnAtlases(SceneData *d)
 {
     for (int a = 0; a < d->ownAtlasCount; a++) {
         OwnAtlas *A = &d->ownAtlases[a];
         if (!A->painted || A->shader) continue;
-        ShaderFile *f = ShaderFileOf(d, NULL, d->modelFiles[A->file].line, err, errSize);
+        ShaderFile *f = ShaderFileOf(d, NULL, d->modelFiles[A->file].line);
         if (!f) return false;
         R3D_SurfaceShader *ps = PaintShaderOf(d, f);
         if (!ps) {
@@ -8152,10 +8235,10 @@ static bool BuildOwnAtlases(SceneData *d, char *err, int errSize)
             continue;
         }
         A->tex = GetTextureEx(d, A->rel, true, false, true, 1, A->nearest ? TEX_NEAREST : TEX_TRILINEAR,
-                              d->modelFiles[A->file].line, err, errSize);
+                              d->modelFiles[A->file].line);
         if (!A->tex.id) return false;
         if (!(A->shader = R3D_LoadSurfaceShaderAlias(ps))) {
-            snprintf(err, errSize, "%s: out of memory", d->path);
+            ErrSet("%s: out of memory", d->path);
             return false;
         }
         ShaderSortKey(A->shader, 0);        // (sorts as the model's own material: no shader)
@@ -8256,14 +8339,13 @@ static void PaintCheckCube(void);
 
 // The paint layer's GPU state after the materials (their paint aliases and atlases): the own
 // materials' atlases and aliases, the keys (old's for the same objects, when d replaces old), the table
-// (old's texture when it is the same: *tookTable) bound to every paint alias. On failure err says why.
-static bool PaintUpload(SceneData *d, const SceneData *old, const int *boxFrom, const int *modelFrom, bool *tookTable,
-                        char *err, int errSize)
+// (old's texture when it is the same: *tookTable) bound to every paint alias. On failure the last error says why.
+static bool PaintUpload(SceneData *d, const SceneData *old, const int *boxFrom, const int *modelFrom, bool *tookTable)
 {
     bool took = false;
-    if (!BuildOwnAtlases(d, err, errSize)) return false;
+    if (!BuildOwnAtlases(d)) return false;
     if (!PaintKeys(d, old, boxFrom, modelFrom) || !PaintTableUpload(d, old, &took)) {
-        snprintf(err, errSize, "%s: out of memory (paint keys)", d->path);
+        ErrSet("%s: out of memory (paint keys)", d->path);
         return false;
     }
     if (tookTable) *tookTable = took;
@@ -8352,8 +8434,8 @@ static void FreePaintMeshes(SceneData *d)
 }
 
 // Material i's textures (its four maps, with the material's wrap and filter); an unset map keeps
-// R3D's default. On failure err says why.
-static bool BuildMaterialMaps(SceneData *d, int i, char *err, int errSize)
+// R3D's default. On failure the last error says why.
+static bool BuildMaterialMaps(SceneData *d, int i)
 {
     MatDef *D = &d->matDefs[i];
     R3D_Material *m = &d->materials[i].material;
@@ -8361,38 +8443,38 @@ static bool BuildMaterialMaps(SceneData *d, int i, char *err, int errSize)
     Texture2D *slot[MAP_COUNT] = { &m->albedo.texture, &m->normal.texture, &m->orm.texture, &m->emission.texture };
     for (int k = 0; k < MAP_COUNT; k++) {
         if (!D->maps[k]) continue;
-        *slot[k] = GetTexture(d, D->maps[k], IS_COLOR[k], false, D->wrap, D->filter, D->mapLine[k], err, errSize);
+        *slot[k] = GetTexture(d, D->maps[k], IS_COLOR[k], false, D->wrap, D->filter, D->mapLine[k]);
         if (!slot[k]->id) return false;
     }
     return true;
 }
 
 // Material i's GPU state: its shader alias (with its uniforms and samplers) and its textures. On
-// failure err says why (what it made stays in d: FreeGpu frees it).
-static bool BuildMaterialShader(SceneData *d, int i, char *err, int errSize)
+// failure the last error says why (what it made stays in d: FreeGpu frees it).
+static bool BuildMaterialShader(SceneData *d, int i)
 {
     MS_Material *M = &d->materials[i];
     MatDef *D = &d->matDefs[i];
     R3D_Material *m = &M->material;
     m->shader = NULL;
     // A painted material draws with the paint version of its shader (or of the empty one)
-    if (D->painted && !BuildPaintedShader(d, i, err, errSize)) return false;
+    if (D->painted && !BuildPaintedShader(d, i)) return false;
     if (D->painted) return true;
     if (M->shader) {
         // One compiled shader per file (a compile is ~2 ms, and the first frame compiles each
         // shader's variants again); the materials' aliases are created in material order, so
         // R3D's draw sort, which orders shaders by creation, sees the same order as with one
         // compiled shader per material
-        ShaderFile *f = GetShaderFile(d, M, D, err, errSize);
+        ShaderFile *f = GetShaderFile(d, M, D);
         if (f) m->shader = R3D_LoadSurfaceShaderAlias(f->shader);
-        if (f && !m->shader) snprintf(err, errSize, "%s:%d: out of memory", d->srcPath, D->shaderLine);
+        if (f && !m->shader) ErrSet("%s:%d: out of memory", d->srcPath, D->shaderLine);
         if (!m->shader) return false;
         ShaderSortKey(m->shader, (unsigned int)i + 1);
         for (int u = 0; u < D->uniformCount; u++)
             R3D_SetSurfaceShaderUniform(m->shader, D->uniforms[u].name, D->uniforms[u].v);
         for (int s = 0; s < D->samplerCount; s++) {
             Texture2D tex = GetTexture(d, D->samplers[s].path, true, D->samplers[s].data, D->wrap, TEX_TRILINEAR,
-                                       D->samplers[s].line, err, errSize);
+                                       D->samplers[s].line);
             if (!tex.id) return false;
             R3D_SetSurfaceShaderSampler(m->shader, D->samplers[s].name, tex);
         }
@@ -8400,20 +8482,20 @@ static bool BuildMaterialShader(SceneData *d, int i, char *err, int errSize)
     return true;
 }
 
-static bool BuildMaterial(SceneData *d, int i, char *err, int errSize)
+static bool BuildMaterial(SceneData *d, int i)
 {
-    return BuildMaterialShader(d, i, err, errSize) && BuildMaterialMaps(d, i, err, errSize);
+    return BuildMaterialShader(d, i) && BuildMaterialMaps(d, i);
 }
 
 // How material i's boxes are drawn (after BuildMaterial loaded its shader)
-static void MaterialDrawMode(SceneData *d, int i, char *err, int errSize)
+static void MaterialDrawMode(SceneData *d, int i)
 {
     MS_Material *M = &d->materials[i];
     MatDef *D = &d->matDefs[i];
     R3D_Material *m = &M->material;
     bool needsCube = false, cutout = false;
     if (M->shader) {
-        const ShaderFile *f = ShaderFileOf(d, M->shader, D->shaderLine, err, errSize);    // (scanned)
+        const ShaderFile *f = ShaderFileOf(d, M->shader, D->shaderLine);    // (scanned)
         needsCube = !f || f->needsCube;
         cutout = !f || f->cutout;
         if (f && f->scanned && f->needsCube && !D->instanced)
@@ -8434,7 +8516,7 @@ static void MaterialDrawMode(SceneData *d, int i, char *err, int errSize)
 
 // Creates every GPU resource of `d` (a previous load's are still alive: new before old, see
 // the instance-buffer note in LoadBytes). On failure everything created so far is freed.
-static bool UploadGpu(SceneData *d, char *err, int errSize)
+static bool UploadGpu(SceneData *d)
 {
     d->gpu = true;
     d->inst = calloc(d->materialCount, sizeof(R3D_InstanceBuffer));
@@ -8442,32 +8524,32 @@ static bool UploadGpu(SceneData *d, char *err, int errSize)
     d->lightShadow = calloc(d->lightCount > 0 ? d->lightCount : 1, sizeof(R3D_ShadowMap));
     d->lightShadowDrawn = calloc(d->lightCount > 0 ? d->lightCount : 1, sizeof(bool));
     if (!d->inst || !d->instCount || !d->lightShadow || !d->lightShadowDrawn) {
-        snprintf(err, errSize, "%s: out of memory", d->path);
+        ErrSet("%s: out of memory", d->path);
         FreeGpu(d);
         return false;
     }
     for (int i = 0; i < d->materialCount; i++)
-        if (!BuildMaterial(d, i, err, errSize)) {
+        if (!BuildMaterial(d, i)) {
             FreeGpu(d);
             return false;
         }
 
     // The paint layer (only with an active entry): the own materials' paint, the keys and their table
-    if (d->anyPaint && !PaintUpload(d, NULL, NULL, NULL, NULL, err, errSize)) {
+    if (d->anyPaint && !PaintUpload(d, NULL, NULL, NULL, NULL)) {
         FreeGpu(d);
         return false;
     }
 
     // How the boxes of each material are drawn, and the unit cubes of the face layouts
-    for (int i = 0; i < d->materialCount; i++) MaterialDrawMode(d, i, err, errSize);
+    for (int i = 0; i < d->materialCount; i++) MaterialDrawMode(d, i);
     if (!BuildFaceCubes(d)) {
-        snprintf(err, errSize, "%s: out of memory", d->path);
+        ErrSet("%s: out of memory", d->path);
         FreeGpu(d);
         return false;
     }
 
     double tBoxes = GetTime();
-    bool boxesOk = UploadBoxes(d, err, errSize);
+    bool boxesOk = UploadBoxes(d);
     d->times.meshes = (GetTime() - tBoxes) * 1000.0 - d->times.hidden;
     if (!boxesOk) {
         FreeGpu(d);
@@ -8484,7 +8566,7 @@ static bool UploadGpu(SceneData *d, char *err, int errSize)
         snprintf(full, sizeof(full), "%s%s", d->root, e->skyPanorama);
         d->sky = R3D_LoadCubemap(full, R3D_CUBEMAP_LAYOUT_PANORAMA);
         if (!d->sky.texture) {
-            snprintf(err, errSize, "%s: cannot load the sky panorama \"%s\"", d->path, e->skyPanorama);
+            ErrSet("%s: cannot load the sky panorama \"%s\"", d->path, e->skyPanorama);
             FreeGpu(d);
             return false;
         }
@@ -8507,11 +8589,11 @@ static bool UploadGpu(SceneData *d, char *err, int errSize)
     }
     for (int f = 0; d->filePaint && f < d->modelFileCount; f++)
         if (d->filePaint[f].painted && !BuildPaintMeshes(d, f)) {
-            snprintf(err, errSize, "%s: out of memory (paint meshes)", d->path);
+            ErrSet("%s: out of memory (paint meshes)", d->path);
             FreeGpu(d);
             return false;
         }
-    if (!BuildModelGroups(d, err, errSize)) {
+    if (!BuildModelGroups(d)) {
         FreeGpu(d);
         return false;
     }
@@ -8666,10 +8748,10 @@ static void SetWatch(MS_Private *p, const SceneData *d)
 
 // The rest of a load, the same for every input: what follows from the parsed scene (FinishParse
 // on), then with `gpu` the model files and every GPU resource; else the model files are only checked
-static bool FinishLoad(SceneData *d, const MS_LoadOptions *opt, bool gpu, char *err, int errSize)
+static bool FinishLoad(SceneData *d, const MS_LoadOptions *opt, bool gpu)
 {
     if (!FinishParse(d, opt)) {
-        snprintf(err, errSize, "%s: out of memory", d->path);
+        ErrSet("%s: out of memory", d->path);
         return false;
     }
     bool ok;
@@ -8681,22 +8763,22 @@ static bool FinishLoad(SceneData *d, const MS_LoadOptions *opt, bool gpu, char *
     PaintPrepare(d);
     if (gpu) {
         d->gpu = true;                  // (so FreeData unloads what LoadModelFiles loaded)
-        ok = LoadModelFiles(d, err, errSize);
-    } else ok = CheckModelFiles(d, err, errSize);
-    if (ok) ok = ResolveModels(d, err, errSize);
+        ok = LoadModelFiles(d);
+    } else ok = CheckModelFiles(d);
+    if (ok) ok = ResolveModels(d);
     d->times.models = (GetTime() - t0) * 1000.0;
     if (ok) {
         FinishGeometry(d);
         t0 = GetTime();
-        ok = BuildColliderBvh(d, err, errSize);
+        ok = BuildColliderBvh(d);
         d->times.bvh = (GetTime() - t0) * 1000.0;
     }
     if (ok && !BuildEntities(d)) {
-        snprintf(err, errSize, "%s: out of memory", d->path);
+        ErrSet("%s: out of memory", d->path);
         ok = false;
     }
     if (ok && d->paintCount > 0) PaintResolve(d);
-    if (ok && gpu) ok = UploadGpu(d, err, errSize);
+    if (ok && gpu) ok = UploadGpu(d);
 #ifdef MONOLITH_EDITOR
     if (ok) PaintPublish(d);
 #endif
@@ -8743,26 +8825,26 @@ static void FreeProvided(MS_Private *p);
 
 // Loads a map from its file's bytes (takes ownership): fills a SceneData from them, finishes the
 // load and swaps it in on success
-static bool LoadBytes(MS_Scene *s, const char *mapPath, char *bytes, int size, char *err, int errSize)
+static bool LoadBytes(MS_Scene *s, const char *mapPath, char *bytes, int size)
 {
     MS_Private *p = s->priv;
     SceneData *d = calloc(1, sizeof(*d));
     if (!d) {
-        snprintf(err, errSize, "%s: out of memory", mapPath);
+        ErrSet("%s: out of memory", mapPath);
         free(bytes);
         return false;
     }
     double tLoad = GetTime();
     bool ok = InitData(d, mapPath);
-    if (!ok) snprintf(err, errSize, "%s: out of memory", mapPath);
+    if (!ok) ErrSet("%s: out of memory", mapPath);
     bool compiled = IsCompiledMap(bytes, size);
-    if (ok && compiled) ok = ReadCompiled(d, bytes, size, err, errSize);
+    if (ok && compiled) ok = ReadCompiled(d, bytes, size);
 #ifdef MONOLITH_EDITOR
     if (ok && !compiled && size > MS_FILE_MAX) {
-        snprintf(err, errSize, "%s: cannot read file (or larger than 4 MB)", mapPath);
+        ErrSet("%s: cannot read file (or larger than 4 MB)", mapPath);
         ok = false;
     }
-    if (ok && !compiled) ok = ParseScene(d, bytes, size, err, errSize);
+    if (ok && !compiled) ok = ParseScene(d, bytes, size);
     d->times.parse = (GetTime() - tLoad) * 1000.0;
     if (ok && compiled) WarnStale(d);
     d->text = compiled ? NULL : bytes;
@@ -8779,13 +8861,13 @@ static bool LoadBytes(MS_Scene *s, const char *mapPath, char *bytes, int size, c
 #else
     d->times.parse = (GetTime() - tLoad) * 1000.0;
     if (ok && !compiled) {
-        snprintf(err, errSize, "%s: not a compiled map (this program reads compiled maps, <name>.mapb: compile the "
+        ErrSet("%s: not a compiled map (this program reads compiled maps, <name>.mapb: compile the "
                  "map's text with monolith)", mapPath);
         ok = false;
     }
     free(bytes);
 #endif
-    if (ok) ok = FinishLoad(d, &p->opt, p->gpu, err, errSize);
+    if (ok) ok = FinishLoad(d, &p->opt, p->gpu);
     if (ok && p->gpu && !p->warnedShadowSize && R3D_GetHint(R3D_HINT_SHADOW_DIR_SIZE) != d->env.sun.shadowSize) {
         p->warnedShadowSize = true;
         TraceLog(LOG_WARNING, "monolith_scene: shadow.size %d is not the R3D hint %d (it applies at R3D_Init: "
@@ -8813,18 +8895,18 @@ static bool LoadBytes(MS_Scene *s, const char *mapPath, char *bytes, int size, c
     Publish(s, d);
     FreeData(old);
     if (p->gpu) LogLoadTimes(d, old != NULL, (GetTime() - tLoad) * 1000.0);
-    if (errSize > 0) err[0] = '\0';
+    ErrClear();
     return true;
 }
 
-static bool LoadPath(MS_Scene *s, const char *path, char *err, int errSize)
+static bool LoadPath(MS_Scene *s, const char *path)
 {
     char mapPath[MS_PATH_MAX];
-    if (!ResolveMapPath(path, mapPath, sizeof(mapPath), err, errSize)) return false;
+    if (!ResolveMapPath(path, mapPath, sizeof(mapPath))) return false;
     int size;
-    char *bytes = ReadWholeFile(mapPath, MS_MAX_COMPILED_BYTES, &size, err, errSize);
+    char *bytes = ReadWholeFile(mapPath, MS_MAX_COMPILED_BYTES, &size, true);
     if (!bytes) return false;
-    return LoadBytes(s, mapPath, bytes, size, err, errSize);
+    return LoadBytes(s, mapPath, bytes, size);
 }
 
 // #endregion
@@ -8833,13 +8915,13 @@ static bool LoadPath(MS_Scene *s, const char *path, char *err, int errSize)
 // #region Public API: loading
 // ======================================================================================
 
-MS_Scene *MS_Load(const char *path, const MS_LoadOptions *opt, char *err, int errSize)
+MS_Scene *MS_Load(const char *path, const MS_LoadOptions *opt)
 {
     MS_Scene *s = calloc(1, sizeof(*s));
     MS_Private *p = s ? calloc(1, sizeof(*p)) : NULL;
     if (!p) {
         free(s);
-        snprintf(err, errSize, "%s: out of memory", path);
+        ErrSet("%s: out of memory", path);
         return NULL;
     }
     s->priv = p;
@@ -8864,7 +8946,7 @@ MS_Scene *MS_Load(const char *path, const MS_LoadOptions *opt, char *err, int er
         R3D_SetDepthPrepass(p->rs.depthPrepass);
 #endif
     }
-    if (!LoadPath(s, path, err, errSize)) {
+    if (!LoadPath(s, path)) {
         MS_Unload(s);
         return NULL;
     }
@@ -8920,6 +9002,7 @@ void MS_Unload(MS_Scene *s)
         FreeWatch(p);
         free(p->watch);
         free(p->watchMtime);
+        free(p->error);
 #endif
         free(p);
     }
@@ -8927,16 +9010,21 @@ void MS_Unload(MS_Scene *s)
 }
 
 #ifdef MONOLITH_EDITOR
-MS_ReloadResult MS_Reload(MS_Scene *s, const char *path, char *err, int errSize)
+// MS_Error's copy of a (re)load's outcome: the last error after a failure, nothing after a
+// success. Out of memory: MS_Error says so.
+static void KeepReloadError(MS_Private *p, bool ok)
+{
+    free(p->error);
+    p->error = ok ? NULL : MS_StrDup(MS_LastError());
+    p->errorOom = !ok && !p->error;
+}
+
+MS_ReloadResult MS_Reload(MS_Scene *s, const char *path)
 {
     char *cur = MS_StrDup(path ? path : s->path);     // (s->path is freed by a successful load)
-    if (!cur) {
-        snprintf(err, errSize, "out of memory");
-        return MS_RELOAD_FAILED;
-    }
-    bool ok = LoadPath(s, cur, err, errSize);
+    bool ok = cur ? LoadPath(s, cur) : ErrSet("out of memory");
     free(cur);
-    snprintf(s->priv->error, sizeof(s->priv->error), "%s", ok ? "" : err);
+    KeepReloadError(s->priv, ok);
     return ok ? MS_RELOADED : MS_RELOAD_FAILED;
 }
 
@@ -8958,15 +9046,19 @@ MS_ReloadResult MS_Poll(MS_Scene *s, float dt)
     if (p->settleTime <= 0.0f) return MS_UNCHANGED;
     p->settleTime -= MS_POLL_INTERVAL;
 
-    char err[512], mapPath[MS_PATH_MAX];
+    char mapPath[MS_PATH_MAX];
     snprintf(mapPath, sizeof(mapPath), "%s", p->watch[0]);
     int size;
-    char *text = ReadWholeFile(mapPath, MS_MAX_COMPILED_BYTES, &size, err, sizeof(err));
+    char *text = ReadWholeFile(mapPath, MS_MAX_COMPILED_BYTES, &size, false);
     if (!text) {
         // Usually transient (the next poll retries), but a file that stays unreadable or
         // too big must not fail silently: report it once the settle window has run out
+        // (read again for the reason: a poll that reloads nothing leaves the last error alone)
         if (p->settleTime > 0.0f) return MS_UNCHANGED;
-        snprintf(p->error, sizeof(p->error), "%s", err);
+        text = ReadWholeFile(mapPath, MS_MAX_COMPILED_BYTES, &size, true);
+    }
+    if (!text) {
+        KeepReloadError(p, false);
         p->triedHash = 0;
         return MS_RELOAD_FAILED;
     }
@@ -8976,15 +9068,16 @@ MS_ReloadResult MS_Poll(MS_Scene *s, float dt)
         return MS_UNCHANGED;
     }
     float settle = p->settleTime;
-    bool ok = LoadBytes(s, mapPath, text, size, err, sizeof(err));
+    bool ok = LoadBytes(s, mapPath, text, size);
     p->settleTime = settle;                     // keep watching while the editor may still write
-    snprintf(p->error, sizeof(p->error), "%s", ok ? "" : err);
+    KeepReloadError(p, ok);
     return ok ? MS_RELOADED : MS_RELOAD_FAILED;
 }
 
 const char *MS_Error(const MS_Scene *s)
 {
-    return s->priv->error;
+    const MS_Private *p = s->priv;
+    return p->error ? p->error : p->errorOom ? "out of memory" : "";
 }
 
 const char *MS_LineText(const MS_Scene *s, int line, int *length)
@@ -9045,36 +9138,36 @@ MS_SourceState MS_CompiledSource(const MS_Scene *s, const char **sourcePath)
     return d ? SourceState(d) : MS_SOURCE_TEXT;
 }
 
-bool MS_Compile(const char *mapPath, const char *outPath, char *err, int errSize)
+bool MS_Compile(const char *mapPath, const char *outPath)
 {
     char path[MS_PATH_MAX];
-    if (!ResolveMapPath(mapPath, path, sizeof(path), err, errSize)) return false;
+    if (!ResolveMapPath(mapPath, path, sizeof(path))) return false;
     int size;
-    char *text = ReadWholeFile(path, MS_FILE_MAX, &size, err, errSize);
+    char *text = ReadWholeFile(path, MS_FILE_MAX, &size, true);
     if (!text) return false;
     if (IsCompiledMap(text, size)) {
-        snprintf(err, errSize, "%s: already a compiled map (compile the map's text, its .map file)", path);
+        ErrSet("%s: already a compiled map (compile the map's text, its .map file)", path);
         free(text);
         return false;
     }
     SceneData *d = calloc(1, sizeof(*d));
     bool ok = d && InitData(d, path);
-    if (!ok) snprintf(err, errSize, "%s: out of memory", path);
-    if (ok) ok = ParseScene(d, text, size, err, errSize);
+    if (!ok) ErrSet("%s: out of memory", path);
+    if (ok) ok = ParseScene(d, text, size);
     unsigned char *out = NULL;
     int outSize = 0;
     if (ok) ok = (out = WriteCompiled(d, GetFileName(path), Fnv1a64Update(FNV_OFFSET, text, (size_t)size), size,
-                                      &outSize, err, errSize)) != NULL;
+                                      &outSize)) != NULL;
     // The package check a noGpu load makes (model files included), then the compiled bytes read
     // back as a game would (relative to the source's package folder): what compiles, loads
-    if (ok) ok = FinishLoad(d, &(MS_LoadOptions){ .noGpu = true }, false, err, errSize);
+    if (ok) ok = FinishLoad(d, &(MS_LoadOptions){ .noGpu = true }, false);
     FreeData(d);
     free(text);
     if (ok) {
         SceneData *r = calloc(1, sizeof(*r));
         ok = r && InitData(r, path);
-        if (!ok) snprintf(err, errSize, "%s: out of memory", path);
-        if (ok) ok = ReadCompiled(r, (const char *)out, outSize, err, errSize);
+        if (!ok) ErrSet("%s: out of memory", path);
+        if (ok) ok = ReadCompiled(r, (const char *)out, outSize);
         FreeData(r);
     }
     if (ok) {
@@ -9088,11 +9181,12 @@ bool MS_Compile(const char *mapPath, const char *outPath, char *err, int errSize
 #endif
         if (ok) ok = rename(partial, outPath) == 0;
         if (!ok) {
-            snprintf(err, errSize, "%s: cannot write the compiled map", outPath);
+            ErrSet("%s: cannot write the compiled map", outPath);
             remove(partial);
         }
     }
     free(out);
+    if (ok) ErrClear();
     return ok;
 }
 #endif
@@ -9431,12 +9525,12 @@ static void LiveRetire(MS_Private *p, SceneData *old)
 
 // The paint meshes of d's painted model files: old's when d took the file over and they were built
 // from the same unwrap (or both from own UVs), else built (stats: paintMeshFiles). False when out of
-// memory (err says so).
-static bool PaintMeshesLive(SceneData *old, SceneData *d, LiveBorrow *B, MS_EditStats *st, char *err, int errSize)
+// memory (the last error says so).
+static bool PaintMeshesLive(SceneData *old, SceneData *d, LiveBorrow *B, MS_EditStats *st)
 {
     if (!d->filePaint) return true;
     if (!(B->paintMeshFrom = malloc(sizeof(int) * (size_t)d->modelFileCount))) {
-        snprintf(err, errSize, "%s: out of memory", d->path);
+        ErrSet("%s: out of memory", d->path);
         return false;
     }
     for (int f = 0; f < d->modelFileCount; f++) {
@@ -9455,7 +9549,7 @@ static bool PaintMeshesLive(SceneData *old, SceneData *d, LiveBorrow *B, MS_Edit
             continue;
         }
         if (!BuildPaintMeshes(d, f)) {
-            snprintf(err, errSize, "%s: out of memory (paint meshes)", d->path);
+            ErrSet("%s: out of memory (paint meshes)", d->path);
             return false;
         }
         st->paintMeshFiles++;
@@ -9603,7 +9697,7 @@ typedef struct { int *first, *end, *at, *oldAt; } RangeIndex;
 // rebuild: per material of d, nonzero when it was built again (its boxes' meshes are not kept:
 // their UVs or textures changed) or is new (beyond old's materials); NULL: none
 static bool UploadBoxesLive(MS_Private *p, SceneData *old, SceneData *d, const int *boxFrom, int dirtyBoxes, LiveBorrow *B,
-                            const unsigned char *rebuild, MS_EditStats *st, char *err, int errSize)
+                            const unsigned char *rebuild, MS_EditStats *st)
 {
     int mc = d->materialCount, oldMc = old->materialCount;
     CellItem *items = malloc(sizeof(CellItem) * (d->boxCount > 0 ? d->boxCount : 1));
@@ -9612,7 +9706,7 @@ static bool UploadBoxesLive(MS_Private *p, SceneData *old, SceneData *d, const i
     B->instFrom = calloc(mc > 0 ? mc : 1, sizeof(bool));
     if (!items || !ri.first || !ri.end || !ri.at || !ri.oldAt || !B->instFrom) {
         free(items); free(ri.first); free(ri.end); free(ri.at); free(ri.oldAt);
-        snprintf(err, errSize, "%s: out of memory", d->path);
+        ErrSet("%s: out of memory", d->path);
         return false;
     }
     bool anyMerge = false;
@@ -9793,7 +9887,7 @@ static bool UploadBoxesLive(MS_Private *p, SceneData *old, SceneData *d, const i
     free(hidden);
     free(items);
     free(ri.first); free(ri.end); free(ri.at); free(ri.oldAt);
-    if (!ok) snprintf(err, errSize, "%s: out of memory (box meshes)", d->path);
+    if (!ok) ErrSet("%s: out of memory (box meshes)", d->path);
     return ok;
 }
 
@@ -9924,16 +10018,16 @@ static void Restamp(MS_Scene *s, unsigned int oldVersion, const SceneData *old, 
 
 // --- MS_EditSetText
 
-MS_ReloadResult MS_EditSetText(MS_Scene *s, const char *text, int size, MS_EditStats *stats, char *err, int errSize)
+MS_ReloadResult MS_EditSetText(MS_Scene *s, const char *text, int size, MS_EditStats *stats)
 {
     MS_Private *p = s->priv;
     SceneData *old = p->d;
     MS_EditStats st = { 0 };
     double t0 = GetTime();
-    if (errSize > 0) err[0] = '\0';
+    ErrClear();
     if (p->pv) MS_EditPreviewEnd(s);
     if (!old || size < 0 || size > MS_FILE_MAX) {
-        snprintf(err, errSize, "%s: no map loaded, or the text is larger than 4 MB", old ? old->path : "map");
+        ErrSet("%s: no map loaded, or the text is larger than 4 MB", old ? old->path : "map");
         return MS_RELOAD_FAILED;
     }
     char *bytes = malloc((size_t)size + 1);
@@ -9942,12 +10036,12 @@ MS_ReloadResult MS_EditSetText(MS_Scene *s, const char *text, int size, MS_EditS
     int *boxFrom = NULL, *modelFrom = NULL;
     bool *oldBoxUsed = NULL, *oldModelUsed = NULL, *oldLightUsed = NULL;
     bool ok = d && InitData(d, old->path);
-    if (!ok) snprintf(err, errSize, "%s: out of memory", old->path);
+    if (!ok) ErrSet("%s: out of memory", old->path);
     if (ok) {
         d->live = p;                    // (the provided textures count as files: MS_PaintAtlasProvide)
         memcpy(bytes, text, (size_t)size);
         bytes[size] = '\0';
-        ok = ParseScene(d, bytes, size, err, errSize);
+        ok = ParseScene(d, bytes, size);
         d->text = bytes;
         d->textSize = size;
         bytes = NULL;
@@ -9959,7 +10053,7 @@ MS_ReloadResult MS_EditSetText(MS_Scene *s, const char *text, int size, MS_EditS
         st.parseMs = d->times.parse = (GetTime() - t0) * 1000.0;
     }
     if (ok && !FinishParse(d, &p->opt)) {
-        snprintf(err, errSize, "%s: out of memory", d->path);
+        ErrSet("%s: out of memory", d->path);
         ok = false;
     }
     // Anything but objects changed (a material, env, the format): uploaded in full, from memory.
@@ -9971,14 +10065,14 @@ MS_ReloadResult MS_EditSetText(MS_Scene *s, const char *text, int size, MS_EditS
         full = !LiveMaterialPlan(old, d, &matRebuild);
     st.full = full;
     if (ok) PaintPrepare(d);
-    if (ok && !p->gpu) ok = CheckModelFiles(d, err, errSize);
+    if (ok && !p->gpu) ok = CheckModelFiles(d);
     else if (ok) {
         // Model files: the ones old has are taken over, new paths are loaded
         double tm = GetTime();
         d->gpu = true;
         B.fileFrom = malloc(sizeof(int) * (d->modelFileCount > 0 ? (size_t)d->modelFileCount : 1));
         ok = B.fileFrom != NULL;
-        if (!ok) snprintf(err, errSize, "%s: out of memory", d->path);
+        if (!ok) ErrSet("%s: out of memory", d->path);
         for (int i = 0; ok && i < d->modelFileCount; i++) B.fileFrom[i] = -1;
         for (int i = 0; ok && i < d->modelFileCount; i++) {
             for (int k = 0; !full && k < old->modelFileCount && B.fileFrom[i] < 0; k++)
@@ -9994,21 +10088,21 @@ MS_ReloadResult MS_EditSetText(MS_Scene *s, const char *text, int size, MS_EditS
                 F->materialCount = O->materialCount;
                 d->modelPick[i] = old->modelPick[B.fileFrom[i]];
                 if (d->filePaint) PaintLiveUnwrap(p, d, i, old, B.fileFrom[i]);
-            } else ok = LoadModelFile(d, i, err, errSize);
+            } else ok = LoadModelFile(d, i);
         }
         st.modelsMs = (GetTime() - tm) * 1000.0;
     }
-    if (ok) ok = ResolveModels(d, err, errSize);
+    if (ok) ok = ResolveModels(d);
     if (ok) {
         FinishGeometry(d);
         double tb = GetTime();
-        ok = BuildColliderBvh(d, err, errSize);
+        ok = BuildColliderBvh(d);
         st.bvhMs = (GetTime() - tb) * 1000.0;
     }
     if (ok) {
         double te = GetTime();
         if (!BuildEntities(d)) {
-            snprintf(err, errSize, "%s: out of memory", d->path);
+            ErrSet("%s: out of memory", d->path);
             ok = false;
         }
         if (ok && d->paintCount > 0) PaintResolve(d);
@@ -10031,7 +10125,7 @@ MS_ReloadResult MS_EditSetText(MS_Scene *s, const char *text, int size, MS_EditS
              LiveMatchAll(old, old->lightCount, d, d->lightCount, LightKey, LightSame, lightFrom, &oldLightUsed, &lightsChanged);
         st.lightsChanged = lightsChanged;
         B.lightFrom = lightFrom;
-        if (!ok) snprintf(err, errSize, "%s: out of memory", d->path);
+        if (!ok) ErrSet("%s: out of memory", d->path);
         for (int i = 0; ok && i < old->boxCount; i++) if (!oldBoxUsed[i]) DirtyAdd(p, old->boxes[i]);
         for (int j = 0; ok && j < d->boxCount; j++) if (boxFrom[j] < 0) DirtyAdd(p, d->boxes[j]);
         // A material built again (a new texture or filter: its alpha may cut other shadows; an
@@ -10070,7 +10164,7 @@ MS_ReloadResult MS_EditSetText(MS_Scene *s, const char *text, int size, MS_EditS
             if (!again) continue;
             after = true;
             if (!matRebuild && !(matRebuild = calloc((size_t)d->materialCount, 1))) {
-                snprintf(err, errSize, "%s: out of memory", d->path);
+                ErrSet("%s: out of memory", d->path);
                 ok = false;
                 break;
             }
@@ -10080,7 +10174,7 @@ MS_ReloadResult MS_EditSetText(MS_Scene *s, const char *text, int size, MS_EditS
 
     double tu = GetTime();
     if (ok && p->gpu && full) {
-        ok = UploadGpu(d, err, errSize);        // (frees what it made on failure)
+        ok = UploadGpu(d);        // (frees what it made on failure)
         if (ok) for (int j = 0; j < d->lightCount; j++) B.lightFrom[j] = -1;
         if (ok && d->anyPaint) st.paintTables++;
     } else if (ok && p->gpu) {
@@ -10091,7 +10185,7 @@ MS_ReloadResult MS_EditSetText(MS_Scene *s, const char *text, int size, MS_EditS
         d->lightShadowDrawn = calloc(d->lightCount > 0 ? d->lightCount : 1, sizeof(bool));
         d->shaderFiles = malloc(sizeof(ShaderFile) * (old->shaderFileCount > 0 ? (size_t)old->shaderFileCount : 1));
         ok = d->inst && d->instCount && d->lightShadow && d->lightShadowDrawn && d->shaderFiles;
-        if (!ok) snprintf(err, errSize, "%s: out of memory", d->path);
+        if (!ok) ErrSet("%s: out of memory", d->path);
         if (ok) {
             // Shaders, textures, sky: the same statements, so old's GPU state as it is
             d->shaderFileCount = d->shaderFileCap = old->shaderFileCount;
@@ -10122,7 +10216,7 @@ MS_ReloadResult MS_EditSetText(MS_Scene *s, const char *text, int size, MS_EditS
                     d->matDefs[i].paintTex = old->matDefs[i].paintTex;
                     continue;
                 }
-                if ((how & PLAN_MATERIAL) == PLAN_NEW) ok = BuildMaterial(d, i, err, errSize);
+                if ((how & PLAN_MATERIAL) == PLAN_NEW) ok = BuildMaterial(d, i);
                 else {
                     R3D_Material m = old->materials[i].material, fresh = d->materials[i].material;
                     d->matDefs[i].paintTex = old->matDefs[i].paintTex;
@@ -10133,22 +10227,22 @@ MS_ReloadResult MS_EditSetText(MS_Scene *s, const char *text, int size, MS_EditS
                         m.emission.texture = fresh.emission.texture;
                     }
                     d->materials[i].material = m;
-                    if (how & PLAN_MAPS) ok = BuildMaterialMaps(d, i, err, errSize);
-                    if (ok && (how & PLAN_PAINT)) ok = BuildMaterialShader(d, i, err, errSize);
+                    if (how & PLAN_MAPS) ok = BuildMaterialMaps(d, i);
+                    if (ok && (how & PLAN_PAINT)) ok = BuildMaterialShader(d, i);
                 }
-                if (ok) MaterialDrawMode(d, i, err, errSize);
+                if (ok) MaterialDrawMode(d, i);
                 st.materialsRebuilt++;
             }
             if (ok && !LiveFaceCubes(old, d, &B)) {
-                snprintf(err, errSize, "%s: out of memory", d->path);
+                ErrSet("%s: out of memory", d->path);
                 ok = false;
             }
             // The paint keys (the same objects keep theirs) and table, before the box draws use them
             bool tookTable = false;
-            if (ok) ok = PaintUpload(d, old, boxFrom, modelFrom, &tookTable, err, errSize);
+            if (ok) ok = PaintUpload(d, old, boxFrom, modelFrom, &tookTable);
             B.paintTable = tookTable;
             if (ok && d->anyPaint && !tookTable) st.paintTables++;
-            if (ok) ok = UploadBoxesLive(p, old, d, boxFrom, dirtyBoxes, &B, matRebuild, &st, err, errSize);
+            if (ok) ok = UploadBoxesLive(p, old, d, boxFrom, dirtyBoxes, &B, matRebuild, &st);
         }
         // Lights: an identical light keeps its shadow map (drawn again below if a change reaches it)
         for (int j = 0; ok && j < d->lightCount; j++) {
@@ -10164,8 +10258,8 @@ MS_ReloadResult MS_EditSetText(MS_Scene *s, const char *text, int size, MS_EditS
             }
         }
         // Paint meshes of the painted model files: old's when built from the same unwrap
-        if (ok) ok = PaintMeshesLive(old, d, &B, &st, err, errSize);
-        if (ok) ok = BuildModelGroups(d, err, errSize);
+        if (ok) ok = PaintMeshesLive(old, d, &B, &st);
+        if (ok) ok = BuildModelGroups(d);
     }
     st.uploadMs = (GetTime() - tu) * 1000.0 - st.hiddenMs - st.meshesMs;
     free(boxFrom);

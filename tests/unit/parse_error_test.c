@@ -1,8 +1,8 @@
-// Error messages of the map-text parser (runtime/monolith_scene.c, region "Parser"): they are written
-// straight into the caller's buffer, "<file>:<line>: <message>", with no message buffer in between.
-// A bad token of any length arrives whole in a large buffer; in every smaller one the message is cut
-// at its end, NUL-terminated, never in half a UTF-8 character and never past errSize. Short messages
-// keep their exact text. Built like the editor (the runtime with MONOLITH_EDITOR) with ASan + UBSan:
+// Error messages of the map-text parser (runtime/monolith_scene.c, region "Parser"): "<file>:<line>:
+// <message>", built straight into the runtime's last error (MS_LastError), with no message buffer in
+// between and no length limit. A bad token of any length (here up to 100 000 bytes) arrives whole and
+// valid UTF-8; a successful load after a failure clears the message. Short messages keep their exact
+// text. Built like the editor (the runtime with MONOLITH_EDITOR) with ASan + UBSan:
 //   tests/unit/parse_error_test.sh       (builds it and runs it in build/parse-error-test/)
 //   parse_error_test <scratch folder>
 #include "monolith_scene.h"
@@ -34,11 +34,12 @@ static void WriteMap(const char *name, const char *text, char *path, int pathSiz
     fclose(f);
 }
 
-// Loads the map (no GPU) into err[errSize]: true if it was refused, as every map here must be
-static bool Refused(const char *path, char *err, int errSize)
+// Loads the map (no GPU): true if it was refused, as every map here must be (the reason in
+// MS_LastError())
+static bool Refused(const char *path)
 {
     loads++;
-    MS_Scene *s = MS_Load(path, &(MS_LoadOptions){ .noGpu = true }, err, errSize);
+    MS_Scene *s = MS_Load(path, &(MS_LoadOptions){ .noGpu = true });
     if (s) { MS_Unload(s); return false; }
     return true;
 }
@@ -46,53 +47,49 @@ static bool Refused(const char *path, char *err, int errSize)
 // The map must be refused with exactly "<path>:<line>: <message>"
 static void ExpectExact(const char *what, const char *text, int line, const char *message)
 {
-    char path[1100], want[2048], err[2048];
+    char path[1100], want[2048];
     WriteMap(what, text, path, sizeof(path));
     snprintf(want, sizeof(want), "%s:%d: %s", path, line, message);
-    if (!Refused(path, err, sizeof(err))) { printf("FAIL %s: loaded\n", what); fails++; }
-    else if (strcmp(err, want) != 0) { printf("FAIL %s:\n  got  %s\n  want %s\n", what, err, want); fails++; }
-    else printf("ok   %s: %s\n", what, err);
+    if (!Refused(path)) { printf("FAIL %s: loaded\n", what); fails++; }
+    else if (strcmp(MS_LastError(), want) != 0) { printf("FAIL %s:\n  got  %s\n  want %s\n", what, MS_LastError(), want); fails++; }
+    else printf("ok   %s: %s\n", what, MS_LastError());
 }
 
-// A long message: whole in a large buffer (it starts with "<path>:<line>: ", contains `token` and
-// ends with `tail`), cleanly cut in every buffer of 1 .. its length + 1 bytes
+// A long message: whole (it starts with "<path>:<line>: ", contains `token` and ends with `tail`),
+// valid UTF-8, the same on a second failing load
 static void ExpectLong(const char *what, const char *text, int line, const char *token, const char *tail)
 {
     char path[1100], head[1200];
     WriteMap(what, text, path, sizeof(path));
     snprintf(head, sizeof(head), "%s:%d: ", path, line);
-    static char full[16384];
-    if (!Refused(path, full, sizeof(full))) { printf("FAIL %s: loaded\n", what); fails++; return; }
+    if (!Refused(path)) { printf("FAIL %s: loaded\n", what); fails++; return; }
+    const char *full = MS_LastError();
     size_t len = strlen(full), tailLen = strlen(tail);
     if (strncmp(full, head, strlen(head)) != 0 || !strstr(full, token) || len < tailLen ||
         strcmp(full + len - tailLen, tail) != 0 || !WholeUtf8(full)) {
-        printf("FAIL %s: the message isn't whole: %s\n", what, full); fails++; return;
+        printf("FAIL %s: the message isn't whole: %.2000s\n", what, full); fails++; return;
     }
     printf("ok   %s: whole (%zu bytes, the token %zu): %.*s…%s\n", what, len, strlen(token),
            (int)strlen(head) + 24, full, full + len - tailLen - 8);
+    char *first = MS_StrDup(full);      // (full is valid only until the next MS_* call)
+    if (!first) exit(1);
+    if (!Refused(path) || strcmp(MS_LastError(), first) != 0) { printf("FAIL %s: a second load gave another message\n", what); fails++; }
+    free(first);
+}
 
-    int trimmed = 0, bad = 0;
-    char *buf = malloc(len + 64);
-    if (!buf) exit(1);
-    for (int size = 1; size <= (int)len + 1; size++) {
-        memset(buf, 0x7F, len + 64);
-        if (!Refused(path, buf, size)) { bad++; continue; }
-        size_t got = strnlen(buf, (size_t)size), room = (size_t)size - 1;
-        bool ok = got <= room && memcmp(buf, full, got) == 0 && WholeUtf8(buf) &&
-                  (got == (room < len ? room : len) ||                          // as much as fits, or
-                   (room - got <= 3 && (unsigned char)full[got] >= 0xC0)) &&    // back to a character's start
-                  (unsigned char)buf[size] == 0x7F;                             // nothing past errSize
-        if (!ok) {
-            if (bad++ < 5) printf("FAIL %s: errSize %d: %zu bytes \"%.*s\"\n", what, size, got, (int)got, buf);
-            continue;
-        }
-        if (got < room) trimmed++;
-        if (size == 1 || size == 16) printf("ok   %s: errSize %d: \"%s\"\n", what, size, buf);
-    }
-    fails += bad;
-    printf("%s   %s: errSize 1..%zu: every message a clean cut (%d cut back to a whole UTF-8 character)\n",
-           bad ? "FAIL" : "ok", what, len + 1, trimmed);
-    free(buf);
+// Writes `text` as a map that loads: the load must succeed and leave MS_LastError() ""
+static void ExpectCleared(const char *what, const char *text)
+{
+    char path[1100];
+    WriteMap(what, text, path, sizeof(path));
+    bool hadError = MS_LastError()[0] != 0;
+    loads++;
+    MS_Scene *s = MS_Load(path, &(MS_LoadOptions){ .noGpu = true });
+    if (!s) { printf("FAIL %s: refused: %s\n", what, MS_LastError()); fails++; return; }
+    MS_Unload(s);
+    if (!hadError) { printf("FAIL %s: no error before the load to clear\n", what); fails++; }
+    else if (MS_LastError()[0]) { printf("FAIL %s: the last error is still \"%s\"\n", what, MS_LastError()); fails++; }
+    else printf("ok   %s: loaded after a failure, MS_LastError() is \"\"\n", what);
 }
 
 int main(int argc, char **argv)
@@ -117,6 +114,21 @@ int main(int argc, char **argv)
     snprintf(text, sizeof(text), "monolith 2\n\nenv fog.mode %s\n", token);
     ExpectLong("long-keyword", text, 3, token, "' (expected disabled linear exp2 exp)");
 
+    // No length limit at all: a token of 100 000 bytes
+    size_t hugeLen = 100000;
+    char *huge = malloc(hugeLen + 1), *hugeText = malloc(hugeLen + 64);
+    if (!huge || !hugeText) exit(1);
+    memset(huge, 'y', hugeLen);
+    huge[hugeLen] = '\0';
+    snprintf(hugeText, hugeLen + 64, "monolith 2\nbox 0 0 0 1 1 %s\n", huge);
+    ExpectLong("huge-number", hugeText, 2, huge, "y'");
+    free(hugeText);
+    free(huge);
+
+    // A success after the failures clears the last error
+    ExpectCleared("loads", "monolith 2\nbox 0 0 0 1 1 1\nspawn 0 0 3 0\n");
+
     printf("%s: %d loads, %d failures\n", fails ? "FAILED" : "PASSED", loads, fails);
+    MS_ClearError();
     return fails ? 1 : 0;
 }

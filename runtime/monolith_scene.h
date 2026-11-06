@@ -16,15 +16,14 @@
 #endif
 //
 // Minimal use:
-//     char err[512];
 //     InitWindow(w, h, "game");
 //     // optional: the map's shadow map size is an R3D init hint, so peek at it first
-//     MS_Scene *peek = MS_Load("maps/forest", &(MS_LoadOptions){ .noGpu = true }, err, sizeof(err));
+//     MS_Scene *peek = MS_Load("maps/forest", &(MS_LoadOptions){ .noGpu = true });
 //     if (peek) { MS_SetInitHints(peek); MS_Unload(peek); }
 //     R3D_Init(w, h);
 //     MS_InitRenderer();                 // GL state the scene needs (depth clamp for the sun shadow)
-//     MS_Scene *scene = MS_Load("maps/forest", NULL, err, sizeof(err));
-//     if (!scene) { puts(err); return 1; }
+//     MS_Scene *scene = MS_Load("maps/forest", NULL);
+//     if (!scene) { puts(MS_LastError()); MS_ClearError(); return 1; }
 //     MS_ApplyEnvironment(scene);
 //     while (!WindowShouldClose()) {
 //         BeginDrawing();
@@ -32,6 +31,7 @@
 //         EndDrawing();
 //     }
 //     MS_Unload(scene);
+//     MS_ClearError();                   // frees the last error message, if any
 //
 // Inside your own R3D frame instead (your objects and the scene together):
 //     R3D_Begin(camera);
@@ -251,6 +251,54 @@ typedef struct {
 } MS_Scene;
 
 // ======================================================================================
+// Errors
+// ======================================================================================
+// A function that can fail says so by its return value (NULL, false, MS_RELOAD_FAILED) and
+// leaves the reason in the last error: "file: message", or "file:line: message" when a map
+// line is to blame. A message has no length limit: one that quotes a long path or lists many
+// files is never cut.
+//  - Each thread has its own last error.
+//  - MS_Load sets it when it fails and clears it ("") when it succeeds.
+#ifdef MONOLITH_EDITOR
+//  - Editor builds: MS_Reload, MS_Compile, MS_EditSetText and MS_CheckModelReferences do the
+//    same; MS_Poll sets it when a reload fails, clears it when one succeeds and leaves it alone
+//    when it reloads nothing. The editor's own functions report through it too (MS_SetError)
+//    and set it only when they fail.
+#endif
+//  - No other runtime function changes it.
+//  - The pointer MS_LastError returns stays valid until the next MS_* call on the same thread:
+//    copy the text (MS_StrDup) to keep it longer.
+//  - Out of memory while a message is built: the message is "out of memory" (a static
+//    string), never NULL and never half a message.
+
+// The calling thread's last error; "" when there is none (never NULL)
+const char *MS_LastError(void);
+
+// Frees the calling thread's last error (MS_LastError() is "" after it). Call it at exit, and
+// in a thread of your own before it ends if it called the runtime, so the message's memory is
+// returned.
+void MS_ClearError(void);
+
+// printf-style argument checks where the compiler has them (MinGW: the archetype its own stdio
+// declares, so %zu is checked like snprintf's)
+#if defined(__MINGW32__) && defined(__MINGW_PRINTF_FORMAT)
+#define MS_PRINTF_LIKE(f, a) __attribute__((format(__MINGW_PRINTF_FORMAT, f, a)))
+#elif defined(__GNUC__) || defined(__clang__)
+#define MS_PRINTF_LIKE(f, a) __attribute__((format(printf, f, a)))
+#else
+#define MS_PRINTF_LIKE(f, a)
+#endif
+
+#ifdef MONOLITH_EDITOR
+// Editor: sets the calling thread's last error to a printf-style message, or appends one to
+// it, so the editor's own functions report failures the same way as the runtime's. The
+// arguments may point into MS_LastError() (e.g. to prefix it). Both return false, so a
+// failing function can `return MS_SetError(...)`.
+bool MS_SetError(const char *fmt, ...) MS_PRINTF_LIKE(1, 2);
+bool MS_AppendError(const char *fmt, ...) MS_PRINTF_LIKE(1, 2);
+#endif
+
+// ======================================================================================
 // Loading
 // ======================================================================================
 
@@ -272,13 +320,13 @@ typedef struct {
 
 // Loads a compiled map (<name>.mapb: the map's text compiled by monolith, read without parsing) or
 // a package folder holding one (<name>/<name>.mapb, or its only .mapb file). Needs R3D_Init first
-// unless opt->noGpu. Returns NULL and "file: message" in err on failure (a map line, when there is
-// one, refers to the map's text: "file:line: message").
+// unless opt->noGpu. Returns NULL on failure, the reason in MS_LastError(): "file: message" (a map
+// line, when there is one, refers to the map's text: "file:line: message").
 #ifdef MONOLITH_EDITOR
 // Editor builds also read the map's text: a folder's <name>.map (else its only .map file) comes
 // before a compiled map, and a file's first bytes tell the two apart.
 #endif
-MS_Scene *MS_Load(const char *path, const MS_LoadOptions *opt, char *err, int errSize);
+MS_Scene *MS_Load(const char *path, const MS_LoadOptions *opt);
 void MS_Unload(MS_Scene *scene);
 
 // R3D hints that only take effect before R3D_Init (today: the sun's shadow map size, from
@@ -309,12 +357,16 @@ typedef enum {
 // Hot reload: call once per frame. About twice a second it checks every file the scene
 // depends on (map, shaders, models, textures) and reloads the package when one changed.
 // A reload that changes shadow.size keeps the old shadow map size until a restart.
+// MS_RELOAD_FAILED: the reason in MS_LastError() and MS_Error(scene).
 MS_ReloadResult MS_Poll(MS_Scene *scene, float dt);
 
-// Reloads now, from `path` (NULL = the current one). Same swap rules as MS_Poll.
-MS_ReloadResult MS_Reload(MS_Scene *scene, const char *path, char *err, int errSize);
+// Reloads now, from `path` (NULL = the current one). Same swap rules as MS_Poll; the reason
+// of a failure in MS_LastError().
+MS_ReloadResult MS_Reload(MS_Scene *scene, const char *path);
 
-const char *MS_Error(const MS_Scene *scene);    // last failed (re)load, "" after a success
+// The scene's own copy of its last failed (re)load's message (MS_Poll, MS_Reload), "" after a
+// successful one: unlike MS_LastError(), it stays until the scene reloads again. No length limit.
+const char *MS_Error(const MS_Scene *scene);
 
 // Line `line` (1-based) of the loaded map's text, without the newline (cut to outSize - 1 bytes)
 bool MS_GetLine(const MS_Scene *scene, int line, char *out, int outSize);
@@ -344,8 +396,8 @@ int MS_PrimitiveArgs(const char *name, unsigned char axes[8]);
 // outPath: parsed, checked like a noGpu load (model files included), read back, then written
 // (to outPath + ".partial", renamed). The same text always gives the same bytes. Paths in it
 // stay relative to the package, so outPath belongs in the package folder (or in a copy of it).
-// False with "file:line: message" in err.
-bool MS_Compile(const char *mapPath, const char *outPath, char *err, int errSize);
+// False with "file:line: message" in MS_LastError().
+bool MS_Compile(const char *mapPath, const char *outPath);
 
 typedef enum {
     MS_SOURCE_TEXT = 0,     // the scene was loaded from its map text
@@ -383,10 +435,9 @@ typedef struct {
 
 // The scene becomes the parse of text[0..size) (copied). scene->hash = its hash, version + 1;
 // loadVersion and the hot-reload state are unchanged (the files on disk are). MS_RELOADED on
-// success (stats filled when not NULL), MS_RELOAD_FAILED with "file:line: message" in err and
-// the scene unchanged otherwise. Ends a preview (MS_EditPreviewBegin) if one is running.
-MS_ReloadResult MS_EditSetText(MS_Scene *scene, const char *text, int size, MS_EditStats *stats,
-                               char *err, int errSize);
+// success (stats filled when not NULL), MS_RELOAD_FAILED with "file:line: message" in
+// MS_LastError() and the scene unchanged otherwise. Ends a preview (MS_EditPreviewBegin) if one is running.
+MS_ReloadResult MS_EditSetText(MS_Scene *scene, const char *text, int size, MS_EditStats *stats);
 
 // The editor wrote the scene's current text (MS_MapText) to the map file: hot reload takes the
 // files on disk as loaded, so MS_Poll does not reload them for that write
@@ -484,7 +535,7 @@ void MS_SetRenderSettings(MS_Scene *scene, MS_RenderSettings settings);
 //     MS_Quality q = MS_QualityPreset(MS_QUALITY_MEDIUM);
 //     MS_LoadOptions opt = { .shadowSizeOverride = q.shadowSize };  // the shadow map size is an
 //     ... peek with opt + .noGpu, MS_SetInitHints(peek), R3D_Init, MS_InitRenderer ...  // init hint
-//     MS_Scene *scene = MS_Load(path, &opt, err, sizeof(err));
+//     MS_Scene *scene = MS_Load(path, &opt);
 //     MS_ApplyEnvironment(scene);
 //     MS_ApplyQuality(scene, &q);                  // right after every MS_ApplyEnvironment
 //     MS_ApplyRenderResolution(scene, w, h);
@@ -767,9 +818,9 @@ bool MS_WriteR3DEnvironment(const R3D_Environment *env, FILE *f);
 // and their texture maps) without importing it: each must stay inside `root` (a folder path
 // ending in '/') and exist; references of 1024 bytes or more, control characters and
 // absolute or URL references fail. modelRel: the model's path relative to root. False with
-// the reason in err. The map loader runs this check for every model file of a map;
+// the reason in MS_LastError(). The map loader runs this check for every model file of a map;
 // --inspect-model runs it with the model's own folder as root before assimp reads anything.
-bool MS_CheckModelReferences(const char *root, const char *modelRel, char *err, int errSize);
+bool MS_CheckModelReferences(const char *root, const char *modelRel);
 
 // The range the map parser enforces for an `env` key (e.g. "volumetricFog.stepSize": >= 0.05):
 // lo..hi, lo excluded when *loOpen. False if the key has no range. For tools that set

@@ -217,10 +217,10 @@ int InspectModel(const char *path)
     // it: a downloaded model could name ../../../etc/passwd as a buffer or texture (QA2 F13);
     // the map loader would refuse it anyway (same check, package root instead of the folder)
     {
-        char dir[1100], err[1400];
+        char dir[1100];
         snprintf(dir, sizeof(dir), "%s/", GetDirectoryPath(path));
-        if (!MS_CheckModelReferences(dir, GetFileName(path), err, sizeof(err))) {
-            printf("inspect-model: %s: not imported: %s\n", path, err);
+        if (!MS_CheckModelReferences(dir, GetFileName(path))) {
+            printf("inspect-model: %s: not imported: %s\n", path, MS_LastError());
             printf("  (a model may only refer to files in its own folder or below it; the map loader rejects it too)\n");
             return 1;
         }

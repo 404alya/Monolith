@@ -17,7 +17,8 @@
 # live settings changes incl. the renderer restart, the settings panel), of tests/models (models, textured /
 # shader materials, shadowed lights), of examples/01_minimal/scene and maps/pine_forest
 # (textured ground, many restyled models), --reload-test both ways
-# and into a broken map, a broken map on the command line, --bake-surface (and a data_sampler reading
+# and into a broken map, a broken map on the command line, failing loads with long messages (a package
+# with many .map files: on the command line and as a reload), --bake-surface (and a data_sampler reading
 # its tile), --shot-hud with --select / --region / --volume,
 # the render inspector (outline modes, labels, its panel, buffer views, the draw filter with a live
 # edit, a preview and a reload), manual edits (--apply-edits on a copy of tests/models: move, turn, split, duplicate, add, id, undo, redo and
@@ -202,6 +203,12 @@ Run reload-to-default 0 "$M" --shot "$TMP/r2.png" --view 1 --map tests/models --
 printf 'monolith 2\nbox 0 0 0 1 1 1\nbogus statement here\n' > "$TMP/broken.map"
 Run reload-to-broken 0  "$M" --shot "$TMP/r3.png" --view 1 --map tests/models --reload-test "$TMP/broken.map"
 Run broken-map 1        "$M" --dump-boxes "$TMP/broken.txt" --map "$TMP/broken.map"
+# A failing load whose message grows past any fixed size (the runtime's last error, MS_LastError):
+# a package folder with 60 long-named .map files and no <name>.map lists every one of them
+mkdir -p "$TMP/several"
+for i in $(seq 1 60); do printf 'monolith 2\nbox 0 0 0 1 1 1\n' > "$TMP/several/candidate-$i-with-a-long-name-so-the-list-outgrows-old-buffers.map"; done
+Run several-maps 1      "$M" --dump-boxes "$TMP/several.txt" --map "$TMP/several"
+Run reload-to-several 0 "$M" --shot "$TMP/r4.png" --view 1 --map tests/models --reload-test "$TMP/several"
 # --bake-surface (bake.c): a shader with an MS_BAKE path, 3 levels into an atlas, then a map that
 # reads the tile through a data_sampler; and a material that doesn't exist (exit 1)
 mkdir -p "$TMP/bake/shaders"

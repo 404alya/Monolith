@@ -27,9 +27,9 @@ MS_QualityLevel GfxPreset(const GfxSettings *s);            // the preset q equa
 // The settings file: ~/.config/monolith/settings.ini ($XDG_CONFIG_HOME), on Windows
 // %APPDATA%\monolith\settings.ini, else settings.ini next to the executable
 const char *GfxDefaultPath(void);
-// Missing file: false with err "" (not an error). Unknown keys / bad values: a warning each
-// (logged), the rest still loads.
-bool GfxLoad(GfxSettings *s, const char *path, char *err, int errSize);
+// Missing file: false (not an error). Unknown keys / bad values: a warning each (logged), the
+// rest still loads; *ignored = how many lines were ignored.
+bool GfxLoad(GfxSettings *s, const char *path, int *ignored);
 bool GfxSave(const GfxSettings *s, const char *path);       // creates the folder
 // Where the working copy of map `mapPath` goes when the game closes with unsaved edits: the
 // settings file's folder (GfxDefaultPath), unsaved/<map name>-<YYYYMMDD-HHMMSS>.map (the folder is

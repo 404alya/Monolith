@@ -34,6 +34,10 @@ program and compiles its `courtyard.map` there with `build/linux/monolith --comp
 the text, which it hot-reloads. To open another package with a game-style example, compile it
 first: `build/linux/monolith --map <package> --compile <package>/<name>.mapb`.
 
+Errors: a failed `MS_Load` returns NULL, and the reason is `MS_LastError()` (`file: message`, no
+length limit, valid until the next `MS_*` call); each example prints it and calls `MS_ClearError()`
+before it exits, which frees the message.
+
 ## The test build: screenshots without a window
 
 The examples are plain integration code: they open a window and run until it is closed. Tests

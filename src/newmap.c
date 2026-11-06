@@ -184,10 +184,9 @@ bool NewMapIn(const char *dir, const char *name, const char *mapsDir)
     if (!ok) return false;
 
     // The package must load (it is generated, so a failure is a bug here)
-    char err[512];
-    MS_Scene *check = MS_Load(dir, &(MS_LoadOptions){ .noGpu = true }, err, sizeof(err));
+    MS_Scene *check = MS_Load(dir, &(MS_LoadOptions){ .noGpu = true });
     if (!check) {
-        fprintf(stderr, "monolith: --new-map: the new package does not load:\n%s\n", err);
+        fprintf(stderr, "monolith: --new-map: the new package does not load:\n%s\n", MS_LastError());
         return false;
     }
     MS_Unload(check);

@@ -285,9 +285,8 @@ static void RenderThumb(PickerModel *pm)
         }
     }
     if (!model) {
-        char err[512];
-        if (!MS_CheckModelReferences(scene->root, pm->path, err, sizeof(err))) {
-            TraceLog(LOG_WARNING, "monolith: model picker: %s: %s", pm->path, err);
+        if (!MS_CheckModelReferences(scene->root, pm->path)) {
+            TraceLog(LOG_WARNING, "monolith: model picker: %s: %s", pm->path, MS_LastError());
             pm->infoReady = pm->failed = true;
             return;
         }

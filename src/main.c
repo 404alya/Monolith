@@ -627,9 +627,8 @@ static bool RestartRenderer(MS_LoadOptions *opt, int shadowSize, bool *fatal, ch
     MS_LoadOptions peekOpt = *opt;
     peekOpt.noGpu = true;
     peekOpt.shadowSizeOverride = shadowSize;
-    char err[512];
-    MS_Scene *peek = MS_Load(path, &peekOpt, err, sizeof(err));
-    if (!peek) { snprintf(msg, msgSize, "renderer not restarted: %.200s", err); return false; }
+    MS_Scene *peek = MS_Load(path, &peekOpt);
+    if (!peek) { snprintf(msg, msgSize, "renderer not restarted: %s", MS_LastError()); return false; }
     MS_Unload(scene);
     scene = NULL;
     R3D_Close();
@@ -640,8 +639,8 @@ static bool RestartRenderer(MS_LoadOptions *opt, int shadowSize, bool *fatal, ch
     MS_InitRenderer();
     opt->shadowSizeOverride = shadowSize;
     opt->noGpu = false;
-    scene = MS_Load(path, opt, err, sizeof(err));
-    if (!scene) { *fatal = true; snprintf(msg, msgSize, "renderer restart failed: %.200s", err); return false; }
+    scene = MS_Load(path, opt);
+    if (!scene) { *fatal = true; snprintf(msg, msgSize, "renderer restart failed: %s", MS_LastError()); return false; }
     snprintf(msg, msgSize, "renderer restarted: sun shadow map %d px", R3D_GetHint(R3D_HINT_SHADOW_DIR_SIZE));
     return true;
 }
@@ -947,6 +946,7 @@ int main(int argc, char **argv)
     int status = Run(argc, argv);
     FreeMainHeap();
     LauncherShutdown();
+    MS_ClearError();        // (the runtime's last error message, if any)
     return status;
 }
 
@@ -1425,9 +1425,13 @@ static int Run(int argc, char **argv)
     const char *settingsFile = noSettings ? NULL : settingsPath ? settingsPath : automated ? NULL : GfxDefaultPath();
     GfxSettings gfx = GfxDefaults();
     if (settingsFile) {
-        char err[512];
-        if (GfxLoad(&gfx, settingsFile, err, sizeof(err)))
-            TraceLog(LOG_INFO, "monolith: settings %s: quality %s%s%s", settingsFile, MS_QualityName(GfxPreset(&gfx)), err[0] ? "; " : "", err);
+        int ignored;
+        if (GfxLoad(&gfx, settingsFile, &ignored)) {
+            if (ignored)
+                TraceLog(LOG_INFO, "monolith: settings %s: quality %s; %s: %d line%s ignored", settingsFile,
+                         MS_QualityName(GfxPreset(&gfx)), settingsFile, ignored, ignored == 1 ? "" : "s");
+            else TraceLog(LOG_INFO, "monolith: settings %s: quality %s", settingsFile, MS_QualityName(GfxPreset(&gfx)));
+        }
         else TraceLog(LOG_INFO, "monolith: settings %s: no file yet (defaults; F2 changes them)", settingsFile);
     }
     GfxSettings gfxSaved = gfx;     // what the file holds: the panel's changes go here too, the flags don't
@@ -1476,20 +1480,18 @@ static int Run(int argc, char **argv)
         return BakeSurface(&bake);
     }
     if (compilePath) {
-        char err[512];
-        bool ok = MS_Compile(mapPath, compilePath, err, sizeof(err));
+        bool ok = MS_Compile(mapPath, compilePath);
         if (ok) printf("monolith: compiled %s into %s\n", mapPath, compilePath);
-        else fprintf(stderr, "monolith: cannot compile the map\n%s\n", err);
+        else fprintf(stderr, "monolith: cannot compile the map\n%s\n", MS_LastError());
         return ok ? 0 : 1;
     }
     // (shadow size: an init hint, so a load option; the range is applied by MS_ApplyQuality)
     MS_LoadOptions loadOpt = { .noGpu = true, .shadowSizeOverride = gfx.q.shadowSize };
     MS_Scene *peek;     // parsed only (no GPU); gives the R3D init hints once a GL context exists
     {
-        char err[512];
-        peek = MS_Load(mapPath, &loadOpt, err, sizeof(err));
+        peek = MS_Load(mapPath, &loadOpt);
         if (!peek) {
-            fprintf(stderr, "monolith: cannot load the map\n%s\n", err);
+            fprintf(stderr, "monolith: cannot load the map\n%s\n", MS_LastError());
             return 1;
         }
         TraceLog(LOG_INFO, "monolith: %s: %d boxes, %d groups (format %d)", peek->path, peek->boxCount,
@@ -1621,11 +1623,10 @@ static int Run(int argc, char **argv)
     // --- The scene (runtime/monolith_scene.c): boxes as one instanced draw per material,
     // materials and their shaders, sky + ambient map, lights, sun shadow tiles
     {
-        char err[512];
         loadOpt.noGpu = false;
-        scene = MS_Load(mapPath, &loadOpt, err, sizeof(err));
+        scene = MS_Load(mapPath, &loadOpt);
         if (!scene) {
-            fprintf(stderr, "monolith: cannot load the map\n%s\n", err);
+            fprintf(stderr, "monolith: cannot load the map\n%s\n", MS_LastError());
             R3D_Close();
             CloseWindow();
             return 1;
@@ -2074,9 +2075,8 @@ static int Run(int argc, char **argv)
             if (!shotPath) r = MS_Poll(scene, GetFrameTime());
             else if (frame == 10) {
                 // --reload-test: the same reload handling as a changed map package
-                char err[512];
-                r = MS_Reload(scene, reloadTestPath, err, sizeof(err));
-                if (r == MS_RELOAD_FAILED) TraceLog(LOG_WARNING, "monolith: --reload-test: %s", err);
+                r = MS_Reload(scene, reloadTestPath);
+                if (r == MS_RELOAD_FAILED) TraceLog(LOG_WARNING, "monolith: --reload-test: %s", MS_LastError());
             }
             if (r == MS_RELOADED) {
                 // The runtime swapped in the new GPU resources (new before old: R3D caches
@@ -2095,9 +2095,8 @@ static int Run(int argc, char **argv)
                 EditModeSync(&edit, &designer, false);
                 DrawModeSync(&drawMode, &edit, false);
             } else if (r == MS_RELOAD_FAILED) {
-                snprintf(mapMessage, sizeof(mapMessage), "%s", MS_Error(scene));
-                mapMessageError = true;
-                TraceLog(LOG_WARNING, "monolith: map reload failed: %s", mapMessage);
+                mapMessageError = true;      // (the HUD shows MS_Error(scene): the scene keeps it, whole)
+                TraceLog(LOG_WARNING, "monolith: map reload failed: %s", MS_Error(scene));
             }
             if (mapMessageTime > 0.0f) mapMessageTime -= GetFrameTime();
             if (!shotPath) LauncherUpdate(GetFrameTime());   // unclamped: its HUD timers sum these
@@ -2429,7 +2428,7 @@ static int Run(int argc, char **argv)
             if (drawUi && (mapMessageError || mapMessageTime > 0.0f) && !designer.promptOpen) {
                 float a = mapMessageError ? 1.0f : fminf(mapMessageTime, 1.0f);
                 int y = GetScreenHeight() - 36;
-                if (mapMessageError) UiHudMark(mapMessage, 12, y, 26, UI_M, UI_ERROR);   // (a broken map: stays)
+                if (mapMessageError) UiHudMark(MS_Error(scene), 12, y, 26, UI_M, UI_ERROR);   // (a broken map: stays)
                 else {
                     // Fades as a whole (the alphas scaled, not replaced)
                     Color strip = UiAlpha(UI_BACKDROP, a), ink = UiAlpha(UI_INK, a);

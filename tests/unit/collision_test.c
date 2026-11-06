@@ -43,9 +43,8 @@ int main(int argc, char **argv)
 {
     if (argc != 2) { fprintf(stderr, "usage: collision_test <tests/rotated>\n"); return 2; }
     SetTraceLogLevel(LOG_WARNING);
-    char err[512];
-    scene = MS_Load(argv[1], &(MS_LoadOptions){ .noGpu = true }, err, sizeof(err));
-    if (!scene) { fprintf(stderr, "collision_test: %s\n", err); return 1; }
+    scene = MS_Load(argv[1], &(MS_LoadOptions){ .noGpu = true });
+    if (!scene) { fprintf(stderr, "collision_test: %s\n", MS_LastError()); MS_ClearError(); return 1; }
     Check(scene->turnedBoxCount == 9, "turned boxes in tests/rotated", scene->turnedBoxCount, 9);
 
     // Axis-aligned colliders: exactly max.y / min.y, walkable
@@ -125,5 +124,6 @@ int main(int argc, char **argv)
 
     MS_Unload(scene);
     printf("collision_test: %s (%d failed)\n", fails ? "FAILED" : "OK", fails);
+    MS_ClearError();
     return fails ? 1 : 0;
 }

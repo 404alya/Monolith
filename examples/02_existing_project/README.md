@@ -27,7 +27,9 @@ Keys: WASD move, LEFT/RIGHT or the mouse turn, SPACE jumps.
 4. **Collision.** `MS_Collides(scene, box)` (strict AABB overlap with every box and model
    collider of the map) replaces the floor test; the crates are still tested by the game.
 5. **Start at the map's spawn** (`scene->spawnFeet`, `spawnYawDeg`), optional.
-6. **Unload**: `MS_Unload(scene)` before `R3D_Close`.
+6. **Unload**: `MS_Unload(scene)` before `R3D_Close`, and `MS_ClearError()` (frees the last
+   error message, if a call failed). A failed `MS_Load` returns NULL; the reason is
+   `MS_LastError()`, with no length limit.
 
 `after` is built like an exported game: the runtime without `-DMONOLITH_EDITOR` (a shipped game
 loads the package once; watching it for changes while monolith edits it is `03_live_editing`).
@@ -47,9 +49,8 @@ loads the package once; watching it for changes while monolith edits it is `03_l
 +int main(int argc, char **argv)
 @@ main(): before R3D_Init
 +    const char *package = argc > 1 && argv[1][0] != '-' ? argv[1] : TextFormat("%sscene", GetApplicationDirectory());
-+    char err[512];
-+    MS_Scene *peek = MS_Load(package, &(MS_LoadOptions){ .noGpu = true }, err, sizeof(err));
-+    if (!peek) { puts(err); return 1; }
++    MS_Scene *peek = MS_Load(package, &(MS_LoadOptions){ .noGpu = true });
++    if (!peek) { puts(MS_LastError()); MS_ClearError(); return 1; }
      SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE);
      InitWindow(1280, 720, "my game");
      SetTargetFPS(60);
@@ -60,8 +61,8 @@ loads the package once; watching it for changes while monolith edits it is `03_l
 +    MS_InitRenderer();                              // monolith: GL state for the sun's shadow (depth clamp)
 @@ main(): setup
 -    R3D_Mesh floorMesh = R3D_GenMeshPlane(60, 60, 1, 1);
-+    scene = MS_Load(package, NULL, err, sizeof(err));   // monolith: load the level
-+    if (!scene) { puts(err); return 1; }
++    scene = MS_Load(package, NULL);                     // monolith: load the level
++    if (!scene) { puts(MS_LastError()); MS_ClearError(); return 1; }
 +    MS_ApplyEnvironment(scene);                         // monolith: sky, ambient, fog, post-processing
 -    R3D_Material floorMat = ...;                        (2 lines)
 -    R3D_Cubemap sky = R3D_GenProceduralSky(...);        (sky, ambient map, tonemap, sun + shadow map: 9 lines)
@@ -76,6 +77,7 @@ loads the package once; watching it for changes while monolith edits it is `03_l
 @@ cleanup
 -    R3D_UnloadShadowMap(sunShadow); R3D_UnloadAmbientMap(ambient); R3D_UnloadCubemap(sky); R3D_UnloadMesh(floorMesh);
 +    MS_Unload(scene);                               // monolith
++    MS_ClearError();                                // monolith: frees the last error message, if any
 ```
 
 (`diff -u before.c after.c` gives the full diff; the comment header differs as well.)

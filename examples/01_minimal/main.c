@@ -76,11 +76,10 @@ int main(int argc, char **argv)
 
     // Parse the package once without the GPU: errors show before a window opens, and the
     // sun's shadow map size (an R3D init hint) is known before R3D_Init
-    char err[512];
     // (the quality's shadow map size is an R3D init hint too: 0 = the map's)
     MS_LoadOptions opt = { .shadowSizeOverride = quality.shadowSize };
-    MS_Scene *peek = MS_Load(package, &(MS_LoadOptions){ .noGpu = true, .shadowSizeOverride = quality.shadowSize }, err, sizeof(err));
-    if (!peek) { fprintf(stderr, "%s\n", err); return 1; }
+    MS_Scene *peek = MS_Load(package, &(MS_LoadOptions){ .noGpu = true, .shadowSizeOverride = quality.shadowSize });
+    if (!peek) { fprintf(stderr, "%s\n", MS_LastError()); MS_ClearError(); return 1; }
 
     SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE);
     InitWindow(width, height, "monolith scene");
@@ -90,8 +89,8 @@ int main(int argc, char **argv)
     R3D_SetAntiAliasingMode(R3D_ANTI_ALIASING_MODE_FXAA);
     MS_InitRenderer();                  // depth clamp for the sun's shadow (see monolith_scene.h)
 
-    MS_Scene *scene = MS_Load(package, &opt, err, sizeof(err));
-    if (!scene) { fprintf(stderr, "%s\n", err); R3D_Close(); CloseWindow(); return 1; }
+    MS_Scene *scene = MS_Load(package, &opt);
+    if (!scene) { fprintf(stderr, "%s\n", MS_LastError()); MS_ClearError(); R3D_Close(); CloseWindow(); return 1; }
     MS_ApplyEnvironment(scene);
     // Quality presets scale the cost on top of the map's look (render scale, baked AO, fog
     // cache, ...): right after every MS_ApplyEnvironment, then R3D's resolution for the scale
@@ -142,6 +141,7 @@ int main(int argc, char **argv)
     }
 
     MS_Unload(scene);
+    MS_ClearError();         // (nothing to free unless a call failed; harmless)
     R3D_Close();
     CloseWindow();
     return 0;

@@ -154,9 +154,8 @@ int main(int argc, char **argv)
     }
     if (!package) package = TextFormat("%sscene", GetApplicationDirectory());
 
-    char err[512];
-    MS_Scene *peek = MS_Load(package, &(MS_LoadOptions){ .noGpu = true }, err, sizeof(err));
-    if (!peek) { fprintf(stderr, "%s\n", err); return 1; }
+    MS_Scene *peek = MS_Load(package, &(MS_LoadOptions){ .noGpu = true });
+    if (!peek) { fprintf(stderr, "%s\n", MS_LastError()); MS_ClearError(); return 1; }
     SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE);
     InitWindow(1280, 720, "entities");
     SetTargetFPS(60);
@@ -166,8 +165,8 @@ int main(int argc, char **argv)
     R3D_SetAntiAliasingMode(R3D_ANTI_ALIASING_MODE_FXAA);
     MS_InitRenderer();
 
-    MS_Scene *scene = MS_Load(package, NULL, err, sizeof(err));
-    if (!scene) { fprintf(stderr, "%s\n", err); return 1; }
+    MS_Scene *scene = MS_Load(package, NULL);
+    if (!scene) { fprintf(stderr, "%s\n", MS_LastError()); MS_ClearError(); return 1; }
     MS_ApplyEnvironment(scene);
     PrintSummary(scene);
 
@@ -222,6 +221,7 @@ int main(int argc, char **argv)
     WorldFree(&world);
     R3D_UnloadMesh(cube);
     MS_Unload(scene);
+    MS_ClearError();
     R3D_Close();
     CloseWindow();
     return 0;

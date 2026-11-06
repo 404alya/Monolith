@@ -83,9 +83,8 @@ int main(int argc, char **argv)
 {
     // monolith: parse the package before R3D_Init (errors before a window; the sun's shadow map size is an init hint)
     const char *package = argc > 1 && argv[1][0] != '-' ? argv[1] : TextFormat("%sscene", GetApplicationDirectory());
-    char err[512];
-    MS_Scene *peek = MS_Load(package, &(MS_LoadOptions){ .noGpu = true }, err, sizeof(err));
-    if (!peek) { puts(err); return 1; }
+    MS_Scene *peek = MS_Load(package, &(MS_LoadOptions){ .noGpu = true });
+    if (!peek) { puts(MS_LastError()); MS_ClearError(); return 1; }
     SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE);
     InitWindow(1280, 720, "my game");
     SetTargetFPS(60);
@@ -95,8 +94,8 @@ int main(int argc, char **argv)
     R3D_SetAntiAliasingMode(R3D_ANTI_ALIASING_MODE_FXAA);
     MS_InitRenderer();                              // monolith: GL state for the sun's shadow (depth clamp)
 
-    scene = MS_Load(package, NULL, err, sizeof(err));   // monolith: load the level
-    if (!scene) { puts(err); return 1; }
+    scene = MS_Load(package, NULL);                     // monolith: load the level
+    if (!scene) { puts(MS_LastError()); MS_ClearError(); return 1; }
     MS_ApplyEnvironment(scene);                         // monolith: sky, ambient, fog, post-processing
 
     // Meshes and materials of the game's own objects (monolith: the floor is gone)
@@ -134,6 +133,7 @@ int main(int argc, char **argv)
     }
 
     MS_Unload(scene);                               // monolith
+    MS_ClearError();                                // monolith: frees the last error message, if any
     R3D_UnloadMesh(playerMesh);
     R3D_UnloadMesh(crateMesh);
     R3D_Close();

@@ -30,16 +30,15 @@ typedef struct {
 // coincident duplicates (they draw no pixel, or the other's). Triangles of zero area that xatlas
 // leaves out get paint UV 0, 0. The
 // result is deterministic (single-threaded xatlas, fixed options). out->fileHash is 0 (the
-// caller sets it). Free with MS_PaintUnwrapFree. False with a message in err (out is then
-// empty) on bad input or when out of memory.
-bool PaintUnwrapMeshes(const PaintUnwrapInput *meshes, int meshCount, int texelsHint, MS_PaintUnwrap *out,
-                       char *err, int errSize);
+// caller sets it). Free with MS_PaintUnwrapFree. False with a message in MS_LastError() (out is
+// then empty) on bad input or when out of memory.
+bool PaintUnwrapMeshes(const PaintUnwrapInput *meshes, int meshCount, int texelsHint, MS_PaintUnwrap *out);
 
 // The unwrap of model file `file` of a loaded scene: its meshes from MS_ModelMeshData, the slots
 // from the model, fileHash = FNV-1a 64 of the file's bytes, at a texelsHint x texelsHint paint
 // rectangle (the draw mode passes the size of the slot's rectangle; PAINTUNWRAP_TEXELS: the tests'
 // size). False with a message when the file isn't loaded, is skinned, or the unwrap fails.
 #define PAINTUNWRAP_TEXELS 1024
-bool PaintUnwrapModelFile(const MS_Scene *scene, int file, int texelsHint, MS_PaintUnwrap *out, char *err, int errSize);
+bool PaintUnwrapModelFile(const MS_Scene *scene, int file, int texelsHint, MS_PaintUnwrap *out);
 
 #endif

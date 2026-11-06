@@ -188,6 +188,17 @@ Lessons:
 - **R3D patch 28 (`prepass off`):** measured first (flat `fragment()` saved nothing, removing the weeds 2.2 ms), so the weeds' cost was triangles drawn twice. A per-material opt-out was chosen over a heuristic (triangles ÷ shader cost isn't known to R3D) and over greedy-meshing the voxels (larger, later). Gain −0.5 ms on machine C, smaller than the estimate (~1 ms): the depth-only draws were cheaper than the shading draws.
 - **Volumetric fog on an integrated GPU:** the developer asked why it is heavy before making it cheaper. The answer (r3d-pitfalls §1): the map's fade turns off the shader's shortcuts, so sky pixels march fully, and the per-step lookup dominates. Next: skip lookups in uniformly lit or shadowed air (bit-identical), then a closed form for fully lit rays.
 
+## The runtime owns the last error (2026-11-06)
+
+The 2026-11-02 round left the caller's `char *err, int errSize` as the only limit, and every caller passed 512 bytes while `MS_PATH_MAX` is 1024: a message quoting a deep path lost its reason (a 657-byte map path came out as 512 bytes of path, no "file not found"), and the "several map files" message listed 5 of 100 candidate names (`ResolveMapPath`'s `names[512]`). The developer wanted messages with no length limit and accepted an API break. The runtime now keeps its last error in a heap string it owns (`MS_LastError()`); every public function lost its `err, errSize`, and failure is the return value. The defaults chosen:
+- **Per thread (`_Thread_local`), not main-thread only:** the box-hiding workers never set an error, but a game may load scenes from its own threads; MinGW builds it too.
+- **Success clears it** (as `LoadBytes`' `err[0] = '\0'` did); `MS_Poll` leaves it alone when it reloads nothing. Valid until the next `MS_*` call. A clear keeps the memory; a new message is built before the old one is freed, so it may quote the old one (`ResolveMapPath` wraps `PackageFile`'s appended name list this way).
+- **`MS_ClearError()`** frees it, called at exit (the editor's `main`, the examples, `viewer.c`), rather than relying on the leak checker seeing TLS as reachable.
+- **Out of memory while building a message gives a static "out of memory"**, never NULL or half a message. The old argument for caller buffers (the failure path must not allocate) is answered by that fallback.
+- **The editor shares it** (`MS_SetError` / `MS_AppendError`, editor builds), `src/paintunwrap.c` included, so a runtime message is never cut back one layer up; `MS_Error(scene)` became a heap copy, and the launcher's coordinator error too. `GfxLoad`'s "N lines ignored" was a warning on success, so it became an out-count instead of an error.
+- **Message texts unchanged**, except that nothing is cut: two edge cases now say "path too long" (a path longer than `MS_PATH_MAX` was silently cut before it was opened; a single map file whose path didn't fit said "more than one other .map file").
+- The UI's own status buffers (`msg, msgSize` of the edit, draw and export modes, raylib's `TextFormat`) are display buffers and still cut a long message on screen; the terminal and the log get it whole.
+
 ## The instruction files
 
 Superseded layouts, for reading old bundles, commits and notes; the current layout is `CLAUDE.md` + `.claude/skills/` + `docs/`.

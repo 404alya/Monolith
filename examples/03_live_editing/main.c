@@ -24,9 +24,8 @@ int main(int argc, char **argv)
 {
     const char *package = argc > 1 ? argv[1] : TextFormat("%sscene", GetApplicationDirectory());
 
-    char err[512];
-    MS_Scene *peek = MS_Load(package, &(MS_LoadOptions){ .noGpu = true }, err, sizeof(err));
-    if (!peek) { fprintf(stderr, "%s\n", err); return 1; }
+    MS_Scene *peek = MS_Load(package, &(MS_LoadOptions){ .noGpu = true });
+    if (!peek) { fprintf(stderr, "%s\n", MS_LastError()); MS_ClearError(); return 1; }
     SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE);
     InitWindow(1280, 720, "live editing");
     SetTargetFPS(60);
@@ -36,8 +35,8 @@ int main(int argc, char **argv)
     R3D_SetAntiAliasingMode(R3D_ANTI_ALIASING_MODE_FXAA);
     MS_InitRenderer();                  // depth clamp for the sun's shadow (see monolith_scene.h)
 
-    MS_Scene *scene = MS_Load(package, NULL, err, sizeof(err));
-    if (!scene) { fprintf(stderr, "%s\n", err); return 1; }
+    MS_Scene *scene = MS_Load(package, NULL);
+    if (!scene) { fprintf(stderr, "%s\n", MS_LastError()); MS_ClearError(); return 1; }
     MS_ApplyEnvironment(scene);
     int view = 0;
     Camera3D camera = ViewpointCamera(scene, view);
@@ -84,6 +83,7 @@ int main(int argc, char **argv)
     }
 
     MS_Unload(scene);
+    MS_ClearError();         // (MS_Poll's last failed reload left a message)
     R3D_Close();
     CloseWindow();
     return 0;

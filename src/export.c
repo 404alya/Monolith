@@ -433,12 +433,13 @@ static bool IsBlank(const char *line, const char *end)
 // `#ifndef MONOLITH_EDITOR` blocks kept, either one's `#else` part the other way round, the
 // directives themselves removed; a blank line left doubled by a dropped block goes too.
 // Nested #if blocks inside are followed; an editor block inside an editor block, or any
-// other mention of MONOLITH_EDITOR left over, is an error (malloc'd result, NULL + err).
-static char *StripEditor(const char *text, const char *what, char *err, int errSize)
+// other mention of MONOLITH_EDITOR left over, is an error (malloc'd result; NULL, the reason in
+// MS_LastError()).
+static char *StripEditor(const char *text, const char *what)
 {
     size_t len = strlen(text);
     char *out = malloc(len + 1);
-    if (!out) { snprintf(err, errSize, "out of memory"); return NULL; }
+    if (!out) { MS_SetError("out of memory"); return NULL; }
     size_t o = 0;
     int inBlock = 0;        // 0 = outside, else the #if depth inside the editor block (1 = its own level)
     bool keep = true;       // inside a block: are its lines kept?
@@ -456,7 +457,7 @@ static char *StripEditor(const char *text, const char *what, char *err, int errS
         bool editorIf = (wl == 5 && strncmp(word, "ifdef", 5) == 0 && IsEditorArg(arg, end)) ||
                         (wl == 6 && strncmp(word, "ifndef", 6) == 0 && IsEditorArg(arg, end));
         if (editorIf) {
-            if (inBlock) { snprintf(err, errSize, "%s:%d: MONOLITH_EDITOR block inside another one", what, lineNo); free(out); return NULL; }
+            if (inBlock) { MS_SetError("%s:%d: MONOLITH_EDITOR block inside another one", what, lineNo); free(out); return NULL; }
             inBlock = 1;
             keep = wl == 6;         // #ifndef: kept
             emit = false;
@@ -466,7 +467,7 @@ static char *StripEditor(const char *text, const char *what, char *err, int errS
             keep = !keep;
             emit = false;
         } else if (inBlock == 1 && wl == 4 && strncmp(word, "elif", 4) == 0) {
-            snprintf(err, errSize, "%s:%d: #elif in a MONOLITH_EDITOR block", what, lineNo);
+            MS_SetError("%s:%d: #elif in a MONOLITH_EDITOR block", what, lineNo);
             free(out);
             return NULL;
         } else if (inBlock && wl == 5 && strncmp(word, "endif", 5) == 0) {
@@ -486,9 +487,9 @@ static char *StripEditor(const char *text, const char *what, char *err, int errS
         line = next;
     }
     out[o] = 0;
-    if (inBlock) { snprintf(err, errSize, "%s: unterminated MONOLITH_EDITOR block", what); free(out); return NULL; }
+    if (inBlock) { MS_SetError("%s: unterminated MONOLITH_EDITOR block", what); free(out); return NULL; }
     if (strstr(out, "MONOLITH_EDITOR")) {
-        snprintf(err, errSize, "%s: MONOLITH_EDITOR is still mentioned after removing its blocks", what);
+        MS_SetError("%s: MONOLITH_EDITOR is still mentioned after removing its blocks", what);
         free(out);
         return NULL;
     }
@@ -628,16 +629,15 @@ static char *MakeReadme(const MS_Scene *s, const char *name, const char *assetsP
         "answers queries: the window, the main loop, the camera, the player and the physics stay yours.\n\n"
         "```c\n"
         "#include \"monolith_scene.h\"\n\n"
-        "char err[512];\n"
         "InitWindow(1280, 720, \"game\");\n"
         "// The sun's shadow map size is an R3D init hint: read the package once without the GPU first\n"
-        "MS_Scene *peek = MS_Load(\"%s\", &(MS_LoadOptions){ .noGpu = true }, err, sizeof(err));\n"
+        "MS_Scene *peek = MS_Load(\"%s\", &(MS_LoadOptions){ .noGpu = true });\n"
         "if (peek) { MS_SetInitHints(peek); MS_Unload(peek); }\n"
         "R3D_Init(GetScreenWidth(), GetScreenHeight());\n"
         "R3D_SetAntiAliasingMode(R3D_ANTI_ALIASING_MODE_FXAA);   // what monolith uses\n"
         "MS_InitRenderer();          // GL state the scene needs (depth clamp), see \"Sun shadow\" below\n\n"
-        "MS_Scene *scene = MS_Load(\"%s\", NULL, err, sizeof(err));\n"
-        "if (!scene) { puts(err); return 1; }\n"
+        "MS_Scene *scene = MS_Load(\"%s\", NULL);\n"
+        "if (!scene) { puts(MS_LastError()); return 1; }\n"
         "MS_ApplyEnvironment(scene);         // sky, ambient light, fog, SSAO/SSIL, bloom, tonemap ...\n\n"
         "while (!WindowShouldClose()) {\n"
         "    // ... your input, physics and camera ...\n"
@@ -894,10 +894,9 @@ bool ExportScene(const MS_Scene *s, const char *outDirIn, char *msg, int msgSize
                        "nothing written", s->path, source);
             return false;
         }
-        char err[512];
-        MS_Scene *text = MS_Load(source, &(MS_LoadOptions){ .noGpu = true }, err, sizeof(err));
+        MS_Scene *text = MS_Load(source, &(MS_LoadOptions){ .noGpu = true });
         if (!text) {
-            snprintf(msg, msgSize, "export: %s; nothing written", err);
+            snprintf(msg, msgSize, "export: %s; nothing written", MS_LastError());
             return false;
         }
         bool ok = ExportScene(text, outDirIn, msg, msgSize);
@@ -990,18 +989,22 @@ bool ExportScene(const MS_Scene *s, const char *outDirIn, char *msg, int msgSize
     int pkgFiles = P.count + 1;         // (+ the compiled map, made after writing the package)
 
     // --- Plan: the runtime without its editor parts, viewer.c + build.sh from the templates
-    char err[MS_PATH_MAX + 512] = "";      // (room for a source path in the message)
+    bool failed = false;        // the first reason not to write anything is in MS_LastError()
     static const char *const RT[] = { "monolith_scene.h", "monolith_scene.c" };
-    for (int i = 0; i < 2 && !err[0]; i++) {
+    for (int i = 0; i < 2 && !failed; i++) {
         char *text = LoadFileText(TextFormat("%sruntime/%s", rt, RT[i]));
-        char *clean = text ? StripEditor(text, RT[i], err, sizeof(err)) : NULL;
-        if (!text) snprintf(err, sizeof(err), "cannot read %sruntime/%s", rt, RT[i]);
+        char *clean = text ? StripEditor(text, RT[i]) : NULL;     // (NULL: it says why)
+        if (!text) MS_SetError("cannot read %sruntime/%s", rt, RT[i]);
+        failed = !clean;
         if (text) UnloadFileText(text);
         if (clean) AddData(&P, RT[i], clean, false);
     }
     char *viewer = LoadTemplate(TextFormat("%sruntime/export/viewer.c", rt), name);
     char *build = LoadTemplate(TextFormat("%sruntime/export/build.sh", rt), name);
-    if (!err[0] && (!viewer || !build)) snprintf(err, sizeof(err), "cannot read %sruntime/export/viewer.c / build.sh", rt);
+    if (!failed && (!viewer || !build)) {
+        MS_SetError("cannot read %sruntime/export/viewer.c / build.sh", rt);
+        failed = true;
+    }
     AddData(&P, "viewer.c", viewer, false);
     AddData(&P, "build.sh", build, true);
     AddCopy(&P, TextFormat("%scmake/mingw-w64-x86_64.cmake", rt), "cmake/mingw-w64-x86_64.cmake", NULL);
@@ -1010,7 +1013,8 @@ bool ExportScene(const MS_Scene *s, const char *outDirIn, char *msg, int msgSize
     R3DScan rs = { .P = &P };
     DirScanStats st;
     if (!DirScan(r3d, true, R3DFile, &rs, &st) || st.stopped || st.linksSkipped) {
-        if (!err[0]) snprintf(err, sizeof(err), "cannot list the R3D tree %s completely (symlinked folders or too many entries)", r3d);
+        if (!failed) MS_SetError("cannot list the R3D tree %s completely (symlinked folders or too many entries)", r3d);
+        failed = true;
     }
     static const char *const LIC[][2] = {
         { "LICENSE", "LICENSES/r3d.txt" }, { "external/raylib/LICENSE", "LICENSES/raylib.txt" },
@@ -1037,13 +1041,16 @@ bool ExportScene(const MS_Scene *s, const char *outDirIn, char *msg, int msgSize
     for (int i = 0; i < P.count; i++) {
         if (!P.items[i].from || FileExists(P.items[i].from)) continue;
         fprintf(stderr, "monolith: export: missing: %s%s\n", P.items[i].from, P.items[i].pkgRel ? " (referenced by the map)" : "");
-        if (!missing && !err[0]) snprintf(err, sizeof(err), "%s is missing", P.items[i].from);
+        if (!missing && !failed) {
+            MS_SetError("%s is missing", P.items[i].from);
+            failed = true;
+        }
         missing++;
     }
-    if (err[0] || P.errors) {
-        if (missing > 1) snprintf(err + strlen(err), sizeof(err) - strlen(err), " (and %d more, see the log)", missing - 1);
-        snprintf(msg, msgSize, "export: %s%s; nothing written", err[0] ? err : "errors while collecting the files (see the log)",
-                 err[0] && P.errors ? " (more errors in the log)" : "");
+    if (failed || P.errors) {
+        if (missing > 1) MS_AppendError(" (and %d more, see the log)", missing - 1);
+        snprintf(msg, msgSize, "export: %s%s; nothing written", failed ? MS_LastError() : "errors while collecting the files (see the log)",
+                 failed && P.errors ? " (more errors in the log)" : "");
         FreePlan(&P);
         return false;
     }
@@ -1075,17 +1082,17 @@ bool ExportScene(const MS_Scene *s, const char *outDirIn, char *msg, int msgSize
     }
     if (ok) {
         AddWritten(&P, compiledTo);
-        if (!MS_Compile(mapText, compiled, err, sizeof(err))) {
+        if (!MS_Compile(mapText, compiled)) {
             ok = false;
-            snprintf(msg, msgSize, "export: the map does not compile: %s; nothing written", err);
+            snprintf(msg, msgSize, "export: the map does not compile: %s; nothing written", MS_LastError());
         }
         bytesPkg += FileBytes(compiled);
     }
     if (ok) {
-        MS_Scene *check = MS_Load(compiled, &(MS_LoadOptions){ .noGpu = true }, err, sizeof(err));
+        MS_Scene *check = MS_Load(compiled, &(MS_LoadOptions){ .noGpu = true });
         if (!check) {
             ok = false;
-            snprintf(msg, msgSize, "export: the exported package does not load: %s; nothing written", err);
+            snprintf(msg, msgSize, "export: the exported package does not load: %s; nothing written", MS_LastError());
         } else {
             if (check->boxCount != s->boxCount || check->modelCount != s->modelCount || check->entityCount != s->entityCount) {
                 ok = false;

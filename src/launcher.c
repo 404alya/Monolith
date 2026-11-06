@@ -1765,7 +1765,8 @@ static struct {
     TermWindow term;            // its terminal, if this game run started it
     bool tried;                 // this game run tried to start one
     double startTime;           // clockTime of that attempt
-    char error[256];            // why the last attempt failed ("" = it didn't)
+    bool failed;                // the last attempt failed ...
+    char *error;                //   ... and why (heap; NULL when out of memory)
     int alive;                  // last lock test: 1 = running, 0 = not, -1 = not tested yet
     float checkTimer;
     double confirmUntil;        // CTRL+SHIFT+K with requests open: second press until then
@@ -1840,6 +1841,8 @@ static OpenRequest *NewSlot(void)
 
 void LauncherShutdown(void)
 {
+    free(coord.error);
+    coord.error = NULL;
     free(reqs);
     reqs = NULL;
     reqCount = reqCap = 0;
@@ -2129,7 +2132,7 @@ static bool FindClaude(char *out, int outSize)
 // whose input reached the prompt box would otherwise start a coordinator on the developer's screen.
 // Tests set MONOLITH_TERMINAL (tools/stub-terminal.sh); MONOLITH_ALLOW_WINDOW lifts it, as for the
 // game window.
-static bool AgentShellRefuses(char *err, int errSize)
+static bool AgentShellRefuses(void)
 {
     const char *keys[] = { "CLAUDECODE", "AI_AGENT" };
     bool agent = false;
@@ -2139,7 +2142,7 @@ static bool AgentShellRefuses(char *err, int errSize)
     }
     const char *allow = getenv("MONOLITH_ALLOW_WINDOW"), *term = getenv("MONOLITH_TERMINAL");
     if (!agent || (allow && allow[0] && strcmp(allow, "0") != 0) || (term && term[0])) return false;
-    snprintf(err, errSize, "refusing to open a terminal from an AI agent's shell (set MONOLITH_TERMINAL to tools/stub-terminal.sh)");
+    MS_SetError("refusing to open a terminal from an AI agent's shell (set MONOLITH_TERMINAL to tools/stub-terminal.sh)");
     return true;
 }
 
@@ -2173,14 +2176,14 @@ static bool FindProgram(const char *name, char *out, int outSize)
 }
 
 static bool Launch(const char *title, const char *mark, const char *prompt, const char *model, const char *lock,
-                   TermWindow *t, char *err, int errSize)
+                   TermWindow *t)
 {
     (void)t;
     (void)mark;
-    if (AgentShellRefuses(err, errSize)) return false;
+    if (AgentShellRefuses()) return false;
     char claude[1024];
     if (!FindClaude(claude, sizeof(claude))) {
-        snprintf(err, errSize, "claude not found in PATH (or MONOLITH_CLAUDE)");
+        MS_SetError("claude not found in PATH (or MONOLITH_CLAUDE)");
         return false;
     }
     char dir[1024];
@@ -2191,21 +2194,21 @@ static bool Launch(const char *title, const char *mark, const char *prompt, cons
 
     // (quoting for cmd /k: see wincmd.c)
     ArgList args;
-    if (!ClaudeArgs(&args, NULL, false)) { snprintf(err, errSize, "out of memory"); return false; }
+    if (!ClaudeArgs(&args, NULL, false)) { MS_SetError("out of memory"); return false; }
     int skipped = 0;
     char *cmd = WinClaudeCommand(claude, SKIP_PERMISSION_FLAGS, SkipPermissions() ? SKIP_PERMISSION_COUNT : 0, model,
                                  args.tok, args.count, prompt, &skipped);
     FreeArgs(&args);
-    if (!cmd) { snprintf(err, errSize, "out of memory"); return false; }
+    if (!cmd) { MS_SetError("out of memory"); return false; }
     if (skipped) TraceLog(LOG_WARNING, "monolith: %d word%s with a double quote left out of the claude command line (cmd can't pass them)",
                           skipped, skipped == 1 ? "" : "s");
     // The coordinator: ` 9>"<lock>"` inside the outer quotes, so cmd keeps the lock file
     // open (without delete / write sharing) while claude runs (CoordinatorAlive)
     if (lock) {
-        if (strchr(lock, '"')) { free(cmd); snprintf(err, errSize, "the requests folder has a double quote in its path"); return false; }
+        if (strchr(lock, '"')) { free(cmd); MS_SetError("the requests folder has a double quote in its path"); return false; }
         size_t cl = strlen(cmd);
         char *with = malloc(cl + strlen(lock) + 8);
-        if (!with) { free(cmd); snprintf(err, errSize, "out of memory"); return false; }
+        if (!with) { free(cmd); MS_SetError("out of memory"); return false; }
         memcpy(with, cmd, cl - 1);                              // without the closing outer quote
         sprintf(with + cl - 1, " 9>\"%s\"\"", lock);
         free(cmd);
@@ -2219,7 +2222,7 @@ static bool Launch(const char *title, const char *mark, const char *prompt, cons
     // "cannot start" (or a window that drops the end)
     size_t total = strlen(cmd) + strlen(titleArg) + strlen(dirArg) + 40;
     if (total > 8191) {
-        snprintf(err, errSize, "the claude command line is %zu characters, cmd.exe takes at most 8191 (shorten MONOLITH_CLAUDE_ARGS)", total);
+        MS_SetError("the claude command line is %zu characters, cmd.exe takes at most 8191 (shorten MONOLITH_CLAUDE_ARGS)", total);
         free(cmd);
         return false;
     }
@@ -2227,7 +2230,7 @@ static bool Launch(const char *title, const char *mark, const char *prompt, cons
     intptr_t h = _spawnvp(_P_NOWAIT, "cmd.exe", argv);
     free(cmd);
     if (h == -1) {
-        snprintf(err, errSize, "cannot start cmd.exe: %s", strerror(errno));
+        MS_SetError("cannot start cmd.exe: %s", strerror(errno));
         return false;
     }
     CloseHandle((void *)h);     // cmd /c start exits right away; nothing to wait for
@@ -2353,9 +2356,9 @@ static const char COORDINATOR_WRAPPER[] =
 // repo root; lock != NULL: the coordinator, wrapped in COORDINATOR_WRAPPER with that lock file.
 // mark: the i3 / sway mark for its window (MarkAndMove). Fills t (pid, mark).
 static bool Launch(const char *title, const char *mark, const char *prompt, const char *model, const char *lock,
-                   TermWindow *t, char *err, int errSize)
+                   TermWindow *t)
 {
-    if (AgentShellRefuses(err, errSize)) return false;
+    if (AgentShellRefuses()) return false;
     // Terminal: env override (program + extra args) or the first known one in PATH
     ArgList term = { 0 }, args = { 0 };
     char termPath[4096];
@@ -2364,9 +2367,9 @@ static bool Launch(const char *title, const char *mark, const char *prompt, cons
     if (env && *env) envVar = "MONOLITH_TERMINAL";
     else if ((env = getenv("TERMINAL")) && *env) envVar = "TERMINAL";
     if (envVar) {
-        if (!SplitArgs(env, &term)) { snprintf(err, errSize, "out of memory"); return false; }
+        if (!SplitArgs(env, &term)) { MS_SetError("out of memory"); return false; }
         if (term.count == 0 || !FindProgram(term.tok[0], termPath, sizeof(termPath))) {
-            snprintf(err, errSize, "terminal '%s' from $%s not found", term.count ? term.tok[0] : "", envVar);
+            MS_SetError("terminal '%s' from $%s not found", term.count ? term.tok[0] : "", envVar);
             FreeArgs(&term);
             return false;
         }
@@ -2374,11 +2377,11 @@ static bool Launch(const char *title, const char *mark, const char *prompt, cons
         for (int i = 0; i < TERMINAL_COUNT && !term.count; i++)
             if (FindProgram(TERMINALS[i].name, termPath, sizeof(termPath))) {
                 FreeArgs(&term);
-                if (!SplitArgs(TERMINALS[i].name, &term)) { snprintf(err, errSize, "out of memory"); return false; }
+                if (!SplitArgs(TERMINALS[i].name, &term)) { MS_SetError("out of memory"); return false; }
             }
         if (!term.count) {
             FreeArgs(&term);
-            snprintf(err, errSize, "no terminal found (tried alacritty kitty foot wezterm xterm; set MONOLITH_TERMINAL)");
+            MS_SetError("no terminal found (tried alacritty kitty foot wezterm xterm; set MONOLITH_TERMINAL)");
             return false;
         }
     }
@@ -2393,7 +2396,7 @@ static bool Launch(const char *title, const char *mark, const char *prompt, cons
     bool ok = false;
     char claude[4096];
     if (!FindClaude(claude, sizeof(claude))) {
-        snprintf(err, errSize, "claude not found in PATH or ~/.local/bin (or MONOLITH_CLAUDE)");
+        MS_SetError("claude not found in PATH or ~/.local/bin (or MONOLITH_CLAUDE)");
         goto fail;
     }
 
@@ -2403,12 +2406,12 @@ static bool Launch(const char *title, const char *mark, const char *prompt, cons
     snprintf(dir, sizeof(dir), "%s", rootDir);
     size_t dl = strlen(dir);
     if (dl > 1 && dir[dl - 1] == '/') dir[dl - 1] = 0;
-    if (!ClaudeArgs(&args, NULL, false)) { snprintf(err, errSize, "out of memory"); goto fail; }
+    if (!ClaudeArgs(&args, NULL, false)) { MS_SetError("out of memory"); goto fail; }
     char **extra = args.tok;
     int extraCount = args.count;
     // (allocated before the fork: the child may only call async-signal-safe functions)
     argv = malloc(sizeof(char *) * (termCount + 8 + 4 + SKIP_PERMISSION_COUNT + 2 + extraCount + 4));
-    if (!argv) { snprintf(err, errSize, "out of memory"); goto fail; }
+    if (!argv) { MS_SetError("out of memory"); goto fail; }
     int n = 0;
     for (int i = 0; i < termCount; i++) argv[n++] = termTok[i];
     if (ts->pre) argv[n++] = (char *)ts->pre;
@@ -2428,13 +2431,13 @@ static bool Launch(const char *title, const char *mark, const char *prompt, cons
     // exec closes it (the parent reads EOF), a failed one writes errno first. The read
     // only waits for the exec itself, not for the terminal.
     int fds[2];
-    if (pipe(fds) != 0) { snprintf(err, errSize, "pipe: %s", strerror(errno)); goto fail; }
+    if (pipe(fds) != 0) { MS_SetError("pipe: %s", strerror(errno)); goto fail; }
     fcntl(fds[0], F_SETFD, FD_CLOEXEC);
     fcntl(fds[1], F_SETFD, FD_CLOEXEC);
     pid_t pid = fork();
     if (pid < 0) {
         close(fds[0]); close(fds[1]);
-        snprintf(err, errSize, "fork: %s", strerror(errno));
+        MS_SetError("fork: %s", strerror(errno));
         goto fail;
     }
     if (pid == 0) {
@@ -2461,7 +2464,7 @@ static bool Launch(const char *title, const char *mark, const char *prompt, cons
     close(fds[0]);
     if (r == (ssize_t)sizeof(childErr)) {
         waitpid(pid, NULL, 0);      // it has _exit()ed already
-        snprintf(err, errSize, "cannot run %s: %s", termPath, strerror(childErr));
+        MS_SetError("cannot run %s: %s", termPath, strerror(childErr));
         goto fail;
     }
 
@@ -2826,7 +2829,7 @@ static bool CoordinatorAlive(void)
 
 static bool CoordinatorStarting(void)
 {
-    return coord.tried && !coord.error[0] && clockTime - coord.startTime < COORD_START_TIME && !coord.term.exited;
+    return coord.tried && !coord.failed && clockTime - coord.startTime < COORD_START_TIME && !coord.term.exited;
 }
 
 // Listed coordinator-mode requests that aren't finished yet
@@ -2871,7 +2874,8 @@ static const char *CoordinatorLine(Color *c)
     }
     if (CoordinatorStarting()) return "coordinator: starting ...";
     *c = UI_WARN;
-    if (coord.error[0]) return TextFormat("coordinator: not started: %s (the requests stay queued)", coord.error);
+    if (coord.failed)
+        return TextFormat("coordinator: not started: %s (the requests stay queued)", coord.error ? coord.error : "out of memory");
     *c = UI_DIM;
     if (!queued && !running) return "coordinator: not running";
     return "coordinator: not running (the next request starts one; queued requests wait for it)";
@@ -2908,11 +2912,13 @@ static bool StartCoordinator(char *note, int noteSize)
     if (CoordinatorStarting()) { snprintf(note, noteSize, "the coordinator is starting"); return true; }
     coord.tried = true;
     coord.startTime = clockTime;
-    coord.error[0] = 0;
+    coord.failed = false;
+    free(coord.error);
+    coord.error = NULL;
     coord.alive = 0;
     coord.checkTimer = 0.0f;
 
-    char title[200], prompt[1600], err[512] = "";
+    char title[200], prompt[1600];
     CoordinatorTitle(title, sizeof(title));
     snprintf(prompt, sizeof(prompt), "You are the monolith request coordinator. Read .claude/skills/coordinator/SKILL.md in the repository root "
                                      "and follow it exactly. Requests folder: %s", requestsDir);
@@ -2921,10 +2927,11 @@ static bool StartCoordinator(char *note, int noteSize)
 #ifndef _WIN32
     snprintf(mark, sizeof(mark), "%s", coord.term.mark);
 #endif
-    if (!Launch(title, mark, prompt, CoordinatorModel(), lock, &t, err, sizeof(err))) {
-        snprintf(coord.error, sizeof(coord.error), "%s", err);
-        snprintf(note, noteSize, "the coordinator could not start: %s; the request stays queued", err);
-        TraceLog(LOG_WARNING, "monolith: coordinator not started: %s", err);
+    if (!Launch(title, mark, prompt, CoordinatorModel(), lock, &t)) {
+        coord.failed = true;
+        coord.error = MS_StrDup(MS_LastError());
+        snprintf(note, noteSize, "the coordinator could not start: %s; the request stays queued", MS_LastError());
+        TraceLog(LOG_WARNING, "monolith: coordinator not started: %s", MS_LastError());
         return false;
     }
     t.launched = true;
@@ -3123,12 +3130,12 @@ bool LauncherSubmit(const DesignRequest *req, Image view, Image marked, char *ms
         goto done;
     }
 
-    char err[512] = "", title[300], mark[160];
+    char title[300], mark[160];
     RequestTitle(B.id, B.slug, title, sizeof(title));
     snprintf(mark, sizeof(mark), "_monolith_%s", B.id);
-    q->term.launched = Launch(title, mark, B.prompt, B.model.addFlag ? B.model.name : NULL, NULL, &q->term, err, sizeof(err));
+    q->term.launched = Launch(title, mark, B.prompt, B.model.addFlag ? B.model.name : NULL, NULL, &q->term);
     if (!q->term.launched) {
-        snprintf(msg, msgSize, "launch failed: %s. Bundle kept: %s", err, dir);
+        snprintf(msg, msgSize, "launch failed: %s. Bundle kept: %s", MS_LastError(), dir);
         TraceLog(LOG_WARNING, "monolith: %s", msg);
         TraceLog(LOG_WARNING, "monolith: run it by hand: cd '%s' && claude --model %s \"%s\"", rootDir, B.model.name, B.prompt);
         goto done;
@@ -3152,12 +3159,12 @@ bool LauncherStartBundle(const char *id, const char *slug, const char *claudePro
     snprintf(q->dir, sizeof(q->dir), "%s%s/", requestsDir, id);
     q->submitTime = clockTime;
     if (QueueMode()) return QueueBundle(q, "request", model, msg, msgSize);
-    char err[512] = "", title[300], mark[160];
+    char title[300], mark[160];
     RequestTitle(id, slug, title, sizeof(title));
     snprintf(mark, sizeof(mark), "_monolith_%s", id);
-    q->term.launched = Launch(title, mark, claudePrompt, model, NULL, &q->term, err, sizeof(err));
+    q->term.launched = Launch(title, mark, claudePrompt, model, NULL, &q->term);
     if (!q->term.launched) {
-        snprintf(msg, msgSize, "launch failed: %s. Bundle kept: %s", err, q->dir);
+        snprintf(msg, msgSize, "launch failed: %s. Bundle kept: %s", MS_LastError(), q->dir);
         TraceLog(LOG_WARNING, "monolith: run it by hand: cd '%s' && claude \"%s\"", rootDir, claudePrompt);
         return false;
     }

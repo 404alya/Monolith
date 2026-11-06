@@ -37,16 +37,18 @@ static uint32_t Section(const unsigned char *b, int id, uint32_t *entry)
     return 0;
 }
 
-// Writes the bytes as fuzz.mapb and loads it without the GPU: true if it loaded
-static bool Load(const unsigned char *b, size_t size, char *err, int errSize)
+// Writes the bytes as fuzz.mapb and loads it without the GPU: true if it loaded. A refused file
+// leaves its reason in MS_LastError(); a loaded one leaves it "" (a success clears it).
+static bool Load(const unsigned char *b, size_t size)
 {
     FILE *f = fopen(fuzzPath, "wb");
     if (!f || fwrite(b, 1, size, f) != size) { printf("FAIL cannot write %s\n", fuzzPath); exit(1); }
     fclose(f);
     loads++;
-    err[0] = '\0';
-    MS_Scene *s = MS_Load(fuzzPath, &(MS_LoadOptions){ .noGpu = true }, err, errSize);
-    if (!s && !err[0]) { printf("FAIL a refused file gave no message\n"); fails++; }
+    MS_Scene *s = MS_Load(fuzzPath, &(MS_LoadOptions){ .noGpu = true });
+    if (!MS_LastError()) { printf("FAIL MS_LastError() is NULL\n"); fails++; return s != NULL; }
+    if (!s && !MS_LastError()[0]) { printf("FAIL a refused file gave no message\n"); fails++; }
+    if (s && MS_LastError()[0]) { printf("FAIL a loaded file left a message: %s\n", MS_LastError()); fails++; }
     if (s) {
         // A scene that loaded must be usable: touch what a game reads
         volatile float sum = 0.0f;
@@ -62,18 +64,18 @@ static bool Load(const unsigned char *b, size_t size, char *err, int errSize)
 // A damaged copy that must be refused
 static void ExpectRefused(const char *what, const unsigned char *b, size_t size)
 {
-    char err[512];
-    if (Load(b, size, err, sizeof(err))) { printf("FAIL %s: loaded\n", what); fails++; }
-    else printf("ok   %s: %s\n", what, err);
+    if (Load(b, size)) { printf("FAIL %s: loaded\n", what); fails++; }
+    else printf("ok   %s: %s\n", what, MS_LastError());
 }
 
 // A damaged copy that must be refused with a message containing `want`
 static void ExpectMessage(const char *what, const unsigned char *b, size_t size, const char *want)
 {
-    char err[512];
-    if (Load(b, size, err, sizeof(err))) { printf("FAIL %s: loaded\n", what); fails++; }
-    else if (!strstr(err, want)) { printf("FAIL %s: the message lacks \"%s\": %s\n", what, want, err); fails++; }
-    else printf("ok   %s: %s\n", what, err);
+    if (Load(b, size)) { printf("FAIL %s: loaded\n", what); fails++; }
+    else if (!strstr(MS_LastError(), want)) {
+        printf("FAIL %s: the message lacks \"%s\": %s\n", what, want, MS_LastError());
+        fails++;
+    } else printf("ok   %s: %s\n", what, MS_LastError());
 }
 
 static unsigned char *Copy(const unsigned char *b, size_t size)
@@ -96,11 +98,11 @@ static bool WholeUtf8(const char *s)
     return true;
 }
 
-// Messages longer than any buffer the reader keeps (tests/unit/compiled_test.sh makes the package
-// "longname": a material whose texture lies three folders of 120 'é' deep). With the texture
-// renamed away the load fails with "<file>: file not found: \"<~740 bytes>\" (…)", written straight
-// into the caller's buffer: whole in a large one; in every smaller one cut at its end, NUL-terminated,
-// never in half a UTF-8 character, never past errSize.
+// Messages longer than any fixed buffer (tests/unit/compiled_test.sh makes the package "longname": a
+// material whose texture lies three folders of 120 'é' deep). With the texture renamed away the load
+// fails with "<file>: file not found: \"<~740 bytes>\" (…)", built in the runtime's last error: whole
+// (no length limit, never cut, valid UTF-8), the same on a second failing load (nothing stale or
+// appended), and cleared by the successful load once the texture is back.
 static void MessageCases(const char *mapb)
 {
     char tex[1400], away[1400];
@@ -114,46 +116,36 @@ static void MessageCases(const char *mapb)
     snprintf(away, sizeof(away), "%s.away", tex);
     if (rename(tex, away) != 0) { printf("FAIL cannot rename %s\n", tex); fails++; return; }
 
-    // The whole message, in a buffer larger than it
-    static char full[8192];
-    MS_Scene *s = MS_Load(mapb, &(MS_LoadOptions){ .noGpu = true }, full, sizeof(full));
+    // The whole message, longer than the 512 bytes callers used to give
+    MS_Scene *s = MS_Load(mapb, &(MS_LoadOptions){ .noGpu = true });
     loads++;
+    const char *full = MS_LastError();
     const char *tail = "(paths are relative to the package folder)";
     size_t len = strlen(full), tailLen = strlen(tail);
     if (s) { printf("FAIL loaded without its texture\n"); fails++; MS_Unload(s); }
-    else if (strncmp(full, mapb, strlen(mapb)) != 0 || !strstr(full, tex + strlen(dir) + 1) ||
+    else if (strncmp(full, mapb, strlen(mapb)) != 0 || !strstr(full, tex + strlen(dir) + 1) || len <= 512 ||
              len < tailLen || strcmp(full + len - tailLen, tail) != 0 || !WholeUtf8(full)) {
         printf("FAIL the long message isn't whole: %s\n", full); fails++;
     } else printf("ok   long message whole (%zu bytes): %s\n", len, full);
+    char *first = MS_StrDup(full);      // (full is valid only until the next MS_* call)
+    if (!first) exit(1);
 
-    // Every smaller size: the start of the whole message, cut at most 3 bytes short (half a
-    // character), NUL-terminated, nothing written past errSize
-    int trimmed = 0, bad = 0;
-    char *buf = malloc(len + 64);
-    if (!buf) exit(1);
-    for (int size = 1; size <= (int)len + 1; size++) {
-        memset(buf, 0x7F, len + 64);
-        s = MS_Load(mapb, &(MS_LoadOptions){ .noGpu = true }, buf, size);
-        loads++;
-        if (s) { MS_Unload(s); bad++; continue; }
-        size_t got = strnlen(buf, (size_t)size);
-        size_t room = (size_t)size - 1;
-        bool ok = got <= room && memcmp(buf, full, got) == 0 && WholeUtf8(buf) &&
-                  (got == (room < len ? room : len) ||                          // as much as fits, or
-                   (room - got <= 3 && (unsigned char)full[got] >= 0xC0)) &&    // back to a character's start
-                  (unsigned char)buf[size] == 0x7F;
-        if (!ok) {
-            if (bad++ < 5) printf("FAIL errSize %d: %zu bytes \"%.*s\"\n", size, got, (int)got, buf);
-            continue;
-        }
-        if (got < (size_t)size - 1) trimmed++;
-        if (size == 1 || size == 16) printf("ok   errSize %d: \"%s\" (%zu bytes)\n", size, buf, got);
-    }
-    fails += bad;
-    printf("%s   errSize 1..%zu: every message a clean cut (%d cut back to a whole UTF-8 character)\n",
-           bad ? "FAIL" : "ok", len + 1, trimmed);
-    free(buf);
-    if (rename(away, tex) != 0) { printf("FAIL cannot rename %s back\n", away); fails++; }
+    // The same failing load again: the same message (a new one, nothing appended to the old)
+    s = MS_Load(mapb, &(MS_LoadOptions){ .noGpu = true });
+    loads++;
+    if (s) { printf("FAIL loaded without its texture\n"); fails++; MS_Unload(s); }
+    else if (strcmp(MS_LastError(), first) != 0) { printf("FAIL the second message differs: %s\n", MS_LastError()); fails++; }
+    else printf("ok   the same message on a second failing load\n");
+    free(first);
+
+    // The texture back: the load succeeds and the last error is ""
+    if (rename(away, tex) != 0) { printf("FAIL cannot rename %s back\n", away); fails++; return; }
+    s = MS_Load(mapb, &(MS_LoadOptions){ .noGpu = true });
+    loads++;
+    if (!s) { printf("FAIL the package doesn't load with its texture: %s\n", MS_LastError()); fails++; }
+    else if (MS_LastError()[0]) { printf("FAIL a success left the last error: %s\n", MS_LastError()); fails++; }
+    else printf("ok   a successful load after the failure: MS_LastError() is \"\"\n");
+    if (s) MS_Unload(s);
 }
 
 int main(int argc, char **argv)
@@ -168,6 +160,7 @@ int main(int argc, char **argv)
     if (strcmp(base, "longname") == 0) {
         MessageCases(path);
         printf("%s: %d loads, %d failures\n", fails ? "FAILED" : "PASSED", loads, fails);
+        MS_ClearError();
         return fails ? 1 : 0;
     }
     FILE *f = fopen(path, "rb");
@@ -178,16 +171,15 @@ int main(int argc, char **argv)
     unsigned char *orig = malloc(size);
     if (!orig || fread(orig, 1, size, f) != size) return 1;
     fclose(f);
-    char err[512];
 
     // The undamaged file loads
-    if (!Load(orig, size, err, sizeof(err))) { printf("FAIL the undamaged file: %s\n", err); return 1; }
+    if (!Load(orig, size)) { printf("FAIL the undamaged file: %s\n", MS_LastError()); return 1; }
     printf("ok   undamaged file (%zu bytes) loads\n", size);
 
     // Every truncation is refused
     int truncOk = 0;
     for (size_t n = 0; n < size; n++) {
-        if (Load(orig, n, err, sizeof(err))) { printf("FAIL truncated to %zu bytes: loaded\n", n); fails++; }
+        if (Load(orig, n)) { printf("FAIL truncated to %zu bytes: loaded\n", n); fails++; }
         else truncOk++;
     }
     printf("ok   %d truncations refused\n", truncOk);
@@ -197,7 +189,7 @@ int main(int argc, char **argv)
     for (size_t i = 0; i < size; i++) {
         unsigned char *c = Copy(orig, size);
         c[i] ^= 0xFF;
-        Load(c, size, err, sizeof(err));
+        Load(c, size);
         free(c);
     }
     printf("ok   %zu single-byte flips (%d loaded as valid scenes)\n", size, accepted - before);
@@ -215,7 +207,7 @@ int main(int argc, char **argv)
             seed = seed * 1664525u + 1013904223u;
             c[at] = (unsigned char)(seed >> 24);
         }
-        Load(c, size, err, sizeof(err));
+        Load(c, size);
         free(c);
     }
     printf("ok   2000 random damages (%d loaded as valid scenes)\n", accepted - before);
@@ -293,7 +285,7 @@ int main(int argc, char **argv)
         unsigned char *ok = Copy(orig, size);
         memcpy(ok + mats + MAT_UV_FACES, ALL, 6);
         ok[mats + MAT_FILTER] = 1;
-        if (!Load(ok, size, err, sizeof(err))) { printf("FAIL uv_faces 0 1 2 3 4 5 and filter nearest on material 0: %s\n", err); fails++; }
+        if (!Load(ok, size)) { printf("FAIL uv_faces 0 1 2 3 4 5 and filter nearest on material 0: %s\n", MS_LastError()); fails++; }
         else printf("ok   uv_faces 0 1 2 3 4 5 and filter nearest on material 0 load\n");
         free(ok);
     }
@@ -331,7 +323,7 @@ int main(int argc, char **argv)
         // Loaded as valid: the same turns with another (finite) angle
         unsigned char *ok = Copy(orig, size);
         Wr32(ok, turns + 4, 0x42340000u);    // (yaw 45)
-        if (!Load(ok, size, err, sizeof(err))) { printf("FAIL box turn yaw 45: %s\n", err); fails++; }
+        if (!Load(ok, size)) { printf("FAIL box turn yaw 45: %s\n", MS_LastError()); fails++; }
         else printf("ok   box turn yaw 45 loads\n");
         free(ok);
         printf("ok   %u box turns in the file\n", turnCount);
@@ -360,5 +352,6 @@ int main(int argc, char **argv)
     printf("%s: %d loads, %d valid scenes, %d failures\n", fails ? "FAILED" : "PASSED", loads, accepted, fails);
     free(orig);
     remove(fuzzPath);
+    MS_ClearError();
     return fails ? 1 : 0;
 }

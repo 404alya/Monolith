@@ -2649,12 +2649,10 @@ static bool WriteAndReload(const char *text, int size, const char *restore, int 
         snprintf(msg, msgSize, "cannot write %s", scene->path);
         return false;
     }
-    char err[512];
-    if (MS_Reload(scene, NULL, err, sizeof(err)) == MS_RELOADED) return true;
+    if (MS_Reload(scene, NULL) == MS_RELOADED) return true;
     WriteFileBytes(scene->path, restore, restoreSize);
-    char err2[512];
-    MS_Reload(scene, NULL, err2, sizeof(err2));
-    snprintf(msg, msgSize, "the edit would break the map, reverted: %s", err);
+    snprintf(msg, msgSize, "the edit would break the map, reverted: %s", MS_LastError());
+    MS_Reload(scene, NULL);         // (the restored text: succeeds, and clears the last error)
     return false;
 }
 
@@ -2766,9 +2764,8 @@ static EditResult ApplyStep(MapEditor *E, const MS_ObjRef *sel, int selCount, co
     EditStep *slot = MS_RESERVE(E->undo, E->undoCap, E->undoCount + 1) ? &E->undo[E->undoCount] : NULL;
     if (!slot) { snprintf(msg, msgSize, "out of memory"); goto done; }
     if (live) {
-        char err[512];
-        if (MS_EditSetText(scene, after, afterSize, &E->lastStats, err, sizeof(err)) != MS_RELOADED) {
-            snprintf(msg, msgSize, "the edit would break the map, not applied: %s", err);
+        if (MS_EditSetText(scene, after, afterSize, &E->lastStats) != MS_RELOADED) {
+            snprintf(msg, msgSize, "the edit would break the map, not applied: %s", MS_LastError());
             goto done;
         }
         E->work = after;
@@ -2856,9 +2853,8 @@ static EditResult Replay(MapEditor *E, bool undo, MS_EntityId **outSel, int *out
         goto done;
     }
     if (textual && live) {
-        char err[512];
-        if (MS_EditSetText(scene, text, outSize, &E->lastStats, err, sizeof(err)) != MS_RELOADED) {
-            snprintf(msg, msgSize, "%s would break the map: %s", undo ? "undo" : "redo", err);
+        if (MS_EditSetText(scene, text, outSize, &E->lastStats) != MS_RELOADED) {
+            snprintf(msg, msgSize, "%s would break the map: %s", undo ? "undo" : "redo", MS_LastError());
             if (step->paint) (undo ? E->paintHooks.redo : E->paintHooks.undo)(E->paintHooks.user, step->paint);
             goto done;
         }
@@ -3559,10 +3555,9 @@ static int RunScript(MapEditor *E, const char *scriptPath, bool live)
             // reload loads it (MS_Reload, as MS_Poll would), and the unsaved edits are rebased
             int dsize;
             char *bytes = ReadFileBytes(w[1], &dsize);
-            char err[512];
             if (!bytes) snprintf(msg, sizeof(msg), "cannot read %s", w[1]);
             else if (!WriteFileBytes(scene->path, bytes, dsize)) snprintf(msg, sizeof(msg), "cannot write %s", scene->path);
-            else if (MS_Reload(scene, NULL, err, sizeof(err)) != MS_RELOADED) snprintf(msg, sizeof(msg), "the reload failed: %.480s", err);
+            else if (MS_Reload(scene, NULL) != MS_RELOADED) snprintf(msg, sizeof(msg), "the reload failed: %s", MS_LastError());
             else if (MapEditUnsaved(E) == 0) {
                 ok = MapEditBegin(E);
                 sel.n = 0;
@@ -3773,11 +3768,10 @@ EditResult MapEditAmendPaint(MapEditor *E, const MS_ObjRef *sel, int selCount, c
         snprintf(msg, msgSize, "out of memory");
         goto done;
     }
-    char err[512];
-    if (MS_EditSetText(scene, after, afterSize, &E->lastStats, err, sizeof(err)) != MS_RELOADED) {
+    if (MS_EditSetText(scene, after, afterSize, &E->lastStats) != MS_RELOADED) {
         free(h.oldText);
         free(h.newText);
-        snprintf(msg, msgSize, "the edit would break the map, not applied: %s", err);
+        snprintf(msg, msgSize, "the edit would break the map, not applied: %s", MS_LastError());
         goto done;
     }
     for (int i = 0; i < top->hunkCount; i++) { free(top->hunks[i].oldText); free(top->hunks[i].newText); }
