@@ -35,6 +35,7 @@ Reference maps: `maps/monolith/` (the default: brutalist concrete, boxes only, o
 ```
 monolith/
 ├── build.sh, cmake/mingw-w64-x86_64.cmake, .gitignore
+├── compile_commands.json        # clangd's compilation database, written by ./build.sh (gitignored; CONTRIBUTING.md, Editor setup)
 ├── README.md, CONTRIBUTING.md, LICENSE (MIT)
 ├── CLAUDE.md                    # Claude Code: guard rails, hard rules, index of skills (always loaded)
 ├── .claude/skills/<topic>/      # Claude Code: workflows and lessons (map-request, engine-code, ...), loaded per task

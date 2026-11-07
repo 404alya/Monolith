@@ -26,6 +26,16 @@ Map-only changes (a `.map` file, `MAP.md`, a package's shaders, models, textures
 
 C11, 4-space indent, `static` file-local functions, PascalCase functions, `UPPER_CASE` macros, `// #region` sections, one module per concern with a header comment, short comments that explain *why*. Comment non-obvious engine workarounds with their reason so nobody "cleans them up". English everywhere.
 
+## Editor setup
+
+Code navigation (go to definition, find references, symbol search, call hierarchy) works with any editor that uses [clangd](https://clangd.llvm.org/), and follows calls across files and into R3D and raylib (`submodules/r3d/src/`, `submodules/r3d/external/raylib/src/`).
+
+- **`./build.sh` writes `compile_commands.json`** in the repo root: one entry per file with the exact flags the build uses (includes, `-DMONOLITH_EDITOR`, `-DMS_PATCHED_R3D`, the path defines), so clangd sees each file as the compiler does and editor-only code isn't greyed out. It also covers `tools/profile.c`, the vendored xatlas, `examples/` and `tests/unit/` (with their scripts' flags), and R3D's and raylib's sources (from R3D's own CMake export; assimp is left out). Only the plain Linux build writes it; `debug`, `lsan`, `profile` and `--win` leave it alone. It needs `python3`.
+- **When to regenerate:** after a fresh clone, after adding a `.c` file, and after a change to a flag in `build.sh`: run `./build.sh` again. The file holds absolute paths for your checkout and is gitignored; never edit it by hand. Each git worktree gets its own.
+- **Let clangd index in the background** (`--background-index`, the default in most setups): it can then jump into files you haven't opened. Its index goes into `.cache/clangd/` (gitignored).
+- **No `.clangd` with `CompileFlags: Add:`** is needed. An old one adds flags on top of the database's (a second `-std`, stale defines): remove that block, or the file.
+- **Neovim:** LSP go-to-definition is `gd` in LazyVim. Ctrl+click is a tags jump by default; map it to the LSP in your own config if you want it, e.g. `vim.keymap.set("n", "<C-LeftMouse>", "<LeftMouse><cmd>lua vim.lsp.buf.definition()<cr>")`.
+
 ## Docs
 
 `README.md` and `docs/` are written for people: describe what the software does and how to use it, without instructions to an AI assistant or session history. Workflows and lessons for Claude Code go into a skill in `.claude/skills/`; measurements into `.claude/skills/benchmarking/measurements.md`, labelled with the machine.

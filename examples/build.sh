@@ -109,6 +109,7 @@ Compiled() {
   echo "compiled: ${maps[0]#"$ROOT/"}b"
 }
 
+# (../build.sh mirrors these programs and their flags in compile_commands.json for clangd: keep it in step)
 Example 01_minimal minimal "$HERE/01_minimal/main.c" -- "${RUNTIME[@]}"
 Data 01_minimal "$HERE/01_minimal/scene" scene
 Compiled 01_minimal scene

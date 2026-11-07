@@ -12,6 +12,9 @@ requests/
 
 # Local editor config (machine-specific absolute paths)
 .clangd
+# clangd's compilation database (written by ./build.sh, absolute paths) and its index
+compile_commands.json
+.cache/
 
 # Vendored R3D: parts not used by the monolith build (examples/tests are OFF)
 submodules/r3d/examples/

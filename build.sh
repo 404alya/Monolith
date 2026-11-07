@@ -13,6 +13,8 @@
 #                                     RelWithDebInfo + frame pointers in $R3D_DIR/build-linux-profile
 #                                     (so build-linux stays Release), plus the profiling tool
 #                                     build/linux-profile/profile (tools/profile.c, libc only)
+#                                     The plain build (and run) also writes compile_commands.json
+#                                     in the repo root for clangd (see WriteCompileCommands below)
 #        ./build.sh --win          -> Windows x86_64 build in build/win/ (MinGW-w64):
 #                                     monolith.exe (statically linked) + maps/ (packages),
 #                                     the folder can be zipped and copied as-is
@@ -82,6 +84,47 @@ Xatlas() {
     "$cxx" "${flags[@]}" -c "$dir/xatlas.cpp" -o "$obj"
     printf '%s\n' "$cxx ${flags[*]}" > "$stamp"
   fi
+}
+
+# WriteCompileCommands <R3D build dir> <entry>...: writes compile_commands.json in the repo root, the
+# compilation database clangd (and other tools) read for go-to-definition, references and diagnostics.
+# Each <entry> is "@@" <compiler> <args...> <source file>: the arguments the file is compiled with,
+# with no shell in between (the path defines' quotes stay as they are). R3D's own database (from
+# CMAKE_EXPORT_COMPILE_COMMANDS) is merged in with assimp's entries dropped (C++, huge, not needed to
+# follow calls into R3D and raylib). Machine-specific absolute paths: the file is gitignored. Written
+# to a temporary file and renamed, so clangd never reads half a file; without python3 it is skipped.
+WriteCompileCommands() {
+  local r3dBuild="$1"
+  shift
+  if ! command -v python3 >/dev/null; then
+    echo "build.sh: python3 not found: compile_commands.json not written" >&2
+    return 0
+  fi
+  python3 -I -c '
+import json, os, sys
+root, out, r3dDb, assimp = sys.argv[1:5]
+db, cur = [], None
+for a in sys.argv[5:]:
+    if a == "@@":
+        cur = []
+        db.append(cur)
+    else:
+        cur.append(a)
+db = [{"directory": root, "file": e[-1], "arguments": e[:-1] + ["-c", e[-1]]} for e in db]
+if os.path.isfile(r3dDb):
+    with open(r3dDb) as f:
+        for e in json.load(f):
+            path = os.path.normpath(os.path.join(e["directory"], e["file"]))
+            if not path.startswith(assimp):
+                db.append(e)
+else:
+    print("build.sh: " + r3dDb + " not found: compile_commands.json has no R3D or raylib entries", file=sys.stderr)
+with open(out + ".tmp", "w") as f:
+    json.dump(db, f, indent=1)
+    f.write("\n")
+os.replace(out + ".tmp", out)
+' "$ROOT" "$ROOT/compile_commands.json" "$r3dBuild/compile_commands.json" \
+    "$(realpath -m "$R3D_DIR/external/assimp")/" "$@"
 }
 
 WIN=0
@@ -154,6 +197,8 @@ fi
 # #include <unzip.h> looks, so the build fails.
 # The profile build has its own R3D dir: RelWithDebInfo (-O2 -g) with frame pointers, so
 # perf --call-graph fp unwinds through R3D, raylib and assimp (tools/profile.c).
+# CMAKE_EXPORT_COMPILE_COMMANDS: R3D's and raylib's entries for our compile_commands.json (no
+# change to how anything compiles).
 MODE="${1:-}"
 R3D_LINUX="$R3D_DIR/build-linux"
 R3D_EXTRA=()
@@ -169,7 +214,7 @@ BuildR3D "$R3D_LINUX" "Linux ($R3D_BUILD_TYPE)" \
   -DCMAKE_BUILD_TYPE="$R3D_CMAKE_TYPE" "${R3D_EXTRA[@]}" \
   -DBUILD_SHARED_LIBS=OFF -DR3D_RAYLIB_VENDORED=ON -DR3D_ASSIMP_VENDORED=ON \
   -DASSIMP_BUILD_ZLIB=ON -DASSIMP_BUILD_MINIZIP=ON -DR3D_BUILD_EXAMPLES=OFF \
-  -DR3D_GPU_PROFILER=ON
+  -DR3D_GPU_PROFILER=ON -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 
 OUT="$ROOT/build/linux"
 INCLUDES=(
@@ -220,11 +265,13 @@ Xatlas "$CXX" "$XATLAS_OBJ" "${XATLAS_FLAGS[@]}"
 # versions, see src/glibc_compat.c. The result runs on glibc >= 2.34.
 # The baked-in repo paths are only used while they exist (see InitDataPaths in src/main.c).
 GLIBC_WRAP=acosf,asinf,atan2f,sqrtf,fmod,fmodf,hypot,hypotf,__isoc23_strtoul,__isoc23_strtol,arc4random
-"$CC" "${CFLAGS[@]}" "${INCLUDES[@]}" \
-  -DBENCHMARK_PATH="\"$ROOT/benchmark/\"" \
-  -DMAPS_PATH="\"$ROOT/maps/\"" -DPROJECT_PATH="\"$ROOT/\"" -DR3D_SOURCE_PATH="\"$R3D_DIR/\"" \
-  -DR3D_BUILD_TYPE_NAME="\"$R3D_BUILD_TYPE\"" \
-  -I"$ROOT/runtime" -DMS_PATCHED_R3D -DMONOLITH_EDITOR \
+DEFINES=(
+  -DBENCHMARK_PATH="\"$ROOT/benchmark/\""
+  -DMAPS_PATH="\"$ROOT/maps/\"" -DPROJECT_PATH="\"$ROOT/\"" -DR3D_SOURCE_PATH="\"$R3D_DIR/\""
+  -DR3D_BUILD_TYPE_NAME="\"$R3D_BUILD_TYPE\""
+  -I"$ROOT/runtime" -DMS_PATCHED_R3D -DMONOLITH_EDITOR
+)
+"$CC" "${CFLAGS[@]}" "${INCLUDES[@]}" "${DEFINES[@]}" \
   "$ROOT"/src/*.c "$ROOT"/runtime/*.c "$XATLAS_OBJ" -o "$OUT/monolith" \
   -L"$R3D_LINUX/lib" -lr3d -lraylib -lassimp -lzlibstatic \
   -l:libstdc++.a -lgcc_s -lGL -lm -lpthread -ldl -Wl,--wrap="${GLIBC_WRAP//,/,--wrap=}"
@@ -236,6 +283,39 @@ cp "$ROOT/resources/fonts/outfit/OFL.txt" "$OUT/OFL-Outfit.txt"
 cp "$ROOT/resources/fonts/pixelify/OFL.txt" "$OUT/OFL-PixelifySans.txt"
 
 echo "built: ${OUT#"$ROOT/"}/monolith"
+
+# clangd's compilation database, from the arrays above (the plain build only: the sanitizer and
+# profile builds and --win leave it alone). The game's files with the game's flags; tools/profile.c,
+# xatlas, the examples and tests/unit with the flags their own scripts use (examples/build.sh,
+# tests/unit/*.sh: keep these lines in step when those change). One entry per file: 04_import_source
+# is listed as the plain program, not its capture-shim build.
+if [[ "$MODE" == "" || "$MODE" == "run" ]]; then
+  ENTRIES=()
+  for f in "$ROOT"/src/*.c "$ROOT"/runtime/*.c; do
+    ENTRIES+=(@@ "$CC" "${CFLAGS[@]}" "${INCLUDES[@]}" "${DEFINES[@]}" "$f")
+  done
+  ENTRIES+=(@@ "$CXX" -std=c++14 -w -DNDEBUG -DXATLAS_C_API=1 -DXA_MULTITHREADED=0 "${XATLAS_FLAGS[@]}"
+            "$ROOT/src/vendor/xatlas/xatlas.cpp")
+  ENTRIES+=(@@ "$CC" -std=c11 -Wall -Wextra -Wno-missing-field-initializers -O2 -g "$ROOT/tools/profile.c")
+  EX_FLAGS=("$CC" "${CFLAGS[@]}" -I"$R3D_DIR/include" -I"$R3D_LINUX/external/raylib/raylib/include"
+            -I"$ROOT/runtime" -DMS_PATCHED_R3D)
+  ENTRIES+=(@@ "${EX_FLAGS[@]}" "$ROOT/examples/01_minimal/main.c")
+  ENTRIES+=(@@ "${EX_FLAGS[@]}" -DHARNESS_MAIN_NO_ARGS "$ROOT/examples/02_existing_project/before.c")
+  ENTRIES+=(@@ "${EX_FLAGS[@]}" "$ROOT/examples/02_existing_project/after.c")
+  ENTRIES+=(@@ "${EX_FLAGS[@]}" -DMONOLITH_EDITOR "$ROOT/examples/03_live_editing/main.c")
+  ENTRIES+=(@@ "${EX_FLAGS[@]}" -DHARNESS_MAIN_NO_ARGS "$ROOT/examples/04_import_source/main.c")
+  ENTRIES+=(@@ "${EX_FLAGS[@]}" "$ROOT/examples/05_entities/main.c")
+  UNIT_FLAGS=("$CC" -std=c11 -Wall -Wextra -Wno-missing-field-initializers -g -O1 -fno-omit-frame-pointer
+              -fsanitize=address,undefined -fno-sanitize-recover=all -D_GNU_SOURCE -DMS_PATCHED_R3D
+              -I"$R3D_DIR/include" -I"$R3D_LINUX/external/raylib/raylib/include" -I"$ROOT/runtime")
+  ENTRIES+=(@@ "${UNIT_FLAGS[@]}" "$ROOT/tests/unit/compiled_test.c")
+  ENTRIES+=(@@ "${UNIT_FLAGS[@]}" -DMONOLITH_EDITOR "$ROOT/tests/unit/parse_error_test.c")
+  ENTRIES+=(@@ "${UNIT_FLAGS[@]}" -DMONOLITH_EDITOR -I"$ROOT/src" "$ROOT/tests/unit/collision_test.c")
+  ENTRIES+=(@@ "${UNIT_FLAGS[@]}" -DMONOLITH_EDITOR -I"$ROOT/src" "$ROOT/tests/unit/paintunwrap_test.c")
+  ENTRIES+=(@@ "$CC" -std=c11 -Wall -Wextra -I"$ROOT/src" "$ROOT/tests/unit/wincmd_test.c")
+  WriteCompileCommands "$R3D_LINUX" "${ENTRIES[@]}"
+  echo "wrote: compile_commands.json"
+fi
 # The profiling tool runs perf on the binary next to it. Not a game flag: the game stays as it is.
 # Linux only (perf is); plain C, links only libc.
 if [[ "$MODE" == "profile" ]]; then
