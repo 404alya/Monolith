@@ -24,6 +24,7 @@ The workflows are project skills in `.claude/skills/<name>/SKILL.md`. They load 
 | `surface-shaders` | a map's `.glsl` surface shader: rules, portable GLSL, the per-pixel cost budget |
 | `lighting-fog-shadows` | lighting, shadows, fog, ambient, exposure, black surfaces (with `.claude/skills/lighting-fog-shadows/r3d-pitfalls.md`) |
 | `benchmarking` | any `--bench` run or performance claim |
+| `delegated-perf-work` | a performance investigation or optimisation handed to subagents (models, phases, briefs, checks) |
 | `leak-check` | `tools/leakcheck.sh`, after every code change |
 | `large-engine-work` | engine work across modules or with several agents; `/task-prompt` drafts a task prompt |
 | `project-history` | why something is built the way it is, before changing a rule or design; old bundles or notes naming files that no longer exist |
