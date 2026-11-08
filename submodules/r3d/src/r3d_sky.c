@@ -54,6 +54,7 @@ void R3D_UpdateProceduralSky(R3D_Cubemap* cubemap, R3D_ProceduralSky params)
 
     R3D_SHADER_USE(prepare.cubemapProceduralSky);
     r3d_driver_disable(GL_CULL_FACE);
+    r3d_driver_disable(GL_BLEND);   //< Local patch 29: the target is uninitialised memory (NaN * 0 = NaN)
     r3d_render_prepare_drawing();
 
     R3D_SHADER_SET_MAT4(prepare.cubemapProceduralSky, uMatProj, matProj);
@@ -105,6 +106,7 @@ void R3D_UpdateCustomSky(R3D_Cubemap* cubemap, R3D_SkyShader* shader)
 
     R3D_SHADER_USE_CUSTOM(shader, prepare.cubemapCustomSky);
     r3d_driver_disable(GL_CULL_FACE);
+    r3d_driver_disable(GL_BLEND);   //< Local patch 29: the target is uninitialised memory (NaN * 0 = NaN)
     r3d_render_prepare_drawing();
 
     R3D_SHADER_SET_MAT4_CUSTOM(shader, prepare.cubemapCustomSky, uMatProj, matProj);

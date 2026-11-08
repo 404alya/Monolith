@@ -30,6 +30,7 @@ void r3d_pass_prepare_irradiance(int layerMap, GLuint srcCubemap)
 
     R3D_SHADER_USE(prepare.cubemapIrradiance);
     r3d_driver_disable(GL_DEPTH_TEST);
+    r3d_driver_disable(GL_BLEND);   //< Local patch 29: the target is uninitialised memory (NaN * 0 = NaN)
     r3d_driver_disable(GL_CULL_FACE);
 
     R3D_SHADER_BIND_SAMPLER(prepare.cubemapIrradiance, uSourceTex, srcCubemap);
@@ -53,6 +54,7 @@ void r3d_pass_prepare_prefilter(int layerMap, GLuint srcCubemap, int srcSize)
 
     R3D_SHADER_USE(prepare.cubemapPrefilter);
     r3d_driver_disable(GL_DEPTH_TEST);
+    r3d_driver_disable(GL_BLEND);   //< Local patch 29: the target is uninitialised memory (NaN * 0 = NaN)
     r3d_driver_disable(GL_CULL_FACE);
 
     R3D_SHADER_BIND_SAMPLER(prepare.cubemapPrefilter, uSourceTex, srcCubemap);

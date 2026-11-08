@@ -86,7 +86,7 @@ static const Row ROWS[] = {
       V_BOOL, OFF(q.sunShadow) },
     { GFX_GROUP_SHADOWS, 0, "Shadow map size", "shadow_size",
       "px; 8192 = 3.7 cm texels, 256 MB VRAM; 4096 = 7.4 cm, 64 MB. Restarts the renderer (~1 s)",
-      V_INT, OFF(q.shadowSize), OPTS(0, 2048, 4096, 6144, 8192, 16384), .fmt = "%.0f", .zero = "map's",
+      V_INT, OFF(q.shadowSize), OPTS(0, 512, 1024, 2048, 4096, 6144, 8192, 16384), .fmt = "%.0f", .zero = "map's",
       .min = 256, .max = 16384, .heavy = true },
     { GFX_GROUP_SHADOWS, 0, "Shadow range", "shadow_range",
       "m; texels grow with it; below the fog length (90 m) the shafts fade early",

@@ -5056,3 +5056,27 @@ monolith's runtime sets the field from the material key `prepass off` (`Material
 **Look: the winner at equal depth.** Before, coplanar fragments of a pre-passed and a non-prepassed draw were resolved by draw order (stencil tie-break, first drawn wins); an opted-out draw now always loses an exact tie against a pre-passed surface (that surface's depth is already in the buffer and the opted-out draw tests LESS). Only contact pixels change (below).
 
 **Verification.** Against the build before the patch (`build/linux/monolith-base`): `--dump-boxes` of `maps/monolith` and `maps/pine_forest` identical. The code alone (a package without `prepass off`) is pixel-identical in 19 shots (viewpoints 1–7, yaw sweeps 0/60/…/300 at `--pos 8 13.6 -70 --look y -10` and `--pos 20 2 -100 --look y 15`). With the four weed materials `prepass off`: 7 of the 19 shots change, 1–27 pixels each of 1600 × 900 (≤ 3 pixels > 2/255, max 17/255), at weed / rubble / ground contacts. Frame time, machine C (Intel HD 5500, Mesa 25.2.8, i5-5300U; headless at the native 1366 × 768 in a scratch build, the developer's settings with render scale 1; 150-frame screening runs, cool-down below 68 °C before each), 5 interleaved pairs (3 A-first, 2 B-first): frame paired differences +1.21 / −0.48 / −0.51 / −1.13 / −0.36 ms (median −0.48 ms, −1.3 %; the first pair's B ran its non-geometry passes ~3 ms slower, a clock-state flip), geometry pass +0.32 / −0.41 / −0.57 / −0.83 / −0.50 ms (median −0.50 ms, −5 %). Reports `benchmark/2026-11-05_023821` … `_025151` (local).
+
+## Patch 29: sky and IBL cubemaps are rendered with blending left on (2026-11-07)
+
+**Symptom.** Changing the shadow map size in the settings panel (F2) restarts the renderer (`RestartRenderer` in `src/main.c`: `R3D_Close`, `R3D_Init`, the map loaded again). Afterwards the lit scene is gone: shadows show green on the developer's GPU, a flat grey / black frame on machine C (Intel HD 5500, Mesa 25.2.8), and no shadows at all. A start with the same setting is fine. `maps/monolith` broke on every live change (2048, 8192, 16384, every shadow mode); `maps/pine_forest` only with the low preset; at render scale 0.5 the result varied between identical runs.
+
+**Cause.** `R3D_UpdateProceduralSky` / `R3D_UpdateCustomSky` (`src/r3d_sky.c`) and the irradiance / prefilter convolutions (`r3d_pass_prepare_irradiance` / `_prefilter`, `src/common/r3d_pass.c`) disable culling and depth test but never blending, and `r3d_driver_invalidate_cache()` before them only forgets the cached state. raylib leaves `GL_BLEND` on (rlgl's default, and every frame's HUD), so the cubemap faces are written with `src * a + dst * (1 - a)` over a texture allocated with NULL data. In a fresh process that memory is zeroed; after `R3D_Close` the driver hands back the old textures' memory, and float garbage that is NaN stays NaN (`NaN * 0 = NaN`). A NaN in the ambient irradiance makes the ambient pass's output NaN (the sun light is summed in the same pass, so it goes too); a NaN in the sky cubemap reaches the background; bloom and the fog spread the NaN pixels over the frame. G-buffer, SSAO and the shadow maps were identical to a fresh start.
+
+**Change.** Blending off in the four passes.
+
+Files: `src/r3d_sky.c`, `src/common/r3d_pass.c`.
+
+```diff
+--- src/r3d_sky.c  (R3D_UpdateProceduralSky, R3D_UpdateCustomSky, both)
+     r3d_driver_disable(GL_CULL_FACE);
++    r3d_driver_disable(GL_BLEND);   //< Local patch 29: the target is uninitialised memory (NaN * 0 = NaN)
+     r3d_render_prepare_drawing();
+--- src/common/r3d_pass.c  (r3d_pass_prepare_irradiance, r3d_pass_prepare_prefilter, both)
+     r3d_driver_disable(GL_DEPTH_TEST);
++    r3d_driver_disable(GL_BLEND);   //< Local patch 29: the target is uninitialised memory (NaN * 0 = NaN)
+     r3d_driver_disable(GL_CULL_FACE);
+```
+
+**Verification.**
+Machine C (Intel HD 5500, Mesa 25.2.8). Repro: `--shot` with `--settings-change shadow_size=…` (the panel's live path, a restart at frame 10) against `--settings-set` (a start with the value): before the patch 1,330,000–1,440,000 of 1,440,000 pixels differ (`maps/monolith`: 2048, 8192, 16384, shadow modes tiles / camera / always, preset low; `maps/pine_forest`: preset low; render scale 0.5 on `maps/monolith` broke in 2 of 3 identical runs). Narrowed with R3D's output modes (G-buffer and SSAO identical, radiance black) and a debug ambient shader (irradiance NaN after the restart only). After the patch: `shadow_size` 2048 and 16384, `render_scale=0.5`, preset low with 4096, on both maps, two runs each: 0 pixels against the started-with run. Against the build before the patch: every viewpoint of `maps/monolith` (7) and `maps/pine_forest` (5) 0 pixels, `--dump-boxes` identical. `./build.sh` and `examples/build.sh` without warnings (`./build.sh --win` not run: no mingw-w64 on machine C); `tools/leakcheck.sh`: zero leaks of ours.

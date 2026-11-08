@@ -11670,7 +11670,7 @@ void MS_ApplyRenderResolution(const MS_Scene *s, int outW, int outH)
 // Presets from the measured trade-off knobs (.claude/skills/benchmarking/measurements.md "Trade-off knobs" and
 // docs/user-guide.md "Graphics settings"): ultra is the map exactly; high trades SSAO + SSIL for the baked
 // occlusion volume and bakes the fog's sun visibility; medium also renders at 75% with half
-// the fog march steps and a 4096 shadow map; low renders at 50% without AO and bloom.
+// the fog march steps and a 4096 shadow map; low renders at 50% without AO and bloom, 2048 shadow map.
 
 MS_Quality MS_QualityPreset(MS_QualityLevel level)
 {
@@ -11688,7 +11688,7 @@ MS_Quality MS_QualityPreset(MS_QualityLevel level)
         q.renderScale = 0.5f;
         q.ao = MS_AO_OFF;
         q.bloom = false;
-        q.shadowSize = 4096;
+        q.shadowSize = 2048;
         q.fogCacheVoxel = 0.5f;
         q.fogStepScale = 2.0f;
         break;
