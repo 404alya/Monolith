@@ -5080,3 +5080,32 @@ Files: `src/r3d_sky.c`, `src/common/r3d_pass.c`.
 
 **Verification.**
 Machine C (Intel HD 5500, Mesa 25.2.8). Repro: `--shot` with `--settings-change shadow_size=…` (the panel's live path, a restart at frame 10) against `--settings-set` (a start with the value): before the patch 1,330,000–1,440,000 of 1,440,000 pixels differ (`maps/monolith`: 2048, 8192, 16384, shadow modes tiles / camera / always, preset low; `maps/pine_forest`: preset low; render scale 0.5 on `maps/monolith` broke in 2 of 3 identical runs). Narrowed with R3D's output modes (G-buffer and SSAO identical, radiance black) and a debug ambient shader (irradiance NaN after the restart only). After the patch: `shadow_size` 2048 and 16384, `render_scale=0.5`, preset low with 4096, on both maps, two runs each: 0 pixels against the started-with run. Against the build before the patch: every viewpoint of `maps/monolith` (7) and `maps/pine_forest` (5) 0 pixels, `--dump-boxes` identical. `./build.sh` and `examples/build.sh` without warnings (`./build.sh --win` not run: no mingw-w64 on machine C); `tools/leakcheck.sh`: zero leaks of ours.
+
+## Patch 30: shadow-only meshes are drawn by the camera (2026-11-08)
+
+**Symptom.** A mesh with `shadowCastMode = R3D_SHADOW_CAST_ONLY_*` ("the object only casts shadows", `include/r3d/r3d_mesh.h`) is drawn by the camera like any other mesh. monolith's draw distance (`MS_RenderSettings.detailDistance`, the material key `draw_distance`) submits the draws beyond their distance as shadow-only, so the sun's static tiles and the light shadows, drawn once, keep them; the camera has to skip them.
+
+**Cause.** `src/r3d_draw.c` defines `SHADOW_CAST_ONLY_MASK` and `IS_SHADOW_CAST_ONLY`, but nothing uses the macro, and it names `R3D_SHADOW_CAST_ONLY_MASK`, which doesn't exist (it never compiled). The camera passes (pre-pass, geometry, unlit, forward / blend) test only the layer mask (`IS_MESH_VISIBLE_CAMERA`), the probe captures nothing. The shadow pass already handles the `ONLY_*` modes (`r3d_driver_set_shadow_cast_mode`).
+
+**Change.** `IS_SHADOW_CAST_ONLY` uses the mask that exists; `IS_MESH_VISIBLE_CAMERA` (every camera pass) and the two probe-capture loops leave shadow-only meshes out.
+
+Files: `src/r3d_draw.c`.
+
+```diff
+--- src/r3d_draw.c
++// Local patch 30: a SHADOW_CAST_ONLY_* mesh is not drawn by the camera (nor into probes)
+ #define IS_MESH_VISIBLE_CAMERA(mesh) \
+-    (IS_MESH_VISIBLE((mesh), R3D.viewState.camera.cullMask))
++    (IS_MESH_VISIBLE((mesh), R3D.viewState.camera.cullMask) && !IS_SHADOW_CAST_ONLY((mesh).shadowCastMode))
+ ...
+ #define IS_SHADOW_CAST_ONLY(mode)               \
+-    ((R3D_SHADOW_CAST_ONLY_MASK & (1 << (mode))) != 0)
++    ((SHADOW_CAST_ONLY_MASK & (1 << (mode))) != 0)     //< Local patch 30: was R3D_SHADOW_CAST_ONLY_MASK (undefined)
+ ...  (pass_scene_probes, the opaque and the blend loop)
+-            R3D_RENDER_FOR_EACH(call, true, frustum, R3D_RENDER_LIST_OPAQUE_INST, R3D_RENDER_LIST_OPAQUE)
++            R3D_RENDER_FOR_EACH(call, !IS_SHADOW_CAST_ONLY(call->mesh.instance.shadowCastMode), frustum, R3D_RENDER_LIST_OPAQUE_INST, R3D_RENDER_LIST_OPAQUE)
+-            R3D_RENDER_FOR_EACH(call, true, frustum, R3D_RENDER_LIST_BLEND_INST, R3D_RENDER_LIST_BLEND)
++            R3D_RENDER_FOR_EACH(call, !IS_SHADOW_CAST_ONLY(call->mesh.instance.shadowCastMode), frustum, R3D_RENDER_LIST_BLEND_INST, R3D_RENDER_LIST_BLEND)
+```
+
+**Verification.** Nothing in monolith set a shadow-only mode before, so the patch alone changes no image: against the build before it (`detail_distance=0`, the runtime then submits no shadow-only draw), every viewpoint of `maps/monolith` (7) and `maps/pine_forest` (5) 0 pixels of 1600 × 900, `--dump-boxes` and `--dump-scene` identical. With the draw distance on (x1), `maps/monolith` changes 56–1758 pixels per viewpoint (13–227 by more than 2/255, max 36/255): small far objects missing, their shadows in place; `pine_forest` 0 (nothing small enough). A scratch copy of `maps/monolith` with `draw_distance off` on every material: 0 pixels against the build before the patch. With the weeds' `draw_distance` at 0.5 m they vanish from a terrace view and their shadows stay on the facade foot. Frame time on machine C (Intel HD 5500, Mesa 25.2.8, i5-5300U; headless 1920 × 1006, ultra, full runs, 3 interleaved pairs, cool-down before every run): frame median +0.06 ms (noise), geometry pass median −0.34 ms (−2.5 %); `.claude/skills/benchmarking/measurements.md`, "Draw distance of small objects". `./build.sh`, `examples/build.sh` (and `test`) without warnings, the runtime also without `MS_PATCHED_R3D` and without `MONOLITH_EDITOR`; `./build.sh --win` not run (no mingw-w64 on machine C); `tools/leakcheck.sh`: zero leaks of ours.

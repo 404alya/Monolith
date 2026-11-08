@@ -180,7 +180,7 @@ Removing and giving ids are manual edits like any other: live, undoable with Ctr
 
 The panel has a preset selector, rows for display, shadows, ambient occlusion, fog, post-processing and performance, the editor's **Save edits** row (manual / auto, see *Editing by hand*; not a graphics setting and not part of a preset), and a live frame time readout. Use the arrow keys or the mouse; values that differ from the preset are pink, with a pink bar beside them. Heavy changes (shadow map size, AO mode, fog cache, preset) take a frame to apply; a new shadow map size reloads the map (about a second, your selection is kept). Esc or F2 closes and saves.
 
-**The map is the source of the look.** Every setting is relative to the map: **ultra** shows exactly what the map describes, and an effect the map turns off stays off.
+**The map is the source of the look.** Every setting is relative to the map: **ultra** shows exactly what the map describes, and an effect the map turns off stays off. The one exception is **Detail distance** (display rows, x1 in every preset): small objects far from the camera, whose boxes would cover a pixel or two, are not drawn (their shadows stay). x2 keeps them twice as far, x0.5 drops them earlier, off draws everything. A map can keep a material always drawn, or give it its own distance (`draw_distance`, [map-format.md](map-format.md)).
 
 | Preset | What it trades |
 |---|---|

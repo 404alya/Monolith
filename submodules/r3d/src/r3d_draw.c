@@ -41,8 +41,9 @@
 #define IS_MESH_VISIBLE(mesh, cullMask) \
     (R3D_BIT_ANY((cullMask), (mesh).layerMask))
 
+// Local patch 30: a SHADOW_CAST_ONLY_* mesh is not drawn by the camera (nor into probes)
 #define IS_MESH_VISIBLE_CAMERA(mesh) \
-    (IS_MESH_VISIBLE((mesh), R3D.viewState.camera.cullMask))
+    (IS_MESH_VISIBLE((mesh), R3D.viewState.camera.cullMask) && !IS_SHADOW_CAST_ONLY((mesh).shadowCastMode))
 
 #define SHADOW_CAST_ONLY_MASK (                 \
     (1 << R3D_SHADOW_CAST_ONLY_AUTO) |          \
@@ -52,7 +53,7 @@
 )
 
 #define IS_SHADOW_CAST_ONLY(mode)               \
-    ((R3D_SHADOW_CAST_ONLY_MASK & (1 << (mode))) != 0)
+    ((SHADOW_CAST_ONLY_MASK & (1 << (mode))) != 0)     //< Local patch 30: was R3D_SHADOW_CAST_ONLY_MASK (undefined)
 
 // ========================================
 // GPU PROFILER (local patch, see patches.md)
@@ -2165,12 +2166,12 @@ void pass_scene_probes(void)
             r3d_env_probe_capture_bind_fbo(job->probeType, iFace);
             glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
 
-            R3D_RENDER_FOR_EACH(call, true, frustum, R3D_RENDER_LIST_OPAQUE_INST, R3D_RENDER_LIST_OPAQUE)
+            R3D_RENDER_FOR_EACH(call, !IS_SHADOW_CAST_ONLY(call->mesh.instance.shadowCastMode), frustum, R3D_RENDER_LIST_OPAQUE_INST, R3D_RENDER_LIST_OPAQUE)
             {
                 RASTER_PROBE(true);
             }
 
-            R3D_RENDER_FOR_EACH(call, true, frustum, R3D_RENDER_LIST_BLEND_INST, R3D_RENDER_LIST_BLEND)
+            R3D_RENDER_FOR_EACH(call, !IS_SHADOW_CAST_ONLY(call->mesh.instance.shadowCastMode), frustum, R3D_RENDER_LIST_BLEND_INST, R3D_RENDER_LIST_BLEND)
             {
                 RASTER_PROBE(false);
             }

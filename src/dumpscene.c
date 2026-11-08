@@ -12,7 +12,7 @@
 //         position <3 hex> rotationDeg <3 hex> scale <3 hex> translation <3 hex> rotation <4 hex>
 //         bounds <6 hex> colliders <first> <count> slots <N=m,...|->
 //   collider <i> <6 hex>        (model colliders only; i >= boxes)
-//   material <i> "<name>" line <l> shader "<path>" unlit <on|off>
+//   material <i> "<name>" line <l> shader "<path>" unlit <on|off> [draw_distance <off|hex>]
 //   light <i> <point|spot|dir> line <l> position <3 hex> direction <3 hex> color r g b energy <hex> range <hex> shadow <on|off> [clip <3 hex> <3 hex>]
 //   sun direction <3 hex> energy <hex> range <hex> shadow <on|off>
 //
@@ -137,7 +137,11 @@ bool DumpScene(const MS_Scene *s, const char *path, bool diff)
         Index(f, diff, i);
         fprintf(f, " \"%s\"", m->name);
         Line(f, diff, m->line);
-        fprintf(f, " shader \"%s\" unlit %s\n", m->shader ? m->shader : "", m->material.unlit ? "on" : "off");
+        fprintf(f, " shader \"%s\" unlit %s", m->shader ? m->shader : "", m->material.unlit ? "on" : "off");
+        // (only when set, so the dumps of maps without the key stay as they were)
+        if (m->drawDistance < 0.0f) fprintf(f, " draw_distance off");
+        else if (m->drawDistance > 0.0f) fprintf(f, " draw_distance %a", m->drawDistance);
+        fprintf(f, "\n");
     }
     for (int i = 0; i < s->lightCount; i++) {
         const R3D_Light *L = &s->lights[i].light;

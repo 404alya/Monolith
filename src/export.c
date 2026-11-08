@@ -710,6 +710,8 @@ static char *MakeReadme(const MS_Scene *s, const char *name, const char *assetsP
         "R3D's camera-fitted map, re-rendered when it no longer covers the view (`R3D_PushLightEx`) |\n"
         "| Depth pre-pass | on (`MS_RenderSettings.depthPrepass`, patch 6): expensive surface shaders run once per pixel | "
         "not available: same image, more GPU time with overdraw |\n"
+        "| Draw distance (`MS_RenderSettings.detailDistance`) | small objects beyond their draw distance are skipped by "
+        "the camera and keep their shadows (patch 30) | they are drawn as before (the image of `detailDistance` 0) |\n"
         "| Fog cache (`fogCacheVoxel`) | optional baked fog sun visibility (patch 8) | not available (off) |\n"
         "| Occlusion volume (`aoVolumeVoxel`) | optional baked world-space AO for the ambient light (patch 11) | not available (off) |\n"
         "| Post passes | bloom composite folded into tonemapping, FXAA writes the final target, depth pyramid only as deep as used (patch 10) | same image, ~0.25 ms more GPU |\n\n"
