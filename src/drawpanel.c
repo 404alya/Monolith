@@ -202,9 +202,9 @@ static void SectionTarget(Ctx *c)
     // What the cursor rested on last (dm->target), and what paint there goes into, or why it can't
     const DrawTarget *t = &dm->target;
     bool none = !TargetSet(dm) || t->hit.hit.obj.kind == MS_OBJ_NONE;
-    c->y += Wrapped(c, none ? "point at a box or a model" : t->what, UI_S, none ? UI_DIM : UI_INK, 2);
-    if (!none && !t->ok && t->refusal[0]) c->y += Wrapped(c, t->refusal, UI_S, UI_ERROR, 3);
-    else if (!none && t->into[0]) c->y += Wrapped(c, t->into, UI_S, UI_DIM, 3);
+    c->y += Wrapped(c, none ? "point at a box or a model" : MsgText(&t->what), UI_S, none ? UI_DIM : UI_INK, 2);
+    if (!none && !t->ok && t->refusalCode >= 2) c->y += Wrapped(c, MsgText(&t->refusal), UI_S, UI_ERROR, 3);    // (a refusal)
+    else if (!none && t->intoSet) c->y += Wrapped(c, MsgText(&t->into), UI_S, UI_DIM, 3);
     c->y += GAP;
 }
 
@@ -374,7 +374,7 @@ static void SectionDensity(Ctx *c)
     if (Field(c, W_DENS_F, fr, &fv, 8.0f, 512.0f, 1.0f, 0)) dm->density = fv;
     c->y += ROW_H + ROW_GAP;
     // The texel size on the target (its rectangle's, or the one its first stroke gets), else at the density
-    const char *texel = TargetSet(dm) && dm->target.ok && dm->target.texel[0] ? dm->target.texel
+    const char *texel = TargetSet(dm) && dm->target.ok && dm->target.texelSet ? MsgText(&dm->target.texel)
                       : TextFormat("new paint: a texel is about %.1f mm", 1000.0f / d);
     c->y += Wrapped(c, texel, UI_S, UI_DIM, 2) + GAP - 1;
     int bw = (c->w - GAP) / 2;

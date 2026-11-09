@@ -16,10 +16,24 @@ Vector3 LookDir(float yaw, float pitch)
     return (Vector3){ cosf(pitch) * sinf(yaw), sinf(pitch), cosf(pitch) * cosf(yaw) };
 }
 
-void SpectatorMessage(Spectator *s, const char *text)
+void SpectatorMessageStatic(Spectator *s, const char *literal)
 {
-    snprintf(s->message, sizeof(s->message), "%s", text);
+    MsgSetStatic(&s->message, literal);
     s->messageTime = 3.0f;
+}
+
+void SpectatorMessagef(Spectator *s, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    MsgSetv(&s->message, fmt, ap);
+    va_end(ap);
+    s->messageTime = 3.0f;
+}
+
+void SpectatorFree(Spectator *s)
+{
+    MsgFree(&s->message);
 }
 
 void SpectatorFlyToPose(Spectator *s, Vector3 eye, float yaw, float pitch)
@@ -44,7 +58,7 @@ void SpectatorFlyTo(Spectator *s, int view)
     LookAngles(scene->viewpoints[view].eye, scene->viewpoints[view].target, &yaw, &pitch);
     s->view = view;
     SpectatorFlyToPose(s, scene->viewpoints[view].eye, yaw, pitch);
-    SpectatorMessage(s, TextFormat("[%d/%d] %s", view + 1, scene->viewpointCount, scene->viewpoints[view].name));
+    SpectatorMessagef(s, "[%d/%d] %s", view + 1, scene->viewpointCount, scene->viewpoints[view].name);
 }
 
 void SpectatorJumpTo(Spectator *s, int view)
@@ -71,7 +85,7 @@ void UpdateSpectator(Spectator *s, Player *player, float dt, bool arrows)
     float wheel = fly ? GetMouseWheelMove() : 0.0f;
     if (wheel != 0.0f) {
         s->speed = Clamp(s->speed * powf(1.25f, wheel), SPEC_MIN_SPEED, SPEC_MAX_SPEED);
-        SpectatorMessage(s, TextFormat("speed %.1f m/s", s->speed));
+        SpectatorMessagef(s, "speed %.1f m/s", s->speed);
     }
 
     // Print the current view as command line arguments (for --shot and bookmarks)
@@ -82,7 +96,7 @@ void UpdateSpectator(Spectator *s, Player *player, float dt, bool arrows)
         printf("%s\n", line);
         fflush(stdout);
         SetClipboardText(line);
-        SpectatorMessage(s, TextFormat("copied: %s", line));
+        SpectatorMessagef(s, "copied: %s", line);
     }
 
     // Drop the player at the current spot
@@ -91,7 +105,7 @@ void UpdateSpectator(Spectator *s, Player *player, float dt, bool arrows)
         player->vel = Vector3Zero();
         player->yaw = s->yaw;
         player->pitch = s->pitch;
-        SpectatorMessage(s, "player moved here (TAB to walk)");
+        SpectatorMessageStatic(s, "player moved here (TAB to walk)");
     }
 
     Vector2 md = fly ? GetMouseDelta() : (Vector2){ 0, 0 };

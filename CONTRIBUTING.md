@@ -18,7 +18,8 @@ Map-only changes (a `.map` file, `MAP.md`, a package's shaders, models, textures
 
 ## Rules
 
-- **No fixed-size buffers for content.** Anything whose size depends on the map, the selection, the regions or the input is a heap array (`MS_RESERVE` / `MS_PUSH`) or a heap string. Fixed arrays only for stack scratch that formats one path or message. The per-frame path never allocates.
+- **No fixed-size buffers for content.** Anything whose size depends on the map, the selection, the regions or the input is a heap array (`MS_RESERVE` / `MS_PUSH`) or a heap string. Fixed arrays only for stack scratch that formats one path. The per-frame path never allocates.
+- **Results are status codes, messages are for people.** A function that can fail or end in several ways returns an `unsigned char` (0 = success, the other values listed in its comment); callers compare with the number and never branch on a message. Text that is logged or shown is never a fixed-size buffer: a literal stays a `const char *`, run-time text is a heap string sized to fit (`MonoMsg` / `MonoStrf`, `src/msg.h`), failures go to `MS_LastError()`.
 - **R3D changes are patches.** Work around R3D from the app side where reasonable. When R3D itself must change, change it minimally and record it in `submodules/r3d/patches.md` (symptom, cause, files, diff, verification).
 - **Assets need a recorded licence:** CC0 / public domain, or CC-BY with the attribution. Every external file gets a row in its package's `ASSETS.md` and a `<file>.asset.md` sidecar (`tools/record_asset.py` writes both). Models are restyled with material overrides in the map, never by editing the file. The editor's own font (`resources/fonts/`) is the one exception: it may be under the SIL Open Font License 1.1, recorded the same way, with its `OFL.txt` shipped next to the binary.
 - **The level is data.** Nothing in the engine or the shared docs assumes one map's style; a map's style and rules live in its `MAP.md`.

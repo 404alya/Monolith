@@ -73,18 +73,35 @@ typedef struct {
     Vector2 uv;             // the hit in the entry's paint coordinates (0..1; -1: no paint UVs yet)
 } DrawGeom;
 
+// What a per-frame text was built from (drawmode.c TextKeyOf): the texts hold names, so they are heap
+// strings, rebuilt only when this changes (the hover and the target resolve every frame)
+typedef struct {
+    bool set;
+    unsigned char code;
+    int kind, index, face, slot, material;
+    unsigned int version;
+    bool ok, fresh, needsUnwrap;
+    int atlasW, atlasH, w, h, x, y;
+} DrawTextKey;
+
 // The surface the panel shows and acts on (docs/painting.md 13.2): the one the cursor last rested
 // on in the scene (for 0.3 s, or clicked), so crossing other objects on the way to the panel
 // doesn't change it. Found again (the same ray) when the scene changed
 typedef struct {
     MS_SurfaceHit hit;
     bool ok;                // it can be painted
-    char refusal[200];      // why not ("" when nothing is there)
+    unsigned char refusalCode;  // Resolve's code: 0 paintable, 1 nothing there, 2.. a refusal (its words:)
+    MonoMsg refusal;        // why not (codes >= 2; rebuilt only when refusalKey changes: no per-frame allocation)
+    DrawTextKey refusalKey;
     DrawGeom geom;
     Ray ray;                // the ray that found it
     unsigned int version;   // scene->version then
     unsigned int gen;       // +1 whenever it becomes another surface (object, face or slot)
-    char what[200], into[240], texel[160];      // the panel's lines (DrawModeUpdate / DrawModeHover)
+    // The panel's lines (DrawModeUpdate / DrawModeHover): what it is, what paint there goes into (set
+    // when ok), the texel size (texelSet); rebuilt only when textKey changes (they hold names)
+    MonoMsg what, into, texel;
+    bool intoSet, texelSet;
+    DrawTextKey textKey;
     bool facesOk;           // a box: the Faces section shows its groups
     int faceKey;            // the box and material the groups belong to (-1: none)
     unsigned char groups[6];// per face +x .. -z: its group (faces in one entry share a number; a face
@@ -121,12 +138,18 @@ typedef struct {
     int lastRegion;         // ... its region (the step's)
     MS_SurfaceHit lastHit;  // the surface of the last stroke's LMB down (--paint-script's faces,
     bool lastHitSet;        // resize, clear, pixel)
-    // What is under the cursor (every frame) and why it can't be painted ("" = it can)
+    // What is under the cursor (every frame) and why it can't be painted (refusalCode: Resolve's
+    // code, 0 paintable, 1 nothing there, 2.. a refusal, its text in refusal: per-frame state, bounded)
     MS_SurfaceHit hover;
-    char refusal[200];
-    char message[256];
+    unsigned char refusalCode;
+    MonoMsg refusal;        // (rebuilt only when refusalKey changes)
+    DrawTextKey refusalKey;
+    // The last message (an event: SayStatic / Sayf set it), shown while messageTime runs; messageSaid:
+    // one was said since --paint-script cleared it for its next command
+    MonoMsg message;
     float messageTime;
     bool messageError;
+    bool messageSaid;
     EditMode *em;           // the edit mode whose history it shares (the hooks' user is the DrawMode)
     Color prevColor;        // X swaps with it
     Vector2 cursorPx;       // where the cursor is (window pixels)
@@ -197,8 +220,12 @@ void DrawModeBeforeSync(DrawMode *dm);
 void DrawModeSync(DrawMode *dm, EditMode *em, bool newScene);
 // CTRL+S: the unsaved atlases' PNGs and the new unwrap sidecars, then the map (MapEditSave), the
 // licence records, then MS_EditMarkSaved (the edit history's save hook: EditModeSave and auto save
-// call it too)
-bool DrawModeSave(DrawMode *dm, EditMode *em, char *msg, int msgSize);
+// call it too). Logs "monolith: <text>" itself (INFO for 0 / 1, WARNING for 2), except when the map
+// changed on disk (nothing tried: the caller says that one). Returns:
+//   0  saved: the text in the editor's note (MapEditNote(&em->ed)): "saved ...; %d paint file%s written ..."
+//   1  nothing to save: the map was up to date, no paint file or licence record written (the note)
+//   2  not saved, or saved only in part: the whole sentence in MS_LastError()
+unsigned char DrawModeSave(DrawMode *dm, EditMode *em);
 // Atlases with unsaved pixels
 int DrawModeUnsavedAtlases(const DrawMode *dm);
 // Closing with unsaved paint: the atlases (and unwraps) under dir (<settings>/unsaved/<map>-<time>/)

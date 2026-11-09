@@ -65,7 +65,8 @@
 // failed[] (the HUD lists them); the history before the save point is dropped. Steps undone past
 // the save point can't be replayed as ops (they are reported as failed: the file keeps them).
 // Without unsaved steps the history is dropped (MapEditBegin), so an undo never reverts a
-// change the developer didn't make here. --apply-edits: MapEditSync drops it as before.
+// change the developer didn't make here. --apply-edits (no working copy): every edit, undo and
+// redo first checks that the file on disk is still the loaded map.
 //
 // Edit script (--apply-edits <file>; one command per line, '#' starts a comment):
 //   select line <n> [copy <c>]     the selection becomes every object of map line n (with
@@ -343,7 +344,7 @@ static bool Tokenize(Stmt *st)
 }
 
 // Reads the statement's prefixes, keyword and positional numbers. False with a reason.
-static bool Analyze(Stmt *st, const char *text, int len, char *why, int whySize)
+static bool Analyze(Stmt *st, const char *text, int len, const char **why)
 {
     st->text = text;
     st->len = len;
@@ -354,7 +355,7 @@ static bool Analyze(Stmt *st, const char *text, int len, char *why, int whySize)
     memset(st->repFrom, 0, sizeof(st->repFrom));
     memset(st->at, 0, sizeof(st->at));
     memset(st->atF, 0, sizeof(st->atF));
-    if (!Tokenize(st)) { snprintf(why, whySize, "cannot read the line"); return false; }
+    if (!Tokenize(st)) { *why = "cannot read the line"; return false; }
     int t = 0;
     for (;;) {
         if (TokIs(st, t, "id")) {
@@ -366,7 +367,7 @@ static bool Analyze(Stmt *st, const char *text, int len, char *why, int whySize)
             st->repTok[r] = t;
             if (!TokInt(st, t + 1, &st->repN[r])) break;
             for (int a = 0; a < 3; a++)
-                if (!TokNum(st, t + 2 + a, &st->repD[r][a], &st->repDf[r][a])) { snprintf(why, whySize, "bad repeat"); return false; }
+                if (!TokNum(st, t + 2 + a, &st->repD[r][a], &st->repDf[r][a])) { *why = "bad repeat"; return false; }
             t += 5;
             st->repFrom[r] = 0;
             if (TokIs(st, t, "from")) {
@@ -378,12 +379,12 @@ static bool Analyze(Stmt *st, const char *text, int len, char *why, int whySize)
         } else if (TokIs(st, t, "at")) {
             st->atTok = t;
             for (int a = 0; a < 3; a++)
-                if (!TokNum(st, t + 1 + a, &st->at[a], &st->atF[a])) { snprintf(why, whySize, "bad at"); return false; }
+                if (!TokNum(st, t + 1 + a, &st->at[a], &st->atF[a])) { *why = "bad at"; return false; }
             t += 4;
         } else break;
     }
     st->kw = t;
-    if (t >= st->n || !TokCopy(st, t, st->prim, sizeof(st->prim))) { snprintf(why, whySize, "not an object line"); return false; }
+    if (t >= st->n || !TokCopy(st, t, st->prim, sizeof(st->prim))) { *why = "not an object line"; return false; }
     if (TokIs(st, t, "light")) {
         st->kind = ST_LIGHT;
         int nPos = TokIs(st, t + 1, "dir") ? 0 : 3, nDir = TokIs(st, t + 1, "point") ? 0 : 3;
@@ -406,7 +407,7 @@ static bool Analyze(Stmt *st, const char *text, int len, char *why, int whySize)
     } else {
         unsigned char axes[8];
         int argc = MS_PrimitiveArgs(st->prim, axes);
-        if (argc < 0) { snprintf(why, whySize, "not an object line"); return false; }
+        if (argc < 0) { *why = "not an object line"; return false; }
         st->kind = ST_BOX;
         for (int a = 0; a < argc; a++)
             if (axes[a] >= MS_AXIS_X && axes[a] <= MS_AXIS_Z) {
@@ -415,12 +416,12 @@ static bool Analyze(Stmt *st, const char *text, int len, char *why, int whySize)
             }
         if (argc == 6 && TokIs(st, t + 7, "rot")) {     // box / block ... rot yaw pitch roll
             for (int a = 0; a < 3; a++)
-                if (!TokNum(st, t + 8 + a, NULL, NULL)) { snprintf(why, whySize, "bad rot"); return false; }
+                if (!TokNum(st, t + 8 + a, NULL, NULL)) { *why = "bad rot"; return false; }
             st->rotTok = t + 7;
         }
     }
     for (int k = 0; k < st->posCount; k++)
-        if (!TokNum(st, st->posTok[k], NULL, NULL)) { snprintf(why, whySize, "unexpected line layout"); return false; }
+        if (!TokNum(st, st->posTok[k], NULL, NULL)) { *why = "unexpected line layout"; return false; }
     return true;
 }
 
@@ -676,8 +677,23 @@ typedef struct {
     const EditOp *op;
     int nextId;             // the next free `id`
     Rewrite rw;
-    char why[200];          // first refusal
+    bool refused;           // a refusal was given (its reason is in MS_LastError())
 } Ctx;
+
+// A refusal: the reason goes straight to the last error (MS_SetError) and C->refused is set.
+// Returns false, so a check can `return Refuse(C, ...)`.
+static bool Refuse(Ctx *C, const char *fmt, ...) MSG_PRINTF(2, 3);
+static bool Refuse(Ctx *C, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    char *why = MonoStrv(fmt, ap);
+    va_end(ap);
+    MS_SetError("%s", why ? why : "out of memory");
+    free(why);
+    C->refused = true;
+    return false;
+}
 
 static double NormalizeYaw(double y)
 {
@@ -1073,7 +1089,7 @@ static void RwBoxTurn(Ctx *C, const Stmt *st, double *vals, const double P[3], b
 
 // EDIT_ROTATE, EDIT_SET_ROTATION, EDIT_SCALE, EDIT_SIZE on a box / block / model line: vals[]
 // (positional numbers: the line's own (whole) or one copy's world numbers) become the new ones
-// (the caller writes them); everything else is spliced into C->rw. False with C->why.
+// (the caller writes them); everything else is spliced into C->rw. False with the refusal in MS_LastError().
 static bool RwTransform(Ctx *C, const Stmt *st, double *vals, bool whole)
 {
     const EditOp *op = C->op;
@@ -1081,12 +1097,12 @@ static bool RwTransform(Ctx *C, const Stmt *st, double *vals, bool whole)
     bool box = st->kind == ST_BOX && strcmp(st->prim, "box") == 0, block = st->kind == ST_BOX && strcmp(st->prim, "block") == 0;
     bool turn = op->kind == EDIT_ROTATE || op->kind == EDIT_SET_ROTATION;
     const char *what = turn ? "turn" : op->kind == EDIT_SCALE ? "scale" : "resize";
-    if (st->kind == ST_LIGHT) { snprintf(C->why, sizeof(C->why), "lights can't %s (only their position moves)", what); return false; }
+    if (st->kind == ST_LIGHT) { Refuse(C, "lights can't %s (only their position moves)", what); return false; }
     if (st->kind == ST_BOX && !box && !block) {
-        snprintf(C->why, sizeof(C->why), "%s lines can't %s (only box and block lines)", st->prim, what);
+        Refuse(C, "%s lines can't %s (only box and block lines)", st->prim, what);
         return false;
     }
-    if (op->kind == EDIT_SIZE && st->kind == ST_MODEL) { snprintf(C->why, sizeof(C->why), "size is for boxes (models: scale)"); return false; }
+    if (op->kind == EDIT_SIZE && st->kind == ST_MODEL) { Refuse(C, "size is for boxes (models: scale)"); return false; }
     int sz = st->kw + 4;    // block: the first size token (sx sy sz)
     // The object's own centre (box, block) or origin (model): the pivot when the op has none
     double own[3];
@@ -1117,7 +1133,7 @@ static bool RwTransform(Ctx *C, const Stmt *st, double *vals, bool whole)
 
     if (op->kind == EDIT_SCALE) {
         const double *F = op->factor;
-        if (!(F[0] > 0.0 && F[1] > 0.0 && F[2] > 0.0)) { snprintf(C->why, sizeof(C->why), "a scale factor must be > 0"); return false; }
+        if (!(F[0] > 0.0 && F[1] > 0.0 && F[2] > 0.0)) { Refuse(C, "a scale factor must be > 0"); return false; }
         bool about = st->kind == ST_BOX || !op->local;      // local: each model about its own origin
         double ypr[3];
         ModelRot(st, ypr);
@@ -1131,7 +1147,7 @@ static bool RwTransform(Ctx *C, const Stmt *st, double *vals, bool whole)
                 c[a] = P[a] + F[a] * (c[a] - P[a]);
                 double ne = e[a] * f[a];
                 if (e[a] != 0.0 && fabs(Written(ne)) < 1e-6) {
-                    snprintf(C->why, sizeof(C->why), "the box would be thinner than 0.000001 m along its %c axis", "xyz"[a]);
+                    Refuse(C, "the box would be thinner than 0.000001 m along its %c axis", "xyz"[a]);
                     return false;
                 }
                 if (box) { vals[a] = c[a] - ne * 0.5; vals[a + 3] = c[a] + ne * 0.5; }
@@ -1153,14 +1169,14 @@ static bool RwTransform(Ctx *C, const Stmt *st, double *vals, bool whole)
         // (a box flattened to nothing by the 6 written decimals would be a different object)
         for (int a = 0; box && a < 3; a++)
             if (vals[a] != vals[a + 3] && fabs(Written(vals[a + 3]) - Written(vals[a])) < 1e-6) {
-                snprintf(C->why, sizeof(C->why), "the box would be thinner than 0.000001 m along %c", "xyz"[a]);
+                Refuse(C, "the box would be thinner than 0.000001 m along %c", "xyz"[a]);
                 return false;
             }
         if (block)
             for (int a = 0; a < 3; a++) {
                 double v = TokValue(st, sz + a) * F[a];
                 if (TokValue(st, sz + a) != 0.0 && fabs(Written(v)) < 1e-6) {
-                    snprintf(C->why, sizeof(C->why), "the block would be thinner than 0.000001 m along %c", "xyz"[a]);
+                    Refuse(C, "the block would be thinner than 0.000001 m along %c", "xyz"[a]);
                     return false;
                 }
                 if (F[a] != 1.0) RwNumber(w, st, sz + a, v, NumDecimals(st, sz + a));
@@ -1170,7 +1186,7 @@ static bool RwTransform(Ctx *C, const Stmt *st, double *vals, bool whole)
             RwSteps(w, st, &D);
         }
         if (st->kind == ST_MODEL && !RwModelScale(w, st, op)) {
-            snprintf(C->why, sizeof(C->why), "the model's scale would be written as 0 (factor too small)");
+            Refuse(C, "the model's scale would be written as 0 (factor too small)");
             return false;
         }
         return true;
@@ -1178,10 +1194,10 @@ static bool RwTransform(Ctx *C, const Stmt *st, double *vals, bool whole)
 
     // EDIT_SIZE: about the box's own centre (a whole line: each copy about its own)
     const double *S = op->size;
-    if (S[0] < 0.0 || S[1] < 0.0 || S[2] < 0.0) { snprintf(C->why, sizeof(C->why), "a size must be >= 0 (0 keeps that axis)"); return false; }
+    if (S[0] < 0.0 || S[1] < 0.0 || S[2] < 0.0) { Refuse(C, "a size must be >= 0 (0 keeps that axis)"); return false; }
     for (int a = 0; a < 3; a++) {
         if (S[a] == 0.0) continue;
-        if (S[a] < 1e-6) { snprintf(C->why, sizeof(C->why), "a size must be at least 0.000001 m (0 keeps that axis)"); return false; }
+        if (S[a] < 1e-6) { Refuse(C, "a size must be at least 0.000001 m (0 keeps that axis)"); return false; }
         if (box) {
             bool flip = vals[a] > vals[a + 3];
             double lo = own[a] - S[a] * 0.5, hi = own[a] + S[a] * 0.5;
@@ -1325,8 +1341,21 @@ typedef struct {
     bool selByStmt;         // sel[].stmt is a statement index (MS_Source.prim), resolved to the
                             // new entity ids once the edited text is loaded (EDIT_ID_REMOVE: the
                             // implicit keys come from the runtime)
-    char what[200];
+    char *what;             // what the patch does, for the HUD (heap; NULL: out of memory)
 } Patch;
+
+// Sets P->what (printf, sized to fit). The arguments may quote P->what: it is freed after the
+// formatting. Out of memory leaves NULL (BuildPatch refuses then).
+static void PatchWhat(Patch *P, const char *fmt, ...) MSG_PRINTF(2, 3);
+static void PatchWhat(Patch *P, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    char *what = MonoStrv(fmt, ap);
+    va_end(ap);
+    free(P->what);
+    P->what = what;
+}
 
 static bool IndexLines(Patch *P)
 {
@@ -1534,6 +1563,7 @@ static void ActiveUse(const Patch *P, int line, char *out, int outSize)
 
 static void FreePatch(Patch *P)
 {
+    free(P->what);
     free(P->lines);
     for (int i = 0; i < P->outCount; i++) free(P->outs[i].text.s);
     free(P->outs);
@@ -1544,20 +1574,21 @@ static void FreePatch(Patch *P)
 static bool IdLines(Ctx *C, Patch *P, const StmtSel *ss, int ssCount, Stmt *st)
 {
     int want = C->op->id;
-    if (want < 0) { snprintf(C->why, sizeof(C->why), "an id is a number from 1 to 2147483647"); return false; }
+    if (want < 0) { Refuse(C, "an id is a number from 1 to 2147483647"); return false; }
     if (want > 0 && ssCount > 1) {
-        snprintf(C->why, sizeof(C->why), "one id names one line: select objects of a single line (the selection has %d)", ssCount);
+        Refuse(C, "one id names one line: select objects of a single line (the selection has %d)", ssCount);
         return false;
     }
     int other = want > 0 ? IdLine(P, want) : 0;
-    if (other && other != ss[0].line) { snprintf(C->why, sizeof(C->why), "id %d is used on line %d already", want, other); return false; }
+    if (other && other != ss[0].line) { Refuse(C, "id %d is used on line %d already", want, other); return false; }
     int changed = 0, objects = 0, firstId = 0, lastId = 0, oldId = 0, lastCount = 0, lastLine = 0;
     for (int k = 0; k < ssCount; k++) {
         const StmtSel *S = &ss[k];
-        if (S->line < 1 || S->line > P->lineCount) { snprintf(C->why, sizeof(C->why), "line %d is not in the file", S->line); return false; }
+        if (S->line < 1 || S->line > P->lineCount) { Refuse(C, "line %d is not in the file", S->line); return false; }
         const LineSpan *ls = &P->lines[S->line - 1];
-        if (!Analyze(st, P->text + ls->start, ls->contentEnd - ls->start, C->why, sizeof(C->why))) return false;
-        if (CopyCount(st) != S->copies) { snprintf(C->why, sizeof(C->why), "line %d: the copies don't match the loaded map", S->line); return false; }
+        const char *bad;
+        if (!Analyze(st, P->text + ls->start, ls->contentEnd - ls->start, &bad)) return Refuse(C, "%s", bad);
+        if (CopyCount(st) != S->copies) { Refuse(C, "line %d: the copies don't match the loaded map", S->line); return false; }
         int has = st->idTok >= 0 ? st->id : 0;
         int id = want > 0 ? want : has ? has : C->nextId++;
         // The selection keeps the same objects (their line's new key, the same index)
@@ -1565,11 +1596,11 @@ static bool IdLines(Ctx *C, Patch *P, const StmtSel *ss, int ssCount, Stmt *st)
             if (S->copySel[scene->entitySources[S->firstEntity + i].copy]) SelAdd(P, (unsigned int)id, i);
         if (id == has) continue;
         LineOut *o = OutFor(P, S->line);
-        if (!o) { snprintf(C->why, sizeof(C->why), "out of memory"); return false; }
+        if (!o) { Refuse(C, "out of memory"); return false; }
         RwReset(&C->rw);
         RwId(&C->rw, st, id);
         RwBuild(&C->rw, st, &o->text);
-        if (C->rw.oom || o->text.oom) { snprintf(C->why, sizeof(C->why), "out of memory"); return false; }
+        if (C->rw.oom || o->text.oom) { Refuse(C, "out of memory"); return false; }
         if (!changed) firstId = id;
         lastId = id;
         oldId = has;
@@ -1579,17 +1610,17 @@ static bool IdLines(Ctx *C, Patch *P, const StmtSel *ss, int ssCount, Stmt *st)
         changed++;
     }
     if (!changed) {
-        if (ssCount == 1) snprintf(C->why, sizeof(C->why), "line %d has id %d already", ss[0].line, want > 0 ? want : st->id);
-        else snprintf(C->why, sizeof(C->why), "every selected line has an id already");
+        if (ssCount == 1) Refuse(C, "line %d has id %d already", ss[0].line, want > 0 ? want : st->id);
+        else Refuse(C, "every selected line has an id already");
         return false;
     }
     const char *kept = changed < ssCount ? TextFormat("; %d other line%s had an id already", ssCount - changed,
                                                       ssCount - changed == 1 ? "" : "s") : "";
     if (changed == 1)
-        snprintf(P->what, sizeof(P->what), "id %d on line %d (%d object%s: %d:0%s)%s%s", lastId, lastLine, lastCount,
-                 lastCount == 1 ? "" : "s", lastId, lastCount > 1 ? TextFormat(" .. %d:%d", lastId, lastCount - 1) : "",
-                 oldId ? TextFormat(", was id %d", oldId) : "", kept);
-    else snprintf(P->what, sizeof(P->what), "ids %d..%d on %d lines (%d objects)%s", firstId, lastId, changed, objects, kept);
+        PatchWhat(P, "id %d on line %d (%d object%s: %d:0%s)%s%s", lastId, lastLine, lastCount,
+                  lastCount == 1 ? "" : "s", lastId, lastCount > 1 ? TextFormat(" .. %d:%d", lastId, lastCount - 1) : "",
+                  oldId ? TextFormat(", was id %d", oldId) : "", kept);
+    else PatchWhat(P, "ids %d..%d on %d lines (%d objects)%s", firstId, lastId, changed, objects, kept);
     return true;
 }
 
@@ -1602,19 +1633,20 @@ static bool IdRemoveLines(Ctx *C, Patch *P, const StmtSel *ss, int ssCount, Stmt
     P->selByStmt = true;
     for (int k = 0; k < ssCount; k++) {
         const StmtSel *S = &ss[k];
-        if (S->line < 1 || S->line > P->lineCount) { snprintf(C->why, sizeof(C->why), "line %d is not in the file", S->line); return false; }
+        if (S->line < 1 || S->line > P->lineCount) { Refuse(C, "line %d is not in the file", S->line); return false; }
         const LineSpan *ls = &P->lines[S->line - 1];
-        if (!Analyze(st, P->text + ls->start, ls->contentEnd - ls->start, C->why, sizeof(C->why))) return false;
-        if (CopyCount(st) != S->copies) { snprintf(C->why, sizeof(C->why), "line %d: the copies don't match the loaded map", S->line); return false; }
+        const char *bad;
+        if (!Analyze(st, P->text + ls->start, ls->contentEnd - ls->start, &bad)) return Refuse(C, "%s", bad);
+        if (CopyCount(st) != S->copies) { Refuse(C, "line %d: the copies don't match the loaded map", S->line); return false; }
         for (int i = 0; i < S->entityCount; i++)
             if (S->copySel[scene->entitySources[S->firstEntity + i].copy]) SelAdd(P, (unsigned int)S->prim, i);
         if (st->idTok < 0) continue;
         LineOut *o = OutFor(P, S->line);
-        if (!o) { snprintf(C->why, sizeof(C->why), "out of memory"); return false; }
+        if (!o) { Refuse(C, "out of memory"); return false; }
         RwReset(&C->rw);
         RwDropTokens(&C->rw, st, st->idTok, st->idTok + 2);
         RwBuild(&C->rw, st, &o->text);
-        if (C->rw.oom || o->text.oom) { snprintf(C->why, sizeof(C->why), "out of memory"); return false; }
+        if (C->rw.oom || o->text.oom) { Refuse(C, "out of memory"); return false; }
         lastId = st->id;
         lastLine = S->line;
         lastCount = S->entityCount;
@@ -1622,16 +1654,16 @@ static bool IdRemoveLines(Ctx *C, Patch *P, const StmtSel *ss, int ssCount, Stmt
         changed++;
     }
     if (!changed) {
-        if (ssCount == 1) snprintf(C->why, sizeof(C->why), "line %d has no id (its objects' ids are implicit already)", ss[0].line);
-        else snprintf(C->why, sizeof(C->why), "no selected line has an id");
+        if (ssCount == 1) Refuse(C, "line %d has no id (its objects' ids are implicit already)", ss[0].line);
+        else Refuse(C, "no selected line has an id");
         return false;
     }
     const char *kept = changed < ssCount ? TextFormat("; %d other line%s had no id", ssCount - changed,
                                                       ssCount - changed == 1 ? "" : "s") : "";
     if (changed == 1)
-        snprintf(P->what, sizeof(P->what), "id %d removed from line %d (%d object%s, now implicit)%s", lastId, lastLine, lastCount,
-                 lastCount == 1 ? "" : "s", kept);
-    else snprintf(P->what, sizeof(P->what), "ids removed from %d lines (%d objects, now implicit)%s", changed, objects, kept);
+        PatchWhat(P, "id %d removed from line %d (%d object%s, now implicit)%s", lastId, lastLine, lastCount,
+                  lastCount == 1 ? "" : "s", kept);
+    else PatchWhat(P, "ids removed from %d lines (%d objects, now implicit)%s", changed, objects, kept);
     return true;
 }
 
@@ -1747,21 +1779,21 @@ static void RwDropKey(Rewrite *w, const Stmt *st, int from, int to)
 static bool MaterialSet(Ctx *C, Patch *P, Stmt *st)
 {
     const EditOp *op = C->op;
-    if (!op->matName || !op->matName[0]) { snprintf(C->why, sizeof(C->why), "material-set needs a material name"); return false; }
+    if (!op->matName || !op->matName[0]) { Refuse(C, "material-set needs a material name"); return false; }
     Stmt ks = { .text = op->matKeys ? op->matKeys : "", .len = op->matKeys ? (int)strlen(op->matKeys) : 0 };
     bool ok = false;
     bool *found = NULL, *written = NULL;
     int *mlines = NULL, mlCount = 0, mlCap = 0;
-    if (!Tokenize(&ks)) { snprintf(C->why, sizeof(C->why), "material-set: cannot read the keys"); goto done; }
-    if (ks.n == 0) { snprintf(C->why, sizeof(C->why), "material-set needs keys"); goto done; }
+    if (!Tokenize(&ks)) { Refuse(C, "material-set: cannot read the keys"); goto done; }
+    if (ks.n == 0) { Refuse(C, "material-set needs keys"); goto done; }
     for (int l = 0; l < P->lineCount; l++)
         if (MaterialLineIs(P, l, op->matName, st)) {
             int *slot = MS_PUSH(mlines, mlCount, mlCap);
-            if (!slot) { snprintf(C->why, sizeof(C->why), "out of memory"); goto done; }
+            if (!slot) { Refuse(C, "out of memory"); goto done; }
             *slot = l;
         }
-    if (mlCount == 0) { snprintf(C->why, sizeof(C->why), "no material \"%s\" in the map", op->matName); goto done; }
-    if (!(found = calloc((size_t)ks.n, sizeof(bool))) || !(written = calloc((size_t)ks.n, sizeof(bool)))) { snprintf(C->why, sizeof(C->why), "out of memory"); goto done; }
+    if (mlCount == 0) { Refuse(C, "no material \"%s\" in the map", op->matName); goto done; }
+    if (!(found = calloc((size_t)ks.n, sizeof(bool))) || !(written = calloc((size_t)ks.n, sizeof(bool)))) { Refuse(C, "out of memory"); goto done; }
     // Pass 0 finds which keys the material has, pass 1 writes the lines
     for (int pass = 0; pass < 2; pass++)
         for (int i = 0; i < mlCount; i++) {
@@ -1790,18 +1822,18 @@ static bool MaterialSet(Ctx *C, Patch *P, Stmt *st)
                     StrBuf b = { 0 };
                     SbStr(&b, " ");
                     SbAdd(&b, ks.text + ks.tok[kk].s, ks.tok[ke - 1].e - ks.tok[kk].s);
-                    if (b.oom) { free(b.s); snprintf(C->why, sizeof(C->why), "out of memory"); goto done; }
+                    if (b.oom) { free(b.s); Refuse(C, "out of memory"); goto done; }
                     RwSet(&C->rw, at, at, b.s, b.len);
                     free(b.s);
                     splices++;
                 }
             if (pass == 0 || splices == 0) continue;
             LineOut *o = OutFor(P, l + 1);
-            if (!o) { snprintf(C->why, sizeof(C->why), "out of memory"); goto done; }
+            if (!o) { Refuse(C, "out of memory"); goto done; }
             RwBuild(&C->rw, st, &o->text);
-            if (C->rw.oom || o->text.oom) { snprintf(C->why, sizeof(C->why), "out of memory"); goto done; }
+            if (C->rw.oom || o->text.oom) { Refuse(C, "out of memory"); goto done; }
         }
-    snprintf(P->what, sizeof(P->what), "material %s: %.150s", op->matName, ks.text);
+    PatchWhat(P, "material %s: %.150s", op->matName, ks.text);
     ok = true;
 done:
     free(found);
@@ -2009,7 +2041,7 @@ static bool PaintObject(Ctx *C, const Patch *P, MS_ObjRef obj, Stmt *st, int *li
 {
     int e = MS_ObjectEntity(scene, obj);
     if (e < 0 || (obj.kind != MS_OBJ_BOX && obj.kind != MS_OBJ_MODEL)) {
-        snprintf(C->why, sizeof(C->why), "paint: select a box or a model (one object)");
+        Refuse(C, "paint: select a box or a model (one object)");
         return false;
     }
     const MS_Source *src = &scene->entitySources[e];
@@ -2017,9 +2049,10 @@ static bool PaintObject(Ctx *C, const Patch *P, MS_ObjRef obj, Stmt *st, int *li
     while (first > 0 && scene->entitySources[first - 1].prim == src->prim) first--;
     *index = e - first;
     *line = src->line;
-    if (*line < 1 || *line > P->lineCount) { snprintf(C->why, sizeof(C->why), "line %d is not in the file", *line); return false; }
+    if (*line < 1 || *line > P->lineCount) { Refuse(C, "line %d is not in the file", *line); return false; }
     const LineSpan *ls = &P->lines[*line - 1];
-    if (!Analyze(st, P->text + ls->start, ls->contentEnd - ls->start, C->why, sizeof(C->why))) return false;
+    const char *bad;
+    if (!Analyze(st, P->text + ls->start, ls->contentEnd - ls->start, &bad)) return Refuse(C, "%s", bad);
     *id = st->idTok >= 0 ? st->id : 0;
     return true;
 }
@@ -2067,7 +2100,7 @@ static bool PaintSteal(Ctx *C, const Patch *P, PaintEdit *pe, Stmt *st, int id, 
 static bool PaintRectOk(Ctx *C, const int r[4])
 {
     if (r[0] < 0 || r[1] < 0 || r[2] < 1 || r[3] < 1 || r[0] > 1000000 || r[1] > 1000000 || r[2] > 1000000 || r[3] > 1000000) {
-        snprintf(C->why, sizeof(C->why), "paint: the rectangle must be x y >= 0, w h >= 1");
+        Refuse(C, "paint: the rectangle must be x y >= 0, w h >= 1");
         return false;
     }
     return true;
@@ -2089,12 +2122,12 @@ static bool PaintAdd(Ctx *C, Patch *P, PaintEdit *pe, MS_ObjRef obj, Stmt *st)
     const EditOp *op = C->op;
     const char *mat = op->paint.material;
     bool model = obj.kind == MS_OBJ_MODEL;
-    if (mat && (!mat[0] || strchr(mat, '"'))) { snprintf(C->why, sizeof(C->why), "paint: bad material name"); return false; }
+    if (mat && (!mat[0] || strchr(mat, '"'))) { Refuse(C, "paint: bad material name"); return false; }
     if (!model && (!mat || (op->paint.faces & EDIT_PAINT_ALL_FACES) == 0 || (op->paint.faces & ~EDIT_PAINT_ALL_FACES))) {
-        snprintf(C->why, sizeof(C->why), "paint-add on a box takes a material and faces");
+        Refuse(C, "paint-add on a box takes a material and faces");
         return false;
     }
-    if (model && op->paint.slot < 0) { snprintf(C->why, sizeof(C->why), "paint-add on a model takes a slot"); return false; }
+    if (model && op->paint.slot < 0) { Refuse(C, "paint-add on a model takes a slot"); return false; }
     if (!PaintRectOk(C, op->paint.rect)) return false;
     int line, id, index;
     if (!PaintObject(C, P, obj, st, &line, &id, &index)) return false;
@@ -2111,7 +2144,7 @@ static bool PaintAdd(Ctx *C, Patch *P, PaintEdit *pe, MS_ObjRef obj, Stmt *st)
     // A model slot has one entry per material; a box's faces leave the entries they were in
     for (int k = 0; !newId && model && k < pe->lineCount; k++)
         if (!pe->lines[k].box && pe->lines[k].slot == op->paint.slot && PaintLineOf(&pe->lines[k], op, id, index)) {
-            snprintf(C->why, sizeof(C->why), "paint: slot %d of %d:%d already has an entry (line %d)", op->paint.slot, id, index,
+            Refuse(C, "paint: slot %d of %d:%d already has an entry (line %d)", op->paint.slot, id, index,
                      pe->lines[k].line);
             return false;
         }
@@ -2123,7 +2156,7 @@ static bool PaintAdd(Ctx *C, Patch *P, PaintEdit *pe, MS_ObjRef obj, Stmt *st)
     char key[MS_PATH_MAX + 64] = "";
     if (mat) {
         if (!op->paint.atlas || !op->paint.atlas[0] || strchr(op->paint.atlas, '"')) {
-            snprintf(C->why, sizeof(C->why), "paint-add: bad atlas path");
+            Refuse(C, "paint-add: bad atlas path");
             return false;
         }
         snprintf(key, sizeof(key), "paint \"%s\"%s", op->paint.atlas, op->paint.nearest ? " paint_filter nearest" : "");
@@ -2135,7 +2168,7 @@ static bool PaintAdd(Ctx *C, Patch *P, PaintEdit *pe, MS_ObjRef obj, Stmt *st)
             for (int k = 2; k < st->n; k = KeyEnd(st, k)) hasKey = hasKey || TokIs(st, k, "paint");
         }
         if (!firstLine && strcmp(mat, "default") != 0) {
-            snprintf(C->why, sizeof(C->why), "no material \"%s\" in the map", mat);
+            Refuse(C, "no material \"%s\" in the map", mat);
             return false;
         }
         if (!firstLine) SbFmt(&matLine, "material \"default\" %s", key);
@@ -2204,8 +2237,8 @@ static bool PaintAdd(Ctx *C, Patch *P, PaintEdit *pe, MS_ObjRef obj, Stmt *st)
     }
     if (ok) {
         SelAdd(P, (unsigned int)id, index);
-        snprintf(P->what, sizeof(P->what), "%.190s", stmt.s);
-    } else if (!C->why[0]) snprintf(C->why, sizeof(C->why), "out of memory");
+        PatchWhat(P, "%.190s", stmt.s);
+    } else if (!C->refused) Refuse(C, "out of memory");
     free(stmt.s);
     free(matLine.s);
     return ok;
@@ -2217,13 +2250,13 @@ static bool PaintSet(Ctx *C, Patch *P, PaintEdit *pe, const MS_ObjRef *sel, int 
     const EditOp *op = C->op;
     bool rect = op->paint.rect[2] > 0;
     if (rect && !PaintRectOk(C, op->paint.rect)) return false;
-    if (rect && selCount != 1) { snprintf(C->why, sizeof(C->why), "paint-set with a rectangle: select one object"); return false; }
+    if (rect && selCount != 1) { Refuse(C, "paint-set with a rectangle: select one object"); return false; }
     for (int i = 0; i < selCount; i++) {
         int line, id, index;
         if (!PaintObject(C, P, sel[i], st, &line, &id, &index)) return false;
         bool model = sel[i].kind == MS_OBJ_MODEL;
         if (!model && (op->paint.faces & EDIT_PAINT_ALL_FACES) == 0) {
-            snprintf(C->why, sizeof(C->why), "paint-set on a box takes faces");
+            Refuse(C, "paint-set on a box takes faces");
             return false;
         }
         int first = 0;
@@ -2243,7 +2276,7 @@ static bool PaintSet(Ctx *C, Patch *P, PaintEdit *pe, const MS_ObjRef *sel, int 
             char where[32];
             if (model) snprintf(where, sizeof(where), "slot %d", op->paint.slot);
             else snprintf(where, sizeof(where), "%s", PAINT_FACE_NAMES[first]);
-            snprintf(C->why, sizeof(C->why), "paint-set: line %d has no entry of %s for %s", line,
+            Refuse(C, "paint-set: line %d has no entry of %s for %s", line,
                      op->paint.material ? op->paint.material : "its own material", where);
             return false;
         }
@@ -2282,18 +2315,12 @@ static bool PaintSet(Ctx *C, Patch *P, PaintEdit *pe, const MS_ObjRef *sel, int 
             char where[48];
             if (model) snprintf(where, sizeof(where), "slot %d", op->paint.slot);
             else PaintFacesText(op->paint.faces, where, sizeof(where));
-            snprintf(P->what, sizeof(P->what), "paint %.120s %d:%d %s", op->paint.material ? op->paint.material : "own", id, index, where);
-            if (rect) {
-                size_t l = strlen(P->what);
-                snprintf(P->what + l, sizeof(P->what) - l, " %d %d %d %d", op->paint.rect[0], op->paint.rect[1], op->paint.rect[2],
-                         op->paint.rect[3]);
-            }
+            PatchWhat(P, "paint %.120s %d:%d %s", op->paint.material ? op->paint.material : "own", id, index, where);
+            if (rect && P->what)
+                PatchWhat(P, "%s %d %d %d %d", P->what, op->paint.rect[0], op->paint.rect[1], op->paint.rect[2], op->paint.rect[3]);
         }
     }
-    if (selCount > 1) {
-        size_t l = strlen(P->what);
-        snprintf(P->what + l, sizeof(P->what) - l, " (and %d more)", selCount - 1);
-    }
+    if (selCount > 1 && P->what) PatchWhat(P, "%s (and %d more)", P->what, selCount - 1);
     return true;
 }
 
@@ -2317,13 +2344,13 @@ static bool PaintRemove(Ctx *C, Patch *P, PaintEdit *pe, MS_ObjRef obj, Stmt *st
         else if (!PaintRewriteFaces(C, P, o, pl, left, st)) return false;
     }
     if (hit == 0) {
-        snprintf(C->why, sizeof(C->why), "paint-remove: line %d has no entry of %s there", line,
+        Refuse(C, "paint-remove: line %d has no entry of %s there", line,
                  op->paint.material ? op->paint.material : "its own material");
         return false;
     }
     SelAdd(P, (unsigned int)id, index);
-    snprintf(P->what, sizeof(P->what), "removed %d paint entr%s of %.120s from %d:%d", hit, hit == 1 ? "y" : "ies",
-             op->paint.material ? op->paint.material : "own", id, index);
+    PatchWhat(P, "removed %d paint entr%s of %.120s from %d:%d", hit, hit == 1 ? "y" : "ies",
+              op->paint.material ? op->paint.material : "own", id, index);
     return true;
 }
 
@@ -2332,26 +2359,26 @@ static bool PaintOp(Ctx *C, Patch *P, const MS_ObjRef *sel, int selCount, Stmt *
 {
     const EditOp *op = C->op;
     if (selCount < 1 || (selCount > 1 && op->kind != EDIT_PAINT_SET)) {
-        snprintf(C->why, sizeof(C->why), "paint: select one object (%d selected)", selCount);
+        Refuse(C, "paint: select one object (%d selected)", selCount);
         return false;
     }
     PaintEdit pe = { 0 };
     bool ok = PaintScan(P, &pe, st);
-    if (!ok) snprintf(C->why, sizeof(C->why), "out of memory");
+    if (!ok) Refuse(C, "out of memory");
     if (ok && op->kind == EDIT_PAINT_ADD) ok = PaintAdd(C, P, &pe, sel[0], st);
     else if (ok && op->kind == EDIT_PAINT_SET) ok = PaintSet(C, P, &pe, sel, selCount, st);
     else if (ok) ok = PaintRemove(C, P, &pe, sel[0], st);
     if (ok && !PaintOutsEmit(P, &pe)) ok = false;
-    if (!ok && !C->why[0]) snprintf(C->why, sizeof(C->why), "out of memory");
+    if (!ok && !C->refused) Refuse(C, "out of memory");
     PaintEditFree(&pe);
     return ok;
 }
 
-// Fills P->outs (one per changed line) and P->sel for op on sel[]. False with C->why.
+// Fills P->outs (one per changed line) and P->sel for op on sel[]. False with the refusal in MS_LastError().
 static bool BuildPatch(Ctx *C, Patch *P, const MS_ObjRef *sel, int selCount)
 {
     const EditOp *op = C->op;
-    if (!IndexLines(P)) { snprintf(C->why, sizeof(C->why), "out of memory"); return false; }
+    if (!IndexLines(P)) { Refuse(C, "out of memory"); return false; }
     C->nextId = MaxId(P) + 1;
     Stmt st = { 0 };
     bool ok = false;
@@ -2366,8 +2393,8 @@ static bool BuildPatch(Ctx *C, Patch *P, const MS_ObjRef *sel, int selCount)
     }
     if (op->kind == EDIT_ADD) {
         const MS_Ref *r = MS_ObjectRef(scene, op->anchor);
-        if (!r || r->line < 1 || r->line > P->lineCount) { snprintf(C->why, sizeof(C->why), "nothing to place it on"); goto done; }
-        if (strchr(op->modelPath, '"')) { snprintf(C->why, sizeof(C->why), "bad model path"); goto done; }
+        if (!r || r->line < 1 || r->line > P->lineCount) { Refuse(C, "nothing to place it on"); goto done; }
+        if (strchr(op->modelPath, '"')) { Refuse(C, "bad model path"); goto done; }
         const LineSpan *ls = &P->lines[r->line - 1];
         LineOut *o = OutFor(P, r->line);
         if (!o) goto oom;
@@ -2383,7 +2410,7 @@ static bool BuildPatch(Ctx *C, Patch *P, const MS_ObjRef *sel, int selCount)
         if (use[0]) SbFmt(&o->text, "\nuse \"%s\"", use);
         if (o->text.oom) goto oom;
         SelAdd(P, (unsigned int)id, 0);
-        snprintf(P->what, sizeof(P->what), "added %s after line %d%s", op->modelPath, r->line, use[0] ? " (in use \"default\")" : "");
+        PatchWhat(P, "added %s after line %d%s", op->modelPath, r->line, use[0] ? " (in use \"default\")" : "");
         ok = true;
         goto done;
     }
@@ -2415,28 +2442,28 @@ static bool BuildPatch(Ctx *C, Patch *P, const MS_ObjRef *sel, int selCount)
         }
         if (!S->copySel[src->copy]) { S->copySel[src->copy] = true; S->selCopies++; }
     }
-    if (ssCount == 0) { snprintf(C->why, sizeof(C->why), "nothing selected"); goto doneSel; }
+    if (ssCount == 0) { Refuse(C, "nothing selected"); goto doneSel; }
     if ((op->kind == EDIT_ROTATE || op->kind == EDIT_SET_ROTATION) && lights > 0) {
-        snprintf(C->why, sizeof(C->why), "lights can't be turned (edit a spot light's direction on its line)");
+        Refuse(C, "lights can't be turned (edit a spot light's direction on its line)");
         goto doneSel;
     }
     bool plain = IsPlainTurn(op);
     if (plain && models == 0 && turnedBoxes == 0 && fmod(fabs(op->degrees), 180.0) == 0.0) {
-        snprintf(C->why, sizeof(C->why), "a box turned by 180 degrees is the same box");
+        Refuse(C, "a box turned by 180 degrees is the same box");
         goto doneSel;
     }
     if ((op->kind == EDIT_SCALE || op->kind == EDIT_SIZE) && lights > 0) {
-        snprintf(C->why, sizeof(C->why), "lights can't be %s (only moved)", op->kind == EDIT_SCALE ? "scaled" : "resized");
+        Refuse(C, "lights can't be %s (only moved)", op->kind == EDIT_SCALE ? "scaled" : "resized");
         goto doneSel;
     }
-    if (op->kind == EDIT_SIZE && models > 0) { snprintf(C->why, sizeof(C->why), "size is for boxes (models: scale)"); goto doneSel; }
+    if (op->kind == EDIT_SIZE && models > 0) { Refuse(C, "size is for boxes (models: scale)"); goto doneSel; }
     if (op->kind == EDIT_SCALE && !(op->factor[0] > 0.0 && op->factor[1] > 0.0 && op->factor[2] > 0.0)) {
-        snprintf(C->why, sizeof(C->why), "a scale factor must be > 0");
+        Refuse(C, "a scale factor must be > 0");
         goto doneSel;
     }
     if (op->kind == EDIT_SIZE && (op->size[0] < 0.0 || op->size[1] < 0.0 || op->size[2] < 0.0 ||
                                   op->size[0] + op->size[1] + op->size[2] == 0.0)) {
-        snprintf(C->why, sizeof(C->why), "size takes sizes >= 0 (0 keeps that axis), at least one > 0");
+        Refuse(C, "size takes sizes >= 0 (0 keeps that axis), at least one > 0");
         goto doneSel;
     }
     qsort(ss, (size_t)ssCount, sizeof(StmtSel), CompareStmtSel);
@@ -2452,23 +2479,24 @@ static bool BuildPatch(Ctx *C, Patch *P, const MS_ObjRef *sel, int selCount)
     int splits = 0, extraLines = 0;
     for (int k = 0; k < ssCount; k++) {
         StmtSel *S = &ss[k];
-        if (S->line < 1 || S->line > P->lineCount) { snprintf(C->why, sizeof(C->why), "line %d is not in the file", S->line); goto doneSel; }
+        if (S->line < 1 || S->line > P->lineCount) { Refuse(C, "line %d is not in the file", S->line); goto doneSel; }
         const LineSpan *ls = &P->lines[S->line - 1];
-        if (!Analyze(&st, P->text + ls->start, ls->contentEnd - ls->start, C->why, sizeof(C->why))) goto doneSel;
-        if (CopyCount(&st) != S->copies) { snprintf(C->why, sizeof(C->why), "line %d: the copies don't match the loaded map", S->line); goto doneSel; }
+        const char *bad;
+        if (!Analyze(&st, P->text + ls->start, ls->contentEnd - ls->start, &bad)) { Refuse(C, "%s", bad); goto doneSel; }
+        if (CopyCount(&st) != S->copies) { Refuse(C, "line %d: the copies don't match the loaded map", S->line); goto doneSel; }
         if (IsTransform(op) && st.kind == ST_BOX && strcmp(st.prim, "box") != 0 && strcmp(st.prim, "block") != 0) {
-            snprintf(C->why, sizeof(C->why), "line %d: %s can't %s (only box and block lines)", S->line, st.prim,
+            Refuse(C, "line %d: %s can't %s (only box and block lines)", S->line, st.prim,
                      op->kind == EDIT_ROTATE || op->kind == EDIT_SET_ROTATION ? "turn" : op->kind == EDIT_SCALE ? "be scaled" : "be resized");
             goto doneSel;
         }
         if ((op->kind == EDIT_MOVE || op->kind == EDIT_DUPLICATE) && st.posCount == 0) {
-            snprintf(C->why, sizeof(C->why), "line %d: a directional light has no position", S->line);
+            Refuse(C, "line %d: a directional light has no position", S->line);
             goto doneSel;
         }
         LineOut *o = OutFor(P, S->line);
         if (!o) goto oomSel;
         if (!EditStatement(C, P, S, &st, o)) {
-            if (!C->why[0]) snprintf(C->why, sizeof(C->why), "line %d: cannot rewrite it", S->line);
+            if (!C->refused) Refuse(C, "line %d: cannot rewrite it", S->line);
             goto doneSel;
         }
         int lines = o->deleted ? 0 : 1;
@@ -2497,22 +2525,23 @@ static bool BuildPatch(Ctx *C, Patch *P, const MS_ObjRef *sel, int selCount)
         char where[64];
         if (ssCount == 1) snprintf(where, sizeof(where), "line %d", ss[0].line);
         else snprintf(where, sizeof(where), "%d lines from line %d", ssCount, ss[0].line);
-        snprintf(P->what, sizeof(P->what), "%s %d object%s%s (%s%s%s)", verb, objs, objs == 1 ? "" : "s", amount, where,
-                 splits ? ", split" : "", extraLines > 0 ? TextFormat(", +%d line%s", extraLines, extraLines == 1 ? "" : "s")
-                 : extraLines < 0 ? TextFormat(", %d line%s", extraLines, extraLines == -1 ? "" : "s") : "");
+        PatchWhat(P, "%s %d object%s%s (%s%s%s)", verb, objs, objs == 1 ? "" : "s", amount, where,
+                  splits ? ", split" : "", extraLines > 0 ? TextFormat(", +%d line%s", extraLines, extraLines == 1 ? "" : "s")
+                  : extraLines < 0 ? TextFormat(", %d line%s", extraLines, extraLines == -1 ? "" : "s") : "");
     }
     ok = true;
     goto doneSel;
 oomSel:
-    snprintf(C->why, sizeof(C->why), "out of memory");
+    Refuse(C, "out of memory");
 doneSel:
     for (int k = 0; k < ssCount; k++) free(ss[k].copySel);
     free(ss);
     goto done;
 oom:
-    snprintf(C->why, sizeof(C->why), "out of memory");
+    Refuse(C, "out of memory");
 done:
     free(st.tok);
+    if (ok && !P->what) ok = Refuse(C, "out of memory");     // (its text could not be made)
     return ok;
 }
 
@@ -2590,6 +2619,7 @@ static void FreeStep(MapEditor *E, EditStep *s)
     free(s->matKeys);
     free(s->paintMaterial);
     free(s->paintAtlas);
+    free(s->what);
     for (int i = 0; i < s->moreCount; i++) {
         free(s->more[i].material);
         free(s->more[i].atlas);
@@ -2616,47 +2646,47 @@ void MapEditFree(MapEditor *E)
     free(E->failed);
     free(E->lost);
     free(E->work);
+    MsgFree(&E->note);
     memset(E, 0, sizeof(*E));
 }
 
-bool MapEditSync(MapEditor *E, char *msg, int msgSize)
+const char *MapEditNote(const MapEditor *E)
 {
-    if ((E->undoCount == 0 && E->redoCount == 0) || scene->hash == E->knownHash) return false;
-    ClearStack(E, E->undo, &E->undoCount);
-    ClearStack(E, E->redo, &E->redoCount);
-    snprintf(msg, msgSize, "the map changed on disk (not by a manual edit): undo history cleared");
-    return true;
+    return MsgText(&E->note);
 }
 
-// The file on disk, which must be the loaded map (hash). NULL with msg otherwise.
-static char *ReadLoadedMap(unsigned long long expect, int *size, char *msg, int msgSize)
+// The file on disk, which must be the loaded map (hash). NULL with the reason in MS_LastError().
+static char *ReadLoadedMap(unsigned long long expect, int *size)
 {
     char *disk = ReadFileBytes(scene->path, size);
-    if (!disk) { snprintf(msg, msgSize, "cannot read %s", scene->path); return NULL; }
+    if (!disk) { MS_SetError("cannot read %s", scene->path); return NULL; }
     if (Fnv1a64(disk, *size) != expect) {
         free(disk);
-        snprintf(msg, msgSize, "the map on disk changed since it was loaded (a request? another editor?): wait for the reload");
+        MS_SetError("the map on disk changed since it was loaded (a request? another editor?): wait for the reload");
         return NULL;
     }
     return disk;
 }
 
-// Writes text over the map and reloads it; on a failed reload writes `restore` back
-static bool WriteAndReload(const char *text, int size, const char *restore, int restoreSize, char *msg, int msgSize)
+// Writes text over the map and reloads it; on a failed reload writes `restore` back. False with
+// the reason in MS_LastError().
+static bool WriteAndReload(const char *text, int size, const char *restore, int restoreSize)
 {
     if (!WriteFileBytes(scene->path, text, size)) {
         WriteFileBytes(scene->path, restore, restoreSize);
-        snprintf(msg, msgSize, "cannot write %s", scene->path);
-        return false;
+        return MS_SetError("cannot write %s", scene->path);
     }
     if (MS_Reload(scene, NULL) == MS_RELOADED) return true;
     WriteFileBytes(scene->path, restore, restoreSize);
-    snprintf(msg, msgSize, "the edit would break the map, reverted: %s", MS_LastError());
-    MS_Reload(scene, NULL);         // (the restored text: succeeds, and clears the last error)
+    // (the restored text reloads, which clears the last error: the reason is kept and set again)
+    char *why = MS_StrDup(MS_LastError());
+    MS_Reload(scene, NULL);
+    MS_SetError("the edit would break the map, reverted: %s", why ? why : "out of memory");
+    free(why);
     return false;
 }
 
-static void AutoSave(MapEditor *E, char *msg, int msgSize);
+static unsigned char AutoSave(MapEditor *E);
 
 static MS_EntityId *CopyIds(const MS_EntityId *ids, int n)
 {
@@ -2687,43 +2717,45 @@ static void PushStep(MapEditor *E, EditStep *slot, EditStep *step)
 
 // MapEditApply, and with *paint (MapEditPushPaint) a step that holds the paint as well: *paint is
 // the step's (NULL) once it is pushed; a paint step isn't auto-saved here (the draw mode writes its
-// canvases and the map at LMB up)
-static EditResult ApplyStep(MapEditor *E, const MS_ObjRef *sel, int selCount, const EditOp *op, PaintStep **paint,
-                            MS_EntityId **outSel, int *outSelCount, char *msg, int msgSize)
+// canvases and the map at LMB up). Returns MapEditApply's values: 0 applied (the note: the step's
+// text), 1 not applied (MS_LastError() says why), 2 applied but the auto save failed (the note:
+// the text + " (auto save: <reason>)")
+static unsigned char ApplyStep(MapEditor *E, const MS_ObjRef *sel, int selCount, const EditOp *op, PaintStep **paint,
+                               MS_EntityId **outSel, int *outSelCount)
 {
     *outSel = NULL;
     *outSelCount = 0;
     if (MS_CompiledSource(scene, NULL) != MS_SOURCE_TEXT) {
-        snprintf(msg, msgSize, "%s is a compiled map: edits change the map's text (load its .map)", scene->path);
-        return EDIT_FAILED;
+        MS_SetError("%s is a compiled map: edits change the map's text (load its .map)", scene->path);
+        return 1;
     }
     unsigned long long before = scene->hash;
     int size;
     // The text the patch is made against: the working copy (live), else the file on disk
     bool live = E->work != NULL;
     if (live && (E->workHash != scene->hash || E->loadVersion != scene->loadVersion)) {
-        snprintf(msg, msgSize, "the map was reloaded from disk: wait until the edits are re-applied");
-        return EDIT_FAILED;
+        MS_SetError("the map was reloaded from disk: wait until the edits are re-applied");
+        return 1;
     }
-    char *disk = live ? E->work : ReadLoadedMap(before, &size, msg, msgSize);
-    if (!disk) return EDIT_FAILED;
+    char *disk = live ? E->work : ReadLoadedMap(before, &size);
+    if (!disk) return 1;
     if (live) size = E->workSize;
 
     Ctx C = { .op = op };
     Patch P = { .text = disk, .size = size };
     EditStep step = { 0 };
-    EditResult res = EDIT_FAILED;
+    unsigned char res = 1;
     char *after = NULL;
-    if (!BuildPatch(&C, &P, sel, selCount)) { snprintf(msg, msgSize, "%s", C.why); goto done; }
-    if (!MakeHunks(&P, &step)) { snprintf(msg, msgSize, "out of memory"); goto done; }
+    if (!BuildPatch(&C, &P, sel, selCount)) goto done;      // (the refusal is the last error)
+    if (!MakeHunks(&P, &step)) { MS_SetError("out of memory"); goto done; }
     int afterSize;
-    if (!(after = ApplyHunks(disk, size, &step, false, &afterSize))) { snprintf(msg, msgSize, "out of memory"); goto done; }
-    if (afterSize == size && memcmp(after, disk, (size_t)size) == 0) { snprintf(msg, msgSize, "%s: nothing changes", P.what); goto done; }
+    if (!(after = ApplyHunks(disk, size, &step, false, &afterSize))) { MS_SetError("out of memory"); goto done; }
+    if (afterSize == size && memcmp(after, disk, (size_t)size) == 0) { MS_SetError("%s: nothing changes", P.what); goto done; }
 
     // The selection before (for undo), as entity ids
     step.selBefore = malloc(sizeof(MS_EntityId) * (selCount > 0 ? selCount : 1));
     step.selAfter = CopyIds(P.sel, P.selCount);
-    if (!step.selBefore || !step.selAfter) { snprintf(msg, msgSize, "out of memory"); goto done; }
+    if (!step.selBefore || !step.selAfter) { MS_SetError("out of memory"); goto done; }
     for (int i = 0; i < selCount; i++) {
         int e = MS_ObjectEntity(scene, sel[i]);
         if (e >= 0) step.selBefore[step.selBeforeCount++] = scene->entityIds[e];
@@ -2731,7 +2763,7 @@ static EditResult ApplyStep(MapEditor *E, const MS_ObjRef *sel, int selCount, co
     step.selAfterCount = P.selCount;
     step.hashBefore = before;
     step.hashAfter = Fnv1a64(after, afterSize);
-    snprintf(step.what, sizeof(step.what), "%s", P.what);
+    if (!(step.what = MS_StrDup(P.what))) { MS_SetError("out of memory"); goto done; }
     // The op, so a rebase can apply the step again to another text
     step.op = *op;
     step.op.modelPath = NULL;
@@ -2741,7 +2773,7 @@ static EditResult ApplyStep(MapEditor *E, const MS_ObjRef *sel, int selCount, co
         step.paintMaterial = op->paint.material ? MS_StrDup(op->paint.material) : NULL;
         step.paintAtlas = op->paint.atlas ? MS_StrDup(op->paint.atlas) : NULL;
         if ((op->paint.material && !step.paintMaterial) || (op->paint.atlas && !step.paintAtlas)) {
-            snprintf(msg, msgSize, "out of memory");
+            MS_SetError("out of memory");
             goto done;
         }
         step.op.paint.material = step.paintMaterial;
@@ -2750,22 +2782,22 @@ static EditResult ApplyStep(MapEditor *E, const MS_ObjRef *sel, int selCount, co
     if (op->kind == EDIT_MATERIAL_SET) {
         step.matName = MS_StrDup(op->matName ? op->matName : "");
         step.matKeys = MS_StrDup(op->matKeys ? op->matKeys : "");
-        if (!step.matName || !step.matKeys) { snprintf(msg, msgSize, "out of memory"); goto done; }
+        if (!step.matName || !step.matKeys) { MS_SetError("out of memory"); goto done; }
         step.op.matName = step.matName;
         step.op.matKeys = step.matKeys;
     }
     if (op->kind == EDIT_ADD) {
-        if (!(step.modelPath = MS_StrDup(op->modelPath ? op->modelPath : ""))) { snprintf(msg, msgSize, "out of memory"); goto done; }
+        if (!(step.modelPath = MS_StrDup(op->modelPath ? op->modelPath : ""))) { MS_SetError("out of memory"); goto done; }
         step.op.modelPath = step.modelPath;
         int e = MS_ObjectEntity(scene, op->anchor);
         if (e >= 0) step.anchorId = scene->entityIds[e];
     }
 
     EditStep *slot = MS_RESERVE(E->undo, E->undoCap, E->undoCount + 1) ? &E->undo[E->undoCount] : NULL;
-    if (!slot) { snprintf(msg, msgSize, "out of memory"); goto done; }
+    if (!slot) { MS_SetError("out of memory"); goto done; }
     if (live) {
         if (MS_EditSetText(scene, after, afterSize, &E->lastStats) != MS_RELOADED) {
-            snprintf(msg, msgSize, "the edit would break the map, not applied: %s", MS_LastError());
+            MS_SetError("the edit would break the map, not applied: %s", MS_LastError());
             goto done;
         }
         E->work = after;
@@ -2774,7 +2806,7 @@ static EditResult ApplyStep(MapEditor *E, const MS_ObjRef *sel, int selCount, co
         after = NULL;
         free(disk);         // (the old working copy)
         disk = NULL;
-    } else if (!WriteAndReload(after, afterSize, disk, size, msg, msgSize)) goto done;
+    } else if (!WriteAndReload(after, afterSize, disk, size)) goto done;
     if (P.selByStmt) {
         // (the keys the edited lines got are the runtime's: read them from the scene now)
         ResolveSelByStmt(P.sel, P.selCount);
@@ -2791,9 +2823,8 @@ static EditResult ApplyStep(MapEditor *E, const MS_ObjRef *sel, int selCount, co
     E->knownHash = scene->hash;
     *outSel = CopyIds(P.sel, P.selCount);
     *outSelCount = *outSel ? P.selCount : 0;
-    snprintf(msg, msgSize, "%s", E->undo[E->undoCount - 1].what);
-    if (live && E->autoSave && !painted) AutoSave(E, msg, msgSize);
-    res = EDIT_DONE;
+    MsgSetf(&E->note, "%s", E->undo[E->undoCount - 1].what);
+    res = live && E->autoSave && !painted ? AutoSave(E) : 0;     // (2: the save failed, the note says why)
 done:
     FreeStep(E, &step);
     FreePatch(&P);
@@ -2804,57 +2835,61 @@ done:
     return res;
 }
 
-EditResult MapEditApply(MapEditor *E, const MS_ObjRef *sel, int selCount, const EditOp *op,
-                        MS_EntityId **outSel, int *outSelCount, char *msg, int msgSize)
+// Applies op to the selection as one undo step (mapedit.h). Returns 0: applied (MapEditNote: the
+// step's text); 1: not applied (why in MS_LastError()); 2: applied, but the auto save failed (the
+// note ends in " (auto save: <why>)").
+unsigned char MapEditApply(MapEditor *E, const MS_ObjRef *sel, int selCount, const EditOp *op,
+                           MS_EntityId **outSel, int *outSelCount)
 {
-    return ApplyStep(E, sel, selCount, op, NULL, outSel, outSelCount, msg, msgSize);
+    return ApplyStep(E, sel, selCount, op, NULL, outSel, outSelCount);
 }
 
 // Moves the top of one stack to the other, writing its inverse (undo) or itself (redo). A step with
 // paint calls the draw mode's hook first (the canvas pixels the text's materials load are provided
-// then), and the other one when its text can't go live; a step of paint alone changes no text
-static EditResult Replay(MapEditor *E, bool undo, MS_EntityId **outSel, int *outSelCount, char *msg, int msgSize)
+// then), and the other one when its text can't go live; a step of paint alone changes no text.
+// Returns MapEditUndo's values (0 done, 1 not done: MS_LastError(), 2 done but the auto save failed)
+static unsigned char Replay(MapEditor *E, bool undo, MS_EntityId **outSel, int *outSelCount)
 {
     *outSel = NULL;
     *outSelCount = 0;
     EditStep *from = undo ? E->undo : E->redo;
     int *fromCount = undo ? &E->undoCount : &E->redoCount;
-    if (*fromCount == 0) { snprintf(msg, msgSize, undo ? "nothing to undo" : "nothing to redo"); return EDIT_FAILED; }
+    if (*fromCount == 0) { MS_SetError("%s", undo ? "nothing to undo" : "nothing to redo"); return 1; }
     EditStep *step = &from[*fromCount - 1];
     int size, outSize = 0;
     bool live = E->work != NULL;
     unsigned long long expect = undo ? step->hashAfter : step->hashBefore;
     if (live && (E->workHash != expect || E->workHash != scene->hash || E->loadVersion != scene->loadVersion)) {
-        snprintf(msg, msgSize, "%s does not apply to the map any more", undo ? "undo" : "redo");
-        return EDIT_FAILED;
+        MS_SetError("%s does not apply to the map any more", undo ? "undo" : "redo");
+        return 1;
     }
     if (step->paint && (!live || !E->paintHooks.undo || !E->paintHooks.redo)) {
-        snprintf(msg, msgSize, "%s: painting needs the draw mode's working copy", undo ? "undo" : "redo");
-        return EDIT_FAILED;
+        MS_SetError("%s: painting needs the draw mode's working copy", undo ? "undo" : "redo");
+        return 1;
     }
     bool textual = step->hunkCount > 0;
     char *disk = NULL, *text = NULL;
-    EditResult res = EDIT_FAILED;
+    unsigned char res = 1;
     EditStep **toArr = undo ? &E->redo : &E->undo;
     int *toCount = undo ? &E->redoCount : &E->undoCount, *toCap = undo ? &E->redoCap : &E->undoCap;
-    if (!MS_RESERVE(*toArr, *toCap, *toCount + 1)) { snprintf(msg, msgSize, "out of memory"); return EDIT_FAILED; }
+    if (!MS_RESERVE(*toArr, *toCap, *toCount + 1)) { MS_SetError("out of memory"); return 1; }
     if (textual) {
-        disk = live ? E->work : ReadLoadedMap(expect, &size, msg, msgSize);
-        if (!disk) return EDIT_FAILED;
+        disk = live ? E->work : ReadLoadedMap(expect, &size);
+        if (!disk) return 1;
         if (live) size = E->workSize;
         text = ApplyHunks(disk, size, step, undo, &outSize);
         if (!text || Fnv1a64(text, outSize) != (undo ? step->hashBefore : step->hashAfter)) {
-            snprintf(msg, msgSize, "%s does not apply to the map any more", undo ? "undo" : "redo");
+            MS_SetError("%s does not apply to the map any more", undo ? "undo" : "redo");
             goto done;
         }
     }
     if (step->paint && !(undo ? E->paintHooks.undo : E->paintHooks.redo)(E->paintHooks.user, step->paint)) {
-        snprintf(msg, msgSize, "%s: the paint can't be swapped (out of memory?)", undo ? "undo" : "redo");
+        MS_SetError("%s: the paint can't be swapped (out of memory?)", undo ? "undo" : "redo");
         goto done;
     }
     if (textual && live) {
         if (MS_EditSetText(scene, text, outSize, &E->lastStats) != MS_RELOADED) {
-            snprintf(msg, msgSize, "%s would break the map: %s", undo ? "undo" : "redo", MS_LastError());
+            MS_SetError("%s would break the map: %s", undo ? "undo" : "redo", MS_LastError());
             if (step->paint) (undo ? E->paintHooks.redo : E->paintHooks.undo)(E->paintHooks.user, step->paint);
             goto done;
         }
@@ -2864,31 +2899,33 @@ static EditResult Replay(MapEditor *E, bool undo, MS_EntityId **outSel, int *out
         E->workHash = undo ? step->hashBefore : step->hashAfter;
         text = NULL;
         disk = NULL;
-    } else if (textual && !WriteAndReload(text, outSize, disk, size, msg, msgSize)) goto done;
+    } else if (textual && !WriteAndReload(text, outSize, disk, size)) goto done;
     const MS_EntityId *ids = undo ? step->selBefore : step->selAfter;
     int n = undo ? step->selBeforeCount : step->selAfterCount;
     *outSel = CopyIds(ids, n);
     *outSelCount = *outSel ? n : 0;
-    snprintf(msg, msgSize, "%s: %s", undo ? "undone" : "redone", step->what);
+    MsgSetf(&E->note, "%s: %s", undo ? "undone" : "redone", step->what);
     (*toArr)[(*toCount)++] = *step;
     (*fromCount)--;
     E->knownHash = scene->hash;
-    if (live && E->autoSave) AutoSave(E, msg, msgSize);
-    res = EDIT_DONE;
+    res = live && E->autoSave ? AutoSave(E) : 0;     // (2: the save failed, the note says why)
 done:
     free(text);
     if (!live) free(disk);
     return res;
 }
 
-EditResult MapEditUndo(MapEditor *E, MS_EntityId **outSel, int *outSelCount, char *msg, int msgSize)
+// Undoes the top step (mapedit.h). Returns 0: done (note "undone: ..."); 1: not done (why in
+// MS_LastError(), e.g. "nothing to undo"); 2: done, but the auto save failed (note + " (auto save: ...)").
+unsigned char MapEditUndo(MapEditor *E, MS_EntityId **outSel, int *outSelCount)
 {
-    return Replay(E, true, outSel, outSelCount, msg, msgSize);
+    return Replay(E, true, outSel, outSelCount);
 }
 
-EditResult MapEditRedo(MapEditor *E, MS_EntityId **outSel, int *outSelCount, char *msg, int msgSize)
+// Redoes the top redo step: the same values as MapEditUndo (note "redone: ...")
+unsigned char MapEditRedo(MapEditor *E, MS_EntityId **outSel, int *outSelCount)
 {
-    return Replay(E, false, outSel, outSelCount, msg, msgSize);
+    return Replay(E, false, outSel, outSelCount);
 }
 
 // #endregion
@@ -2932,11 +2969,12 @@ bool MapEditWriteWork(const MapEditor *E, const char *path)
     return E->work && WriteFileBytes(path, E->work, E->workSize);
 }
 
-bool MapEditSave(MapEditor *E, char *msg, int msgSize)
+// 0 saved, 1 nothing to save (both: the note), 2 not saved (MS_LastError())
+unsigned char MapEditSave(MapEditor *E)
 {
-    if (!E->work) { snprintf(msg, msgSize, "nothing to save"); return false; }
+    if (!E->work) { MS_SetError("nothing to save"); return 2; }
     int n = MapEditUnsaved(E);
-    if (n == 0) { snprintf(msg, msgSize, "nothing to save: %s is up to date", scene->path); return true; }
+    if (n == 0) { MsgSetf(&E->note, "nothing to save: %s is up to date", scene->path); return 1; }
     // Never over a file someone else changed since we read it: that change reloads and the
     // unsaved edits are applied on top of it (MapEditRebase)
     int size;
@@ -2944,13 +2982,13 @@ bool MapEditSave(MapEditor *E, char *msg, int msgSize)
     bool changed = !disk || Fnv1a64(disk, size) != E->diskHash;
     free(disk);
     if (changed) {
-        snprintf(msg, msgSize, "not saved: %s changed on disk (a request? another editor?); it reloads and the edits are applied again",
-                 scene->path);
-        return false;
+        MS_SetError("not saved: %s changed on disk (a request? another editor?); it reloads and the edits are applied again",
+                    scene->path);
+        return 2;
     }
     if (!WriteFileBytes(scene->path, E->work, E->workSize)) {
-        snprintf(msg, msgSize, "cannot write %s", scene->path);
-        return false;
+        MS_SetError("cannot write %s", scene->path);
+        return 2;
     }
     MS_EditMarkSaved(scene);
     E->diskHash = E->workHash;
@@ -2958,25 +2996,29 @@ bool MapEditSave(MapEditor *E, char *msg, int msgSize)
     E->savedAt = E->undoCount;
     E->droppedUnsaved = 0;
     ClearStack(E, E->lost, &E->lostCount);
-    snprintf(msg, msgSize, "saved %d edit%s to %s", n, n == 1 ? "" : "s", scene->path);
-    return true;
+    MsgSetf(&E->note, "saved %d edit%s to %s", n, n == 1 ? "" : "s", scene->path);
+    return 0;
 }
 
-// Auto save mode: the edit / undo / redo just made is written at once (msg gets the outcome)
-bool MapEditSaveAll(MapEditor *E, char *msg, int msgSize)
+// The draw mode's save (canvases and map) when it set the hook, else MapEditSave: the same values
+unsigned char MapEditSaveAll(MapEditor *E)
 {
-    if (E->paintHooks.save) return E->paintHooks.save(E->paintHooks.user, msg, msgSize);
-    return MapEditSave(E, msg, msgSize);
+    if (E->paintHooks.save) return E->paintHooks.save(E->paintHooks.user);
+    return MapEditSave(E);
 }
 
-static void AutoSave(MapEditor *E, char *msg, int msgSize)
+// Auto save mode: the edit / undo / redo just made (its text in the note) is written at once. The
+// note keeps the edit's text, with " (auto save: <reason>)" when the save failed: 2 then, else 0
+static unsigned char AutoSave(MapEditor *E)
 {
-    char m[512];
-    bool ok = MapEditSaveAll(E, m, sizeof(m));
-    if (!ok) {
-        size_t l = strlen(msg);
-        snprintf(msg + l, (size_t)msgSize > l ? (size_t)msgSize - l : 0, " (auto save: %s)", m);
-    }
+    MonoMsg edit = E->note;         // (the save sets the note: the edit's text is moved aside)
+    E->note = (MonoMsg){ 0 };
+    unsigned char r = MapEditSaveAll(E);
+    MsgFree(&E->note);
+    E->note = edit;
+    if (r != 2) return 0;           // saved, or nothing to save
+    MsgAppendf(&E->note, " (auto save: %s)", MS_LastError());
+    return 2;
 }
 
 void MapEditClearFailed(MapEditor *E)
@@ -3005,11 +3047,12 @@ static void MapDead(IdPair **map, int *n, int *cap, const EditStep *st)
     }
 }
 
+// The step goes to failed[], its text "could not re-apply: <text> (<why>)" (why may point into
+// MS_LastError(): it is formatted before anything else runs)
 static void RebaseFail(MapEditor *E, EditStep *st, const char *why)
 {
-    char what[512];
-    snprintf(what, sizeof(what), "could not re-apply: %s (%s)", st->what, why);
-    snprintf(st->what, sizeof(st->what), "%.*s", (int)sizeof(st->what) - 1, what);     // (cut to the field)
+    char *what = MonoStrf("could not re-apply: %s (%s)", st->what, why);
+    if (what) { free(st->what); st->what = what; }      // (out of memory: the step's own text)
     // (its paint goes now: the list only names the step)
     if (st->paint && E->paintHooks.release) E->paintHooks.release(E->paintHooks.user, st->paint);
     st->paint = NULL;
@@ -3018,45 +3061,46 @@ static void RebaseFail(MapEditor *E, EditStep *st, const char *why)
     else FreeStep(E, st);
 }
 
-int MapEditRebase(MapEditor *E, MS_EntityId **outSel, int *outSelCount, char *msg, int msgSize)
+// A step undone past the save point: "undo of "<text>"", then failed[]
+static void RebaseUndone(MapEditor *E, EditStep *st)
+{
+    char *what = MonoStrf("undo of \"%s\"", st->what);
+    if (what) { free(st->what); st->what = what; }
+    RebaseFail(E, st, "undone past the save point: the file keeps it");
+}
+
+// Applies the unsaved steps again after the file changed on disk (mapedit.h). Returns 0: all of them
+// (note); 1: *failedCount could not be (note; they are in failed[]); 2: the map can't be edited any
+// more, the unsaved edits dropped (MS_LastError()); 3: out of memory, nothing done (MS_LastError()).
+unsigned char MapEditRebase(MapEditor *E, MS_EntityId **outSel, int *outSelCount, int *failedCount)
 {
     *outSel = NULL;
     *outSelCount = 0;
+    *failedCount = 0;
     // The unsaved steps: after the save point on the undo stack (none matches the file: all of
     // them); undone past the save point: on the redo stack (their undo can't be replayed as an op)
     int from = E->savedAt < 0 ? 0 : E->savedAt < E->undoCount ? E->savedAt : E->undoCount;
     int undone = E->savedAt > E->undoCount ? E->savedAt - E->undoCount : 0;
     int pendingCount = E->undoCount - from;
     EditStep *pending = malloc(sizeof(EditStep) * (pendingCount > 0 ? (size_t)pendingCount : 1));
-    if (!pending) { snprintf(msg, msgSize, "out of memory"); return 0; }
+    if (!pending) { MS_SetError("out of memory"); return 3; }
     for (int i = 0; i < pendingCount; i++) {
         pending[i] = E->undo[from + i];
         memset(&E->undo[from + i], 0, sizeof(EditStep));
     }
     int failedBefore = E->failedCount;
-    for (int k = 0; k < undone && k < E->redoCount; k++) {
-        EditStep *st = &E->redo[E->redoCount - 1 - k];
-        char what[512];
-        snprintf(what, sizeof(what), "undo of \"%s\"", st->what);
-        snprintf(st->what, sizeof(st->what), "%.*s", (int)sizeof(st->what) - 1, what);
-        RebaseFail(E, st, "undone past the save point: the file keeps it");
-    }
-    for (int k = 0; k < E->lostCount; k++) {
-        EditStep *st = &E->lost[k];
-        char what[512];
-        snprintf(what, sizeof(what), "undo of \"%s\"", st->what);
-        snprintf(st->what, sizeof(st->what), "%.*s", (int)sizeof(st->what) - 1, what);
-        RebaseFail(E, st, "undone past the save point: the file keeps it");
-    }
+    for (int k = 0; k < undone && k < E->redoCount; k++) RebaseUndone(E, &E->redo[E->redoCount - 1 - k]);
+    for (int k = 0; k < E->lostCount; k++) RebaseUndone(E, &E->lost[k]);
     E->lostCount = 0;
     // The new base: the file as it is now (the scene shows it)
     E->undoCount = from;
     if (!MapEditBegin(E)) {
         for (int i = 0; i < pendingCount; i++) FreeStep(E, &pending[i]);
         free(pending);
-        snprintf(msg, msgSize, "the map can't be edited any more (compiled? out of memory): %d unsaved edit%s dropped",
-                 pendingCount, pendingCount == 1 ? "" : "s");
-        return pendingCount;
+        MS_SetError("the map can't be edited any more (compiled? out of memory): %d unsaved edit%s dropped",
+                    pendingCount, pendingCount == 1 ? "" : "s");
+        *failedCount = pendingCount;
+        return 2;
     }
     IdPair *map = NULL;
     int mapCount = 0, mapCap = 0, applied = 0;
@@ -3067,13 +3111,16 @@ int MapEditRebase(MapEditor *E, MS_EntityId **outSel, int *outSelCount, char *ms
         // The selection and the anchor in the current scene, by entity id
         if (!MS_RESERVE(sel, selCap, st->selBeforeCount + 1)) { RebaseFail(E, st, "out of memory"); continue; }
         int n = 0;
-        char why[300] = "";
-        for (int k = 0; k < st->selBeforeCount && !why[0]; k++) {
+        bool bad = false;
+        char *why = NULL;       // why the step can't be applied again (heap; NULL with bad: out of memory)
+        for (int k = 0; k < st->selBeforeCount && !bad; k++) {
             MS_EntityId orig = st->selBefore[k], id = MapId(map, mapCount, orig);
             int e = id.stmt ? MS_FindEntity(scene, id) : -1;
             const char *fmt = MS_ENTITY_EXPLICIT(orig) ? "entity %u:%d %s" : "entity %08x:%d %s";
-            if (e < 0) snprintf(why, sizeof(why), fmt, orig.stmt, orig.index, id.stmt ? "is gone" : "came from an edit that could not be re-applied");
-            else sel[n++] = scene->entityObjects[e];
+            if (e < 0) {
+                bad = true;
+                why = MonoStrf(fmt, orig.stmt, orig.index, id.stmt ? "is gone" : "came from an edit that could not be re-applied");
+            } else sel[n++] = scene->entityObjects[e];
         }
         EditOp op = st->op;
         op.modelPath = st->modelPath;
@@ -3081,17 +3128,31 @@ int MapEditRebase(MapEditor *E, MS_EntityId **outSel, int *outSelCount, char *ms
         op.matKeys = st->matKeys;
         op.paint.material = st->paintMaterial;
         op.paint.atlas = st->paintAtlas;
-        if (!why[0] && op.kind == EDIT_ADD) {
+        if (!bad && op.kind == EDIT_ADD) {
             MS_EntityId id = MapId(map, mapCount, st->anchorId);
             int e = id.stmt ? MS_FindEntity(scene, id) : -1;
-            if (e < 0) snprintf(why, sizeof(why), "what it stood on (entity %08x:%d) is gone", st->anchorId.stmt, st->anchorId.index);
-            else op.anchor = scene->entityObjects[e];
+            if (e < 0) {
+                bad = true;
+                why = MonoStrf("what it stood on (entity %08x:%d) is gone", st->anchorId.stmt, st->anchorId.index);
+            } else op.anchor = scene->entityObjects[e];
         }
         // Paint (docs/painting.md 12): the draw mode provides the canvas again, or replays the strokes
         // onto a PNG that changed on disk; a step of paint alone goes back onto the stack as it is
-        if (!why[0] && st->paint && (!E->paintHooks.rebase || !E->paintHooks.rebase(E->paintHooks.user, st->paint, why, sizeof(why))))
-            if (!why[0]) snprintf(why, sizeof(why), "the paint can't be re-applied");
-        if (why[0]) { MapDead(&map, &mapCount, &mapCap, st); RebaseFail(E, st, why); continue; }
+        if (!bad && st->paint) {
+            if (!E->paintHooks.rebase) {
+                bad = true;
+                why = MS_StrDup("the paint can't be re-applied");
+            } else if (E->paintHooks.rebase(E->paintHooks.user, st->paint) == 1) {      // can't: the reason is the last error
+                bad = true;
+                why = MS_StrDup(MS_LastError());
+            }
+        }
+        if (bad) {
+            MapDead(&map, &mapCount, &mapCap, st);
+            RebaseFail(E, st, why ? why : "out of memory");
+            free(why);
+            continue;
+        }
         if (st->paint && st->hunkCount == 0) {
             EditStep *slot = MS_RESERVE(E->undo, E->undoCap, E->undoCount + 1) ? &E->undo[E->undoCount] : NULL;
             if (!slot) { RebaseFail(E, st, "out of memory"); continue; }
@@ -3102,13 +3163,13 @@ int MapEditRebase(MapEditor *E, MS_EntityId **outSel, int *outSelCount, char *ms
         }
         MS_EntityId *ids;
         int count;
-        char m[512];
         PaintStep *paint = st->paint;
         st->paint = NULL;
-        if (ApplyStep(E, sel, n, &op, paint ? &paint : NULL, &ids, &count, m, sizeof(m)) != EDIT_DONE) {
+        // (2, applied but the auto save failed, counts as applied: its note is not shown here)
+        if (ApplyStep(E, sel, n, &op, paint ? &paint : NULL, &ids, &count) == 1) {
             st->paint = paint;      // (not taken: RebaseFail releases it)
             MapDead(&map, &mapCount, &mapCap, st);
-            RebaseFail(E, st, m);
+            RebaseFail(E, st, MS_LastError());
             continue;
         }
         // The ids this step's objects got now, for the steps after it
@@ -3124,13 +3185,14 @@ int MapEditRebase(MapEditor *E, MS_EntityId **outSel, int *outSelCount, char *ms
                 int e = MS_FindEntity(scene, ids[j]);
                 if (e >= 0 && MS_RESERVE(sel, selCap, on + 1)) sel[on++] = scene->entityObjects[e];
             }
-            char am[512];
-            if (MapEditAmendPaint(E, sel, on, &st->more[k].op, am, sizeof(am)) != EDIT_DONE) {
+            if (MapEditAmendPaint(E, sel, on, &st->more[k].op) == 1) {      // not amended: the reason is the last error
                 EditStep note = { 0 };
-                snprintf(note.what, sizeof(note.what), "could not re-apply: %.80s, its part \"%s\" (%.60s)", st->what,
-                         st->more[k].op.kind == EDIT_PAINT_ADD ? "paint-add" : st->more[k].op.kind == EDIT_PAINT_SET ? "paint-set" : "paint-remove", am);
-                EditStep *slot = MS_PUSH(E->failed, E->failedCount, E->failedCap);
+                note.what = MonoStrf("could not re-apply: %.80s, its part \"%s\" (%.60s)", st->what,
+                                     st->more[k].op.kind == EDIT_PAINT_ADD ? "paint-add" : st->more[k].op.kind == EDIT_PAINT_SET
+                                     ? "paint-set" : "paint-remove", MS_LastError());
+                EditStep *slot = note.what ? MS_PUSH(E->failed, E->failedCount, E->failedCap) : NULL;
                 if (slot) *slot = note;
+                else free(note.what);
             }
         }
         free(*outSel);
@@ -3144,10 +3206,14 @@ int MapEditRebase(MapEditor *E, MS_EntityId **outSel, int *outSelCount, char *ms
     free(pending);
     E->savedAt = 0;
     int failed = E->failedCount - failedBefore;
-    if (failed == 0) snprintf(msg, msgSize, "the map changed on disk: %d unsaved edit%s applied again on top of it", applied, applied == 1 ? "" : "s");
-    else snprintf(msg, msgSize, "the map changed on disk: %d unsaved edit%s applied again, %d could not be (listed in red)", applied,
-                  applied == 1 ? "" : "s", failed);
-    return failed;
+    *failedCount = failed;
+    if (failed == 0) {
+        MsgSetf(&E->note, "the map changed on disk: %d unsaved edit%s applied again on top of it", applied, applied == 1 ? "" : "s");
+        return 0;
+    }
+    MsgSetf(&E->note, "the map changed on disk: %d unsaved edit%s applied again, %d could not be (listed in red)", applied,
+            applied == 1 ? "" : "s", failed);
+    return 1;
 }
 
 void MapEditStatsText(const MS_EditStats *st, char *out, int outSize)
@@ -3232,9 +3298,9 @@ void MapEditClassify(const MS_ObjRef *objs, int count, unsigned char *classes)
         else if (e >= 0 && scene->entitySources[e].prim == lastPrim) c = lastClass;
         else if (e >= 0 && lines) {
             int line = scene->entitySources[e].line;
-            char why[64];
+            const char *bad;        // (not shown: the class only)
             if (line >= 1 && line <= P.lineCount &&
-                Analyze(&st, text + P.lines[line - 1].start, P.lines[line - 1].contentEnd - P.lines[line - 1].start, why, sizeof(why)))
+                Analyze(&st, text + P.lines[line - 1].start, P.lines[line - 1].contentEnd - P.lines[line - 1].start, &bad))
                 c = strcmp(st.prim, "box") == 0 ? EDIT_CLASS_BOX : strcmp(st.prim, "block") == 0 ? EDIT_CLASS_BLOCK : EDIT_CLASS_OTHER_BOX;
             lastPrim = scene->entitySources[e].prim;
             lastClass = c;
@@ -3362,7 +3428,7 @@ static int RunScript(MapEditor *E, const char *scriptPath, bool live)
         char *raw = MS_StrDup(line);     // (material-set and the paint ops read their words as written)
         int n = ScriptWords(line, w, 12);
         if (n == 0 || !raw) { free(raw); continue; }
-        char msg[512] = "";
+        MonoMsg msg = { 0 };      // what the line did, or why it failed
         char matName[256] = "", atlasBuf[MS_PATH_MAX] = "";
         bool ok = false, wentLive = false;
         EditOp op = { 0 };
@@ -3371,7 +3437,7 @@ static int RunScript(MapEditor *E, const char *scriptPath, bool live)
         bool previewOp = live && n >= 3 && strcmp(w[0], "preview") == 0 &&
                          (strcmp(w[1], "turn") == 0 || strcmp(w[1], "scale") == 0 || strcmp(w[1], "rotation") == 0);
         if (previewOp) memmove(w, w + 1, sizeof(char *) * (size_t)--n);
-        if (n < 0) snprintf(msg, sizeof(msg), "unterminated string");
+        if (n < 0) MsgSetStatic(&msg, "unterminated string");
         else if (strcmp(w[0], "select") == 0 || strcmp(w[0], "also") == 0) {
             if (strcmp(w[0], "select") == 0) sel.n = 0;
             long a = 0, b = -1;
@@ -3395,12 +3461,12 @@ static int RunScript(MapEditor *E, const char *scriptPath, bool live)
                     ok = true;
                 }
             }
-            if (!ok) snprintf(msg, sizeof(msg), "select line <n> [copy <c>] | id <n> [index <i>] | entity <hex> <index> | none");
-            else snprintf(msg, sizeof(msg), "%d object%s selected", sel.n, sel.n == 1 ? "" : "s");
+            if (!ok) MsgSetStatic(&msg, "select line <n> [copy <c>] | id <n> [index <i>] | entity <hex> <index> | none");
+            else MsgSetf(&msg, "%d object%s selected", sel.n, sel.n == 1 ? "" : "s");
         } else if (strcmp(w[0], "move") == 0 || strcmp(w[0], "duplicate") == 0) {
             op.kind = w[0][0] == 'm' ? EDIT_MOVE : EDIT_DUPLICATE;
             isEdit = n == 4 && ScriptNum(w[1], &op.delta[0]) && ScriptNum(w[2], &op.delta[1]) && ScriptNum(w[3], &op.delta[2]);
-            if (!isEdit) snprintf(msg, sizeof(msg), "%s <dx> <dy> <dz>", w[0]);
+            if (!isEdit) MsgSetf(&msg, "%s <dx> <dy> <dz>", w[0]);
         } else if (strcmp(w[0], "turn") == 0 || strcmp(w[0], "scale") == 0) {
             // turn <yaw> [<pitch> <roll>] [local] [pivot x y z]; scale <f> | <fx> <fy> <fz> [local] [pivot x y z]
             bool turn = w[0][0] == 't';
@@ -3423,16 +3489,16 @@ static int RunScript(MapEditor *E, const char *scriptPath, bool live)
             } else
                 for (int a = 0; a < 3; a++) op.factor[a] = v[nums == 3 ? a : 0];
             if (!isEdit)
-                snprintf(msg, sizeof(msg), turn ? "turn <yaw> [<pitch> <roll>] [local] [pivot <x> <y> <z>] (degrees)"
-                                                : "scale <f> | <fx> <fy> <fz> [local] [pivot <x> <y> <z>]");
+                MsgSetStatic(&msg, turn ? "turn <yaw> [<pitch> <roll>] [local] [pivot <x> <y> <z>] (degrees)"
+                                   : "scale <f> | <fx> <fy> <fz> [local] [pivot <x> <y> <z>]");
         } else if (strcmp(w[0], "rotation") == 0) {
             op.kind = EDIT_SET_ROTATION;
             isEdit = n == 4 && ScriptNum(w[1], &op.ypr[0]) && ScriptNum(w[2], &op.ypr[1]) && ScriptNum(w[3], &op.ypr[2]);
-            if (!isEdit) snprintf(msg, sizeof(msg), "rotation <yaw> <pitch> <roll> (degrees, each object about its own centre / origin; 0 0 0 resets)");
+            if (!isEdit) MsgSetStatic(&msg, "rotation <yaw> <pitch> <roll> (degrees, each object about its own centre / origin; 0 0 0 resets)");
         } else if (strcmp(w[0], "size") == 0) {
             op.kind = EDIT_SIZE;
             isEdit = n == 4 && ScriptNum(w[1], &op.size[0]) && ScriptNum(w[2], &op.size[1]) && ScriptNum(w[3], &op.size[2]);
-            if (!isEdit) snprintf(msg, sizeof(msg), "size <sx> <sy> <sz> (metres about the box's centre, 0 keeps an axis)");
+            if (!isEdit) MsgSetStatic(&msg, "size <sx> <sy> <sz> (metres about the box's centre, 0 keeps an axis)");
         } else if (strcmp(w[0], "remove") == 0 && n == 1) {
             op.kind = EDIT_REMOVE;
             isEdit = true;
@@ -3441,7 +3507,7 @@ static int RunScript(MapEditor *E, const char *scriptPath, bool live)
             op.modelPath = n == 5 ? w[1] : "";
             isEdit = n == 5 && ScriptNum(w[2], &op.pos[0]) && ScriptNum(w[3], &op.pos[1]) && ScriptNum(w[4], &op.pos[2]) && sel.n > 0;
             if (isEdit) op.anchor = sel.v[0];
-            else snprintf(msg, sizeof(msg), "add \"<model file>\" <x> <y> <z> (after the first selected object's line)");
+            else MsgSetStatic(&msg, "add \"<model file>\" <x> <y> <z> (after the first selected object's line)");
         } else if (strcmp(w[0], "material-set") == 0) {
             // material-set "<name>" <keys...> (docs/painting.md 10.3)
             op.kind = EDIT_MATERIAL_SET;
@@ -3464,7 +3530,7 @@ static int RunScript(MapEditor *E, const char *scriptPath, bool live)
             op.matName = matName;
             op.matKeys = p;
             isEdit = matName[0] && p[0];
-            if (!isEdit) snprintf(msg, sizeof(msg), "material-set \"<name>\" <keys...> (\"-key\" removes one)");
+            if (!isEdit) MsgSetStatic(&msg, "material-set \"<name>\" <keys...> (\"-key\" removes one)");
         } else if (strcmp(w[0], "paint-add") == 0 || strcmp(w[0], "paint-set") == 0 || strcmp(w[0], "paint-remove") == 0) {
             // paint-add "<material>"|own ["<atlas>"] faces <+x,...>|slot <N> <x> <y> <w> <h> [nearest]
             // paint-set "<material>"|own faces <+x,...>|slot <N> [<x> <y> <w> <h>] [nearest|trilinear]
@@ -3515,9 +3581,9 @@ static int RunScript(MapEditor *E, const char *scriptPath, bool live)
             isEdit = okp && t == ps.n && (op.kind != EDIT_PAINT_ADD || !op.paint.material || op.paint.atlas);
             free(ps.tok);
             if (!isEdit)
-                snprintf(msg, sizeof(msg), "%s", op.kind == EDIT_PAINT_ADD ? "paint-add \"<material>\"|own [\"<atlas>\"] faces <+x,-x,...>|slot <N> <x> <y> <w> <h> [nearest]"
-                                       : op.kind == EDIT_PAINT_SET ? "paint-set \"<material>\"|own faces <+x,...>|slot <N> [<x> <y> <w> <h>] [nearest|trilinear]"
-                                       : "paint-remove \"<material>\"|own [faces <+x,...>|slot <N>]");
+                MsgSetStatic(&msg, op.kind == EDIT_PAINT_ADD ? "paint-add \"<material>\"|own [\"<atlas>\"] faces <+x,-x,...>|slot <N> <x> <y> <w> <h> [nearest]"
+                                   : op.kind == EDIT_PAINT_SET ? "paint-set \"<material>\"|own faces <+x,...>|slot <N> [<x> <y> <w> <h>] [nearest|trilinear]"
+                                   : "paint-remove \"<material>\"|own [faces <+x,...>|slot <N>]");
         } else if (strcmp(w[0], "id") == 0 && n == 2 && strcmp(w[1], "remove") == 0) {
             op.kind = EDIT_ID_REMOVE;
             isEdit = true;
@@ -3526,11 +3592,12 @@ static int RunScript(MapEditor *E, const char *scriptPath, bool live)
             op.kind = EDIT_ID;
             isEdit = n == 1 || (n == 2 && ScriptInt(w[1], &v) && v >= 1 && v <= 2147483647);
             op.id = (int)v;
-            if (!isEdit) snprintf(msg, sizeof(msg), "id [<n>] (1..2147483647; without n: the next free id for each line without one)");
+            if (!isEdit) MsgSetStatic(&msg, "id [<n>] (1..2147483647; without n: the next free id for each line without one)");
         } else if ((strcmp(w[0], "undo") == 0 || strcmp(w[0], "redo") == 0) && n == 1) {
             MS_EntityId *ids;
             int count;
-            ok = (w[0][0] == 'u' ? MapEditUndo : MapEditRedo)(E, &ids, &count, msg, sizeof(msg)) == EDIT_DONE;
+            ok = (w[0][0] == 'u' ? MapEditUndo : MapEditRedo)(E, &ids, &count) != 1;     // (2: done, the auto save failed)
+            MsgSetf(&msg, "%s", ok ? MapEditNote(E) : MS_LastError());
             if (ok) SelectIds(&sel, ids, count);
             free(ids);
             wentLive = ok && live;
@@ -3541,74 +3608,80 @@ static int RunScript(MapEditor *E, const char *scriptPath, bool live)
                 printf("edits:   %08x:%d %s %d line %d copy %d part %d\n", scene->entityIds[e].stmt, scene->entityIds[e].index,
                        KindName(sel.v[i].kind), sel.v[i].index, s->line, s->copy, s->part);
             }
-            snprintf(msg, sizeof(msg), "%d selected", sel.n);
+            MsgSetf(&msg, "%d selected", sel.n);
             if (live) {
                 for (int i = 0; i < E->failedCount; i++) printf("edits:   failed: %s\n", E->failed[i].what);
-                snprintf(msg, sizeof(msg), "%d selected, %d unsaved edit%s, %d failed", sel.n, MapEditUnsaved(E),
-                         MapEditUnsaved(E) == 1 ? "" : "s", E->failedCount);
+                MsgSetf(&msg, "%d selected, %d unsaved edit%s, %d failed", sel.n, MapEditUnsaved(E),
+                        MapEditUnsaved(E) == 1 ? "" : "s", E->failedCount);
             }
             ok = true;
         } else if (live && strcmp(w[0], "save") == 0 && n == 1) {
-            ok = MapEditSave(E, msg, sizeof(msg));
+            unsigned char r = MapEditSave(E);
+            ok = r != 2;        // (1, nothing to save, is no failure)
+            MsgSetf(&msg, "%s", r == 2 ? MS_LastError() : MapEditNote(E));
         } else if (live && strcmp(w[0], "disk") == 0 && n == 2) {
             // The outside-change path: the map file becomes that file's bytes, the game's hot
             // reload loads it (MS_Reload, as MS_Poll would), and the unsaved edits are rebased
             int dsize;
             char *bytes = ReadFileBytes(w[1], &dsize);
-            if (!bytes) snprintf(msg, sizeof(msg), "cannot read %s", w[1]);
-            else if (!WriteFileBytes(scene->path, bytes, dsize)) snprintf(msg, sizeof(msg), "cannot write %s", scene->path);
-            else if (MS_Reload(scene, NULL) != MS_RELOADED) snprintf(msg, sizeof(msg), "the reload failed: %s", MS_LastError());
+            if (!bytes) MsgSetf(&msg, "cannot read %s", w[1]);
+            else if (!WriteFileBytes(scene->path, bytes, dsize)) MsgSetf(&msg, "cannot write %s", scene->path);
+            else if (MS_Reload(scene, NULL) != MS_RELOADED) MsgSetf(&msg, "the reload failed: %s", MS_LastError());
             else if (MapEditUnsaved(E) == 0) {
                 ok = MapEditBegin(E);
                 sel.n = 0;
-                snprintf(msg, sizeof(msg), "reloaded %s, no unsaved edits%s", w[1], ok ? "" : " (cannot edit it)");
+                MsgSetf(&msg, "reloaded %s, no unsaved edits%s", w[1], ok ? "" : " (cannot edit it)");
             } else {
                 MS_EntityId *ids;
                 int count;
-                int failed = MapEditRebase(E, &ids, &count, msg, sizeof(msg));
+                int failed;
+                unsigned char r = MapEditRebase(E, &ids, &count, &failed);
+                MsgSetf(&msg, "%s", r >= 2 ? MS_LastError() : MapEditNote(E));     // (2, 3: nothing re-applied)
                 SelectIds(&sel, ids, count);
                 free(ids);
-                printf("edits: %s:%d: %s\n", scriptPath, lineNo, msg);
+                printf("edits: %s:%d: %s\n", scriptPath, lineNo, MsgText(&msg));
                 for (int i = 0; i < E->failedCount; i++) printf("edits:   failed: %s\n", E->failed[i].what);
-                snprintf(msg, sizeof(msg), "rebased: %d selected, %d unsaved, %d failed", sel.n, MapEditUnsaved(E), failed);
+                MsgSetf(&msg, "rebased: %d selected, %d unsaved, %d failed", sel.n, MapEditUnsaved(E), failed);
                 ok = true;
             }
             free(bytes);
         } else if (live && strcmp(w[0], "preview") == 0 && n == 2 && strcmp(w[1], "end") == 0) {
             MS_EditPreviewEnd(scene);
             previewing = false;
-            snprintf(msg, sizeof(msg), "preview ended (everything back)");
+            MsgSetStatic(&msg, "preview ended (everything back)");
             ok = true;
         } else if (live && strcmp(w[0], "preview") == 0 && n == 5 && strcmp(w[1], "move") == 0) {
             double delta[3];
             ok = ScriptNum(w[2], &delta[0]) && ScriptNum(w[3], &delta[1]) && ScriptNum(w[4], &delta[2]) && sel.n > 0 &&
                  ScriptPreview(&sel, delta, NULL, &previewing, &previewFrom);
-            snprintf(msg, sizeof(msg), ok ? "preview: %d object%s shifted" : "preview move <dx> <dy> <dz> (needs a selection; refused?)",
-                     sel.n, sel.n == 1 ? "" : "s");
-        } else snprintf(msg, sizeof(msg), "unknown command '%s' (select also move turn rotation scale size remove duplicate add id material-set paint-add paint-set paint-remove undo redo print%s)", w[0],
-                        live ? " save disk preview" : "");
+            MsgSetf(&msg, ok ? "preview: %d object%s shifted" : "preview move <dx> <dy> <dz> (needs a selection; refused?)",
+                    sel.n, sel.n == 1 ? "" : "s");
+        } else MsgSetf(&msg, "unknown command '%s' (select also move turn rotation scale size remove duplicate add id material-set paint-add paint-set paint-remove undo redo print%s)", w[0],
+                       live ? " save disk preview" : "");
 
         if (isEdit && previewOp) {
             ok = sel.n > 0 && ScriptPreview(&sel, NULL, &op, &previewing, &previewFrom);
             bool turned = op.kind == EDIT_ROTATE || op.kind == EDIT_SET_ROTATION;
-            if (ok) snprintf(msg, sizeof(msg), "preview: %d object%s %s", sel.n, sel.n == 1 ? "" : "s", turned ? "turned" : "scaled");
-            else snprintf(msg, sizeof(msg), "preview %s needs a selection (refused?)", turned ? "turn" : "scale");
+            if (ok) MsgSetf(&msg, "preview: %d object%s %s", sel.n, sel.n == 1 ? "" : "s", turned ? "turned" : "scaled");
+            else MsgSetf(&msg, "preview %s needs a selection (refused?)", turned ? "turn" : "scale");
         } else if (isEdit) {
             MS_EntityId *ids;
             int count;
-            ok = MapEditApply(E, sel.v, sel.n, &op, &ids, &count, msg, sizeof(msg)) == EDIT_DONE;
+            ok = MapEditApply(E, sel.v, sel.n, &op, &ids, &count) != 1;     // (2: applied, the auto save failed)
+            MsgSetf(&msg, "%s", ok ? MapEditNote(E) : MS_LastError());
             if (ok) SelectIds(&sel, ids, count);
             free(ids);
             wentLive = ok && live;
             previewing = false;     // (an edit ends a running preview)
         }
-        printf("edits: %s:%d: %s%s\n", scriptPath, lineNo, ok ? "" : "FAILED: ", msg);
+        printf("edits: %s:%d: %s%s\n", scriptPath, lineNo, ok ? "" : "FAILED: ", MsgText(&msg));
         if (wentLive) {
             char stats[400];
             MapEditStatsText(&E->lastStats, stats, sizeof(stats));
             printf("monolith: live edit %s\n", stats);
         }
         if (!ok) status = 1;
+        MsgFree(&msg);
         free(raw);
     }
     fflush(stdout);
@@ -3668,23 +3741,26 @@ static int TrimPaintHistory(MapEditor *E)
     return dropped;
 }
 
-EditResult MapEditPushPaint(MapEditor *E, const MS_ObjRef *sel, int selCount, const EditOp *op, PaintStep *paint,
-                            const char *what, MS_EntityId **outSel, int *outSelCount, char *msg, int msgSize)
+// A paint step, with or without a text op (mapedit.h). paint is never NULL (a text edit without
+// paint is MapEditApply: only that one auto-saves). Returns 0: pushed (note: its text); 1: not pushed,
+// the paint released (why in MS_LastError()).
+unsigned char MapEditPushPaint(MapEditor *E, const MS_ObjRef *sel, int selCount, const EditOp *op, PaintStep *paint,
+                               const char *what, MS_EntityId **outSel, int *outSelCount)
 {
     *outSel = NULL;
     *outSelCount = 0;
-    EditResult res = EDIT_FAILED;
-    if (!E->work) snprintf(msg, msgSize, "painting needs the working copy (the map's text)");
+    unsigned char res = 1;
+    if (!E->work) MS_SetError("painting needs the working copy (the map's text)");
     else if (E->workHash != scene->hash || E->loadVersion != scene->loadVersion)
-        snprintf(msg, msgSize, "the map was reloaded from disk: wait until the edits are re-applied");
+        MS_SetError("the map was reloaded from disk: wait until the edits are re-applied");
     else if (op) {
-        res = ApplyStep(E, sel, selCount, op, &paint, outSel, outSelCount, msg, msgSize);
-        if (res == EDIT_DONE && what && what[0]) {
+        // (a paint step is never auto-saved by ApplyStep: 2 can't come back, it would count as pushed)
+        res = ApplyStep(E, sel, selCount, op, &paint, outSel, outSelCount) == 1 ? 1 : 0;
+        if (res == 0 && what && what[0]) {
             EditStep *top = &E->undo[E->undoCount - 1];
-            char both[512];
-            snprintf(both, sizeof(both), "%s, %s", what, top->what);
-            snprintf(top->what, sizeof(top->what), "%.*s", (int)sizeof(top->what) - 1, both);
-            snprintf(msg, msgSize, "%s", top->what);
+            char *both = MonoStrf("%s, %s", what, top->what);
+            if (both) { free(top->what); top->what = both; }    // (out of memory: the op's text)
+            MsgSetf(&E->note, "%s", top->what);
         }
     } else {
         // Paint alone: no text, the step only keeps the order with the text steps around it
@@ -3692,63 +3768,62 @@ EditResult MapEditPushPaint(MapEditor *E, const MS_ObjRef *sel, int selCount, co
         EditStep *slot = MS_RESERVE(E->undo, E->undoCap, E->undoCount + 1) ? &E->undo[E->undoCount] : NULL;
         step.selBefore = malloc(sizeof(MS_EntityId) * (selCount > 0 ? (size_t)selCount : 1));
         step.selAfter = malloc(sizeof(MS_EntityId) * (selCount > 0 ? (size_t)selCount : 1));
-        if (!slot || !step.selBefore || !step.selAfter) {
+        step.what = MS_StrDup(what && what[0] ? what : "painted");
+        if (!slot || !step.selBefore || !step.selAfter || !step.what) {
             FreeStep(E, &step);
-            snprintf(msg, msgSize, "out of memory");
+            MS_SetError("out of memory");
         } else {
             for (int i = 0; i < selCount; i++) {
                 int e = MS_ObjectEntity(scene, sel[i]);
                 if (e >= 0) step.selBefore[step.selBeforeCount++] = step.selAfter[step.selAfterCount++] = scene->entityIds[e];
             }
             step.hashBefore = step.hashAfter = E->workHash;
-            snprintf(step.what, sizeof(step.what), "%s", what && what[0] ? what : "painted");
             step.paint = paint;
             paint = NULL;
             *outSel = CopyIds(step.selAfter, step.selAfterCount);
             *outSelCount = *outSel ? step.selAfterCount : 0;
             PushStep(E, slot, &step);
-            snprintf(msg, msgSize, "%s", E->undo[E->undoCount - 1].what);
-            res = EDIT_DONE;
+            MsgSetf(&E->note, "%s", E->undo[E->undoCount - 1].what);
+            res = 0;
         }
     }
     if (paint && E->paintHooks.release) E->paintHooks.release(E->paintHooks.user, paint);
-    if (res == EDIT_DONE) {
+    if (res == 0) {
         int dropped = TrimPaintHistory(E);
-        if (dropped > 0) {
-            size_t l = strlen(msg);
-            snprintf(msg + l, (size_t)msgSize > l ? (size_t)msgSize - l : 0, " (oldest %d undo step%s dropped: paint history over 512 MiB)",
-                     dropped, dropped == 1 ? "" : "s");
-        }
+        if (dropped > 0)
+            MsgAppendf(&E->note, " (oldest %d undo step%s dropped: paint history over 512 MiB)", dropped, dropped == 1 ? "" : "s");
     }
     return res;
 }
 
-EditResult MapEditAmendPaint(MapEditor *E, const MS_ObjRef *sel, int selCount, const EditOp *op, char *msg, int msgSize)
+// One more paint op onto the top paint step (mapedit.h). Returns 0: amended (note: the op's text);
+// 1: not amended, the step and the text as they were (why in MS_LastError()).
+unsigned char MapEditAmendPaint(MapEditor *E, const MS_ObjRef *sel, int selCount, const EditOp *op)
 {
     EditStep *top = E->work && E->undoCount > 0 ? &E->undo[E->undoCount - 1] : NULL;
     if (!top || !top->paint || top->hunkCount == 0 || top->hashAfter != E->workHash || E->workHash != scene->hash ||
         E->loadVersion != scene->loadVersion || E->savedAt >= E->undoCount) {
-        snprintf(msg, msgSize, "paint: nothing to add the edit to (the stroke's step is not on top any more)");
-        return EDIT_FAILED;
+        MS_SetError("paint: nothing to add the edit to (the stroke's step is not on top any more)");
+        return 1;
     }
     if (op->kind != EDIT_PAINT_ADD && op->kind != EDIT_PAINT_SET && op->kind != EDIT_PAINT_REMOVE) {
-        snprintf(msg, msgSize, "paint: only paint ops are added to a step");
-        return EDIT_FAILED;
+        MS_SetError("paint: only paint ops are added to a step");
+        return 1;
     }
     Ctx C = { .op = op };
     Patch P = { .text = E->work, .size = E->workSize };
     EditStep part = { 0 };
-    EditResult res = EDIT_FAILED;
+    unsigned char res = 1;
     char *after = NULL, *before = NULL;
     EditMore more = { .op = *op };
     int afterSize, beforeSize;
-    if (!BuildPatch(&C, &P, sel, selCount)) { snprintf(msg, msgSize, "%s", C.why); goto done; }
+    if (!BuildPatch(&C, &P, sel, selCount)) goto done;      // (the refusal is the last error)
     if (!MakeHunks(&P, &part) || !(after = ApplyHunks(E->work, E->workSize, &part, false, &afterSize)) ||
         !(before = ApplyHunks(E->work, E->workSize, top, true, &beforeSize))) {
-        snprintf(msg, msgSize, "out of memory");
+        MS_SetError("out of memory");
         goto done;
     }
-    if (afterSize == E->workSize && memcmp(after, E->work, (size_t)afterSize) == 0) { snprintf(msg, msgSize, "%s: nothing changes", P.what); goto done; }
+    if (afterSize == E->workSize && memcmp(after, E->work, (size_t)afterSize) == 0) { MS_SetError("%s: nothing changes", P.what); goto done; }
     more.material = op->paint.material ? MS_StrDup(op->paint.material) : NULL;
     more.atlas = op->paint.atlas ? MS_StrDup(op->paint.atlas) : NULL;
     more.op.paint.material = more.material;
@@ -3765,13 +3840,13 @@ EditResult MapEditAmendPaint(MapEditor *E, const MS_ObjRef *sel, int selCount, c
     if (!okStrings) {
         free(h.oldText);
         free(h.newText);
-        snprintf(msg, msgSize, "out of memory");
+        MS_SetError("out of memory");
         goto done;
     }
     if (MS_EditSetText(scene, after, afterSize, &E->lastStats) != MS_RELOADED) {
         free(h.oldText);
         free(h.newText);
-        snprintf(msg, msgSize, "the edit would break the map, not applied: %s", MS_LastError());
+        MS_SetError("the edit would break the map, not applied: %s", MS_LastError());
         goto done;
     }
     for (int i = 0; i < top->hunkCount; i++) { free(top->hunks[i].oldText); free(top->hunks[i].newText); }
@@ -3787,8 +3862,8 @@ EditResult MapEditAmendPaint(MapEditor *E, const MS_ObjRef *sel, int selCount, c
     E->workHash = top->hashAfter;
     after = NULL;
     E->knownHash = scene->hash;
-    snprintf(msg, msgSize, "%s", P.what);
-    res = EDIT_DONE;
+    MsgSetf(&E->note, "%s", P.what);
+    res = 0;
 done:
     free(more.material);
     free(more.atlas);

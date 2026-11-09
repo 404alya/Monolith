@@ -52,10 +52,24 @@ typedef struct {
     Vector3 rotAxis;                // rotate: the axis (world; local: the model axis in model space)
     double sweep, lastAngle;        // rotate: the angle the cursor swept (radians), its last angle
     bool haveAngle;
-    char refusal[320];              // what can't follow (e.g. "stairs can't turn"), shown in red
+    // What can't follow or why nothing changes (Classify, Compute: every frame), shown in red; its
+    // words (refusal) are rebuilt only when these parts change (refusalShown)
+    struct TransformRefusal {
+        int kind;                       // the modal's kind (the verb)
+        int other, dir, turn;           // boxes from stairs / waffle lines, directional lights, boxes refused a turn
+        bool scaleBad;                  // a scale factor <= 0
+        unsigned char note;             // nothing changes: 0 no, 1 one box looks the same turned, 2 the rest
+        bool noteBoxes;                 // 2: boxes among them (rotate)
+        double deg, sx, sz;             // 1: the turn and the box's footprint
+        bool square;
+    } refusalParts, refusalShown;
+    MonoMsg refusal;
+    bool refused;                   // refusal has words
     bool noChange;                  // a value, but every object that follows ends as it started
                                     // (a square box turned 90 deg): LMB / ENTER write nothing
-    char cancelNote[200];           // why the last commit attempt wrote nothing ("" = cancelled)
+    unsigned char cancelWhy;        // why the last commit attempt wrote nothing (TransformCancelNote):
+                                    // 0 a plain cancel, 1 turned with no change, 2 every object would
+                                    // end where it started, 3 nothing selected can follow
     Camera3D cam;                   // the camera of the last update (the commit's view axis)
     // The rotate gizmo while no modal runs (kept across modals)
     bool gizmoLocal;                // L: the rings follow the active object's own axes
@@ -72,23 +86,26 @@ typedef enum {
     TRANSFORM_CANCELLED,            // everything is back as it was
 } TransformResult;
 
-// Starts a modal of `kind` on the designer's selection (false: nothing selected / out of memory, msg)
-bool TransformBegin(TransformModal *t, Designer *d, TransformKind kind, char *msg, int msgSize);
+// Starts a modal of `kind` on the designer's selection. Returns 0 started, 1 nothing selected,
+// 2 out of memory (the caller has the texts for the codes)
+unsigned char TransformBegin(TransformModal *t, Designer *d, TransformKind kind);
 // Every frame while running (takes every key and the mouse; the camera is frozen): on
 // TRANSFORM_COMMIT *op holds the edit; the caller applies it to TransformCommitObjects and then
 // calls TransformEnd (the commit's MS_EditSetText has ended the preview; a refused one is undone)
 TransformResult TransformUpdate(TransformModal *t, Designer *d, Camera3D cam, EditOp *op);
 bool TransformRunning(const TransformModal *t);
 // After TRANSFORM_CANCELLED: why nothing was written when LMB / ENTER asked for a commit (a
-// value that changes nothing), NULL when it was a plain cancel (RMB / ESC, no value)
+// value that changes nothing: a static sentence for cancelWhy), NULL when it was a plain cancel
+// (RMB / ESC, no value)
 const char *TransformCancelNote(const TransformModal *t);
 // The objects the commit's op applies to (those that follow the current kind)
 int TransformCommitObjects(const TransformModal *t, const MS_ObjRef **objs);
 // After a commit (applied or refused) or to abort: the preview ends if it still runs
 void TransformEnd(TransformModal *t, Designer *d);
 // --edit-modal "g x 1.25": opens the modal with this lock and typed text, values computed for
-// cam (for --shot-hud). Lock words: x y z (axis), X Y Z (plane), doubled (xx, XX) = local axes
-bool TransformOpenScripted(TransformModal *t, Designer *d, Camera3D cam, const char *spec, char *msg, int msgSize);
+// cam (for --shot-hud). Lock words: x y z (axis), X Y Z (plane), doubled (xx, XX) = local axes.
+// Returns TransformBegin's values, or 3: the spec is not `<g|r|s> ...` (the caller quotes it)
+unsigned char TransformOpenScripted(TransformModal *t, Designer *d, Camera3D cam, const char *spec);
 // The scripted modal's end (--edit-modal ... commit / cancel): commit fills *op (TRANSFORM_COMMIT,
 // then as after TransformUpdate), cancel puts everything back (TRANSFORM_CANCELLED)
 TransformResult TransformFinish(TransformModal *t, Designer *d, bool commit, EditOp *op);
@@ -96,11 +113,13 @@ TransformResult TransformFinish(TransformModal *t, Designer *d, bool commit, Edi
 // does) and the selection has a box, block or model; drawn in 2D after R3D_End at a constant size
 // TransformGizmoHover: what is under the cursor px (enabled false: nothing, or the forced part)
 GizmoPart TransformGizmoHover(TransformModal *t, Designer *d, Camera3D cam, Vector2 px, bool enabled);
-// LMB on a gizmo part: a rotate modal driven by it (the drag; false: msg says why)
-bool TransformGizmoBegin(TransformModal *t, Designer *d, Camera3D cam, GizmoPart part, char *msg, int msgSize);
+// LMB on a gizmo part: a rotate modal driven by it (the drag). Returns TransformBegin's values, or 3:
+// nothing of the gizmo there (part GIZMO_NONE)
+unsigned char TransformGizmoBegin(TransformModal *t, Designer *d, Camera3D cam, GizmoPart part);
 // --edit-modal "ring <x|y|z|xx|yy|zz|view> <deg> ..." / "ball <dx> <dy> ...": a gizmo drag of that
-// much, values computed for cam; extra words: ctrl (CTRL held), step <deg> (the angle snap), type <v>
-bool TransformGizmoScripted(TransformModal *t, Designer *d, Camera3D cam, const char *spec, char *msg, int msgSize);
+// much, values computed for cam; extra words: ctrl (CTRL held), step <deg> (the angle snap), type <v>.
+// Returns TransformBegin's values, or 3: the spec is not a ring / ball spec (the caller quotes it)
+unsigned char TransformGizmoScripted(TransformModal *t, Designer *d, Camera3D cam, const char *spec);
 void TransformDrawGizmo(TransformModal *t, Designer *d, Camera3D cam);
 // The axis guides (3D, after R3D_End like the designer overlay) and the HUD line; returns its height
 void TransformDrawGuides(const TransformModal *t, Camera3D cam);

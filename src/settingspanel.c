@@ -100,10 +100,24 @@ bool PanelCapturesInput(const SettingsPanel *p)
     return p->open || p->freezeFrames > 0;
 }
 
-void PanelStatus(SettingsPanel *p, const char *text, float seconds)
+void PanelStatusStatic(SettingsPanel *p, const char *literal, float seconds)
 {
-    snprintf(p->status, sizeof(p->status), "%s", text);
+    MsgSetStatic(&p->status, literal);
     p->statusTime = seconds;
+}
+
+void PanelStatusf(SettingsPanel *p, float seconds, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    MsgSetv(&p->status, fmt, ap);
+    va_end(ap);
+    p->statusTime = seconds;
+}
+
+void PanelFree(SettingsPanel *p)
+{
+    MsgFree(&p->status);
 }
 
 int PanelUpdate(SettingsPanel *p, GfxSettings *s, float dt, int w, int h)
@@ -230,8 +244,8 @@ void PanelDraw(const SettingsPanel *p, const GfxSettings *s, int w, int h, bool 
                      : p->sel == ResetItem() ? TextFormat("every setting back to the %s preset", MS_QualityName(s->base))
                      : "close the panel (F2 / ESC)";
     UiText(hint, tx, fy + 10, UI_S, UI_TEXT);
-    if (p->statusTime > 0.0f && p->status[0])
-        UiText(p->status, tx, fy + 34, UI_S, UiAlpha(UI_INK, fminf(p->statusTime, 1.0f)));
+    if (p->statusTime > 0.0f)       // (the timer is set with the text)
+        UiText(MsgText(&p->status), tx, fy + 34, UI_S, UiAlpha(UI_INK, fminf(p->statusTime, 1.0f)));
     UiHints("{UP}/{DOWN} select|{LEFT}/{RIGHT} change|mouse: arrows / wheel|pink = changed from the preset",
             tx, (int)L.close.y + (28 - UiLineHeight(UI_XS)) / 2, UI_XS, UI_DIM);
     Button(L.reset, "Reset to preset", p->sel == ResetItem());

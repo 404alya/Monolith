@@ -56,12 +56,34 @@ static bool Ctrl(void) { return IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIG
 static bool Shift(void) { return IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT); }
 static bool Alt(void) { return IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT); }
 
-static void Say(EditMode *m, bool error, const char *text)
+// The mode's HUD line (an event, never per frame): a literal (SayStatic) or formatted text (Sayf;
+// text of any other lifetime goes in as "%s")
+static void SayShown(EditMode *m, bool error)
 {
-    snprintf(m->message, sizeof(m->message), "%s", text);
     m->messageTime = error ? 8.0f : 5.0f;
     m->messageError = error;
 }
+
+static void SayStatic(EditMode *m, bool error, const char *literal)
+{
+    MsgSetStatic(&m->message, literal);
+    SayShown(m, error);
+}
+
+static void Sayf(EditMode *m, bool error, const char *fmt, ...) MSG_PRINTF(3, 4);
+static void Sayf(EditMode *m, bool error, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    MsgSetv(&m->message, fmt, ap);
+    va_end(ap);
+    SayShown(m, error);
+}
+
+// The texts of the transform modal's start codes 1 and 2 (3 quotes the spec: formatted where it is)
+static const char *const TRANSFORM_START_TEXTS[3] = {
+    "", "nothing selected (LMB selects, SHIFT+LMB adds, CTRL+LMB a group)", "out of memory",
+};
 
 // ======================================================================================
 // #region The package's models (models/, recorded in ASSETS.md)
@@ -140,9 +162,9 @@ static bool Confirmed(EditMode *m, int key)
     }
     m->warnKey = key;
     m->warnTime = WARN_TIME;
-    Say(m, true, TextFormat("request [%d]%s is queued or running on this map: its session may change the same lines. "
-                            "Press again to %s anyway", newest, open > 1 ? TextFormat(" (+%d more)", open - 1) : "",
-                            key == KEY_S ? "save" : "edit"));
+    Sayf(m, true, "request [%d]%s is queued or running on this map: its session may change the same lines. "
+                  "Press again to %s anyway", newest, open > 1 ? TextFormat(" (+%d more)", open - 1) : "",
+                  key == KEY_S ? "save" : "edit");
     return false;
 }
 
@@ -154,11 +176,12 @@ static bool EnsureWork(EditMode *m)
     return m->ed.work || MapEditBegin(&m->ed);
 }
 
-// After an edit / undo / redo: the selection becomes the edited objects
-static EditModeResult Done(EditMode *m, Designer *d, EditResult r, MS_EntityId *ids, int count, const char *msg)
+// After an edit / undo / redo (r: MapEditApply's / MapEditUndo's code): the selection becomes the
+// edited objects
+static EditModeResult Done(EditMode *m, Designer *d, unsigned char r, MS_EntityId *ids, int count)
 {
-    if (r != EDIT_DONE) {
-        Say(m, true, msg);
+    if (r == 1) {       // not done: why is the last error
+        Sayf(m, true, "%s", MS_LastError());
         free(ids);
         return EDITMODE_NONE;
     }
@@ -169,10 +192,11 @@ static EditModeResult Done(EditMode *m, Designer *d, EditResult r, MS_EntityId *
         if (e >= 0) DesignerSelectObject(d, scene->entityObjects[e]);
     }
     free(ids);
-    Say(m, false, msg);
+    // (2, done but the auto save failed, is shown as before: not in red, the note says it)
+    Sayf(m, false, "%s", MapEditNote(&m->ed));
     char stats[400];
     MapEditStatsText(&m->ed.lastStats, stats, sizeof(stats));
-    TraceLog(LOG_INFO, "monolith: edit: %s", msg);
+    TraceLog(LOG_INFO, "monolith: edit: %s", MapEditNote(&m->ed));
     TraceLog(LOG_INFO, "monolith: live edit %s", stats);
     return EDITMODE_RELOADED;
 }
@@ -180,16 +204,15 @@ static EditModeResult Done(EditMode *m, Designer *d, EditResult r, MS_EntityId *
 static EditModeResult ApplyTo(EditMode *m, Designer *d, int key, const MS_ObjRef *sel, int selCount, const EditOp *op)
 {
     if (op->kind != EDIT_ADD && selCount == 0) {
-        Say(m, true, "nothing selected (LMB selects, SHIFT+LMB adds, CTRL+LMB a group)");
+        SayStatic(m, true, "nothing selected (LMB selects, SHIFT+LMB adds, CTRL+LMB a group)");
         return EDITMODE_NONE;
     }
     if (!Confirmed(m, key)) return EDITMODE_NONE;
     EnsureWork(m);      // (a compiled map has none: MapEditApply says why)
     MS_EntityId *ids;
     int count;
-    char msg[512];
-    EditResult r = MapEditApply(&m->ed, sel, selCount, op, &ids, &count, msg, sizeof(msg));
-    return Done(m, d, r, ids, count, msg);
+    unsigned char r = MapEditApply(&m->ed, sel, selCount, op, &ids, &count);
+    return Done(m, d, r, ids, count);
 }
 
 static EditModeResult Apply(EditMode *m, Designer *d, int key, const EditOp *op)
@@ -260,11 +283,11 @@ static EditModeResult Duplicate(EditMode *m, Designer *d, int key)
 EditModeResult EditModeAddModel(EditMode *m, Designer *d, const char *modelPath)
 {
     if (!modelPath) {
-        Say(m, true, "no model to add: the package's models/ has no file listed in ASSETS.md (new assets: a request)");
+        SayStatic(m, true, "no model to add: the package's models/ has no file listed in ASSETS.md (new assets: a request)");
         return EDITMODE_NONE;
     }
     if (ObjIsNone(d->hit.obj)) {
-        Say(m, true, "no surface under the cursor");
+        SayStatic(m, true, "no surface under the cursor");
         return EDITMODE_NONE;
     }
     // Snapped on the axes along the hit face (as volume mode), CTRL: exact
@@ -284,7 +307,7 @@ EditModeResult EditModeAddModel(EditMode *m, Designer *d, const char *modelPath)
 static EditModeResult IdKey(EditMode *m, Designer *d)
 {
     if (d->selectedCount == 0) {
-        Say(m, true, "nothing selected (LMB selects, SHIFT+LMB adds, CTRL+LMB a group)");
+        SayStatic(m, true, "nothing selected (LMB selects, SHIFT+LMB adds, CTRL+LMB a group)");
         return EDITMODE_NONE;
     }
     int first = MS_ObjectEntity(scene, d->selected[0]);
@@ -321,7 +344,7 @@ static EditModeResult IdPanel(EditMode *m, Designer *d)
         if (c >= '0' && c <= '9' && n < 10 && !(n == 0 && c == '0')) { m->idText[n++] = (char)c; m->idText[n] = '\0'; }
     if (!IsKeyPressed(KEY_ENTER) && !IsKeyPressed(KEY_KP_ENTER)) return EDITMODE_NONE;
     long v = n ? strtol(m->idText, NULL, 10) : 0;
-    if (v > 2147483647L) { Say(m, true, "an id is a number from 1 to 2147483647"); return EDITMODE_NONE; }
+    if (v > 2147483647L) { SayStatic(m, true, "an id is a number from 1 to 2147483647"); return EDITMODE_NONE; }
     EditModeResult r = Apply(m, d, KEY_ENTER, &(EditOp){ .kind = EDIT_ID, .id = (int)v });
     if (r == EDITMODE_RELOADED) m->idOpen = false;      // (refused: stays open with the reason shown)
     return r;
@@ -342,9 +365,8 @@ static EditModeResult History(EditMode *m, Designer *d, bool undo)
     EnsureWork(m);
     MS_EntityId *ids;
     int count;
-    char msg[512];
-    EditResult r = undo ? MapEditUndo(&m->ed, &ids, &count, msg, sizeof(msg)) : MapEditRedo(&m->ed, &ids, &count, msg, sizeof(msg));
-    return Done(m, d, r, ids, count, msg);
+    unsigned char r = undo ? MapEditUndo(&m->ed, &ids, &count) : MapEditRedo(&m->ed, &ids, &count);
+    return Done(m, d, r, ids, count);
 }
 
 // The transform modal's commit: one edit of the objects that follow, then the modal ends (a
@@ -367,8 +389,8 @@ static EditModeResult ModalUpdate(EditMode *m, Designer *d, Camera3D cam)
     TransformResult r = TransformUpdate(&m->modal, d, cam, &op);
     if (r == TRANSFORM_CANCELLED) {
         // (LMB / ENTER at a value that changes nothing, e.g. a square box turned 90 deg: say so)
-        const char *note = TransformCancelNote(&m->modal);
-        Say(m, note != NULL, note ? note : "transform cancelled: everything is back");
+        const char *note = TransformCancelNote(&m->modal);     // (a static sentence)
+        SayStatic(m, note != NULL, note ? note : "transform cancelled: everything is back");
         return EDITMODE_NONE;
     }
     if (r == TRANSFORM_COMMIT) return ModalCommit(m, d, &op);
@@ -377,8 +399,8 @@ static EditModeResult ModalUpdate(EditMode *m, Designer *d, Camera3D cam)
 
 static EditModeResult ModalStart(EditMode *m, Designer *d, TransformKind kind)
 {
-    char msg[256];
-    if (!TransformBegin(&m->modal, d, kind, msg, sizeof(msg))) Say(m, true, msg);
+    unsigned char r = TransformBegin(&m->modal, d, kind);
+    if (r != 0) SayStatic(m, true, TRANSFORM_START_TEXTS[r]);      // nothing selected / out of memory
     return EDITMODE_NONE;
 }
 
@@ -387,8 +409,9 @@ bool EditModeModalRunning(const EditMode *m) { return TransformRunning(&m->modal
 // LMB on a gizmo part: the drag (the modal with that source)
 static EditModeResult GizmoStart(EditMode *m, Designer *d, Camera3D cam, GizmoPart part)
 {
-    char msg[256];
-    if (!TransformGizmoBegin(&m->modal, d, cam, part, msg, sizeof(msg))) Say(m, true, msg);
+    unsigned char r = TransformGizmoBegin(&m->modal, d, cam, part);
+    if (r == 3) SayStatic(m, true, "nothing of the gizmo there");
+    else if (r != 0) SayStatic(m, true, TRANSFORM_START_TEXTS[r]);      // nothing selected / out of memory
     return EDITMODE_NONE;
 }
 
@@ -407,7 +430,6 @@ static const char *const GIZMO_PART_NAMES[] = { "", "x", "y", "z", "view", "ball
 
 bool EditModeOpenModal(EditMode *m, Designer *d, Camera3D cam, const char *spec, int end, bool *reloaded)
 {
-    char msg[256];
     *reloaded = false;
     if (!m->active) EditModeOpen(m, d);
     char w0[16] = "";
@@ -418,9 +440,9 @@ bool EditModeOpenModal(EditMode *m, Designer *d, Camera3D cam, const char *spec,
         // The keys' one-shot edits (R / SHIFT+R, ALT+SHIFT+R, the typed rotation): applied now,
         // or nothing with "cancel"
         if ((step || reset) && n != 1) {
-            snprintf(msg, sizeof(msg), "--edit-modal \"%s\" takes no numbers", w0);
+            Sayf(m, true, "--edit-modal \"%s\" takes no numbers", w0);
         } else if (rot && n != 4) {
-            snprintf(msg, sizeof(msg), "--edit-modal \"rot <yaw> <pitch> <roll>\": not '%s'", spec);
+            Sayf(m, true, "--edit-modal \"rot <yaw> <pitch> <roll>\": not '%s'", spec);
         } else if (end == 2) {
             TraceLog(LOG_INFO, "monolith: --edit-modal: %s cancelled (nothing applied)", w0);
             return true;
@@ -428,7 +450,7 @@ bool EditModeOpenModal(EditMode *m, Designer *d, Camera3D cam, const char *spec,
             EditModeResult r = step ? StepTurn(m, d, KEY_R, w0[1] == '-' ? -STEP_TURN_DEG : STEP_TURN_DEG)
                              : SetRotation(m, d, KEY_R, rot ? v[0] : 0.0, rot ? v[1] : 0.0, rot ? v[2] : 0.0);
             *reloaded = r == EDITMODE_RELOADED;
-            TraceLog(LOG_INFO, "monolith: --edit-modal: %s%s", *reloaded ? "" : "FAILED: ", m->message);
+            TraceLog(LOG_INFO, "monolith: --edit-modal: %s%s", *reloaded ? "" : "FAILED: ", MsgText(&m->message));
             return *reloaded;
         }
     } else if (!strcmp(w0, "gizmo")) {
@@ -440,24 +462,27 @@ bool EditModeOpenModal(EditMode *m, Designer *d, Camera3D cam, const char *spec,
             for (int p = 1; p <= GIZMO_BALL; p++)
                 if (k == 2 && !strcmp(w2, GIZMO_PART_NAMES[p])) m->modal.forceHover = (GizmoPart)p;
             if (m->modal.forceHover == GIZMO_NONE) {
-                snprintf(msg, sizeof(msg), "--edit-modal \"gizmo [hover <x|y|z|view|ball>]\": not '%s'", spec);
-                Say(m, true, msg);
-                TraceLog(LOG_WARNING, "monolith: --edit-modal: %s", msg);
+                Sayf(m, true, "--edit-modal \"gizmo [hover <x|y|z|view|ball>]\": not '%s'", spec);
+                TraceLog(LOG_WARNING, "monolith: --edit-modal: %s", MsgText(&m->message));
                 return false;
             }
         } else if (k != -1 && k != 0) {
-            snprintf(msg, sizeof(msg), "--edit-modal \"gizmo [hover <x|y|z|view|ball>]\": not '%s'", spec);
-            Say(m, true, msg);
-            TraceLog(LOG_WARNING, "monolith: --edit-modal: %s", msg);
+            Sayf(m, true, "--edit-modal \"gizmo [hover <x|y|z|view|ball>]\": not '%s'", spec);
+            TraceLog(LOG_WARNING, "monolith: --edit-modal: %s", MsgText(&m->message));
             return false;
         }
         m->modal.hover = m->modal.forceHover;
         return true;
-    } else if (!strcmp(w0, "ring") || !strcmp(w0, "ball")) {
-        if (TransformGizmoScripted(&m->modal, d, cam, spec, msg, sizeof(msg))) return true;
-    } else if (TransformOpenScripted(&m->modal, d, cam, spec, msg, sizeof(msg))) return true;
-    Say(m, true, msg);
-    TraceLog(LOG_WARNING, "monolith: --edit-modal: %s", msg);
+    } else {
+        // The modal (a key's or a gizmo ring's / the trackball's): the texts of the codes are here
+        bool gizmo = !strcmp(w0, "ring") || !strcmp(w0, "ball");
+        unsigned char r = gizmo ? TransformGizmoScripted(&m->modal, d, cam, spec) : TransformOpenScripted(&m->modal, d, cam, spec);
+        if (r == 0) return true;    // started
+        if (r != 3) SayStatic(m, true, TRANSFORM_START_TEXTS[r]);     // nothing selected / out of memory
+        else if (gizmo) Sayf(m, true, "--edit-modal \"ring <x|y|z|xx|yy|zz|view> <deg> | ball <dx> <dy> [ctrl] [step <deg>] [type <v>]\": not '%s'", spec);
+        else Sayf(m, true, "--edit-modal \"<g|r|s> [x|y|z|X|Y|Z] [typed]\": not '%s'", spec);
+    }
+    TraceLog(LOG_WARNING, "monolith: --edit-modal: %s", MsgText(&m->message));
     return false;
 }
 
@@ -466,13 +491,13 @@ EditModeResult EditModeFinishModal(EditMode *m, Designer *d, bool commit)
     EditOp op;
     TransformResult r = TransformFinish(&m->modal, d, commit, &op);
     if (r != TRANSFORM_COMMIT) {
-        const char *note = TransformCancelNote(&m->modal);
-        if (note) Say(m, true, note);
+        const char *note = TransformCancelNote(&m->modal);     // (a static sentence)
+        if (note) SayStatic(m, true, note);
         TraceLog(LOG_INFO, "monolith: --edit-modal: cancelled (everything back)%s%s", note ? ": " : "", note ? note : "");
         return EDITMODE_NONE;
     }
     EditModeResult res = ModalCommit(m, d, &op);
-    TraceLog(LOG_INFO, "monolith: --edit-modal: %s%s", res == EDITMODE_RELOADED ? "" : "FAILED: ", m->message);
+    TraceLog(LOG_INFO, "monolith: --edit-modal: %s%s", res == EDITMODE_RELOADED ? "" : "FAILED: ", MsgText(&m->message));
     return res;
 }
 
@@ -503,12 +528,13 @@ int EditModeUnsaved(const EditMode *m)
     return MapEditUnsaved(&m->ed);      // (auto save: 0 unless a write failed)
 }
 
-bool EditModeSave(EditMode *m, char *msg, int msgSize)
+// 0 saved, 1 nothing to save (the text: the editor's note), 2 not saved (MS_LastError())
+unsigned char EditModeSave(EditMode *m)
 {
-    bool ok = MapEditSaveAll(&m->ed, msg, msgSize);     // (with the draw mode's paint atlases)
-    Say(m, !ok, msg);
-    TraceLog(ok ? LOG_INFO : LOG_WARNING, "monolith: %s", msg);
-    return ok;
+    unsigned char r = MapEditSaveAll(&m->ed);     // (with the draw mode's paint atlases)
+    Sayf(m, r == 2, "%s", r == 2 ? MS_LastError() : MapEditNote(&m->ed));
+    TraceLog(r == 2 ? LOG_WARNING : LOG_INFO, "monolith: %s", MsgText(&m->message));
+    return r;
 }
 
 void EditModeSync(EditMode *m, Designer *d, bool newScene)
@@ -519,16 +545,15 @@ void EditModeSync(EditMode *m, Designer *d, bool newScene)
     if (TransformRunning(&m->modal)) {
         m->modal.previewing = false;
         TransformEnd(&m->modal, d);
-        Say(m, true, "the map was reloaded: the transform was cancelled");
+        SayStatic(m, true, "the map was reloaded: the transform was cancelled");
     }
     if (!E->work || (!newScene && scene->loadVersion == E->loadVersion)) return;
-    char msg[512];
     if (newScene && scene->hash == E->diskHash) {
         // The renderer restarted and loaded the same file: the working copy goes live again
         E->loadVersion = scene->loadVersion;
         if (E->workHash != scene->hash) {
             if (MS_EditSetText(scene, E->work, E->workSize, &E->lastStats) != MS_RELOADED)
-                Say(m, true, TextFormat("the unsaved edits could not be shown again: %s", MS_LastError()));
+                Sayf(m, true, "the unsaved edits could not be shown again: %s", MS_LastError());
             DesignerSync(d);
         }
         return;
@@ -536,12 +561,17 @@ void EditModeSync(EditMode *m, Designer *d, bool newScene)
     if (MapEditUnsaved(E) == 0) {
         bool had = E->undoCount + E->redoCount > 0;
         MapEditBegin(E);
-        if (had) Say(m, true, "the map changed on disk (not by a manual edit): undo history cleared");
+        if (had) SayStatic(m, true, "the map changed on disk (not by a manual edit): undo history cleared");
         return;
     }
     MS_EntityId *ids;
     int count;
-    int failed = MapEditRebase(E, &ids, &count, msg, sizeof(msg));
+    int failed;
+    unsigned char r = MapEditRebase(E, &ids, &count, &failed);
+    // 0 all applied again, 1 some not (the note); 2 the map can't be edited any more, 3 out of
+    // memory (the last error): a warning from 1 on
+    bool bad = r != 0;
+    Sayf(m, bad, "%s", r >= 2 ? MS_LastError() : MapEditNote(E));
     DesignerClearSelection(d);
     DesignerSync(d);
     for (int i = 0; i < count; i++) {
@@ -549,8 +579,7 @@ void EditModeSync(EditMode *m, Designer *d, bool newScene)
         if (e >= 0) DesignerSelectObject(d, scene->entityObjects[e]);
     }
     free(ids);
-    Say(m, failed > 0, msg);
-    TraceLog(failed > 0 ? LOG_WARNING : LOG_INFO, "monolith: %s", msg);
+    TraceLog(bad ? LOG_WARNING : LOG_INFO, "monolith: %s", MsgText(&m->message));
     for (int i = 0; i < E->failedCount; i++) TraceLog(LOG_WARNING, "monolith:   %s", E->failed[i].what);
 }
 
@@ -568,14 +597,13 @@ EditModeResult EditModeUpdate(EditMode *m, Designer *d, Camera3D cam, float dt)
     if (ctrl && IsKeyPressed(KEY_Z)) return History(m, d, !shift);
     if (ctrl && IsKeyPressed(KEY_Y)) return History(m, d, false);
     if (ctrl && IsKeyPressed(KEY_S)) {
-        char msg[512];
-        if (MapEditUnsaved(&m->ed) == 0) Say(m, false, "nothing to save");
-        else if (Confirmed(m, KEY_S)) EditModeSave(m, msg, sizeof(msg));
+        if (MapEditUnsaved(&m->ed) == 0) SayStatic(m, false, "nothing to save");
+        else if (Confirmed(m, KEY_S)) EditModeSave(m);     // (it says how it went)
         return EDITMODE_NONE;
     }
     if (ctrl && shift && IsKeyPressed(KEY_DELETE) && m->ed.failedCount > 0) {
         MapEditClearFailed(&m->ed);
-        Say(m, false, "list of edits that could not be re-applied cleared");
+        SayStatic(m, false, "list of edits that could not be re-applied cleared");
         return EDITMODE_NONE;
     }
 
@@ -583,8 +611,8 @@ EditModeResult EditModeUpdate(EditMode *m, Designer *d, Camera3D cam, float dt)
         int unsaved = EditModeUnsaved(m);
         if (m->active && unsaved > 0 && m->leaveWarnTime <= 0.0f) {
             m->leaveWarnTime = WARN_TIME;
-            Say(m, true, TextFormat("%d unsaved edit%s: CTRL+S saves, M again leaves them unsaved (still live)", unsaved,
-                                    unsaved == 1 ? "" : "s"));
+            Sayf(m, true, "%d unsaved edit%s: CTRL+S saves, M again leaves them unsaved (still live)", unsaved,
+                 unsaved == 1 ? "" : "s");
             return EDITMODE_NONE;
         }
         m->leaveWarnTime = 0.0f;
@@ -600,8 +628,8 @@ EditModeResult EditModeUpdate(EditMode *m, Designer *d, Camera3D cam, float dt)
         return GizmoStart(m, d, cam, m->modal.hover);    // (main.c kept the click from selecting)
 
     if (IsKeyPressed(KEY_N) && !ctrl) {
-        if (shift) Say(m, false, TextFormat("angle snap %g deg (CTRL in a rotate)", DesignerCycleAngleSnap(d)));
-        else Say(m, false, TextFormat("snap %g m", DesignerCycleSnap(d)));
+        if (shift) Sayf(m, false, "angle snap %g deg (CTRL in a rotate)", DesignerCycleAngleSnap(d));
+        else Sayf(m, false, "snap %g m", DesignerCycleSnap(d));
     }
 
     Vector3 fwd, right;
@@ -620,7 +648,7 @@ EditModeResult EditModeUpdate(EditMode *m, Designer *d, Camera3D cam, float dt)
         if (IsKeyPressed(KEY_S)) return ModalStart(m, d, TRANSFORM_SCALE);
         if (IsKeyPressed(KEY_L)) {
             m->modal.gizmoLocal = !m->modal.gizmoLocal;
-            Say(m, false, m->modal.gizmoLocal ? "gizmo: local axes (the first selected box or model)" : "gizmo: global axes");
+            SayStatic(m, false, m->modal.gizmoLocal ? "gizmo: local axes (the first selected box or model)" : "gizmo: global axes");
         }
     }
     if (IsKeyPressed(KEY_DELETE) && !(ctrl && shift)) return Apply(m, d, KEY_DELETE, &(EditOp){ .kind = EDIT_REMOVE });
@@ -697,8 +725,8 @@ int EditModeDrawHud(const EditMode *m, const Designer *d, int x, int y)
     }
     if (m->messageTime > 0.0f) {
         float a = fminf(m->messageTime, 1.0f);
-        if (m->messageError) UiHudMark(m->message, x, y, UI_HUD_LINE, UI_S, UiAlpha(UI_ERROR, a));
-        else HudText(m->message, x, y, UiAlpha(UI_INK, a));
+        if (m->messageError) UiHudMark(MsgText(&m->message), x, y, UI_HUD_LINE, UI_S, UiAlpha(UI_ERROR, a));
+        else HudText(MsgText(&m->message), x, y, UiAlpha(UI_INK, a));
         y += UI_HUD_LINE;
     }
     return y - y0;
@@ -710,6 +738,7 @@ void EditModeFree(EditMode *m)
     FreeModels(m);
     free(m->models);
     MapEditFree(&m->ed);
+    MsgFree(&m->message);
     memset(m, 0, sizeof(*m));
 }
 

@@ -101,7 +101,7 @@ typedef struct {
     unsigned long long hashBefore, hashAfter;
     MS_EntityId *selBefore, *selAfter;
     int selBeforeCount, selAfterCount, selAfterCap;
-    char what[200];         // "moved 2 objects +0.5 m x (line 120 split into 3 lines)"
+    char *what;             // "moved 2 objects +0.5 m x (line 120 split into 3 lines)" (heap, owned by the step)
     char *matName, *matKeys;    // EDIT_MATERIAL_SET: op.matName / matKeys point here
     char *paintMaterial, *paintAtlas;   // EDIT_PAINT_*: op.paint.material / atlas point here
     PaintStep *paint;       // NULL for text edits; strokes (no hunks), or a first stroke (hunks + paint)
@@ -121,17 +121,18 @@ typedef struct EditMore {
 // redo swap the step's tiles (or images) with the canvas; they run before the step's text goes
 // live, so the canvas the text's material loads is provided by then (and the other one runs when
 // the text can't go live). rebase runs before a rebase applies the step again (the canvas provided
-// again, or its strokes replayed onto a PNG that changed on disk; false: the step failed, why in
-// msg); release frees the paint when the step leaves the history; save writes the canvases and
-// the map (CTRL+S anywhere and auto save: MapEditSaveAll).
+// again, or its strokes replayed onto a PNG that changed on disk): 0 provided, 1 the step failed
+// (why in MS_LastError()); release frees the paint when the step leaves the history; save writes
+// the canvases and the map (CTRL+S anywhere and auto save: MapEditSaveAll) and returns
+// MapEditSave's values with the same texts (0 / 1: MapEditor.note, 2: MS_LastError()).
 typedef struct {
     void *user;
     bool (*undo)(void *user, PaintStep *p);
     bool (*redo)(void *user, PaintStep *p);
-    bool (*rebase)(void *user, PaintStep *p, char *msg, int msgSize);
+    unsigned char (*rebase)(void *user, PaintStep *p);
     void (*release)(void *user, PaintStep *p);
     long long (*bytes)(void *user, const PaintStep *p);    // its memory, for the history cap
-    bool (*save)(void *user, char *msg, int msgSize);
+    unsigned char (*save)(void *user);
 } MapEditPaintHooks;
 
 typedef struct {
@@ -159,48 +160,58 @@ typedef struct {
     MapEditPaintHooks paintHooks;   // the draw mode's (docs/painting.md 10.2)
     int droppedSteps;       // steps the paint history cap took from the bottom of the undo stack
     int droppedUnsaved;     // ... of them the file doesn't have (they count as unsaved until a save)
+    MonoMsg note;           // what the last call did when it did not fail (MapEditNote); failures
+                            // are in MS_LastError() (docs/architecture.md "Errors and reports")
 } MapEditor;
 
-typedef enum {
-    EDIT_FAILED = 0,        // nothing written (msg says why)
-    EDIT_DONE,              // written and reloaded; *sel / *selCount = the objects to select now
-} EditResult;
+// The text of the last outcome that was no failure ("saved 3 edits to ...", the step's text); ""
+// before the first. Valid until the next MapEdit* call.
+const char *MapEditNote(const MapEditor *E);
 
 // Applies op to the objects in sel[] (the selection; EDIT_ADD ignores it): the patch is made
 // against the loaded map text and the edit goes onto the undo stack (the redo stack is dropped).
 // With a working copy (MapEditBegin) the patched text goes live (MS_EditSetText; auto save: also
 // written); without one the file on disk must still be the loaded text, it is written and
-// reloaded (MS_Reload). A patch that would not load is never applied (EDIT_FAILED). On EDIT_DONE
-// *outSel is a heap array of entity ids to select (free it), and msg says what changed.
-EditResult MapEditApply(MapEditor *E, const MS_ObjRef *sel, int selCount, const EditOp *op,
-                        MS_EntityId **outSel, int *outSelCount, char *msg, int msgSize);
+// reloaded (MS_Reload). A patch that would not load is never applied. Returns
+//   0 applied: the note is the step's text
+//   1 not applied: why in MS_LastError(); *outSel untouched (NULL)
+//   2 applied, but the auto save failed: the note is the step's text + " (auto save: <reason>)"
+// On 0 and 2 *outSel is a heap array of entity ids to select (free it).
+unsigned char MapEditApply(MapEditor *E, const MS_ObjRef *sel, int selCount, const EditOp *op,
+                           MS_EntityId **outSel, int *outSelCount);
 // A paint step: the stroke's tiles (no text), or with op (EDIT_PAINT_ADD / SET / REMOVE /
-// EDIT_MATERIAL_SET) the text edit and the paint as one step. paint is the history's from then on (even on
-// EDIT_FAILED: released through the hooks). what: the HUD text ("painted 3 tiles of paint_12.png").
+// EDIT_MATERIAL_SET) the text edit and the paint as one step. paint (never NULL) is the history's from then on (even
+// when not pushed: released through the hooks). what: the HUD text ("painted 3 tiles of paint_12.png").
 // Never auto-saved here (the draw mode saves at LMB up). The paint in the history is capped at 512
-// MiB: beyond it the oldest steps are dropped (msg says so; MapEditor.droppedSteps counts them).
-EditResult MapEditPushPaint(MapEditor *E, const MS_ObjRef *sel, int selCount, const EditOp *op, PaintStep *paint,
-                            const char *what, MS_EntityId **outSel, int *outSelCount, char *msg, int msgSize);
+// MiB: beyond it the oldest steps are dropped (MapEditor.droppedSteps counts them). Returns
+//   0 pushed: the note is the text, with " (oldest %d undo step%s dropped: ...)" when the cap dropped steps
+//   1 not pushed, the paint released: why in MS_LastError()
+unsigned char MapEditPushPaint(MapEditor *E, const MS_ObjRef *sel, int selCount, const EditOp *op, PaintStep *paint,
+                               const char *what, MS_EntityId **outSel, int *outSelCount);
 
 // One more paint op onto the top step of the undo stack, which must be a paint step the working copy
 // shows (a stroke going on onto a new face, the panel's face groups): the op goes live, the step's
-// hunks become the text of both (one undo), and a rebase applies it after the step's own op.
-// EDIT_FAILED (msg says why) leaves the step and the text as they were.
-EditResult MapEditAmendPaint(MapEditor *E, const MS_ObjRef *sel, int selCount, const EditOp *op, char *msg, int msgSize);
+// hunks become the text of both (one undo), and a rebase applies it after the step's own op. Returns
+//   0 amended: the note is the op's text
+//   1 not amended (the step and the text as they were): why in MS_LastError()
+unsigned char MapEditAmendPaint(MapEditor *E, const MS_ObjRef *sel, int selCount, const EditOp *op);
 
-// Undo / redo the last step (only while the file, or the working copy, is the one the step left / found)
-EditResult MapEditUndo(MapEditor *E, MS_EntityId **outSel, int *outSelCount, char *msg, int msgSize);
-EditResult MapEditRedo(MapEditor *E, MS_EntityId **outSel, int *outSelCount, char *msg, int msgSize);
+// Undo / redo the last step (only while the file, or the working copy, is the one the step left / found).
+// Returns
+//   0 done: the note is "undone: <text>" / "redone: <text>"
+//   1 not done: why in MS_LastError() ("nothing to undo", "undo does not apply to the map any more", ...)
+//   2 done, but the auto save failed: the note + " (auto save: <reason>)"
+// On 0 and 2 *outSel is the selection to restore (heap, free it).
+unsigned char MapEditUndo(MapEditor *E, MS_EntityId **outSel, int *outSelCount);
+unsigned char MapEditRedo(MapEditor *E, MS_EntityId **outSel, int *outSelCount);
 
-// Call after every reload: when the map is no longer the file the stacks belong to (a request
-// finished, another editor saved), the history is dropped: true then (msg says so)
-bool MapEditSync(MapEditor *E, char *msg, int msgSize);
+// Frees the history, the working copy and the note
 void MapEditFree(MapEditor *E);
 
 // The working copy (docs/live-editing.md): MapEditBegin takes the loaded map text as the
 // working copy (after a load); MapEditSave writes it to the map file (MS_EditMarkSaved);
 // MapEditUnsaved counts the steps the file doesn't have; MapEditRebase applies the unsaved
-// steps again after the file changed on disk (returns how many failed, msg says which)
+// steps again after the file changed on disk
 // (MapEditBegin drops the undo history; false for a compiled map or out of memory.) A rebase takes
 // the reloaded file as the new base, applies each unsaved step's op again to its selection found
 // by entity id (oldest first, each one live), puts the steps that no longer apply into failed[]
@@ -208,15 +219,28 @@ void MapEditFree(MapEditor *E);
 // re-applied (they are reported as failed: the file keeps them). *outSel: the last step's
 // selection (free it).
 bool MapEditBegin(MapEditor *E);
-bool MapEditSave(MapEditor *E, char *msg, int msgSize);
-// CTRL+S: the draw mode's canvases and the map (paintHooks.save), else MapEditSave
-bool MapEditSaveAll(MapEditor *E, char *msg, int msgSize);
+// Returns
+//   0 saved: the note is "saved %d edit%s to %s"
+//   1 nothing to save, the file is up to date: the note is "nothing to save: %s is up to date"
+//   2 not saved: MS_LastError() is "nothing to save" (no working copy), "not saved: %s changed on
+//     disk ..." or "cannot write %s"
+unsigned char MapEditSave(MapEditor *E);
+// CTRL+S: the draw mode's canvases and the map (paintHooks.save), else MapEditSave; the same values
+unsigned char MapEditSaveAll(MapEditor *E);
 // The paint memory of the history (undo, redo and lost steps)
 long long MapEditPaintBytes(const MapEditor *E);
 // The map file on disk is the one the working copy was last read from or written to
 bool MapEditDiskUnchanged(const MapEditor *E);
 int MapEditUnsaved(const MapEditor *E);
-int MapEditRebase(MapEditor *E, MS_EntityId **outSel, int *outSelCount, char *msg, int msgSize);
+// MapEditRebase returns
+//   0 every unsaved step applied again: the note says how many
+//   1 applied again, *failedCount could not be: the note "... %d could not be (listed in red)";
+//     failed[] lists them
+//   2 the map can't be edited any more, the unsaved edits dropped: MS_LastError(); *failedCount =
+//     the steps dropped
+//   3 out of memory, nothing done: MS_LastError()
+// failed[] also gets the steps undone past the save point (with every code but 3).
+unsigned char MapEditRebase(MapEditor *E, MS_EntityId **outSel, int *outSelCount, int *failedCount);
 void MapEditClearFailed(MapEditor *E);
 // Writes the working copy to `path` (closing with unsaved edits)
 bool MapEditWriteWork(const MapEditor *E, const char *path);

@@ -1416,6 +1416,7 @@ static int BuildLinux(int argc, char **argv)
             {"-DMONOLITH_EDITOR", NULL, "tests/unit/parse_error_test.c"},
             {"-DMONOLITH_EDITOR", srcInclude, "tests/unit/collision_test.c"},
             {"-DMONOLITH_EDITOR", srcInclude, "tests/unit/paintunwrap_test.c"},
+            {srcInclude, NULL, "tests/unit/msg_test.c"},
         };
         for (size_t i = 0; i < NOB_ARRAY_LEN(units); i++) {
             ENTRY_BEGIN();

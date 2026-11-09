@@ -185,7 +185,7 @@ typedef struct {
     int scroll;             // first visible wrapped line
     int freezeFrames;       // camera stays frozen this many more frames after the box closes
 
-    char message[256];      // HUD message (submit result, selection notes)
+    MonoMsg message;        // HUD message (submit result, selection notes); freed by DesignerFree
     float messageTime;
     bool messageError;
 } Designer;
@@ -252,7 +252,10 @@ void DesignerFreeRegion(DesignRegionInfo *r);
 void DesignerAnalyzeRegion(Camera3D cam, int w, int h, Rectangle rect, DesignRegionInfo *out);
 
 void DesignerOpenPrompt(Designer *d, const char *text);
-void DesignerMessage(Designer *d, bool error, const char *text);
+// The HUD message (8 s as an error, else 4 s): Static takes a literal only; f formats (text of
+// any other lifetime: "%s", text)
+void DesignerMessageStatic(Designer *d, bool error, const char *literal);
+void DesignerMessagef(Designer *d, bool error, const char *fmt, ...) MSG_PRINTF(3, 4);
 
 // Selection helpers (also used by --select)
 void DesignerClearSelection(Designer *d);
@@ -278,7 +281,8 @@ void DesignerVolumeModeBegin(Designer *d);
 void DesignerBeginOverlay3D(Camera3D cam);
 void DesignerEndOverlay3D(void);
 
-// After LauncherSubmit: closes the box (and clears the text) on success, keeps it on failure
+// After LauncherSubmit: closes the box (and clears the text) on success, keeps it on failure;
+// msg is copied
 void DesignerSubmitDone(Designer *d, bool ok, const char *msg);
 
 // Fills the request from the designer and the camera (prompt, hit, selection, view,

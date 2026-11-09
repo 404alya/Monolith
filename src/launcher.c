@@ -563,18 +563,19 @@ static int CountSentences(const char *s)
     return count;
 }
 
-static ModelTier Classify(const ModelQuery *q, const Words *wordsIn, char *reason, int reasonSize);
+static ModelTier Classify(const ModelQuery *q, const Words *wordsIn, MonoMsg *reason);
 
-ModelTier ClassifyRequest(const ModelQuery *q, char *reason, int reasonSize)
+// The tier, and why in *reason (a literal for fixed reasons, else a heap text: MsgFree it)
+ModelTier ClassifyRequest(const ModelQuery *q, MonoMsg *reason)
 {
     Words W = { 0 };
     SplitPromptWords(q->prompt ? q->prompt : "", &W);
-    ModelTier t = Classify(q, &W, reason, reasonSize);
+    ModelTier t = Classify(q, &W, reason);
     free(W.w);
     return t;
 }
 
-static ModelTier Classify(const ModelQuery *q, const Words *wordsIn, char *reason, int reasonSize)
+static ModelTier Classify(const ModelQuery *q, const Words *wordsIn, MonoMsg *reason)
 {
     const Words W = *wordsIn;
     const char *prompt = q->prompt ? q->prompt : "";
@@ -582,22 +583,22 @@ static ModelTier Classify(const ModelQuery *q, const Words *wordsIn, char *reaso
     const char *k;
 
     if (q->kind && (strcmp(q->kind, "import") == 0 || strcmp(q->kind, "new-map") == 0)) {
-        snprintf(reason, reasonSize, "%s request", q->kind);
+        MsgSetf(reason, "%s request", q->kind);
         return MODEL_TIER_HEAVY;
     }
     if (q->emptyMap || q->noBrief) {
-        snprintf(reason, reasonSize, "%s: the session writes the design brief", q->emptyMap ? "empty map" : "no MAP.md");
+        MsgSetf(reason, "%s: the session writes the design brief", q->emptyMap ? "empty map" : "no MAP.md");
         return MODEL_TIER_HEAVY;
     }
-    if ((k = FindKeyword(&W, KW_ASSET))) { snprintf(reason, reasonSize, "asset word \"%s\"", k); return MODEL_TIER_HEAVY; }
-    if ((k = FindKeyword(&W, KW_LOOK))) { snprintf(reason, reasonSize, "look/engine word \"%s\"", k); return MODEL_TIER_HEAVY; }
-    if ((k = FindKeyword(&W, KW_DESIGN))) { snprintf(reason, reasonSize, "design word \"%s\"", k); return MODEL_TIER_HEAVY; }
-    if (bytes > HEAVY_MIN_BYTES) { snprintf(reason, reasonSize, "long prompt (%d bytes)", bytes); return MODEL_TIER_HEAVY; }
-    if (sentences >= 3) { snprintf(reason, reasonSize, "%d sentences", sentences); return MODEL_TIER_HEAVY; }
+    if ((k = FindKeyword(&W, KW_ASSET))) { MsgSetf(reason, "asset word \"%s\"", k); return MODEL_TIER_HEAVY; }
+    if ((k = FindKeyword(&W, KW_LOOK))) { MsgSetf(reason, "look/engine word \"%s\"", k); return MODEL_TIER_HEAVY; }
+    if ((k = FindKeyword(&W, KW_DESIGN))) { MsgSetf(reason, "design word \"%s\"", k); return MODEL_TIER_HEAVY; }
+    if (bytes > HEAVY_MIN_BYTES) { MsgSetf(reason, "long prompt (%d bytes)", bytes); return MODEL_TIER_HEAVY; }
+    if (sentences >= 3) { MsgSetf(reason, "%d sentences", sentences); return MODEL_TIER_HEAVY; }
     if (q->regions + q->volumes > 2) {
-        if (q->volumes == 0) snprintf(reason, reasonSize, "%d screen regions", q->regions);
-        else if (q->regions == 0) snprintf(reason, reasonSize, "%d volumes", q->volumes);
-        else snprintf(reason, reasonSize, "%d screen regions + %d volumes", q->regions, q->volumes);
+        if (q->volumes == 0) MsgSetf(reason, "%d screen regions", q->regions);
+        else if (q->regions == 0) MsgSetf(reason, "%d volumes", q->volumes);
+        else MsgSetf(reason, "%d screen regions + %d volumes", q->regions, q->volumes);
         return MODEL_TIER_HEAVY;
     }
 
@@ -609,13 +610,13 @@ static ModelTier Classify(const ModelQuery *q, const Words *wordsIn, char *reaso
     bool target = q->hit || (q->selected > 0 && q->selected <= FAST_MAX_SELECTION) || q->regions + q->volumes == 1;
     if (q->selected > FAST_MAX_SELECTION) target = false;
 
-    if (!edit) snprintf(reason, reasonSize, "no local edit word");
-    else if (create) snprintf(reason, reasonSize, "creation word \"%s\"", create);
-    else if (bytes > FAST_MAX_BYTES) snprintf(reason, reasonSize, "edit \"%s\" but %d bytes", edit, bytes);
-    else if (sentences > 1) snprintf(reason, reasonSize, "edit \"%s\" but %d sentences", edit, sentences);
-    else if (!target) snprintf(reason, reasonSize, "edit \"%s\" but no small target (hit/selection/1 region or volume)", edit);
+    if (!edit) MsgSetStatic(reason, "no local edit word");
+    else if (create) MsgSetf(reason, "creation word \"%s\"", create);
+    else if (bytes > FAST_MAX_BYTES) MsgSetf(reason, "edit \"%s\" but %d bytes", edit, bytes);
+    else if (sentences > 1) MsgSetf(reason, "edit \"%s\" but %d sentences", edit, sentences);
+    else if (!target) MsgSetf(reason, "edit \"%s\" but no small target (hit/selection/1 region or volume)", edit);
     else {
-        snprintf(reason, reasonSize, "short local edit \"%s\" with a target", edit);
+        MsgSetf(reason, "short local edit \"%s\" with a target", edit);
         return MODEL_TIER_FAST;
     }
     return MODEL_TIER_DEFAULT;
@@ -635,7 +636,7 @@ void LauncherChooseModel(const ModelQuery *q, ModelChoice *out)
     const char *prompt = q->prompt ? q->prompt : "";
 
     // Leading @token: only when some text follows it
-    char why[200];
+    MonoMsg why = { 0 };
     const char *p = prompt;
     while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
     int tier = -1;
@@ -647,7 +648,7 @@ void LauncherChooseModel(const ModelQuery *q, ModelChoice *out)
             if (i == n && (p[1 + n] == 0 || isspace((unsigned char)p[1 + n]))) {
                 const char *rest = p + 1 + n;
                 while (*rest && isspace((unsigned char)*rest)) rest++;
-                if (*rest) { tier = t % 3; out->promptSkip = (int)(rest - prompt); snprintf(why, sizeof(why), "@%s in the prompt", TOKENS[t]); }
+                if (*rest) { tier = t % 3; out->promptSkip = (int)(rest - prompt); MsgSetf(&why, "@%s in the prompt", TOKENS[t]); }
             }
         }
     }
@@ -658,15 +659,14 @@ void LauncherChooseModel(const ModelQuery *q, ModelChoice *out)
     } else {
         ModelQuery stripped = *q;
         stripped.prompt = prompt + out->promptSkip;
-        out->tier = ClassifyRequest(&stripped, why, sizeof(why));
+        out->tier = ClassifyRequest(&stripped, &why);
     }
     snprintf(out->name, sizeof(out->name), "%s", EnvOr(TIER_ENV[out->tier], TIER_MODELS[out->tier]));
-    snprintf(out->reason, sizeof(out->reason), "%s", why);
 
     const char *fixed = EnvOr("MONOLITH_MODEL", NULL);
     if (fixed) {
         snprintf(out->name, sizeof(out->name), "%s", fixed);
-        snprintf(out->reason, sizeof(out->reason), "MONOLITH_MODEL fixes the model (would be %s: %s)", TIER_NAMES[out->tier], why);
+        MsgSetf(&out->reason, "MONOLITH_MODEL fixes the model (would be %s: %s)", TIER_NAMES[out->tier], MsgText(&why));
         out->source = "MONOLITH_MODEL";
     }
     // A --model (or --model=x) in MONOLITH_CLAUDE_ARGS wins; no second --model then
@@ -680,12 +680,20 @@ void LauncherChooseModel(const ModelQuery *q, ModelChoice *out)
         else if (strncmp(tok[i], "--model=", 8) == 0) m = tok[i] + 8;
         if (!m) continue;
         snprintf(out->name, sizeof(out->name), "%s", m);
-        snprintf(out->reason, sizeof(out->reason), "--model in MONOLITH_CLAUDE_ARGS (would be %s: %s)", TIER_NAMES[out->tier], why);
+        MsgSetf(&out->reason, "--model in MONOLITH_CLAUDE_ARGS (would be %s: %s)", TIER_NAMES[out->tier], MsgText(&why));
         out->source = "MONOLITH_CLAUDE_ARGS";
         out->addFlag = false;
         break;
     }
     FreeArgs(&args);
+    // No override: the classifier's (or the @token's) reason is the reason; hand it over
+    if (out->reason.text) MsgFree(&why);
+    else out->reason = why;
+}
+
+void ModelChoiceFree(ModelChoice *c)
+{
+    MsgFree(&c->reason);
 }
 
 // #endregion
@@ -745,6 +753,7 @@ static void FreeBundle(Bundle *B)
     free(B->selLines);
     free(B->selOrder);
     free(B->nearby);
+    ModelChoiceFree(&B->model);
     free(B);
 }
 
@@ -1207,7 +1216,7 @@ static bool WriteRequestMd(const char *path, const Bundle *B)
     if (!f) return false;
 
     fprintf(f, "# Map edit request: %s\n\n", B->slug);
-    fprintf(f, "Model: %s (%s tier: %s)\n\n", B->model.name, ModelTierName(B->model.tier), B->model.reason);
+    fprintf(f, "Model: %s (%s tier: %s)\n\n", B->model.name, ModelTierName(B->model.tier), MsgText(&B->model.reason));
     fprintf(f, "Request `%s`, submitted %s from the monolith map designer. Bundle format 4: besides the "
                "crosshair hit and the selected objects it may contain **screen regions** the developer "
                "dragged over the frame and **volumes**, boxes marked in world space (see *Screen regions* and "
@@ -1536,7 +1545,7 @@ static bool WriteRequestJson(const char *path, const Bundle *B)
     fprintf(f, ",\n  \"mapReloadedSinceSnapshot\": %s", B->stale ? "true" : "false");
     fprintf(f, ",\n  \"prompt\": "); JsonStr(f, B->userPrompt);
     fprintf(f, ",\n  \"model\": { \"tier\": \"%s\", \"name\": ", ModelTierName(B->model.tier)); JsonStr(f, B->model.name);
-    fprintf(f, ", \"reason\": "); JsonStr(f, B->model.reason);
+    fprintf(f, ", \"reason\": "); JsonStr(f, MsgText(&B->model.reason));
     fprintf(f, ", \"override\": %s, \"source\": \"%s\" }", B->model.override ? "true" : "false", B->model.source);
 
     fprintf(f, ",\n  \"camera\": {\n    \"eye\": "); JsonVec(f, r->eye);
@@ -1766,7 +1775,7 @@ static struct {
     bool tried;                 // this game run tried to start one
     double startTime;           // clockTime of that attempt
     bool failed;                // the last attempt failed ...
-    char *error;                //   ... and why (heap; NULL when out of memory)
+    MonoMsg failedLine;         //   ... and its HUD line, set when it failed (not per frame)
     int alive;                  // last lock test: 1 = running, 0 = not, -1 = not tested yet
     float checkTimer;
     double confirmUntil;        // CTRL+SHIFT+K with requests open: second press until then
@@ -1839,10 +1848,19 @@ static OpenRequest *NewSlot(void)
     return pick;
 }
 
+// The launcher's note (LauncherNote): the text of the last submit / close outcome that is not
+// a failure. Set only by those calls (events), never per frame.
+static MonoMsg note;
+
+const char *LauncherNote(void)
+{
+    return MsgText(&note);
+}
+
 void LauncherShutdown(void)
 {
-    free(coord.error);
-    coord.error = NULL;
+    MsgFree(&coord.failedLine);
+    MsgFree(&note);
     free(reqs);
     reqs = NULL;
     reqCount = reqCap = 0;
@@ -2099,7 +2117,10 @@ static bool ClaudeSafe(void)
 static bool SkipPermissions(void)
 {
     if (ClaudeSafe()) return false;
-    if (FileExists(TextFormat("%sCLAUDE.md", rootDir))) return true;
+    char *claudeMd = MonoStrf("%sCLAUDE.md", rootDir);     // (rootDir can fill TextFormat's 1 KB)
+    bool found = claudeMd && FileExists(claudeMd);
+    free(claudeMd);
+    if (found) return true;
     static bool warned = false;
     if (!warned) {
         TraceLog(LOG_WARNING, "monolith: no CLAUDE.md in %s: Claude Code sessions keep their approval prompts", rootDir);
@@ -2608,21 +2629,23 @@ static CloseOutcome CloseRequest(OpenRequest *q)
     return CloseTerm(&q->term, q->id);
 }
 
-static void CloseMessage(const OpenRequest *q, CloseOutcome o, char *msg, int msgSize)
+// Says (in the note) and logs how request q was closed
+static void CloseMessage(const OpenRequest *q, CloseOutcome o)
 {
-    if (q->queue) snprintf(msg, msgSize, "%s off the list", q->slug);
-    else if (o == CLOSED_WINDOW) snprintf(msg, msgSize, "closed %s", q->slug);
+    if (q->queue) MsgSetf(&note, "%s off the list", q->slug);
+    else if (o == CLOSED_WINDOW) MsgSetf(&note, "closed %s", q->slug);
 #ifdef _WIN32
-    else if (q->term.launched) snprintf(msg, msgSize, "%s off the list; close its window by hand (not supported on Windows)", q->slug);
+    else if (q->term.launched) MsgSetf(&note, "%s off the list; close its window by hand (not supported on Windows)", q->slug);
 #endif
-    else if (o == CLOSED_LISTED) snprintf(msg, msgSize, "%s off the list (it was never launched)", q->slug);
-    else snprintf(msg, msgSize, "%s: window already gone", q->slug);
-    TraceLog(LOG_INFO, "monolith: %s", msg);
+    else if (o == CLOSED_LISTED) MsgSetf(&note, "%s off the list (it was never launched)", q->slug);
+    else MsgSetf(&note, "%s: window already gone", q->slug);
+    TraceLog(LOG_INFO, "monolith: %s", MsgText(&note));
 }
 
-static int CancelRequest(OpenRequest *q, char *msg, int msgSize);
+static unsigned char CancelRequest(OpenRequest *q);
 
-bool LauncherCloseLatestDone(char *msg, int msgSize)
+// 0: closed (note; logged); 1: no finished request (note, a literal)
+unsigned char LauncherCloseLatestDone(void)
 {
     OpenRequest *q = NULL;
     bool running = false, queue = false;
@@ -2632,15 +2655,17 @@ bool LauncherCloseLatestDone(char *msg, int msgSize)
         else if (!q || reqs[i].doneTime > q->doneTime) q = &reqs[i];
     }
     if (!q) {
-        snprintf(msg, msgSize, "no finished request to close%s", !running ? "" : queue ? " (CTRL+K, then its number, cancels a queued or running one)"
-                                                                               : " (CTRL+K, then its number, stops a running one)");
-        return false;
+        MsgSetStatic(&note, !running ? "no finished request to close"
+                            : queue ? "no finished request to close (CTRL+K, then its number, cancels a queued or running one)"
+                                    : "no finished request to close (CTRL+K, then its number, stops a running one)");
+        return 1;
     }
-    CloseMessage(q, CloseRequest(q), msg, msgSize);
-    return true;
+    CloseMessage(q, CloseRequest(q));
+    return 0;
 }
 
-int LauncherCloseAllDone(char *msg, int msgSize)
+// Count only: how many were taken off the list (the note says it)
+int LauncherCloseAllDone(void)
 {
     int count = 0, gone = 0;
     OpenRequest *last = NULL;
@@ -2653,31 +2678,33 @@ int LauncherCloseAllDone(char *msg, int msgSize)
         count++;
         if (lastOutcome == CLOSED_GONE && !q->queue) gone++;
     }
-    if (!last) snprintf(msg, msgSize, "no finished request to close");
-    else if (count == 1) CloseMessage(last, lastOutcome, msg, msgSize);
+    if (!last) MsgSetStatic(&note, "no finished request to close");
+    else if (count == 1) CloseMessage(last, lastOutcome);
     else {
-        snprintf(msg, msgSize, "%s %d finished requests", last->queue ? "took off the list" : "closed", count);
-        if (gone) snprintf(msg + strlen(msg), msgSize - strlen(msg), " (%d window%s already gone)", gone, gone == 1 ? "" : "s");
-        TraceLog(LOG_INFO, "monolith: %s", msg);
+        MsgSetf(&note, "%s %d finished requests", last->queue ? "took off the list" : "closed", count);
+        if (gone) MsgAppendf(&note, " (%d window%s already gone)", gone, gone == 1 ? "" : "s");
+        TraceLog(LOG_INFO, "monolith: %s", MsgText(&note));
     }
     return count;
 }
 
-int LauncherCloseNumber(int number, char *msg, int msgSize)
+// 0: closed / cancelled / cancel already asked (note); 1: waiting for the number again (note);
+// 2: no such number (err); 3: the cancel file could not be written (err)
+unsigned char LauncherCloseNumber(int number)
 {
     OpenRequest *q = NULL;
     for (int i = 0; i < reqCount; i++) if (Listed(&reqs[i]) && reqs[i].number == number) q = &reqs[i];
-    if (!q) { snprintf(msg, msgSize, "no request [%d] in the list", number); return -1; }
-    if (q->queue && !q->done) return CancelRequest(q, msg, msgSize);
+    if (!q) { MS_SetError("no request [%d] in the list", number); return 2; }
+    if (q->queue && !q->done) return CancelRequest(q);
     // A request without result.md may still be working: ask for a second press first
     if (!q->done && !(confirmSeq == q->seq && clockTime <= confirmUntil)) {
         confirmSeq = q->seq;
         confirmUntil = clockTime + CONFIRM_TIME;
-        snprintf(msg, msgSize, "press %d again to stop running request %s", number % 10, q->slug);
-        return 0;
+        MsgSetf(&note, "press %d again to stop running request %s", number % 10, q->slug);
+        return 1;
     }
-    CloseMessage(q, CloseRequest(q), msg, msgSize);
-    return 1;
+    CloseMessage(q, CloseRequest(q));
+    return 0;
 }
 
 int LauncherNewestNumber(void)
@@ -2713,8 +2740,7 @@ void LauncherCloseOnExit(void)
         else if (CoordinatorAlive()) CloseTerm(&coord.term, "the coordinator");
         return;
     }
-    char msg[256];
-    if (LauncherCloseAllDone(msg, sizeof(msg)) > 0) TraceLog(LOG_INFO, "monolith: on exit: %s", msg);
+    if (LauncherCloseAllDone() > 0) TraceLog(LOG_INFO, "monolith: on exit: %s", LauncherNote());
 }
 
 // #endregion
@@ -2874,8 +2900,7 @@ static const char *CoordinatorLine(Color *c)
     }
     if (CoordinatorStarting()) return "coordinator: starting ...";
     *c = UI_WARN;
-    if (coord.failed)
-        return TextFormat("coordinator: not started: %s (the requests stay queued)", coord.error ? coord.error : "out of memory");
+    if (coord.failed) return MsgText(&coord.failedLine);
     *c = UI_DIM;
     if (!queued && !running) return "coordinator: not running";
     return "coordinator: not running (the next request starts one; queued requests wait for it)";
@@ -2898,23 +2923,23 @@ static const char *CoordinatorModel(void)
     return own ? NULL : EnvOr("MONOLITH_COORDINATOR_MODEL", "sonnet");
 }
 
-// Makes sure a coordinator runs or is starting; note: a few words for the HUD message
-static bool StartCoordinator(char *note, int noteSize)
+// Makes sure a coordinator runs or is starting; a few words for the HUD message go into the
+// note. 0: runs or is starting; 1: could not start (the note says so, quoting why)
+static unsigned char StartCoordinator(void)
 {
     char lock[1300];
     MakeDirectory(coordDir);        // raylib: recursive, fine if it exists
     snprintf(lock, sizeof(lock), "%slock", coordDir);
     if (CoordinatorAlive()) {
         coord.alive = 1;
-        snprintf(note, noteSize, "the coordinator takes it");
-        return true;
+        MsgSetStatic(&note, "the coordinator takes it");
+        return 0;
     }
-    if (CoordinatorStarting()) { snprintf(note, noteSize, "the coordinator is starting"); return true; }
+    if (CoordinatorStarting()) { MsgSetStatic(&note, "the coordinator is starting"); return 0; }
     coord.tried = true;
     coord.startTime = clockTime;
     coord.failed = false;
-    free(coord.error);
-    coord.error = NULL;
+    MsgFree(&coord.failedLine);
     coord.alive = 0;
     coord.checkTimer = 0.0f;
 
@@ -2929,49 +2954,52 @@ static bool StartCoordinator(char *note, int noteSize)
 #endif
     if (!Launch(title, mark, prompt, CoordinatorModel(), lock, &t)) {
         coord.failed = true;
-        coord.error = MS_StrDup(MS_LastError());
-        snprintf(note, noteSize, "the coordinator could not start: %s; the request stays queued", MS_LastError());
+        MsgSetf(&coord.failedLine, "coordinator: not started: %s (the requests stay queued)", MS_LastError());
+        MsgSetf(&note, "the coordinator could not start: %s; the request stays queued", MS_LastError());
         TraceLog(LOG_WARNING, "monolith: coordinator not started: %s", MS_LastError());
-        return false;
+        return 1;
     }
     t.launched = true;
     coord.term = t;
-    snprintf(note, noteSize, "starting the request coordinator in a new terminal");
-    return true;
+    MsgSetStatic(&note, "starting the request coordinator in a new terminal");
+    return 0;
 }
 
-// The bundle in q->dir is complete: queue it and make sure a coordinator runs
-static bool QueueBundle(OpenRequest *q, const char *what, const char *model, char *msg, int msgSize)
+// The bundle in q->dir is complete: queue it and make sure a coordinator runs.
+// 0: queued, even if the coordinator couldn't start (note: "<what> queued [n] ..."); 1: not
+// queued (err; logged)
+static unsigned char QueueBundle(OpenRequest *q, const char *what, const char *model)
 {
     q->queue = true;
     if (!WriteState(q->dir, "queued")) {
-        snprintf(msg, msgSize, "cannot write %sstate (disk full?)", q->dir);
-        TraceLog(LOG_WARNING, "monolith: %s", msg);
-        return false;
+        MS_SetError("cannot write %sstate (disk full?)", q->dir);
+        TraceLog(LOG_WARNING, "monolith: %s", MS_LastError());
+        return 1;
     }
     snprintf(q->state, sizeof(q->state), "queued");
     TraceLog(LOG_INFO, "monolith: request %s queued", q->id);
-    char note[700];
-    StartCoordinator(note, sizeof(note));
-    if (model) snprintf(msg, msgSize, "%s queued [%d] (%s): %s (%s)", what, q->number, model, q->id, note);
-    else snprintf(msg, msgSize, "%s queued [%d]: %s (%s)", what, q->number, q->id, note);
-    return true;
+    StartCoordinator();             // (its few words are in the note, quoted below)
+    if (model) MsgSetf(&note, "%s queued [%d] (%s): %s (%s)", what, q->number, model, q->id, MsgText(&note));
+    else MsgSetf(&note, "%s queued [%d]: %s (%s)", what, q->number, q->id, MsgText(&note));
+    return 0;
 }
 
-// CTRL+K n on a queued / running request (LauncherCloseNumber)
-static int CancelRequest(OpenRequest *q, char *msg, int msgSize)
+// CTRL+K n on a queued / running request (LauncherCloseNumber, the same values):
+// 0: cancelled / cancel already asked (note); 1: waiting for the number again (note);
+// 3: the cancel file could not be written (err)
+static unsigned char CancelRequest(OpenRequest *q)
 {
     if (q->cancelAsked) {
-        snprintf(msg, msgSize, "%s: cancel already asked, waiting for the coordinator", q->slug);
-        return 1;
+        MsgSetf(&note, "%s: cancel already asked, waiting for the coordinator", q->slug);
+        return 0;
     }
     ReadState(q);
     bool queued = strcmp(q->state, "queued") == 0;
     if (!queued && !(confirmSeq == q->seq && clockTime <= confirmUntil)) {
         confirmSeq = q->seq;
         confirmUntil = clockTime + CONFIRM_TIME;
-        snprintf(msg, msgSize, "press %d again to cancel running request %s", q->number % 10, q->slug);
-        return 0;
+        MsgSetf(&note, "press %d again to cancel running request %s", q->number % 10, q->slug);
+        return 1;
     }
     if (confirmSeq == q->seq) confirmSeq = 0;
     char path[1400], stamp[32], line[64];
@@ -2979,8 +3007,8 @@ static int CancelRequest(OpenRequest *q, char *msg, int msgSize)
     snprintf(line, sizeof(line), "%s\n", stamp);
     snprintf(path, sizeof(path), "%scancel", q->dir);
     if (!WriteText(path, line)) {
-        snprintf(msg, msgSize, "cannot write %s", path);
-        return -1;
+        MS_SetError("cannot write %s", path);
+        return 3;
     }
     q->cancelAsked = true;
     if (queued && !CoordinatorAlive() && !CoordinatorStarting()) {
@@ -2988,41 +3016,43 @@ static int CancelRequest(OpenRequest *q, char *msg, int msgSize)
         snprintf(path, sizeof(path), "%sresult.md", q->dir);
         WriteText(path, "Cancelled by the developer before it started\n\nNothing was changed.\n");
         WriteState(q->dir, "cancelled");
-        snprintf(msg, msgSize, "cancelled %s", q->slug);
-    } else snprintf(msg, msgSize, "cancelling %s (the coordinator %s)", q->slug, queued ? "skips it" : "stops its subagent and reports what changed");
-    TraceLog(LOG_INFO, "monolith: %s", msg);
-    return 1;
+        MsgSetf(&note, "cancelled %s", q->slug);
+    } else MsgSetf(&note, "cancelling %s (the coordinator %s)", q->slug, queued ? "skips it" : "stops its subagent and reports what changed");
+    TraceLog(LOG_INFO, "monolith: %s", MsgText(&note));
+    return 0;
 }
 
-int LauncherCloseCoordinator(char *msg, int msgSize)
+// 0: closed, or told how (note; logged); 1: requests still open, press again (note);
+// 2: no coordinator (note, a literal)
+unsigned char LauncherCloseCoordinator(void)
 {
     InitPaths();
-    if (!QueueMode()) { snprintf(msg, msgSize, "no coordinator (one terminal per request: MONOLITH_LAUNCH=per-request)"); return -1; }
+    if (!QueueMode()) { MsgSetStatic(&note, "no coordinator (one terminal per request: MONOLITH_LAUNCH=per-request)"); return 2; }
     bool alive = CoordinatorAlive();
     if (!alive && !(coord.term.launched && !coord.term.exited)) {
-        snprintf(msg, msgSize, "no coordinator running");
-        return -1;
+        MsgSetStatic(&note, "no coordinator running");
+        return 2;
     }
     int open = OpenQueueRequests();
     bool confirmed = coord.confirmUntil > 0.0 && clockTime <= coord.confirmUntil;
     if (open && !confirmed) {
         coord.confirmUntil = clockTime + CONFIRM_TIME;
-        snprintf(msg, msgSize, "%d request%s queued or running: CTRL+SHIFT+K again closes the coordinator anyway (the next one takes them up)",
-                 open, open == 1 ? "" : "s");
-        return 0;
+        MsgSetf(&note, "%d request%s queued or running: CTRL+SHIFT+K again closes the coordinator anyway (the next one takes them up)",
+                open, open == 1 ? "" : "s");
+        return 1;
     }
     coord.confirmUntil = 0.0;
     CloseOutcome o = CloseTerm(&coord.term, "the coordinator");
-    if (o == CLOSED_WINDOW) snprintf(msg, msgSize, "closed the coordinator");
+    if (o == CLOSED_WINDOW) MsgSetStatic(&note, "closed the coordinator");
 #ifdef _WIN32
-    else snprintf(msg, msgSize, "close the coordinator window by hand (not supported on Windows)");
+    else MsgSetStatic(&note, "close the coordinator window by hand (not supported on Windows)");
 #else
-    else if (alive) snprintf(msg, msgSize, "the coordinator runs, but its window can't be closed from here (not started by this game run, or no i3 / sway): close it by hand");
-    else snprintf(msg, msgSize, "the coordinator's window is already gone");
+    else if (alive) MsgSetStatic(&note, "the coordinator runs, but its window can't be closed from here (not started by this game run, or no i3 / sway): close it by hand");
+    else MsgSetStatic(&note, "the coordinator's window is already gone");
 #endif
     coord.alive = -1;               // test the lock again at the next poll
-    TraceLog(LOG_INFO, "monolith: %s", msg);
-    return 1;
+    TraceLog(LOG_INFO, "monolith: %s", MsgText(&note));
+    return 0;
 }
 
 // #endregion
@@ -3031,16 +3061,17 @@ int LauncherCloseCoordinator(char *msg, int msgSize)
 // #region Submit
 // ======================================================================================
 
-bool LauncherSubmit(const DesignRequest *req, Image view, Image marked, char *msg, int msgSize)
+// 0: queued / sent (note); 1: not sent (err, logged where the old message was)
+unsigned char LauncherSubmit(const DesignRequest *req, Image view, Image marked)
 {
     if (MS_CompiledSource(scene, NULL) != MS_SOURCE_TEXT) {
-        snprintf(msg, msgSize, "%s is a compiled map: requests change the map's text (load its .map)", scene->path);
-        return false;
+        MS_SetError("%s is a compiled map: requests change the map's text (load its .map)", scene->path);
+        return 1;
     }
     InitPaths();
     Bundle *Bp = calloc(1, sizeof(Bundle));
-    if (!Bp) { snprintf(msg, msgSize, "out of memory"); return false; }
-    bool result = false;
+    if (!Bp) { MS_SetError("out of memory"); return 1; }
+    unsigned char result = 1;
 #define B (*Bp)
 
     // Folder name: local time stamp + slug, made unique if a request with the same
@@ -3057,7 +3088,7 @@ bool LauncherSubmit(const DesignRequest *req, Image view, Image marked, char *ms
                       .emptyMap = scene->boxCount + scene->modelCount <= 2, .noBrief = !scene->brief[0] };
     LauncherChooseModel(&mq, &B.model);
     B.userPrompt = req->prompt + B.model.promptSkip;
-    TraceLog(LOG_INFO, "monolith: model %s (%s tier: %s)", B.model.name, ModelTierName(B.model.tier), B.model.reason);
+    TraceLog(LOG_INFO, "monolith: model %s (%s tier: %s)", B.model.name, ModelTierName(B.model.tier), MsgText(&B.model.reason));
     MakeSlug(B.userPrompt, B.slug, sizeof(B.slug));
 
     MakeDirectory(requestsDir);     // raylib: recursive, fine if it exists
@@ -3071,14 +3102,14 @@ bool LauncherSubmit(const DesignRequest *req, Image view, Image marked, char *ms
         else if (errno != EEXIST) break;
     }
     if (!made) {
-        snprintf(msg, msgSize, "cannot create a request folder in %s: %s", requestsDir, strerror(errno));
-        TraceLog(LOG_WARNING, "monolith: %s", msg);
+        MS_SetError("cannot create a request folder in %s: %s", requestsDir, strerror(errno));
+        TraceLog(LOG_WARNING, "monolith: %s", MS_LastError());
         goto done;
     }
     strcat(dir, "/");
 
     if (!BuildBundle(&B, req)) {
-        snprintf(msg, msgSize, "out of memory (bundle %s not written)", dir);
+        MS_SetError("out of memory (bundle %s not written)", dir);
         goto done;
     }
 
@@ -3104,13 +3135,13 @@ bool LauncherSubmit(const DesignRequest *req, Image view, Image marked, char *ms
     snprintf(path, sizeof(path), "%srequest.json", dir);
     ok &= WriteRequestJson(path, &B);
     if (!ok) {
-        snprintf(msg, msgSize, "cannot write the request bundle %s (disk full?)", dir);
-        TraceLog(LOG_WARNING, "monolith: %s", msg);
+        MS_SetError("cannot write the request bundle %s (disk full?)", dir);
+        TraceLog(LOG_WARNING, "monolith: %s", MS_LastError());
         goto done;
     }
 
     OpenRequest *q = NewSlot();
-    if (!q) { snprintf(msg, msgSize, "out of memory. Bundle kept: %s", dir); goto done; }
+    if (!q) { MS_SetError("out of memory. Bundle kept: %s", dir); goto done; }
     snprintf(q->id, sizeof(q->id), "%s", B.id);
     snprintf(q->slug, sizeof(q->slug), "%s", B.slug);
     snprintf(q->dir, sizeof(q->dir), "%s", dir);
@@ -3124,9 +3155,9 @@ bool LauncherSubmit(const DesignRequest *req, Image view, Image marked, char *ms
     // Coordinator mode: queued even when the coordinator can't start (the next one takes
     // it), so the prompt box closes; a second Enter would only queue it twice
     if (QueueMode()) {
-        result = QueueBundle(q, "request", B.model.name, msg, msgSize);
-        if (result && B.model.droppedModelArg)
-            snprintf(msg + strlen(msg), msgSize - strlen(msg), "; a --model without a name in MONOLITH_CLAUDE_ARGS was ignored");
+        result = QueueBundle(q, "request", B.model.name);
+        if (result == 0 && B.model.droppedModelArg)     // queued
+            MsgAppendf(&note, "; a --model without a name in MONOLITH_CLAUDE_ARGS was ignored");
         goto done;
     }
 
@@ -3135,41 +3166,42 @@ bool LauncherSubmit(const DesignRequest *req, Image view, Image marked, char *ms
     snprintf(mark, sizeof(mark), "_monolith_%s", B.id);
     q->term.launched = Launch(title, mark, B.prompt, B.model.addFlag ? B.model.name : NULL, NULL, &q->term);
     if (!q->term.launched) {
-        snprintf(msg, msgSize, "launch failed: %s. Bundle kept: %s", MS_LastError(), dir);
-        TraceLog(LOG_WARNING, "monolith: %s", msg);
+        MS_SetError("launch failed: %s. Bundle kept: %s", MS_LastError(), dir);
+        TraceLog(LOG_WARNING, "monolith: %s", MS_LastError());
         TraceLog(LOG_WARNING, "monolith: run it by hand: cd '%s' && claude --model %s \"%s\"", rootDir, B.model.name, B.prompt);
         goto done;
     }
-    snprintf(msg, msgSize, "request sent (%s): %s (Claude Code opens in a new terminal)%s", B.model.name, B.id,
-             B.model.droppedModelArg ? "; a --model without a name in MONOLITH_CLAUDE_ARGS was ignored" : "");
-    result = true;
+    MsgSetf(&note, "request sent (%s): %s (Claude Code opens in a new terminal)%s", B.model.name, B.id,
+            B.model.droppedModelArg ? "; a --model without a name in MONOLITH_CLAUDE_ARGS was ignored" : "");
+    result = 0;
 done:
 #undef B
     FreeBundle(Bp);
     return result;
 }
 
-bool LauncherStartBundle(const char *id, const char *slug, const char *claudePrompt, const char *model, char *msg, int msgSize)
+// 0: queued / sent (note); 1: not sent (err)
+unsigned char LauncherStartBundle(const char *id, const char *slug, const char *claudePrompt, const char *model)
 {
     InitPaths();
     OpenRequest *q = NewSlot();
-    if (!q) { snprintf(msg, msgSize, "out of memory"); return false; }
+    if (!q) { MS_SetError("out of memory"); return 1; }
     snprintf(q->id, sizeof(q->id), "%s", id);
     snprintf(q->slug, sizeof(q->slug), "%s", slug);
     snprintf(q->dir, sizeof(q->dir), "%s%s/", requestsDir, id);
     q->submitTime = clockTime;
-    if (QueueMode()) return QueueBundle(q, "request", model, msg, msgSize);
+    if (QueueMode()) return QueueBundle(q, "request", model);
     char title[300], mark[160];
     RequestTitle(id, slug, title, sizeof(title));
     snprintf(mark, sizeof(mark), "_monolith_%s", id);
     q->term.launched = Launch(title, mark, claudePrompt, model, NULL, &q->term);
     if (!q->term.launched) {
-        snprintf(msg, msgSize, "launch failed: %s. Bundle kept: %s", MS_LastError(), q->dir);
+        MS_SetError("launch failed: %s. Bundle kept: %s", MS_LastError(), q->dir);
         TraceLog(LOG_WARNING, "monolith: run it by hand: cd '%s' && claude \"%s\"", rootDir, claudePrompt);
-        return false;
+        return 1;
     }
-    snprintf(msg, msgSize, "request sent: %s (Claude Code opens in a new terminal)", id);
-    return true;
+    MsgSetf(&note, "request sent: %s (Claude Code opens in a new terminal)", id);
+    return 0;
 }
 
 int LauncherOpenOnMap(const char *mapPath, int *newest)

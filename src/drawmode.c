@@ -58,12 +58,30 @@ static bool Ctrl(void) { return IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIG
 static bool Shift(void) { return IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT); }
 static bool Alt(void) { return IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT); }
 
-static void Say(DrawMode *dm, bool error, const char *text)
+// The mode's message line (an event, never per frame): a literal (SayStatic) or formatted text
+// (Sayf; "%s" for text of any other lifetime). Shown for 5 s (an error: 8 s, red) and logged
+static void SayShown(DrawMode *dm, bool error)
 {
-    snprintf(dm->message, sizeof(dm->message), "%.*s", (int)sizeof(dm->message) - 1, text);
     dm->messageTime = error ? 8.0f : 5.0f;
     dm->messageError = error;
-    TraceLog(error ? LOG_WARNING : LOG_INFO, "monolith: draw: %s", text);
+    dm->messageSaid = true;
+    TraceLog(error ? LOG_WARNING : LOG_INFO, "monolith: draw: %s", MsgText(&dm->message));
+}
+
+static void SayStatic(DrawMode *dm, bool error, const char *literal)
+{
+    MsgSetStatic(&dm->message, literal);
+    SayShown(dm, error);
+}
+
+static void Sayf(DrawMode *dm, bool error, const char *fmt, ...) MSG_PRINTF(3, 4);
+static void Sayf(DrawMode *dm, bool error, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    MsgSetv(&dm->message, fmt, ap);
+    va_end(ap);
+    SayShown(dm, error);
 }
 
 // ======================================================================================
@@ -86,12 +104,13 @@ static void SbStr(Sb *b, const char *s) { SbAdd(b, s, (int)strlen(s)); }
 static void SbFmt(Sb *b, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 static void SbFmt(Sb *b, const char *fmt, ...)
 {
-    char tmp[512];
     va_list ap;
     va_start(ap, fmt);
-    int n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
+    char *piece = MonoStrv(fmt, ap);     // (sized to fit: a long path or cell is never cut)
     va_end(ap);
-    SbAdd(b, tmp, n < (int)sizeof(tmp) ? n : (int)sizeof(tmp) - 1);
+    if (!piece) { b->oom = true; return; }
+    SbStr(b, piece);
+    free(piece);
 }
 
 static unsigned long long PixelHash(const Image *img)
@@ -192,7 +211,11 @@ static void FacesText(unsigned char faces, char *out, int size)
 // The package's name (its folder), the author of what the draw mode makes
 static void PackageName(char *out, int size)
 {
-    snprintf(out, (size_t)size, "%s", GetFileName(TextFormat("%.*s", (int)strlen(scene->root) - 1, scene->root)));
+    // (the root's last component: it ends with '/')
+    int n = (int)strlen(scene->root) - 1, s;
+    if (n < 0) n = 0;
+    for (s = n; s > 0 && scene->root[s - 1] != '/' && scene->root[s - 1] != '\\'; s--) { }
+    snprintf(out, (size_t)size, "%.*s", n - s, scene->root + s);
 }
 
 static bool PackageFileExists(const char *rel)
@@ -1139,42 +1162,39 @@ static bool HitPaintUv(const MS_SurfaceHit *h, Vector2 *uv)
     return true;
 }
 
-// What paint at h goes into, or why it can't be painted (docs/painting.md 3.4); *g its rectangle
-static bool Resolve(DrawMode *dm, const MS_SurfaceHit *h, char *why, int whySize, DrawGeom *g)
+// What paint at h goes into, or why it can't be painted (docs/painting.md 3.4); *g its rectangle.
+// Runs every frame (the hover, the panel's target), so it says why with a code, and RefusalPrint
+// words it. Returns:
+//   0  paintable (*g)
+//   1  nothing there (no text)
+//   2  a light; 3 nothing to paint here; 4 the map changed under the hit; 5 the material's shader
+//      can't take the paint stage; 6 a skinned model; 7 a model slot that can't be painted; 8 its
+//      paint entry is inactive
+static unsigned char Resolve(DrawMode *dm, const MS_SurfaceHit *h, DrawGeom *g)
 {
     memset(g, 0, sizeof(*g));
     g->entry = -1;
     g->x = g->y = -1;
     g->uv = (Vector2){ -1.0f, -1.0f };
-    why[0] = '\0';
     MS_ObjKind kind = h->hit.obj.kind;
-    if (kind == MS_OBJ_NONE) return false;
-    if (kind == MS_OBJ_LIGHT) { snprintf(why, (size_t)whySize, "a light: nothing to paint"); return false; }
-    if (!HitIsBox(h) && !HitIsModel(h)) { snprintf(why, (size_t)whySize, "nothing to paint here"); return false; }
+    if (kind == MS_OBJ_NONE) return 1;
+    if (kind == MS_OBJ_LIGHT) return 2;
+    if (!HitIsBox(h) && !HitIsModel(h)) return 3;
     int m = h->material;
-    if (m >= scene->materialCount) { snprintf(why, (size_t)whySize, "the map changed: wait a frame"); return false; }
-    if (m >= 0 && !ShaderTakesPaint(dm, m)) {
-        snprintf(why, (size_t)whySize, "material %s's shader can't take the paint stage (3 or more samplers, or too long for R3D)",
-                 scene->materials[m].name);
-        return false;
-    }
+    if (m >= scene->materialCount) return 4;
+    if (m >= 0 && !ShaderTakesPaint(dm, m)) return 5;
     int file = -1;
     if (HitIsModel(h)) {
         file = scene->models[h->hit.obj.index].file;
-        const char *name = GetFileName(scene->modelFiles[file].path);
         MS_PaintUvKind k = MS_ModelPaintUv(scene, file, h->slot);
-        if (k == MS_PAINTUV_SKINNED) { snprintf(why, (size_t)whySize, "%s is skinned: its bone channels are in use (can't be painted)", name); return false; }
-        if (k == MS_PAINTUV_INVALID || h->slot > 255) { snprintf(why, (size_t)whySize, "%s slot %d can't be painted", name, h->slot); return false; }
+        if (k == MS_PAINTUV_SKINNED) return 6;
+        if (k == MS_PAINTUV_INVALID || h->slot > 255) return 7;
         g->needsUnwrap = k == MS_PAINTUV_NEEDS_UNWRAP;
         g->own = m < 0;
     }
     int inactive;
     int e = EntryFor(h->hit.obj, m, h->face, h->slot, &inactive);
-    if (e < 0 && inactive >= 0) {
-        snprintf(why, (size_t)whySize, "its paint entry (map line %d) is inactive (see the log): fix or remove that line",
-                 MS_PaintEntryAt(scene, inactive)->line);
-        return false;
-    }
+    if (e < 0 && inactive >= 0) return 8;
     AtlasRelOf(m, file, h->slot, &g->atlasW, &g->atlasH, &g->nearest);
     const char *rel = AtlasRelOf(m, file, h->slot, NULL, NULL, NULL);
     if (!rel || (m < 0 && g->atlasW <= 0)) g->nearest = dm->pixelLook;      // (no atlas yet: the pixel look switch)
@@ -1195,7 +1215,39 @@ static bool Resolve(DrawMode *dm, const MS_SurfaceHit *h, char *why, int whySize
     }
     if (!HitPaintUv(h, &g->uv)) g->uv = (Vector2){ -1.0f, -1.0f };
     g->ok = true;
-    return true;
+    return 0;
+}
+
+// Resolve's refusal `code` at h in words, snprintf-style into out (size bytes; NULL / 0 measures);
+// "" for 0 and 1. Right after Resolve (the scene as it saw it)
+static int RefusalPrint(char *out, size_t size, unsigned char code, const MS_SurfaceHit *h)
+{
+    const char *name = code == 6 || code == 7 ? GetFileName(scene->modelFiles[scene->models[h->hit.obj.index].file].path) : "";
+    int inactive = -1;
+    if (code == 8) EntryFor(h->hit.obj, h->material, h->face, h->slot, &inactive);
+    switch (code) {
+    case 2: return snprintf(out, size, "a light: nothing to paint");
+    case 3: return snprintf(out, size, "nothing to paint here");
+    case 4: return snprintf(out, size, "the map changed: wait a frame");
+    case 5: return snprintf(out, size, "material %s's shader can't take the paint stage (3 or more samplers, or too long for R3D)",
+                            scene->materials[h->material].name);
+    case 6: return snprintf(out, size, "%s is skinned: its bone channels are in use (can't be painted)", name);
+    case 7: return snprintf(out, size, "%s slot %d can't be painted", name, h->slot);
+    case 8: return snprintf(out, size, "its paint entry (map line %d) is inactive (see the log): fix or remove that line",
+                            inactive >= 0 ? MS_PaintEntryAt(scene, inactive)->line : 0);
+    default: return snprintf(out, size, "%s", "");
+    }
+}
+
+// Resolve's refusal (an event: a stroke refused) on the message line, red; 1 (nothing there): fallback
+static void SayRefusal(DrawMode *dm, unsigned char code, const MS_SurfaceHit *h, const char *fallback)
+{
+    int n = code >= 2 ? RefusalPrint(NULL, 0, code, h) : -1;
+    char *text = n >= 0 ? malloc((size_t)n + 1) : NULL;
+    if (text) RefusalPrint(text, (size_t)n + 1, code, h);
+    if (code < 2) SayStatic(dm, true, fallback);
+    else Sayf(dm, true, "%s", text ? text : "out of memory");
+    free(text);
 }
 
 // #endregion
@@ -1211,35 +1263,36 @@ static void ProvideUnwrap(const DrawUnwrap *u)
 }
 
 // Model file `file` gets its paint unwrap (xatlas, at the slot's rectangle size: texelsHint) when a
-// slot needs one: made, kept, provided (the next live edit uses it). False with why (no licence row:
-// the sidecar derives from the model's; a degenerate file)
-static bool EnsureUnwrap(DrawMode *dm, int file, int slot, int texels, char *why, int whySize)
+// slot needs one: made, kept, provided (the next live edit uses it). Returns 0 done (or not needed);
+// 1 not made, why in MS_LastError() (no licence row: the sidecar derives from the model's; a
+// degenerate file; out of memory)
+static unsigned char EnsureUnwrap(DrawMode *dm, int file, int slot, int texels)
 {
-    if (MS_ModelPaintUv(scene, file, slot) != MS_PAINTUV_NEEDS_UNWRAP) return true;
+    if (MS_ModelPaintUv(scene, file, slot) != MS_PAINTUV_NEEDS_UNWRAP) return 0;
     const char *path = scene->modelFiles[file].path;
     for (int i = 0; i < dm->unwrapCount; i++)
-        if (strcmp(dm->unwraps[i].modelPath, path) == 0) { ProvideUnwrap(&dm->unwraps[i]); return true; }
+        if (strcmp(dm->unwraps[i].modelPath, path) == 0) { ProvideUnwrap(&dm->unwraps[i]); return 0; }
     char *row = AssetsRow(path);
-    if (!row) { snprintf(why, (size_t)whySize, "%s has no licence row in ASSETS.md (its paint unwrap derives from it)", path); return false; }
+    if (!row) { MS_SetError("%s has no licence row in ASSETS.md (its paint unwrap derives from it)", path); return 1; }
     free(row);
     DrawUnwrap u = { 0 };
     double t0 = GetTime();
     if (!PaintUnwrapModelFile(scene, file, texels, &u.u)) {
-        snprintf(why, (size_t)whySize, "%s can't be unwrapped for paint: %s", path, MS_LastError());
-        return false;
+        MS_SetError("%s can't be unwrapped for paint: %s", path, MS_LastError());     // (MS_SetError may quote the last error)
+        return 1;
     }
     u.modelPath = MS_StrDup(path);
     DrawUnwrap *slotU = u.modelPath ? MS_PUSH(dm->unwraps, dm->unwrapCount, dm->unwrapCap) : NULL;
     if (!slotU) {
         free(u.modelPath);
         MS_PaintUnwrapFree(&u.u);
-        snprintf(why, (size_t)whySize, "out of memory");
-        return false;
+        MS_SetError("out of memory");
+        return 1;
     }
     *slotU = u;
     ProvideUnwrap(slotU);
     TraceLog(LOG_INFO, "monolith: draw: unwrapped %s for paint in %.0f ms (%d texels)", path, (GetTime() - t0) * 1000.0, texels);
-    return true;
+    return 0;
 }
 
 // #endregion
@@ -1248,52 +1301,53 @@ static bool EnsureUnwrap(DrawMode *dm, int file, int slot, int texels, char *why
 // #region Allocation: the first stroke on a face or slot (EDIT_PAINT_ADD)
 // ======================================================================================
 
-// Pushes op with the step (the step's first text) or amends the step with it (a later one). False
-// with why; a failed push releases the step (its pixels go back): dm->stroke is gone then
-static bool PushOp(DrawMode *dm, PaintStep *p, bool *pushed, MS_ObjRef obj, const EditOp *op, const char *what, char *why, int whySize)
+// Pushes op with the step (the step's first text) or amends the step with it (a later one). Returns
+// 0 pushed / amended; 1 not, why in MS_LastError() (a failed push releases the step, its pixels go
+// back: dm->stroke is gone then)
+static unsigned char PushOp(DrawMode *dm, PaintStep *p, bool *pushed, MS_ObjRef obj, const EditOp *op, const char *what)
 {
     MapEditor *E = &dm->em->ed;
-    char msg[512];
-    EditResult r;
+    unsigned char r;
     if (!*pushed) {
         MS_EntityId *ids;
         int count;
-        r = MapEditPushPaint(E, &obj, 1, op, p, what, &ids, &count, msg, sizeof(msg));
+        r = MapEditPushPaint(E, &obj, 1, op, p, what, &ids, &count);
         free(ids);
-        if (r == EDIT_DONE) {
+        if (r == 0) {       // pushed
             *pushed = true;
             p->pending = false;
         }
-    } else r = MapEditAmendPaint(E, &obj, 1, op, msg, sizeof(msg));
-    if (r != EDIT_DONE) { snprintf(why, (size_t)whySize, "%.*s", whySize > 0 ? whySize - 1 : 0, msg); return false; }
+    } else r = MapEditAmendPaint(E, &obj, 1, op);
+    if (r != 0) return 1;       // (not pushed / amended: the reason is the last error)
     char stats[400];
     MapEditStatsText(&E->lastStats, stats, sizeof(stats));
-    TraceLog(LOG_INFO, "monolith: draw: %s", msg);
+    TraceLog(LOG_INFO, "monolith: draw: %s", MapEditNote(E));
     TraceLog(LOG_INFO, "monolith: live edit %s", stats);
-    return true;
+    return 0;
 }
 
 // A new rectangle w x h for object obj's faces / slot in material m (-1: own) of step p's atlas
 // (exclude: an entry whose rectangle may be reused, -1): the atlas grows when needed, the op goes
 // in (pushed with the step, or amended onto it), the rectangle is cleared. *rx *ry where it went.
-// False with why; when the step wasn't pushed yet it is released then (its pixels go back)
-static bool AddRect(DrawMode *dm, PaintStep *p, bool *pushed, MS_ObjRef obj, int m, unsigned char faces, int slot, int w, int h,
-                    int exclude, EditOpKind kind, int *rx, int *ry, char *why, int whySize)
+// Returns 0 done; 1 not, why in MS_LastError() (when the step wasn't pushed yet it is released then:
+// its pixels go back)
+static unsigned char AddRect(DrawMode *dm, PaintStep *p, bool *pushed, MS_ObjRef obj, int m, unsigned char faces, int slot, int w, int h,
+                             int exclude, EditOpKind kind, int *rx, int *ry)
 {
     Atlas *a = &dm->atlases[p->atlas];
     int x, y, W, H;
     if (!AllocRect(a->rel, a->img.width, a->img.height, w, h, exclude, &x, &y, &W, &H)) {
-        snprintf(why, (size_t)whySize, "the paint atlas of %s is full at %dx%d: lower the density", a->material ? a->material : a->rel,
-                 DRAW_ATLAS_MAX, DRAW_ATLAS_MAX);
+        MS_SetError("the paint atlas of %s is full at %dx%d: lower the density", a->material ? a->material : a->rel,
+                    DRAW_ATLAS_MAX, DRAW_ATLAS_MAX);
         if (!*pushed) ReleaseStep(dm, p);
-        return false;
+        return 1;
     }
     int oldW = a->img.width, oldH = a->img.height;
     bool wasProvided = a->provided;
     if (!AtlasResize(a, W, H) || !TilesRemap(a, p)) {
-        snprintf(why, (size_t)whySize, "out of memory");
+        MS_SetError("out of memory");
         if (!*pushed) ReleaseStep(dm, p);
-        return false;
+        return 1;
     }
     Provide(a);
     // The op: the material gets its paint key with its first entry (the pixel look then too)
@@ -1321,15 +1375,22 @@ static bool AddRect(DrawMode *dm, PaintStep *p, bool *pushed, MS_ObjRef obj, int
         AtlasRelOf(-1, scene->models[obj.index].file, slot, NULL, NULL, &near);
         op.paint.nearest = ownEntries ? near : dm->pixelLook;
     } else op.paint.nearest = !rel && dm->pixelLook;
-    char what[300];
-    snprintf(what, sizeof(what), "a %dx%d rectangle in %s", w, h, GetFileName(a->rel));
-    if (!PushOp(dm, p, pushed, obj, &op, what, why, whySize)) {
-        // (the atlas as it was; a failed push released the step, which put its pixels back)
+    char *what = MonoStrf("a %dx%d rectangle in %s", w, h, GetFileName(a->rel));
+    bool haveWhat = what != NULL;
+    unsigned char r = haveWhat ? PushOp(dm, p, pushed, obj, &op, what) : 1;
+    free(what);
+    if (r != 0) {       // (not pushed)
+        // (the atlas as it was; a failed push released the step, which put its pixels back; the
+        // reason is kept across the restore)
+        char *why = haveWhat ? MS_StrDup(MS_LastError()) : NULL;
+        if (!haveWhat && !*pushed) ReleaseStep(dm, p);
         AtlasResize(a, oldW > 0 ? oldW : W, oldH > 0 ? oldH : H);
         TilesInit(a);
         if (wasProvided) Provide(a);
         else Unprovide(a);
-        return false;
+        MS_SetError("%s", why ? why : "out of memory");
+        free(why);
+        return 1;
     }
     if (!p->sized) {
         p->oldW = oldW;
@@ -1342,7 +1403,7 @@ static bool AddRect(DrawMode *dm, PaintStep *p, bool *pushed, MS_ObjRef obj, int
     ClearRect(a, p, x, y, w, h);
     *rx = x;
     *ry = y;
-    return true;
+    return 0;
 }
 
 // #endregion
@@ -1387,16 +1448,15 @@ static bool StrokeSample(DrawMode *dm, const MS_SurfaceHit *h, Sample *s)
         int w, hh, x, y;
         if (model) w = hh = SlotRectSide(dm->density, h->hit.obj.index, h->slot);
         else BoxRectSize(dm->density, h->hit.obj.index, (unsigned char)(1u << h->face), &w, &hh);
-        char why[400];
-        if (!AddRect(dm, p, &dm->strokePushed, h->hit.obj, h->material, model ? 0 : (unsigned char)(1u << h->face), h->slot, w, hh, -1,
-                     EDIT_PAINT_ADD, &x, &y, why, (int)sizeof(why))) {
-            Say(dm, true, why);
+        if (AddRect(dm, p, &dm->strokePushed, h->hit.obj, h->material, model ? 0 : (unsigned char)(1u << h->face), h->slot, w, hh, -1,
+                    EDIT_PAINT_ADD, &x, &y) != 0) {     // (not added: why in the last error)
+            Sayf(dm, true, "%s", MS_LastError());
             if (!dm->strokePushed) StrokeAbort(dm);
             return false;
         }
         e = EntryFor(h->hit.obj, h->material, h->face, h->slot, NULL);
         if (e < 0) {
-            Say(dm, true, "the new paint entry doesn't draw (see the log)");
+            SayStatic(dm, true, "the new paint entry doesn't draw (see the log)");
             return false;
         }
     }
@@ -1474,22 +1534,22 @@ static void StrokeSegment(DrawMode *dm, Camera3D cam, int w, int h, Probe a, Pro
 // a rectangle on a surface without one) is the caller's. False with the reason said
 static bool StrokeBegin(DrawMode *dm, EditMode *em, const MS_SurfaceHit *h)
 {
-    char why[400];
     DrawGeom g;
-    if (!Resolve(dm, h, why, (int)sizeof(why), &g)) { Say(dm, true, why[0] ? why : "nothing to paint here"); return false; }
-    if (!em->ed.work && !MapEditBegin(&em->ed)) { Say(dm, true, "this map can't be painted (a compiled map?): load its .map"); return false; }
+    unsigned char refused = Resolve(dm, h, &g);
+    if (refused != 0) { SayRefusal(dm, refused, h, "nothing to paint here"); return false; }
+    if (!em->ed.work && !MapEditBegin(&em->ed)) { SayStatic(dm, true, "this map can't be painted (a compiled map?): load its .map"); return false; }
     bool model = HitIsModel(h);
     int file = model ? scene->models[h->hit.obj.index].file : -1;
-    if (g.needsUnwrap && !EnsureUnwrap(dm, file, h->slot, g.w, why, (int)sizeof(why))) { Say(dm, true, why); return false; }
+    if (g.needsUnwrap && EnsureUnwrap(dm, file, h->slot, g.w) != 0) { Sayf(dm, true, "%s", MS_LastError()); return false; }
     int m = h->material;
     char rel[MS_PATH_MAX];
     const char *have = AtlasRelOf(m, file, h->slot, NULL, NULL, NULL);
     if (have) snprintf(rel, sizeof(rel), "%s", have);
     else NewAtlasRel(dm, scene->materials[m].name, rel, (int)sizeof(rel));
     int ai = AtlasOpen(dm, rel, m >= 0 ? scene->materials[m].name : NULL, model ? scene->modelFiles[file].path : NULL, h->slot);
-    if (ai < 0) { Say(dm, true, "out of memory"); return false; }
+    if (ai < 0) { SayStatic(dm, true, "out of memory"); return false; }
     PaintStep *p = NewStep(dm, ai, STEP_STROKE);
-    if (!p) { Say(dm, true, "out of memory"); return false; }
+    if (!p) { SayStatic(dm, true, "out of memory"); return false; }
     dm->stroke = p;
     dm->strokePushed = false;
     dm->strokeObj = h->hit.obj;
@@ -1511,24 +1571,23 @@ static bool StrokeEnd(DrawMode *dm, EditMode *em)
     Flush(dm);
     EndTiles(a, p);
     int tiles = p->tileCount;
-    char what[200], msg[512] = "";
-    snprintf(what, sizeof(what), "%s %d tile%s of %s", p->pen == PEN_ERASER ? "erased" : p->pen == PEN_FILL ? "filled" : "painted",
-             tiles, tiles == 1 ? "" : "s", GetFileName(a->rel));
+    const char *verb = p->pen == PEN_ERASER ? "erased" : p->pen == PEN_FILL ? "filled" : "painted";
     if (!dm->strokePushed) {
         if (tiles > 0) {
             MS_EntityId *ids;
             int count;
-            EditResult r = MapEditPushPaint(&em->ed, &dm->strokeObj, 1, NULL, p, what, &ids, &count, msg, sizeof(msg));
+            char *what = MonoStrf("%s %d tile%s of %s", verb, tiles, tiles == 1 ? "" : "s", GetFileName(a->rel));
+            // (out of memory for the text: the history's own "painted")
+            unsigned char r = MapEditPushPaint(&em->ed, &dm->strokeObj, 1, NULL, p, what, &ids, &count);
+            free(what);
             free(ids);
-            if (r == EDIT_DONE) p->pending = false;
-            Say(dm, r != EDIT_DONE, msg);
+            if (r == 0) p->pending = false;     // pushed
+            Sayf(dm, r != 0, "%s", r == 0 ? MapEditNote(&em->ed) : MS_LastError());
         } else ReleaseStep(dm, p);
-    } else Say(dm, false, what);
+    } else Sayf(dm, false, "%s %d tile%s of %s", verb, tiles, tiles == 1 ? "" : "s", GetFileName(a->rel));
     StrokeAbort(dm);
-    if (em->ed.autoSave && tiles > 0) {
-        char m[512];
-        if (!DrawModeSave(dm, em, m, sizeof(m))) Say(dm, true, TextFormat("auto save: %s", m));
-    }
+    if (em->ed.autoSave && tiles > 0 && DrawModeSave(dm, em) == 2)     // (2: not saved)
+        Sayf(dm, true, "auto save: %s", MS_LastError());
     return true;
 }
 
@@ -1586,10 +1645,12 @@ static bool HookUndo(void *user, PaintStep *p) { return HookSwap(user, p, true);
 static bool HookRedo(void *user, PaintStep *p) { return HookSwap(user, p, false); }
 static void HookRelease(void *user, PaintStep *p) { ReleaseStep(user, p); }
 static long long HookBytes(void *user, const PaintStep *p) { (void)user; return StepBytes(p); }
-static bool HookSave(void *user, char *msg, int msgSize)
+// MapEditSaveAll's values, as DrawModeSave's: 0 saved, 1 nothing to save (the editor's note); 2 not
+// saved (the last error)
+static unsigned char HookSave(void *user)
 {
     DrawMode *dm = user;
-    return DrawModeSave(dm, dm->em, msg, msgSize);
+    return DrawModeSave(dm, dm->em);
 }
 
 // A replay (rebase onto a changed PNG): the stroke done again on the atlas as it is now; its undo
@@ -1606,10 +1667,11 @@ static bool ReplayStep(DrawMode *dm, PaintStep *p)
     return true;
 }
 
-static bool HookRebase(void *user, PaintStep *p, char *msg, int msgSize)
+// 0 the paint is provided again, 1 it can't be (why: the last error)
+static unsigned char HookRebase(void *user, PaintStep *p)
 {
     DrawMode *dm = user;
-    if (p->atlas < 0 || p->atlas >= dm->atlasCount) { snprintf(msg, msgSize, "its atlas is gone"); return false; }
+    if (p->atlas < 0 || p->atlas >= dm->atlasCount) { MS_SetError("its atlas is gone"); return 1; }
     Atlas *a = &dm->atlases[p->atlas];
     if (a->rebaseGen != dm->rebaseGen) {
         // The first step of this atlas in this rebase: is its PNG still what it was?
@@ -1624,29 +1686,29 @@ static bool HookRebase(void *user, PaintStep *p, char *msg, int msgSize)
             a->img = disk;
             a->savedHash = PixelHash(&disk);
             a->replaying = true;
-            if (!TilesInit(a)) { snprintf(msg, msgSize, "out of memory"); return false; }
+            if (!TilesInit(a)) { MS_SetError("out of memory"); return 1; }
         } else FreeImage(&disk);
     }
     // (the atlas at least the size the step left it: the rectangles of its text fit)
     if (p->newW > 0 && (a->img.width < p->newW || a->img.height < p->newH)) {
         if (!AtlasResize(a, a->img.width > p->newW ? a->img.width : p->newW, a->img.height > p->newH ? a->img.height : p->newH) ||
             !TilesInit(a)) {
-            snprintf(msg, msgSize, "out of memory");
-            return false;
+            MS_SetError("out of memory");
+            return 1;
         }
     }
     // (a step that gave the runtime the atlas makes its key again; any other needs it in the text)
-    if (!p->created && !AtlasLive(a)) { snprintf(msg, msgSize, "no material paints into %s any more", a->rel); return false; }
+    if (!p->created && !AtlasLive(a)) { MS_SetError("no material paints into %s any more", a->rel); return 1; }
     if (a->replaying) {
         if (!ReplayStep(dm, p)) {
-            snprintf(msg, msgSize, "%s changed on disk and this edit of it can't be replayed", a->rel);
-            return false;
+            MS_SetError("%s changed on disk and this edit of it can't be replayed", a->rel);
+            return 1;
         }
         a->replayed++;
     }
     Provide(a);
     Upload(a, 0, 0, a->img.width, a->img.height);
-    return true;
+    return 0;
 }
 
 // #endregion
@@ -1664,19 +1726,26 @@ static void Today(char *out, int size)
 }
 
 // The cells of an ASSETS.md row after its file cell: source, author, licence, date, sha256, changes
-static void RowCells(const char *row, char cells[6][512])
+// (heap, sized to fit; a missing cell is ""). False when out of memory (the cells made are freed)
+static bool RowCells(const char *row, char *cells[6])
 {
-    for (int i = 0; i < 6; i++) cells[i][0] = '\0';
+    bool ok = true;
     const char *p = row;
-    for (int i = 0; i < 6 && p && *p; i++) {
+    for (int i = 0; i < 6; i++) {
+        cells[i] = NULL;
+        if (!p || !*p) { cells[i] = MS_StrDup(""); ok = ok && cells[i]; continue; }
         while (*p == ' ') p++;
         const char *e = p;
         while (*e && !(*e == '|' && (e == p || e[-1] != '\\'))) e++;
         const char *t = e;
         while (t > p && t[-1] == ' ') t--;
-        snprintf(cells[i], 512, "%.*s", (int)(t - p), p);
+        cells[i] = MS_StrNDup(p, (size_t)(t - p));
+        ok = ok && cells[i];
         p = *e ? e + 1 : e;
     }
+    if (!ok)
+        for (int i = 0; i < 6; i++) { free(cells[i]); cells[i] = NULL; }
+    return ok;
 }
 
 // Puts `row` (whose first cell is key) into the ASSETS.md at path: over the file's row, else
@@ -1726,12 +1795,13 @@ static bool RecordFile(const char *rel, const char *derivedFrom, const char *siz
     PackageName(pkg, sizeof(pkg));
     snprintf(key, sizeof(key), "| `%s` |", rel);
     Sb row = { 0 }, sc = { 0 };
-    char cells[6][512];
+    char *cells[6] = { 0 };
     if (derivedFrom) {
         char *mrow = AssetsRow(derivedFrom);
         if (!mrow) return false;
-        RowCells(mrow, cells);
+        bool got = RowCells(mrow, cells);
         free(mrow);
+        if (!got) return false;
         SbFmt(&row, "%s paint unwrap of `%s`, generated in monolith | %s | %s | %s | - | made from the model by monolith's draw mode (xatlas) |",
               key, derivedFrom, cells[1], cells[2], date);
     } else
@@ -1755,6 +1825,7 @@ static bool RecordFile(const char *rel, const char *derivedFrom, const char *siz
     ok = ok && SaveFileText(scPath, sc.s);
     free(row.s);
     free(sc.s);
+    for (int i = 0; i < 6; i++) free(cells[i]);
     return ok;
 }
 
@@ -1779,17 +1850,30 @@ static bool UnwrapUsed(const DrawUnwrap *u)
     return false;
 }
 
-bool DrawModeSave(DrawMode *dm, EditMode *em, char *msg, int msgSize)
+// A save's failure (only the last one is said): *text replaced (out of memory: NULL), *failed set
+static void SaveFailed(bool *failed, char **text, const char *fmt, ...) MSG_PRINTF(3, 4);
+static void SaveFailed(bool *failed, char **text, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    free(*text);
+    *text = MonoStrv(fmt, ap);
+    va_end(ap);
+    *failed = true;
+}
+
+unsigned char DrawModeSave(DrawMode *dm, EditMode *em)
 {
     MapEditor *E = &em->ed;
     if (dm->stroking) StrokeEnd(dm, em);
     if (E->work && !MapEditDiskUnchanged(E)) {
-        snprintf(msg, msgSize, "not saved: %s changed on disk (a request? another editor?); it reloads and the edits are applied again",
-                 scene->path);
-        return false;
+        MS_SetError("not saved: %s changed on disk (a request? another editor?); it reloads and the edits are applied again",
+                    scene->path);
+        return 2;           // (not logged here: the caller says it, as before)
     }
     int written = 0, records = 0;
-    char failed[256] = "";
+    bool failed = false;
+    char *failedText = NULL;
     char dir[MS_PATH_MAX + 32];
     snprintf(dir, sizeof(dir), "%s" PAINT_DIR, scene->root);
     // 1. the atlases (straight alpha RGBA8), 2. the unwrap sidecars
@@ -1799,7 +1883,7 @@ bool DrawModeSave(DrawMode *dm, EditMode *em, char *msg, int msgSize)
         char path[MS_PATH_MAX + MS_PATH_MAX];
         snprintf(path, sizeof(path), "%s%s", scene->root, a->rel);
         if (!DirectoryExists(dir)) MakeDirectory(dir);
-        if (!PngWrite(a->img, path)) { snprintf(failed, sizeof(failed), "cannot write %s", a->rel); continue; }
+        if (!PngWrite(a->img, path)) { SaveFailed(&failed, &failedText, "cannot write %s", a->rel); continue; }
         a->savedHash = PixelHash(&a->img);
         a->written = true;
         written++;
@@ -1810,33 +1894,48 @@ bool DrawModeSave(DrawMode *dm, EditMode *em, char *msg, int msgSize)
         char rel[MS_PATH_MAX], path[MS_PATH_MAX + MS_PATH_MAX];
         SidecarRel(u->modelPath, rel, (int)sizeof(rel));
         snprintf(path, sizeof(path), "%s%s", scene->root, rel);
-        if (!MS_PaintUnwrapWrite(path, &u->u)) { snprintf(failed, sizeof(failed), "cannot write %.200s", rel); continue; }
+        if (!MS_PaintUnwrapWrite(path, &u->u)) { SaveFailed(&failed, &failedText, "cannot write %.200s", rel); continue; }
         u->written = true;
         written++;
         if (RecordFile(rel, u->modelPath, TextFormat("%d meshes, binary (MSPAINTUV 1)", u->u.meshCount))) records++;
-        else snprintf(failed, sizeof(failed), "cannot record the licence of %.150s in ASSETS.md", rel);
+        else SaveFailed(&failed, &failedText, "cannot record the licence of %.150s in ASSETS.md", rel);
     }
-    // 3. the map, 4. the licence records of new atlases
-    char m[512] = "";
-    bool ok = MapEditSave(E, m, sizeof(m));
-    for (int i = 0; ok && i < dm->atlasCount; i++) {
+    // 3. the map (its text: the editor's note, or the last error when not saved), 4. the licence
+    // records of new atlases
+    unsigned char saved = MapEditSave(E);
+    for (int i = 0; saved != 2 && i < dm->atlasCount; i++) {       // (1, nothing to save, is no failure)
         Atlas *a = &dm->atlases[i];
         if (a->recorded || !a->written || !AtlasLive(a) || AtlasUnsaved(a)) continue;
         if (RecordFile(a->rel, NULL, TextFormat("%d x %d px, RGBA8 PNG (straight alpha)", a->img.width, a->img.height))) {
             a->recorded = true;
             records++;
-        } else snprintf(failed, sizeof(failed), "cannot record the licence of %s in ASSETS.md", a->rel);
+        } else SaveFailed(&failed, &failedText, "cannot record the licence of %s in ASSETS.md", a->rel);
     }
     // 5. the map's watch list: the files as written (MapEditSave did it when the text was unsaved)
-    if (ok && written > 0 && MapEditDiskUnchanged(E)) MS_EditMarkSaved(scene);
-    if (!ok) snprintf(msg, msgSize, "%s%s", m, written ? TextFormat(" (%d paint file%s written)", written, written == 1 ? "" : "s") : "");
-    else if (written == 0 && records == 0) snprintf(msg, msgSize, "%s", m);
-    else snprintf(msg, msgSize, "%s; %d paint file%s written%s%s", strncmp(m, "nothing to save", 15) == 0 ? "saved" : m, written,
-                  written == 1 ? "" : "s", records ? TextFormat(", %d licence record%s", records, records == 1 ? "" : "s") : "",
-                  failed[0] ? TextFormat(" (%s)", failed) : "");
-    if (failed[0]) ok = false;
-    TraceLog(ok ? LOG_INFO : LOG_WARNING, "monolith: %s", msg);
-    return ok;
+    if (saved != 2 && written > 0 && MapEditDiskUnchanged(E)) MS_EditMarkSaved(scene);
+    // The text: the map's, then what the paint files did (code 2: all of it in the last error)
+    unsigned char code;
+    if (saved == 2) {
+        // (MapEditSave's reason is still the last error: nothing since touched it)
+        if (written) MS_AppendError(" (%d paint file%s written)", written, written == 1 ? "" : "s");
+        code = 2;
+    } else if (written == 0 && records == 0) {
+        // the map's own text (a paint file that failed makes it a failure, in the same words)
+        if (failed) MS_SetError("%s", MapEditNote(E));
+        code = failed ? 2 : saved == 1 ? 1 : 0;
+    } else {
+        char *text = MonoStrf("%s; %d paint file%s written%s%s%s%s", saved == 1 ? "saved" : MapEditNote(E), written, written == 1 ? "" : "s",
+                              records ? TextFormat(", %d licence record%s", records, records == 1 ? "" : "s") : "", failed ? " (" : "",
+                              !failed ? "" : failedText ? failedText : "out of memory", failed ? ")" : "");
+        if (failed) MS_SetError("%s", text ? text : "out of memory");
+        else if (text) MsgSetf(&E->note, "%s", text);
+        else MsgSetStatic(&E->note, "out of memory");
+        free(text);
+        code = failed ? 2 : 0;
+    }
+    free(failedText);
+    TraceLog(code != 2 ? LOG_INFO : LOG_WARNING, "monolith: %s", code == 2 ? MS_LastError() : MapEditNote(E));
+    return code;
 }
 
 int DrawModeUnsavedAtlases(const DrawMode *dm)
@@ -1886,15 +1985,15 @@ bool DrawModeWriteUnsaved(const DrawMode *dm, const char *dir)
 static PaintStep *EditStepOn(DrawMode *dm, int m, int file, int slot, const char *what)
 {
     const char *rel = AtlasRelOf(m, file, slot, NULL, NULL, NULL);
-    if (!rel) { Say(dm, true, TextFormat("%s: this surface has no paint yet", what)); return NULL; }
+    if (!rel) { Sayf(dm, true, "%s: this surface has no paint yet", what); return NULL; }
     char copy[MS_PATH_MAX];
     snprintf(copy, sizeof(copy), "%s", rel);
     int ai = AtlasOpen(dm, copy, m >= 0 ? scene->materials[m].name : NULL, file >= 0 ? scene->modelFiles[file].path : NULL, slot);
     PaintStep *p = ai >= 0 ? NewStep(dm, ai, STEP_EDIT) : NULL;
-    if (!p) { Say(dm, true, "out of memory"); return NULL; }
+    if (!p) { SayStatic(dm, true, "out of memory"); return NULL; }
     if (!dm->atlases[ai].img.data) {
         ReleaseStep(dm, p);
-        Say(dm, true, TextFormat("%s: the atlas %s has no image (see the log)", what, copy));
+        Sayf(dm, true, "%s: the atlas %s has no image (see the log)", what, copy);
         return NULL;
     }
     p->sized = true;
@@ -1908,7 +2007,7 @@ static DrawModeResult EditStepEnd(DrawMode *dm, PaintStep *p, bool pushed, const
     Flush(dm);
     EndTiles(a, p);
     if (!pushed) { ReleaseStep(dm, p); return DRAWMODE_NONE; }
-    if (msgOk) Say(dm, false, msgOk);
+    if (msgOk) Sayf(dm, false, "%s", msgOk);
     return DRAWMODE_RELOADED;
 }
 
@@ -1916,12 +2015,12 @@ static DrawModeResult EditStepEnd(DrawMode *dm, PaintStep *p, bool pushed, const
 static bool ActionEntry(DrawMode *dm, const MS_SurfaceHit *h, const char *what, int *entry)
 {
     if (!HitIsBox(h) && !HitIsModel(h)) {
-        Say(dm, true, TextFormat("%s: point at a painted box or model first (the panel acts on the surface the cursor rests on)", what));
+        Sayf(dm, true, "%s: point at a painted box or model first (the panel acts on the surface the cursor rests on)", what);
         return false;
     }
-    if (!dm->em->ed.work && !MapEditBegin(&dm->em->ed)) { Say(dm, true, "this map can't be painted (a compiled map?)"); return false; }
+    if (!dm->em->ed.work && !MapEditBegin(&dm->em->ed)) { SayStatic(dm, true, "this map can't be painted (a compiled map?)"); return false; }
     *entry = EntryFor(h->hit.obj, h->material, h->face, h->slot, NULL);
-    if (*entry < 0) { Say(dm, true, TextFormat("%s: %s has no paint yet: paint it first", what, HitIsBox(h) ? "this face" : "this slot")); return false; }
+    if (*entry < 0) { Sayf(dm, true, "%s: %s has no paint yet: paint it first", what, HitIsBox(h) ? "this face" : "this slot"); return false; }
     return true;
 }
 
@@ -1956,8 +2055,8 @@ static void BoxGroups(const MS_SurfaceHit *h, unsigned char groups[6], int entri
 // any more is cleared. One undo step
 static DrawModeResult ActFaces(DrawMode *dm, const MS_SurfaceHit *h, const unsigned char want[6])
 {
-    if (!HitIsBox(h)) { Say(dm, true, "faces: point at a box (its faces are grouped here)"); return DRAWMODE_NONE; }
-    if (!dm->em->ed.work && !MapEditBegin(&dm->em->ed)) { Say(dm, true, "this map can't be painted (a compiled map?)"); return DRAWMODE_NONE; }
+    if (!HitIsBox(h)) { SayStatic(dm, true, "faces: point at a box (its faces are grouped here)"); return DRAWMODE_NONE; }
+    if (!dm->em->ed.work && !MapEditBegin(&dm->em->ed)) { SayStatic(dm, true, "this map can't be painted (a compiled map?)"); return DRAWMODE_NONE; }
     // The entries before (a snapshot: the ops change the scene's list)
     typedef struct { int x, y, w, h; unsigned char faces; bool kept; } Snap;
     Snap snaps[6];
@@ -1971,13 +2070,13 @@ static DrawModeResult ActFaces(DrawMode *dm, const MS_SurfaceHit *h, const unsig
         for (int s = 0; s < snapCount && !seen; s++) seen = snaps[s].faces == E->faces;
         if (!seen) snaps[snapCount++] = (Snap){ E->x, E->y, E->w, E->h, E->faces, false };
     }
-    if (snapCount == 0) { Say(dm, true, "faces: this box has no paint yet: paint it first, then group its faces"); return DRAWMODE_NONE; }
+    if (snapCount == 0) { SayStatic(dm, true, "faces: this box has no paint yet: paint it first, then group its faces"); return DRAWMODE_NONE; }
     for (int f = 0; f < 6; f++) g[f] = want[f] < 6 ? want[f] : 0;
     PaintStep *p = EditStepOn(dm, h->material, -1, -1, "faces");
     if (!p) return DRAWMODE_NONE;
     Atlas *a = &dm->atlases[p->atlas];
     bool pushed = false, ok = true;
-    char why[400] = "";
+    char *why = NULL;       // (a failed op's reason, kept from the last error: heap, NULL when out of memory)
     for (int n = 0; n < 6 && ok; n++) {
         unsigned char G = 0;
         for (int f = 0; f < 6; f++) if (g[f] == n) G |= (unsigned char)(1u << f);
@@ -2003,12 +2102,12 @@ static DrawModeResult ActFaces(DrawMode *dm, const MS_SurfaceHit *h, const unsig
             op.paint.rect[1] = snaps[best].y;
             op.paint.rect[2] = snaps[best].w;
             op.paint.rect[3] = snaps[best].h;
-            ok = PushOp(dm, p, &pushed, h->hit.obj, &op, "faces", why, (int)sizeof(why));
+            ok = PushOp(dm, p, &pushed, h->hit.obj, &op, "faces") == 0;     // (0: pushed / amended)
         } else {
             // a split: a new rectangle of the source's size with a copy of its paint
             int x, y;
             const Snap *S = &snaps[src];
-            ok = AddRect(dm, p, &pushed, h->hit.obj, h->material, G, -1, S->w, S->h, -1, EDIT_PAINT_ADD, &x, &y, why, (int)sizeof(why));
+            ok = AddRect(dm, p, &pushed, h->hit.obj, h->material, G, -1, S->w, S->h, -1, EDIT_PAINT_ADD, &x, &y) == 0;     // (0: added)
             for (int ty = 0; ok && ty < S->h; ty++)
                 for (int tx = 0; tx < S->w; tx++) {
                     unsigned char px[4];
@@ -2016,7 +2115,12 @@ static DrawModeResult ActFaces(DrawMode *dm, const MS_SurfaceHit *h, const unsig
                     SetTexel(a, p, x + tx, y + ty, px);
                 }
         }
-        if (!ok && !pushed) { Say(dm, true, why); return DRAWMODE_NONE; }     // (the step was released)
+        if (!ok) why = MS_StrDup(MS_LastError());
+        if (!ok && !pushed) {       // (the step was released)
+            Sayf(dm, true, "%s", why ? why : "out of memory");
+            free(why);
+            return DRAWMODE_NONE;
+        }
     }
     // Rectangles no entry has any more: cleared
     for (int s = 0; s < snapCount && pushed; s++) {
@@ -2029,8 +2133,9 @@ static DrawModeResult ActFaces(DrawMode *dm, const MS_SurfaceHit *h, const unsig
         }
         if (!used) ClearRect(a, p, snaps[s].x, snaps[s].y, snaps[s].w, snaps[s].h);
     }
-    if (!ok) Say(dm, true, why);
-    else if (!pushed) Say(dm, false, "faces: nothing changes (a face without paint gets a rectangle with its first stroke)");
+    if (!ok) Sayf(dm, true, "%s", why ? why : "out of memory");
+    else if (!pushed) SayStatic(dm, false, "faces: nothing changes (a face without paint gets a rectangle with its first stroke)");
+    free(why);
     char gt[32];
     snprintf(gt, sizeof(gt), "%d %d %d %d %d %d", g[0], g[1], g[2], g[3], g[4], g[5]);
     return EditStepEnd(dm, p, pushed, ok ? TextFormat("faces: groups %s", gt) : NULL);
@@ -2049,7 +2154,7 @@ static DrawModeResult ActResize(DrawMode *dm, const MS_SurfaceHit *h)
     if (model) w = hh = SlotRectSide(dm->density, h->hit.obj.index, h->slot);
     else BoxRectSize(dm->density, h->hit.obj.index, E.faces, &w, &hh);
     if (w == E.w && hh == E.h) {
-        Say(dm, false, TextFormat("resize: the rectangle is %dx%d already at %g texels/m", w, hh, dm->density));
+        Sayf(dm, false, "resize: the rectangle is %dx%d already at %g texels/m", w, hh, dm->density);
         return DRAWMODE_NONE;
     }
     PaintStep *p = EditStepOn(dm, h->material, file, h->slot, "resize");
@@ -2059,15 +2164,13 @@ static DrawModeResult ActResize(DrawMode *dm, const MS_SurfaceHit *h)
     AtlasRelOf(h->material, file, h->slot, NULL, NULL, &nearest);
     // The old paint, before anything moves
     Image old = NewImage(E.w, E.h);
-    if (!old.data) { ReleaseStep(dm, p); Say(dm, true, "out of memory"); return DRAWMODE_NONE; }
+    if (!old.data) { ReleaseStep(dm, p); SayStatic(dm, true, "out of memory"); return DRAWMODE_NONE; }
     for (int y = 0; y < E.h; y++)
         memcpy((unsigned char *)old.data + (size_t)y * E.w * 4, (const unsigned char *)a->img.data + ((size_t)(E.y + y) * a->img.width + E.x) * 4,
                (size_t)E.w * 4);
     bool pushed = false;
     int x, y;
-    char why[400];
-    bool ok = AddRect(dm, p, &pushed, h->hit.obj, h->material, model ? 0 : E.faces, h->slot, w, hh, entry, EDIT_PAINT_SET, &x, &y, why,
-                      (int)sizeof(why));
+    bool ok = AddRect(dm, p, &pushed, h->hit.obj, h->material, model ? 0 : E.faces, h->slot, w, hh, entry, EDIT_PAINT_SET, &x, &y) == 0;
     if (ok) {
         a = &dm->atlases[p->atlas];
         // (the old rectangle cleared, but where the new one lies: it was cleared already, and is drawn next)
@@ -2084,7 +2187,7 @@ static DrawModeResult ActResize(DrawMode *dm, const MS_SurfaceHit *h)
                 }
                 SetTexel(a, p, x + tx, y + ty, px);
             }
-    } else Say(dm, true, why);
+    } else Sayf(dm, true, "%s", MS_LastError());      // (not added: why)
     FreeImage(&old);
     if (!pushed) return DRAWMODE_NONE;      // (the step was released)
     return EditStepEnd(dm, p, pushed, ok ? TextFormat("resized the rectangle %dx%d -> %dx%d at %d %d", E.w, E.h, w, hh, x, y) : NULL);
@@ -2106,9 +2209,8 @@ static DrawModeResult ActClear(DrawMode *dm, const MS_SurfaceHit *h)
     op.paint.slot = model ? h->slot : -1;
     op.paint.filter = -1;
     bool pushed = false;
-    char why[400];
-    if (!PushOp(dm, p, &pushed, h->hit.obj, &op, "cleared", why, (int)sizeof(why))) {
-        Say(dm, true, why);
+    if (PushOp(dm, p, &pushed, h->hit.obj, &op, "cleared") != 0) {      // (not pushed: why)
+        Sayf(dm, true, "%s", MS_LastError());
         return pushed ? EditStepEnd(dm, p, true, NULL) : DRAWMODE_NONE;
     }
     ClearRect(&dm->atlases[p->atlas], p, E.x, E.y, E.w, E.h);
@@ -2127,17 +2229,17 @@ static DrawModeResult ActPixelLook(DrawMode *dm, const MS_SurfaceHit *h, bool on
     int file = model ? scene->models[h->hit.obj.index].file : -1;
     const char *rel = HitIsBox(h) || model ? AtlasRelOf(h->material, file, h->slot, NULL, NULL, NULL) : NULL;
     if (!rel) {
-        Say(dm, false, on ? "pixel look on: new atlases get paint_filter nearest" : "pixel look off: new atlases are filtered");
+        SayStatic(dm, false, on ? "pixel look on: new atlases get paint_filter nearest" : "pixel look off: new atlases are filtered");
         return DRAWMODE_NONE;
     }
     if (!dm->em->ed.work && !MapEditBegin(&dm->em->ed)) return DRAWMODE_NONE;
     MS_EntityId *ids;
     int count;
-    char msg[512];
-    EditResult r;
+    unsigned char r = 1;
+    bool none = false;      // (an own atlas without entries: nothing applied)
     if (h->material >= 0) {
         EditOp op = { .kind = EDIT_MATERIAL_SET, .matName = scene->materials[h->material].name, .matKeys = on ? "paint_filter nearest" : "-paint_filter" };
-        r = MapEditApply(&dm->em->ed, NULL, 0, &op, &ids, &count, msg, sizeof(msg));
+        r = MapEditApply(&dm->em->ed, NULL, 0, &op, &ids, &count);
     } else {
         // every entry of the own atlas (the runtime samples it nearest when one asks)
         MS_ObjRef *objs = NULL;
@@ -2152,13 +2254,15 @@ static DrawModeResult ActPixelLook(DrawMode *dm, const MS_SurfaceHit *h, bool on
         EditOp op = { .kind = EDIT_PAINT_SET };
         op.paint.slot = h->slot;
         op.paint.filter = (signed char)(on ? 1 : 0);
-        r = n > 0 ? MapEditApply(&dm->em->ed, objs, n, &op, &ids, &count, msg, sizeof(msg)) : EDIT_FAILED;
-        if (n == 0) { snprintf(msg, sizeof(msg), "pixel look: no entry in %s yet", rel); ids = NULL; }
+        if (n > 0) r = MapEditApply(&dm->em->ed, objs, n, &op, &ids, &count);
+        else { none = true; ids = NULL; }
         free(objs);
     }
     free(ids);
-    Say(dm, r != EDIT_DONE, msg);
-    return r == EDIT_DONE ? DRAWMODE_RELOADED : DRAWMODE_NONE;
+    // (1: not applied, why in the last error; 0 / 2: applied (2: the auto save failed), the editor's note)
+    if (none) Sayf(dm, true, "pixel look: no entry in %s yet", rel);
+    else Sayf(dm, r == 1, "%s", r != 1 ? MapEditNote(&dm->em->ed) : MS_LastError());
+    return r != 1 ? DRAWMODE_RELOADED : DRAWMODE_NONE;
 }
 
 DrawModeResult DrawModePanelAction(DrawMode *dm, EditMode *em, int action, const unsigned char faces[6])
@@ -2168,10 +2272,10 @@ DrawModeResult DrawModePanelAction(DrawMode *dm, EditMode *em, int action, const
     bool set = dm->target.version != 0;
     if (action == DRAW_ACT_PIXEL_LOOK) return ActPixelLook(dm, set ? h : &(MS_SurfaceHit){ 0 }, dm->pixelLook);
     if (!set) {
-        Say(dm, true, "point at a painted box or model first (the panel acts on the surface the cursor rests on)");
+        SayStatic(dm, true, "point at a painted box or model first (the panel acts on the surface the cursor rests on)");
         return DRAWMODE_NONE;
     }
-    if (!dm->target.ok && dm->target.refusal[0]) { Say(dm, true, dm->target.refusal); return DRAWMODE_NONE; }
+    if (!dm->target.ok && dm->target.refusalCode >= 2) { Sayf(dm, true, "%s", MsgText(&dm->target.refusal)); return DRAWMODE_NONE; }     // (a refusal)
     if (action == DRAW_ACT_RESIZE) return ActResize(dm, h);
     if (action == DRAW_ACT_FACES && faces) return ActFaces(dm, h, faces);
     if (action == DRAW_ACT_CLEAR) return ActClear(dm, h);
@@ -2273,6 +2377,50 @@ static bool Eyedropper(DrawMode *dm, const MS_SurfaceHit *h, Camera3D cam, int w
 
 // #endregion
 
+// What a per-frame text at h depends on (with Resolve's code and the rectangle g, NULL: none)
+static DrawTextKey TextKeyOf(unsigned char code, const MS_SurfaceHit *h, bool ok, const DrawGeom *g)
+{
+    DrawTextKey k;
+    memset(&k, 0, sizeof(k));       // (compared with memcmp: no stray padding bytes)
+    k.set = true;
+    k.code = code;
+    k.kind = (int)h->hit.obj.kind;
+    k.index = h->hit.obj.index;
+    k.face = h->face;
+    k.slot = h->slot;
+    k.material = h->material;
+    k.version = scene->version;
+    k.ok = ok;
+    if (g) {
+        k.fresh = g->fresh;
+        k.needsUnwrap = g->needsUnwrap;
+        k.atlasW = g->atlasW;
+        k.atlasH = g->atlasH;
+        k.w = g->w;
+        k.h = g->h;
+        k.x = g->x;
+        k.y = g->y;
+    }
+    return k;
+}
+
+// Resolve's refusal words for code at h into m, rebuilt only when what they depend on changed (runs
+// every frame: no allocation while the cursor stays on one surface)
+static void RefusalUpdate(MonoMsg *m, DrawTextKey *key, unsigned char code, const MS_SurfaceHit *h)
+{
+    DrawTextKey k = TextKeyOf(code, h, code == 0, NULL);
+    if (memcmp(&k, key, sizeof(k)) == 0) return;
+    *key = k;
+    if (code < 2) { MsgSetStatic(m, ""); return; }
+    int n = RefusalPrint(NULL, 0, code, h);
+    char *text = n >= 0 ? malloc((size_t)n + 1) : NULL;
+    if (text) {
+        RefusalPrint(text, (size_t)n + 1, code, h);
+        MsgSetf(m, "%s", text);
+        free(text);
+    } else MsgSetStatic(m, "out of memory");
+}
+
 // ======================================================================================
 // #region The surface under the cursor and the panel's target: texts, groups
 // ======================================================================================
@@ -2283,7 +2431,9 @@ static void HoverHit(DrawMode *dm, const MS_SurfaceHit *h)
 {
     dm->hover = *h;
     dm->hoverVersion = 0;       // (no ray: HoverAt sets it)
-    dm->hoverOk = Resolve(dm, h, dm->refusal, (int)sizeof(dm->refusal), &dm->hoverGeom);
+    dm->refusalCode = Resolve(dm, h, &dm->hoverGeom);
+    dm->hoverOk = dm->refusalCode == 0;
+    RefusalUpdate(&dm->refusal, &dm->refusalKey, dm->refusalCode, h);    // (per frame: rebuilt only when it changes)
 }
 
 static MS_SurfaceHit CastRay(Ray ray)
@@ -2311,60 +2461,72 @@ static void AtlasName(const MS_SurfaceHit *h, char *out, int size)
     else snprintf(out, (size_t)size, "the own atlas of %s slot %d", GetFileName(scene->modelFiles[scene->models[h->hit.obj.index].file].path), h->slot);
 }
 
-// The panel's three lines about its target
+// The panel's three lines about its target. Runs every frame: the texts (they hold names: heap) are
+// rebuilt only when what they show changed (textKey); the face groups every time (no allocation)
 static void TargetText(DrawMode *dm)
 {
     DrawTarget *T = &dm->target;
     const MS_SurfaceHit *h = &T->hit;
-    T->what[0] = T->into[0] = T->texel[0] = 0;
     T->facesOk = false;
     T->faceKey = -1;
+    if (HitIsBox(h) && T->ok) {
+        T->facesOk = true;
+        T->faceKey = h->hit.obj.index * 1024 + (h->material & 1023);
+        BoxGroups(h, T->groups, NULL);
+    }
+    DrawTextKey k = TextKeyOf(T->refusalCode, h, T->ok, &T->geom);
+    if (memcmp(&k, &T->textKey, sizeof(k)) == 0) return;
+    T->textKey = k;
+    MsgSetStatic(&T->into, "");
+    MsgSetStatic(&T->texel, "");
+    T->intoSet = T->texelSet = false;
     if (HitIsBox(h)) {
         const MS_Ref *r = MS_ObjectRef(scene, h->hit.obj);
         int e = MS_ObjectEntity(scene, h->hit.obj), first = e;
         while (first > 0 && e >= 0 && scene->entitySources[first - 1].prim == scene->entitySources[e].prim) first--;
         bool turned = scene->boxTurned && scene->boxTurned[h->hit.obj.index] >= 0;
-        snprintf(T->what, sizeof(T->what), "%s line %d #%d, face %s", turned ? "turned box" : "box", r ? r->line : 0, e >= 0 ? e - first : 0,
-                 FACE_NAMES[h->face]);
+        MsgSetf(&T->what, "%s line %d #%d, face %s", turned ? "turned box" : "box", r ? r->line : 0, e >= 0 ? e - first : 0,
+                FACE_NAMES[h->face]);
     } else if (HitIsModel(h)) {
         const MS_Ref *r = MS_ObjectRef(scene, h->hit.obj);
         int file = scene->models[h->hit.obj.index].file;
-        snprintf(T->what, sizeof(T->what), "model %s slot %d, line %d", GetFileName(scene->modelFiles[file].path), h->slot, r ? r->line : 0);
+        MsgSetf(&T->what, "model %s slot %d, line %d", GetFileName(scene->modelFiles[file].path), h->slot, r ? r->line : 0);
     } else if (h->hit.obj.kind == MS_OBJ_LIGHT) {
-        snprintf(T->what, sizeof(T->what), "a light: nothing to paint");
+        MsgSetStatic(&T->what, "a light: nothing to paint");
         return;
     } else {
-        snprintf(T->what, sizeof(T->what), "point at a box or a model");
+        MsgSetStatic(&T->what, "point at a box or a model");
         return;
     }
     if (!T->ok) return;
     const DrawGeom *g = &T->geom;
-    char atlas[200];
-    AtlasName(h, atlas, (int)sizeof(atlas));
-    if (!g->fresh) snprintf(T->into, sizeof(T->into), "%s %d×%d: %d×%d at %d %d", atlas, g->atlasW, g->atlasH, g->w, g->h, g->x, g->y);
-    else if (g->atlasW > 0)
-        snprintf(T->into, sizeof(T->into), "the first stroke adds %d×%d to %.120s (%d×%d)", g->w, g->h, atlas, g->atlasW, g->atlasH);
-    else snprintf(T->into, sizeof(T->into), "the first stroke makes %.120s with a %d×%d rectangle", atlas, g->w, g->h);
-    if (g->needsUnwrap) {
-        size_t l = strlen(T->into);
-        snprintf(T->into + l, sizeof(T->into) - l, "; %s is unwrapped for paint first",
-                 GetFileName(scene->modelFiles[scene->models[h->hit.obj.index].file].path));
-    }
+    // (the atlas's name: "<material>'s atlas" / "the own atlas of <file> slot N", heap: it holds names)
+    char *atlas = h->material >= 0 ? MonoStrf("%s's atlas", scene->materials[h->material].name)
+                : MonoStrf("the own atlas of %s slot %d", GetFileName(scene->modelFiles[scene->models[h->hit.obj.index].file].path), h->slot);
+    const char *an = atlas ? atlas : "out of memory";
+    if (!g->fresh) MsgSetf(&T->into, "%s %d×%d: %d×%d at %d %d", an, g->atlasW, g->atlasH, g->w, g->h, g->x, g->y);
+    else if (g->atlasW > 0) MsgSetf(&T->into, "the first stroke adds %d×%d to %.120s (%d×%d)", g->w, g->h, an, g->atlasW, g->atlasH);
+    else MsgSetf(&T->into, "the first stroke makes %.120s with a %d×%d rectangle", an, g->w, g->h);
+    free(atlas);
+    T->intoSet = true;
+    if (g->needsUnwrap)
+        MsgAppendf(&T->into, "; %s is unwrapped for paint first", GetFileName(scene->modelFiles[scene->models[h->hit.obj.index].file].path));
     // The size of a texel here (mm along the face's two edges; a model: about)
     const char *will = g->fresh ? "will be" : "is";
     if (HitIsBox(h)) {
         float su, sv;
         FaceDims(h->hit.obj.index, h->face, &su, &sv);
-        if (g->w > 0 && g->h > 0)
-            snprintf(T->texel, sizeof(T->texel), "face %s: a texel %s %.1f × %.1f mm%s", FACE_NAMES[h->face], will, su * 1000.0f / g->w,
-                     sv * 1000.0f / g->h, g->w >= DRAW_RECT_MAX || g->h >= DRAW_RECT_MAX ? " (the rectangle is clamped to 2048)" : "");
-        T->facesOk = true;
-        T->faceKey = h->hit.obj.index * 1024 + (h->material & 1023);
-        BoxGroups(h, T->groups, NULL);
+        if (g->w > 0 && g->h > 0) {
+            MsgSetf(&T->texel, "face %s: a texel %s %.1f × %.1f mm%s", FACE_NAMES[h->face], will, su * 1000.0f / g->w,
+                    sv * 1000.0f / g->h, g->w >= DRAW_RECT_MAX || g->h >= DRAW_RECT_MAX ? " (the rectangle is clamped to 2048)" : "");
+            T->texelSet = true;
+        }
     } else if (g->w > 0) {
         double A = SlotArea(h->hit.obj.index, h->slot);
-        if (A > 0.0) snprintf(T->texel, sizeof(T->texel), "slot %d: a texel %s about %.1f mm (%d² over %.2f m²)", h->slot, will,
-                              1000.0 * sqrt(A) / g->w, g->w, A);
+        if (A > 0.0) {
+            MsgSetf(&T->texel, "slot %d: a texel %s about %.1f mm (%d² over %.2f m²)", h->slot, will, 1000.0 * sqrt(A) / g->w, g->w, A);
+            T->texelSet = true;
+        }
     }
 }
 
@@ -2375,7 +2537,8 @@ static void TargetTake(DrawMode *dm)
     if (!(T->version != 0 && SameSurface(&T->hit, &dm->hover))) T->gen++;
     T->hit = dm->hover;
     T->ok = dm->hoverOk;
-    snprintf(T->refusal, sizeof(T->refusal), "%s", dm->refusal);
+    T->refusalCode = dm->refusalCode;
+    RefusalUpdate(&T->refusal, &T->refusalKey, T->refusalCode, &T->hit);
     T->geom = dm->hoverGeom;
     T->ray = dm->hoverRay;
     T->version = scene->version;
@@ -2393,7 +2556,9 @@ static void TargetRefresh(DrawMode *dm)
         T->hit = h;
         T->version = scene->version;
     }
-    T->ok = Resolve(dm, &T->hit, T->refusal, (int)sizeof(T->refusal), &T->geom);
+    T->refusalCode = Resolve(dm, &T->hit, &T->geom);
+    T->ok = T->refusalCode == 0;
+    RefusalUpdate(&T->refusal, &T->refusalKey, T->refusalCode, &T->hit);
     TargetText(dm);
 }
 
@@ -2453,7 +2618,7 @@ void DrawModeOpen(DrawMode *dm, EditMode *em, Designer *d)
     dm->hoverVersion = 0;
     dm->hoverOk = false;
     dm->hover.hit.obj.kind = MS_OBJ_NONE;
-    if (!em->ed.work && !MapEditBegin(&em->ed)) Say(dm, true, "this map can't be painted (a compiled map?): load its .map");
+    if (!em->ed.work && !MapEditBegin(&em->ed)) SayStatic(dm, true, "this map can't be painted (a compiled map?): load its .map");
 }
 
 void DrawModeClose(DrawMode *dm)
@@ -2469,12 +2634,13 @@ static DrawModeResult History(DrawMode *dm, EditMode *em, Designer *d, bool undo
     if (!em->ed.work && !MapEditBegin(&em->ed)) return DRAWMODE_NONE;
     MS_EntityId *ids;
     int count;
-    char msg[512];
-    EditResult r = undo ? MapEditUndo(&em->ed, &ids, &count, msg, sizeof(msg)) : MapEditRedo(&em->ed, &ids, &count, msg, sizeof(msg));
+    unsigned char r = undo ? MapEditUndo(&em->ed, &ids, &count) : MapEditRedo(&em->ed, &ids, &count);
+    char *text = MS_StrDup(r != 1 ? MapEditNote(&em->ed) : MS_LastError());     // (DesignerSync runs first)
     DesignerSync(d);        // (the selection stays: the draw mode doesn't select)
     free(ids);
-    Say(dm, r != EDIT_DONE, msg);
-    return r == EDIT_DONE ? DRAWMODE_RELOADED : DRAWMODE_NONE;
+    Sayf(dm, r == 1, "%s", text ? text : "out of memory");      // (1: not done; 2: done, the auto save failed)
+    free(text);
+    return r != 1 ? DRAWMODE_RELOADED : DRAWMODE_NONE;
 }
 
 // Leaves the mode for `next` (B / ESC: spectator; M edit, V volume, C snip mode); with unsaved
@@ -2484,7 +2650,7 @@ static bool Leave(DrawMode *dm, EditMode *em, Designer *d, int key)
     int unsaved = MapEditUnsaved(&em->ed);
     if (unsaved > 0 && dm->leaveWarnTime <= 0.0f && (key == KEY_B || key == KEY_ESCAPE)) {
         dm->leaveWarnTime = WARN_TIME;
-        Say(dm, true, TextFormat("%d unsaved edit%s: CTRL+S saves, B again leaves them unsaved (still live)", unsaved, unsaved == 1 ? "" : "s"));
+        Sayf(dm, true, "%d unsaved edit%s: CTRL+S saves, B again leaves them unsaved (still live)", unsaved, unsaved == 1 ? "" : "s");
         return false;
     }
     if (dm->stroking) StrokeEnd(dm, em);
@@ -2546,7 +2712,7 @@ DrawModeResult DrawModeUpdate(DrawMode *dm, EditMode *em, Designer *d, Camera3D 
             if (PressStroke(dm, em, &dm->unwrapHit, dm->unwrapPx)) res = DRAWMODE_RELOADED;
             if (dm->stroking && !IsMouseButtonDown(MOUSE_BUTTON_LEFT)) StrokeEnd(dm, em);     // (a click: one dab)
             if (!cursorOnPanel && !flying) HoverAt(dm, cam, GetMousePosition(), w, h);
-        } else Say(dm, true, "the unwrap was dropped: the map changed (click again)");
+        } else SayStatic(dm, true, "the unwrap was dropped: the map changed (click again)");
     }
 
     bool ctrl = Ctrl(), shift = Shift(), alt = Alt();
@@ -2554,16 +2720,15 @@ DrawModeResult DrawModeUpdate(DrawMode *dm, EditMode *em, Designer *d, Camera3D 
         if (ctrl && IsKeyPressed(KEY_Z)) return History(dm, em, d, !shift);
         if (ctrl && IsKeyPressed(KEY_Y)) return History(dm, em, d, false);
         if (ctrl && IsKeyPressed(KEY_S)) {
-            char msg[512];
             if (EditModeConfirm(em, KEY_S)) {
-                bool ok = DrawModeSave(dm, em, msg, sizeof(msg));
-                Say(dm, !ok, msg);
+                unsigned char r = DrawModeSave(dm, em);
+                Sayf(dm, r == 2, "%s", r == 2 ? MS_LastError() : MapEditNote(&em->ed));     // (2: not saved)
             }
             return DRAWMODE_NONE;
         }
         if (ctrl && shift && IsKeyPressed(KEY_DELETE) && em->ed.failedCount > 0) {
             MapEditClearFailed(&em->ed);
-            Say(dm, false, "list of edits that could not be re-applied cleared");
+            SayStatic(dm, false, "list of edits that could not be re-applied cleared");
         }
         static const int LEAVE[] = { KEY_B, KEY_ESCAPE, KEY_M, KEY_V, KEY_C };
         for (int k = 0; k < 5 && !ctrl && !alt; k++)
@@ -2591,24 +2756,24 @@ DrawModeResult DrawModeUpdate(DrawMode *dm, EditMode *em, Designer *d, Camera3D 
             bool paint;
             if (Eyedropper(dm, &dm->hover, cam, w, h, px, &c, &paint)) {
                 SetColor(dm, c);
-                Say(dm, false, TextFormat("picked #%02X%02X%02X a%d (%s)", c.r, c.g, c.b, c.a, paint ? "the paint" : "the surface's albedo"));
+                Sayf(dm, false, "picked #%02X%02X%02X a%d (%s)", c.r, c.g, c.b, c.a, paint ? "the paint" : "the surface's albedo");
             }
         } else if (dm->hoverOk && EditModeConfirm(em, STROKE_KEY)) {
             if (dm->hoverGeom.needsUnwrap) {
                 // (the note shows for a frame, then the next update unwraps: a large scan takes seconds)
                 int file = scene->models[dm->hover.hit.obj.index].file;
                 char *row = AssetsRow(scene->modelFiles[file].path);
-                if (!row) Say(dm, true, TextFormat("%s has no licence row in ASSETS.md (its paint unwrap derives from it)", scene->modelFiles[file].path));
+                if (!row) Sayf(dm, true, "%s has no licence row in ASSETS.md (its paint unwrap derives from it)", scene->modelFiles[file].path);
                 else {
                     dm->unwrapWant = true;
                     dm->unwrapHit = dm->hover;
                     dm->unwrapPx = px;
                     dm->unwrapVersion = scene->version;
-                    Say(dm, false, TextFormat("unwrapping %s for paint (a large model takes a few seconds) ...", GetFileName(scene->modelFiles[file].path)));
+                    Sayf(dm, false, "unwrapping %s for paint (a large model takes a few seconds) ...", GetFileName(scene->modelFiles[file].path));
                 }
                 free(row);
             } else if (PressStroke(dm, em, &dm->hover, px)) res = DRAWMODE_RELOADED;
-        } else if (!dm->hoverOk && dm->refusal[0]) Say(dm, true, dm->refusal);
+        } else if (!dm->hoverOk && dm->refusalCode >= 2) Sayf(dm, true, "%s", MsgText(&dm->refusal));     // (a refusal)
     } else if (dm->stroking && dm->pen != PEN_FILL && (px.x != dm->lastPx.x || px.y != dm->lastPx.y)) {
         unsigned int version = scene->version;
         Probe a = { .px = dm->lastPx, .ok = dm->lastOk, .s = { dm->lastTx, dm->lastTy, dm->lastRegion, false } };
@@ -2656,7 +2821,7 @@ void DrawModeSync(DrawMode *dm, EditMode *em, bool newScene)
     for (int i = 0; i < dm->atlasCount; i++) {
         Atlas *a = &dm->atlases[i];
         if (a->rebaseGen == dm->rebaseGen && a->replaying && a->replayed > 0)
-            Say(dm, false, TextFormat("re-applied %d stroke%s onto %s, which changed on disk", a->replayed, a->replayed == 1 ? "" : "s", a->rel));
+            Sayf(dm, false, "re-applied %d stroke%s onto %s, which changed on disk", a->replayed, a->replayed == 1 ? "" : "s", a->rel);
         if (a->refs == 0) {
             // nothing holds its pixels: the next stroke reads the file again
             a->stale = true;
@@ -2706,14 +2871,14 @@ int DrawModeDrawMessages(const DrawMode *dm, int x, int y)
 {
     if (!dm->active) return 0;
     int y0 = y;
-    if (dm->refusal[0] && !dm->onPanel) {
-        UiHudMark(dm->refusal, x, y, UI_HUD_LINE, UI_S, UI_ERROR);
+    if (dm->refusalCode >= 2 && !dm->onPanel) {     // (a refusal)
+        UiHudMark(MsgText(&dm->refusal), x, y, UI_HUD_LINE, UI_S, UI_ERROR);
         y += UI_HUD_LINE;
     }
     if (dm->messageTime > 0.0f) {
         float fade = fminf(dm->messageTime, 1.0f);
-        if (dm->messageError) UiHudMark(dm->message, x, y, UI_HUD_LINE, UI_S, UiAlpha(UI_ERROR, fade));
-        else UiHudText(dm->message, x, y, UI_HUD_LINE, UI_S, UiAlpha(UI_TEXT, fade));
+        if (dm->messageError) UiHudMark(MsgText(&dm->message), x, y, UI_HUD_LINE, UI_S, UiAlpha(UI_ERROR, fade));
+        else UiHudText(MsgText(&dm->message), x, y, UI_HUD_LINE, UI_S, UiAlpha(UI_TEXT, fade));
         y += UI_HUD_LINE;
     }
     return y - y0;
@@ -3075,6 +3240,12 @@ void DrawModeFree(DrawMode *dm)
     free(dm->slotTris);
     FreeIslands(dm->islands);
     free(dm->islands);
+    MsgFree(&dm->message);
+    MsgFree(&dm->refusal);
+    MsgFree(&dm->target.refusal);
+    MsgFree(&dm->target.what);
+    MsgFree(&dm->target.into);
+    MsgFree(&dm->target.texel);
     memset(dm, 0, sizeof(*dm));
 }
 
@@ -3194,23 +3365,25 @@ static void PrintState(DrawMode *dm, EditMode *em)
     for (int i = 0; i < em->ed.failedCount; i++) printf("paint:   failed: %s\n", em->ed.failed[i].what);
 }
 
-// The map (or a package file) changed on disk: the hot reload's path (reload, rebase, paint hooks)
-static bool ScriptReload(DrawMode *dm, EditMode *em, Designer *d, char *msg, int msgSize)
+// The map (or a package file) changed on disk: the hot reload's path (reload, rebase, paint hooks).
+// Returns 0 reloaded, 1 the reload failed; the script's line in *line either way
+static unsigned char ScriptReload(DrawMode *dm, EditMode *em, Designer *d, MonoMsg *line)
 {
-    if (MS_Reload(scene, NULL) != MS_RELOADED) { snprintf(msg, msgSize, "the reload failed: %s", MS_LastError()); return false; }
+    if (MS_Reload(scene, NULL) != MS_RELOADED) { MsgSetf(line, "the reload failed: %s", MS_LastError()); return 1; }
     DrawModeBeforeSync(dm);
     EditModeSync(em, d, false);
     DrawModeSync(dm, em, false);
     for (int i = 0; i < em->ed.failedCount; i++) printf("paint:   failed: %s\n", em->ed.failed[i].what);
-    snprintf(msg, msgSize, "reloaded: %.300s%s%.250s", em->messageTime > 0.0f ? em->message : "no unsaved edits",
-             dm->messageTime > 0.0f ? "; " : "", dm->messageTime > 0.0f ? dm->message : "");
-    return true;
+    MsgSetf(line, "reloaded: %.300s%s%.250s", em->messageTime > 0.0f ? MsgText(&em->message) : "no unsaved edits",
+            dm->messageTime > 0.0f ? "; " : "", dm->messageTime > 0.0f ? MsgText(&dm->message) : "");
+    return 0;
 }
 
 // One stroke (or a dab: one stamp) of the script: LMB down on the first hit, then each next point
-// one frame of LMB drag (px: through the screen-space sampling; uv: straight in paint coordinates)
-static bool ScriptStroke(DrawMode *dm, EditMode *em, Camera3D cam, int w, int h, bool uv, MS_ObjRef obj, int fs,
-                         const Vector2 *pts, int count, char *msg, int msgSize)
+// one frame of LMB drag (px: through the screen-space sampling; uv: straight in paint coordinates).
+// Returns 0 done, 1 failed; the script's line in *line either way
+static unsigned char ScriptStroke(DrawMode *dm, EditMode *em, Camera3D cam, int w, int h, bool uv, MS_ObjRef obj, int fs,
+                                  const Vector2 *pts, int count, MonoMsg *line)
 {
     MS_SurfaceHit hit;
     if (uv) {
@@ -3218,30 +3391,33 @@ static bool ScriptStroke(DrawMode *dm, EditMode *em, Camera3D cam, int w, int h,
         if (obj.kind == MS_OBJ_MODEL && obj.index >= 0 && obj.index < scene->modelCount &&
             MS_ModelPaintUv(scene, scene->models[obj.index].file, fs) == MS_PAINTUV_NEEDS_UNWRAP) {
             const MS_ModelInstance *M = &scene->models[obj.index];
-            char why[400];
             int file = M->file;
-            if (!EnsureUnwrap(dm, file, fs, SlotRectSide(dm->density, obj.index, fs), why, (int)sizeof(why))) {
-                snprintf(msg, msgSize, "%s", why);
-                return false;
+            if (EnsureUnwrap(dm, file, fs, SlotRectSide(dm->density, obj.index, fs)) != 0) {     // (not made: why)
+                MsgSetf(line, "%s", MS_LastError());
+                return 1;
             }
             // (the unwrap goes live with a text edit; until the first stroke's, the script makes one now
             // to read the paint coordinates: the same text again)
             MapEditor *E = &em->ed;
             if (MS_EditSetText(scene, E->work, E->workSize, &E->lastStats) != MS_RELOADED) {
-                snprintf(msg, msgSize, "the unwrap can't go live: %s", MS_LastError());
-                return false;
+                MsgSetf(line, "the unwrap can't go live: %s", MS_LastError());
+                return 1;
             }
         }
-        if (!UvHit(obj, fs, pts[0].x, pts[0].y, &hit)) { snprintf(msg, msgSize, "no such surface point (face / slot, paint uv)"); return false; }
+        if (!UvHit(obj, fs, pts[0].x, pts[0].y, &hit)) { MsgSetStatic(line, "no such surface point (face / slot, paint uv)"); return 1; }
     } else hit = CastAt(cam, w, h, pts[0]);
     HoverHit(dm, &hit);
-    if (!dm->hoverOk) { snprintf(msg, msgSize, "%s", dm->refusal[0] ? dm->refusal : "nothing to paint there"); return false; }
+    if (!dm->hoverOk) {
+        if (dm->refusalCode >= 2) MsgSetf(line, "%s", MsgText(&dm->refusal));      // (a refusal)
+        else MsgSetStatic(line, "nothing to paint there");
+        return 1;
+    }
     unsigned int version = scene->version;
-    dm->message[0] = '\0';
+    MsgSetStatic(&dm->message, "");     // (what the stroke says, alone)
     dm->messageError = false;
-    if (!StrokeBegin(dm, em, &hit)) { snprintf(msg, msgSize, "%s", dm->message); return false; }
+    if (!StrokeBegin(dm, em, &hit)) { MsgSetf(line, "%s", MsgText(&dm->message)); return 1; }
     Probe a = ProbeHit(dm, &hit, pts[0]);
-    if (!dm->stroking) { snprintf(msg, msgSize, "%s", dm->message); return false; }
+    if (!dm->stroking) { MsgSetf(line, "%s", MsgText(&dm->message)); return 1; }
     if (a.ok) StampProbe(dm, &a);
     Flush(dm);
     for (int i = 1; i < count && dm->pen != PEN_FILL && dm->stroking; i++) {
@@ -3257,12 +3433,12 @@ static bool ScriptStroke(DrawMode *dm, EditMode *em, Camera3D cam, int w, int h,
     int samples = dm->stroke ? dm->stroke->sampleCount : 0;
     bool allocated = scene->version != version;
     bool failed = dm->messageError;
-    char failMessage[256];         // (the stroke's own message: StrokeEnd replaces it)
-    snprintf(failMessage, sizeof(failMessage), "%s", dm->message);
+    char *failMessage = failed ? MS_StrDup(MsgText(&dm->message)) : NULL;     // (the stroke's own message: StrokeEnd replaces it)
     StrokeEnd(dm, em);
-    snprintf(msg, msgSize, "%s (%d sample%s%s)%s%s", dm->message, samples, samples == 1 ? "" : "s", allocated ? ", allocated" : "",
-             failed ? " -- " : "", failed ? failMessage : "");
-    return !failed && !dm->messageError;
+    MsgSetf(line, "%s (%d sample%s%s)%s%s", MsgText(&dm->message), samples, samples == 1 ? "" : "s", allocated ? ", allocated" : "",
+            failed ? " -- " : "", !failed ? "" : failMessage ? failMessage : "out of memory");
+    free(failMessage);
+    return failed || dm->messageError ? 1 : 0;
 }
 
 // --paint-script <file> (docs/painting.md 14): one command per line, '#' starts a comment; each prints
@@ -3303,6 +3479,7 @@ int DrawModeRunScript(DrawMode *dm, EditMode *em, Designer *d, Camera3D cam, int
     int status = 0, lineNo = 0;
     Vector2 *pts = NULL;
     int ptCap = 0;
+    MonoMsg msg = { 0 };        // (each command's line)
     for (char *line = text; line && status == 0; ) {
         char *nl = strchr(line, '\n');
         if (nl) *nl = '\0';
@@ -3314,38 +3491,40 @@ int DrawModeRunScript(DrawMode *dm, EditMode *em, Designer *d, Camera3D cam, int
         for (char *tok = strtok(line, " \t\r"); tok && n < 64; tok = strtok(NULL, " \t\r")) wd[n++] = tok;
         line = nl ? nl + 1 : NULL;
         if (n == 0) continue;
-        char msg[700] = "";
         bool ok = false;
         float f[4];
         bool stroke = strcmp(wd[0], "stroke") == 0, dab = strcmp(wd[0], "dab") == 0;
-        dm->message[0] = '\0';
+        MsgSetStatic(&msg, "");
+        // (each command's own message: what it said, if anything)
+        MsgSetStatic(&dm->message, "");
+        dm->messageSaid = false;
         if (strcmp(wd[0], "pen") == 0 && n == 2) {
             static const char *const NAMES[PEN_COUNT] = { "round", "square", "soft", "eraser", "fill" };
             for (int k = 0; k < PEN_COUNT; k++) if (strcmp(wd[1], NAMES[k]) == 0) { dm->pen = (PenKind)k; ok = true; }
-            snprintf(msg, sizeof(msg), ok ? "pen %s" : "pen <round|square|soft|eraser|fill>, not %s", wd[1]);
+            MsgSetf(&msg, ok ? "pen %s" : "pen <round|square|soft|eraser|fill>, not %s", wd[1]);
         } else if (strcmp(wd[0], "size") == 0 && n == 2 && ScriptNum(wd[1], &f[0]) && f[0] >= 1 && f[0] <= DRAW_SIZE_MAX) {
             dm->size = (int)f[0];
             ok = true;
-            snprintf(msg, sizeof(msg), "size %d", dm->size);
+            MsgSetf(&msg, "size %d", dm->size);
         } else if (strcmp(wd[0], "hardness") == 0 && n == 2 && ScriptNum(wd[1], &f[0]) && f[0] >= 0 && f[0] <= 1) {
             dm->hardness = f[0];
             ok = true;
-            snprintf(msg, sizeof(msg), "hardness %g", f[0]);
+            MsgSetf(&msg, "hardness %g", f[0]);
         } else if (strcmp(wd[0], "color") == 0 && (n == 4 || n == 5)) {
             ok = true;
             for (int k = 0; k < n - 1; k++) ok = ok && ScriptNum(wd[1 + k], &f[k]) && f[k] >= 0 && f[k] <= 255;
             if (ok) SetColor(dm, (Color){ (unsigned char)f[0], (unsigned char)f[1], (unsigned char)f[2], n == 5 ? (unsigned char)f[3] : 255 });
-            if (ok) snprintf(msg, sizeof(msg), "color %d %d %d %d", dm->color.r, dm->color.g, dm->color.b, dm->color.a);
-            else snprintf(msg, sizeof(msg), "color <r> <g> <b> [<a>] (0-255)");
+            if (ok) MsgSetf(&msg, "color %d %d %d %d", dm->color.r, dm->color.g, dm->color.b, dm->color.a);
+            else MsgSetStatic(&msg, "color <r> <g> <b> [<a>] (0-255)");
         } else if (strcmp(wd[0], "density") == 0 && n == 2 && ScriptNum(wd[1], &f[0]) && f[0] >= 8 && f[0] <= 512) {
             dm->density = f[0];
             ok = true;
-            snprintf(msg, sizeof(msg), "density %g texels/m", f[0]);
+            MsgSetf(&msg, "density %g texels/m", f[0]);
         } else if (strcmp(wd[0], "pixel") == 0 && n == 2 && (strcmp(wd[1], "on") == 0 || strcmp(wd[1], "off") == 0)) {
             bool on = wd[1][1] == 'n';
             DrawModeResult r = ActPixelLook(dm, dm->lastHitSet ? &dm->lastHit : &(MS_SurfaceHit){ 0 }, on);
             ok = r == DRAWMODE_RELOADED || !dm->messageError;
-            snprintf(msg, sizeof(msg), "pixel look %s: %s", wd[1], dm->message);
+            MsgSetf(&msg, "pixel look %s: %s", wd[1], MsgText(&dm->message));
         } else if (strcmp(wd[0], "faces") == 0 && n == 7) {
             unsigned char cells[6];
             ok = dm->lastHitSet;
@@ -3354,11 +3533,12 @@ int DrawModeRunScript(DrawMode *dm, EditMode *em, Designer *d, Camera3D cam, int
                 cells[k] = (unsigned char)(ok ? f[0] : 0);
             }
             if (ok) ok = ActFaces(dm, &dm->lastHit, cells) == DRAWMODE_RELOADED;
-            snprintf(msg, sizeof(msg), "%s", dm->message[0] ? dm->message : "faces <a b c d e f> (0-5), after a stroke on a box");
+            if (dm->messageSaid) MsgSetf(&msg, "%s", MsgText(&dm->message));
+            else MsgSetStatic(&msg, "faces <a b c d e f> (0-5), after a stroke on a box");
         } else if ((strcmp(wd[0], "resize") == 0 || strcmp(wd[0], "clear") == 0) && n == 1) {
             bool resize = wd[0][0] == 'r';
             ok = dm->lastHitSet && (resize ? ActResize(dm, &dm->lastHit) : ActClear(dm, &dm->lastHit)) == DRAWMODE_RELOADED;
-            snprintf(msg, sizeof(msg), "%s: %s", wd[0], dm->message[0] ? dm->message : "nothing painted yet");
+            MsgSetf(&msg, "%s: %s", wd[0], dm->messageSaid ? MsgText(&dm->message) : "nothing painted yet");
         } else if ((stroke || dab) && n >= 4 && (strcmp(wd[1], "px") == 0 || strcmp(wd[1], "uv") == 0)) {
             bool uv = wd[1][0] == 'u';
             int at = 2, fs = -1;
@@ -3373,26 +3553,32 @@ int DrawModeRunScript(DrawMode *dm, EditMode *em, Designer *d, Camera3D cam, int
             int count = (n - at) / 2;
             ok = ok && (n - at) % 2 == 0 && count >= 1 && (!dab || count == 1) && MS_RESERVE(pts, ptCap, count);
             for (int k = 0; ok && k < count; k++) ok = ScriptNum(wd[at + 2 * k], &pts[k].x) && ScriptNum(wd[at + 2 * k + 1], &pts[k].y);
-            if (!ok) snprintf(msg, sizeof(msg), "%s px <x> <y> ... | %s uv <id N:i | entity HEX:i> <face|slot> <u> <v> ...", wd[0], wd[0]);
-            else ok = ScriptStroke(dm, em, cam, w, h, uv, obj, fs, pts, count, msg, sizeof(msg));
+            if (!ok) MsgSetf(&msg, "%s px <x> <y> ... | %s uv <id N:i | entity HEX:i> <face|slot> <u> <v> ...", wd[0], wd[0]);
+            else ok = ScriptStroke(dm, em, cam, w, h, uv, obj, fs, pts, count, &msg) == 0;     // (0: done)
         } else if (strcmp(wd[0], "hover") == 0 && n == 4 && strcmp(wd[1], "px") == 0 && ScriptNum(wd[2], &f[0]) && ScriptNum(wd[3], &f[1])) {
             DrawModeHover(dm, cam, (Vector2){ f[0], f[1] }, w, h);
             ok = true;
-            snprintf(msg, sizeof(msg), "hover %s%s%s%s", dm->hoverOk ? "paintable" : "not paintable", dm->refusal[0] ? TextFormat(": %s", dm->refusal) : "",
-                     dm->target.into[0] ? TextFormat(" | %s", dm->target.into) : "", dm->target.texel[0] ? TextFormat(" | %s", dm->target.texel) : "");
+            bool refused = dm->refusalCode >= 2;    // (a refusal; the panel's lines where they apply)
+            const DrawTarget *T = &dm->target;
+            MsgSetf(&msg, "hover %s%s%s%s%s%s%s", dm->hoverOk ? "paintable" : "not paintable", refused ? ": " : "",
+                    refused ? MsgText(&dm->refusal) : "", T->intoSet ? " | " : "", T->intoSet ? MsgText(&T->into) : "", T->texelSet ? " | " : "",
+                    T->texelSet ? MsgText(&T->texel) : "");
         } else if (strcmp(wd[0], "pick") == 0 && n == 4 && strcmp(wd[1], "px") == 0 && ScriptNum(wd[2], &f[0]) && ScriptNum(wd[3], &f[1])) {
             MS_SurfaceHit hit = CastAt(cam, w, h, (Vector2){ f[0], f[1] });
             Color c = { 0 };
             bool paint = false;
             ok = Eyedropper(dm, &hit, cam, w, h, (Vector2){ f[0], f[1] }, &c, &paint);
             if (ok) SetColor(dm, c);
-            snprintf(msg, sizeof(msg), ok ? "picked %d %d %d %d (%s)" : "nothing there", c.r, c.g, c.b, c.a, paint ? "the paint" : "the albedo");
+            if (ok) MsgSetf(&msg, "picked %d %d %d %d (%s)", c.r, c.g, c.b, c.a, paint ? "the paint" : "the albedo");
+            else MsgSetStatic(&msg, "nothing there");
         } else if ((strcmp(wd[0], "undo") == 0 || strcmp(wd[0], "redo") == 0) && n == 1) {
             ok = History(dm, em, d, wd[0][0] == 'u') == DRAWMODE_RELOADED;
             Flush(dm);
-            snprintf(msg, sizeof(msg), "%s", dm->message);
+            MsgSetf(&msg, "%s", MsgText(&dm->message));
         } else if (strcmp(wd[0], "save") == 0 && n == 1) {
-            ok = DrawModeSave(dm, em, msg, sizeof(msg));
+            unsigned char r = DrawModeSave(dm, em);
+            ok = r != 2;        // (2: not saved)
+            MsgSetf(&msg, "%s", r == 2 ? MS_LastError() : MapEditNote(&em->ed));
         } else if (strcmp(wd[0], "poll") == 0 && n == 1) {
             // The hot reload's check, as a few seconds of frames would make it (after a save: nothing
             // reloads, the editor's own writes are known)
@@ -3408,31 +3594,33 @@ int DrawModeRunScript(DrawMode *dm, EditMode *em, Designer *d, Camera3D cam, int
                 DrawModeSync(dm, em, false);
             }
             ok = true;
-            snprintf(msg, sizeof(msg), "poll: %d reload%s, %d failed", reloads, reloads == 1 ? "" : "s", failed);
+            MsgSetf(&msg, "poll: %d reload%s, %d failed", reloads, reloads == 1 ? "" : "s", failed);
         } else if (strcmp(wd[0], "print") == 0 && n == 1) {
             PrintState(dm, em);
             ok = true;
-            snprintf(msg, sizeof(msg), "%d atlas%s, %d entr%s", dm->atlasCount, dm->atlasCount == 1 ? "" : "es", MS_PaintEntryCount(scene),
-                     MS_PaintEntryCount(scene) == 1 ? "y" : "ies");
+            MsgSetf(&msg, "%d atlas%s, %d entr%s", dm->atlasCount, dm->atlasCount == 1 ? "" : "es", MS_PaintEntryCount(scene),
+                    MS_PaintEntryCount(scene) == 1 ? "y" : "ies");
         } else if ((strcmp(wd[0], "disk") == 0 && n == 2) || (strcmp(wd[0], "put") == 0 && n == 3) || (strcmp(wd[0], "reload") == 0 && n == 1)) {
             // disk <file>: the map file becomes its bytes; put <file> <package path>: a package file
             // does (a PNG a request repainted); then the hot reload's path (reload, rebase)
             int size = 0;
             unsigned char *bytes = wd[0][0] == 'r' ? NULL : LoadFileData(wd[1], &size);
             char dst[MS_PATH_MAX * 2];
-            snprintf(dst, sizeof(dst), "%s", wd[0][0] == 'p' ? TextFormat("%s%s", scene->root, wd[2]) : scene->path);
-            if (wd[0][0] != 'r' && !bytes) snprintf(msg, sizeof(msg), "cannot read %s", wd[1]);
-            else if (bytes && !SaveFileData(dst, bytes, size)) snprintf(msg, sizeof(msg), "cannot write %.600s", dst);
-            else if (wd[0][0] == 'p') { ok = true; snprintf(msg, sizeof(msg), "wrote %.600s (no reload yet)", dst); }
-            else ok = ScriptReload(dm, em, d, msg, sizeof(msg));
+            if (wd[0][0] == 'p') snprintf(dst, sizeof(dst), "%s%s", scene->root, wd[2]);
+            else snprintf(dst, sizeof(dst), "%s", scene->path);
+            if (wd[0][0] != 'r' && !bytes) MsgSetf(&msg, "cannot read %s", wd[1]);
+            else if (bytes && !SaveFileData(dst, bytes, size)) MsgSetf(&msg, "cannot write %.600s", dst);
+            else if (wd[0][0] == 'p') { ok = true; MsgSetf(&msg, "wrote %.600s (no reload yet)", dst); }
+            else ok = ScriptReload(dm, em, d, &msg) == 0;       // (0: reloaded)
             if (bytes) UnloadFileData(bytes);
-        } else snprintf(msg, sizeof(msg), "unknown command '%s' (pen size hardness color density pixel faces resize clear stroke dab "
-                                          "hover pick undo redo save print poll disk put reload)", wd[0]);
-        printf("paint: %s:%d: %s%s\n", path, lineNo, ok ? "" : "FAILED: ", msg);
+        } else MsgSetf(&msg, "unknown command '%s' (pen size hardness color density pixel faces resize clear stroke dab "
+                             "hover pick undo redo save print poll disk put reload)", wd[0]);
+        printf("paint: %s:%d: %s%s\n", path, lineNo, ok ? "" : "FAILED: ", MsgText(&msg));
         if (!ok) status = 1;
     }
     Flush(dm);
     free(pts);
+    MsgFree(&msg);
     fflush(stdout);
     UnloadFileText(text);
     return status;

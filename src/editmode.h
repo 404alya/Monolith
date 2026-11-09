@@ -13,7 +13,7 @@ typedef struct {
     MapEditor ed;           // undo / redo history (kept when the mode is left)
     char **models;          // model files of the package listed in ASSETS.md (heap strings), sorted
     int modelCount, modelCap;
-    char message[512];      // the last edit or why it was refused
+    MonoMsg message;        // the last edit or why it was refused (set on events only; freed with the mode)
     float messageTime;
     bool messageError;
     int warnKey;            // a request is open on this map: this key again within warnTime edits anyway
@@ -86,9 +86,10 @@ bool EditModeTakesArrows(const EditMode *m);
 void EditModeSync(EditMode *m, Designer *d, bool newScene);
 // Unsaved edits (0 before the first edit, and in auto save mode unless a write failed)
 int EditModeUnsaved(const EditMode *m);
-// CTRL+S: writes the working copy to the map file (and the draw mode's canvases: MapEditSaveAll);
-// msg says what happened
-bool EditModeSave(EditMode *m, char *msg, int msgSize);
+// CTRL+S: writes the working copy to the map file (and the draw mode's canvases: MapEditSaveAll),
+// posts the outcome to the mode's HUD line and logs it ("monolith: %s": INFO for 0 / 1, WARNING
+// for 2). Returns 0 saved, 1 nothing to save, 2 not saved (why: MS_LastError(), and the HUD)
+unsigned char EditModeSave(EditMode *m);
 // A request is open on the map: the first press of `key` after the last save warns (the HUD
 // message), the same key again within 3 s goes ahead (true). The draw mode's strokes use it too
 bool EditModeConfirm(EditMode *m, int key);

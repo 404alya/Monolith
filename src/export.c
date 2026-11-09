@@ -103,19 +103,18 @@ static void FreePlan(Plan *P)
     memset(P, 0, sizeof(*P));
 }
 
-// malloc'd printf (no length limit); NULL when out of memory
-static char *Fmt(const char *fmt, ...)
+// FileExists of a printf-made path (no length limit: TextFormat's 1 KB would cut a long path
+// and test another file); false when out of memory
+static bool FileExistsf(const char *fmt, ...) MSG_PRINTF(1, 2);
+static bool FileExistsf(const char *fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
-    int n = vsnprintf(NULL, 0, fmt, ap);
+    char *path = MonoStrv(fmt, ap);
     va_end(ap);
-    char *s = n >= 0 ? malloc((size_t)n + 1) : NULL;
-    if (!s) return NULL;
-    va_start(ap, fmt);
-    vsnprintf(s, (size_t)n + 1, fmt, ap);
-    va_end(ap);
-    return s;
+    bool found = path && FileExists(path);
+    free(path);
+    return found;
 }
 
 static PlanItem *FindTo(const Plan *P, const char *to)
@@ -152,11 +151,24 @@ static void AddData(Plan *P, const char *to, char *data, bool exec)
 static void AddPkg(Plan *P, const char *root, const char *name, const char *rel, const char *dstRel)
 {
     if (!dstRel) dstRel = rel;
-    char *from = Fmt("%s%s", root, rel), *to = Fmt("%s/%s", name, dstRel);
+    char *from = MonoStrf("%s%s", root, rel), *to = MonoStrf("%s/%s", name, dstRel);
     if (from && to) AddCopy(P, from, to, dstRel);
     else { fprintf(stderr, "monolith: export: out of memory\n"); P->errors++; }
     free(from);
     free(to);
+}
+
+// AddCopy from a printf-made source path (heap: no length limit)
+static void AddCopyf(Plan *P, const char *to, const char *fromFmt, ...) MSG_PRINTF(3, 4);
+static void AddCopyf(Plan *P, const char *to, const char *fromFmt, ...)
+{
+    va_list ap;
+    va_start(ap, fromFmt);
+    char *from = MonoStrv(fromFmt, ap);
+    va_end(ap);
+    if (from) AddCopy(P, from, to, NULL);
+    else { fprintf(stderr, "monolith: export: out of memory\n"); P->errors++; }
+    free(from);
 }
 
 // A file written into the export by other means than the plan (the compiled map): listed so that
@@ -328,7 +340,7 @@ static void R3DFile(const char *path, const char *rel, void *user)
 {
     R3DScan *r = user;
     if (!R3DWanted(rel)) return;
-    char *to = Fmt("r3d/%s", rel);
+    char *to = MonoStrf("r3d/%s", rel);
     if (to) AddCopy(r->P, path, to, NULL);
     else r->P->errors++;
     free(to);
@@ -349,25 +361,31 @@ static void R3DFile(const char *path, const char *rel, void *user)
 // own times: a change that recompiles nothing, e.g. an umbrella header, leaves them as they are.)
 static const char *const PREBUILT_LIBS[] = { "libr3d.a", "libraylib.a", "libassimp.a", "libzlibstatic.a" };
 
-static bool AddPrebuilt(Plan *P, const char *r3d, const R3DScan *rs, const char *buildDir, const char *target, char *why, int whySize)
+// True when added; false with the reason in *why (MsgFree it)
+static bool AddPrebuilt(Plan *P, const char *r3d, const R3DScan *rs, const char *buildDir, const char *target, MonoMsg *why)
 {
     const char *again = strcmp(target, "win") == 0 ? "./build.sh --win" : "./build.sh";
-    char *args = LoadFileText(TextFormat("%s%s/monolith-configure.args", r3d, buildDir));
+    char *argsPath = MonoStrf("%s%s/monolith-configure.args", r3d, buildDir);
+    char *args = argsPath ? LoadFileText(argsPath) : NULL;
+    free(argsPath);
     bool release = args && strstr(args, "-DCMAKE_BUILD_TYPE=Release\n") && strstr(args, "-DBUILD_SHARED_LIBS=OFF");
     if (args) UnloadFileText(args);
     if (!release) {
-        snprintf(why, whySize, "%s%s is not monolith's static Release build (run %s)", r3d, buildDir, again);
+        MsgSetf(why, "%s%s is not monolith's static Release build (run %s)", r3d, buildDir, again);
         return false;
     }
     for (int i = 0; i < 4; i++) {
-        const char *lib = TextFormat("%s%s/lib/%s", r3d, buildDir, PREBUILT_LIBS[i]);
-        if (!FileExists(lib)) { snprintf(why, whySize, "%s is missing (run %s)", lib, again); return false; }
+        char *lib = MonoStrf("%s%s/lib/%s", r3d, buildDir, PREBUILT_LIBS[i]);
+        bool found = lib && FileExists(lib);
+        if (!found) MsgSetf(why, "%s is missing (run %s)", lib ? lib : "a prebuilt library (out of memory)", again);
+        free(lib);
+        if (!found) return false;
     }
     long newest = rs->newest[LIB_R3D];
     if (rs->newest[LIB_RAYLIB] > newest) newest = rs->newest[LIB_RAYLIB];
     if (rs->newest[LIB_ASSIMP] > newest) newest = rs->newest[LIB_ASSIMP];
     // The last build succeeded when the log's last non-empty line is cmake's "Built target ..."
-    char *log = MS_StrDup(TextFormat("%s%s/monolith-build.log", r3d, buildDir));
+    char *log = MonoStrf("%s%s/monolith-build.log", r3d, buildDir);
     char *text = log && FileExists(log) ? LoadFileText(log) : NULL;
     bool built = false;
     if (text) {
@@ -378,12 +396,12 @@ static bool AddPrebuilt(Plan *P, const char *r3d, const R3DScan *rs, const char 
         UnloadFileText(text);
     }
     bool fresh = built && GetFileModTime(log) >= newest;
-    if (!fresh) snprintf(why, whySize, "the last build in %s%s %s (run %s)", r3d, buildDir,
-                         built ? "ran before its newest source file changed" : "did not finish", again);
+    if (!fresh) MsgSetf(why, "the last build in %s%s %s (run %s)", r3d, buildDir,
+                        built ? "ran before its newest source file changed" : "did not finish", again);
     free(log);
     if (!fresh) return false;
     for (int i = 0; i < 4; i++) {
-        char *from = Fmt("%s%s/lib/%s", r3d, buildDir, PREBUILT_LIBS[i]), *to = Fmt("prebuilt/%s/lib/%s", target, PREBUILT_LIBS[i]);
+        char *from = MonoStrf("%s%s/lib/%s", r3d, buildDir, PREBUILT_LIBS[i]), *to = MonoStrf("prebuilt/%s/lib/%s", target, PREBUILT_LIBS[i]);
         if (from && to) AddCopy(P, from, to, NULL);
         else P->errors++;
         free(from);
@@ -831,7 +849,7 @@ static bool RemoveWritten(const char *root, const Plan *P)
     char **dirs = NULL;
     int dirCount = 0, dirCap = 0;
     for (int i = 0; i < P->count; i++) {
-        char *path = Fmt("%s/%s", root, P->items[i].to);
+        char *path = MonoStrf("%s/%s", root, P->items[i].to);
         if (path && FileExists(path) && remove(path) != 0) ok = false;
         free(path);
         // every parent folder of the file inside root
@@ -850,7 +868,7 @@ static bool RemoveWritten(const char *root, const Plan *P)
     }
     if (dirCount) qsort(dirs, dirCount, sizeof(*dirs), CompareLongerFirst);
     for (int k = 0; k < dirCount; k++) {
-        char *path = Fmt("%s/%s", root, dirs[k]);
+        char *path = MonoStrf("%s/%s", root, dirs[k]);
         if (path && DirectoryExists(path) && RemoveDir(path) != 0) ok = false;
         free(path);
         free(dirs[k]);
@@ -881,54 +899,84 @@ static long long FileBytes(const char *path)
     return stat(path, &st) == 0 ? (long long)st.st_size : 0;
 }
 
-bool ExportScene(const MS_Scene *s, const char *outDirIn, char *msg, int msgSize)
+// The export's note (ExportNote): the success sentence of the last export
+static MonoMsg note;
+
+const char *ExportNote(void)
+{
+    return MsgText(&note);
+}
+
+void ExportShutdown(void)
+{
+    MsgFree(&note);
+}
+
+static unsigned char Export(const MS_Scene *s, const char *outDirIn);
+
+// 0: exported (note); 1: nothing written (err). Prints its own result line (see export.h)
+unsigned char ExportScene(const MS_Scene *s, const char *outDir, bool console)
+{
+    unsigned char r = Export(s, outDir);
+    const char *text = r == 0 ? MsgText(&note) : MS_LastError();
+    if (console) fprintf(r == 0 ? stdout : stderr, "monolith: %s\n", text);
+    else TraceLog(r == 0 ? LOG_INFO : LOG_WARNING, "monolith: %s", text);
+    return r;
+}
+
+// ExportScene without the result line: 0 exported (note), 1 nothing written (err: the whole
+// "export: ..." sentence)
+static unsigned char Export(const MS_Scene *s, const char *outDirIn)
 {
     // A compiled map: the export ships its text and compiles that, so the text must be current
     const char *source;
     MS_SourceState state = MS_CompiledSource(s, &source);
     if (state != MS_SOURCE_TEXT) {
         if (state != MS_SOURCE_CURRENT) {
-            snprintf(msg, msgSize, state == MS_SOURCE_STALE
-                     ? "export: %s was compiled from an older %s: export the .map (or compile it again); nothing written"
-                     : "export: %s is a compiled map and its source %s is not next to it: the export needs the map's text; "
-                       "nothing written", s->path, source);
-            return false;
+            if (state == MS_SOURCE_STALE)
+                MS_SetError("export: %s was compiled from an older %s: export the .map (or compile it again); nothing written",
+                            s->path, source);
+            else
+                MS_SetError("export: %s is a compiled map and its source %s is not next to it: the export needs the map's text; "
+                            "nothing written", s->path, source);
+            return 1;
         }
         MS_Scene *text = MS_Load(source, &(MS_LoadOptions){ .noGpu = true });
         if (!text) {
-            snprintf(msg, msgSize, "export: %s; nothing written", MS_LastError());
-            return false;
+            MS_SetError("export: %s; nothing written", MS_LastError());
+            return 1;
         }
-        bool ok = ExportScene(text, outDirIn, msg, msgSize);
-        MS_Unload(text);
-        return ok;
+        unsigned char r = Export(text, outDirIn);
+        MS_Unload(text);            // (leaves the last error as it is)
+        return r;
     }
 
     char outDir[MS_PATH_MAX];
     snprintf(outDir, sizeof(outDir), "%s", outDirIn);
     size_t ol = strlen(outDir);
     while (ol > 1 && (outDir[ol - 1] == '/' || outDir[ol - 1] == '\\')) outDir[--ol] = 0;
-    if (!ol) { snprintf(msg, msgSize, "export: empty folder name"); return false; }
+    if (!ol) { MS_SetError("export: empty folder name"); return 1; }
     if (!DirIsEmptyOrMissing(outDir)) {
-        snprintf(msg, msgSize, DirectoryExists(outDir) ? "export: %s exists and is not empty (nothing written)"
-                                                       : "export: %s is a file, not a folder (nothing written)", outDir);
-        return false;
+        if (DirectoryExists(outDir)) MS_SetError("export: %s exists and is not empty (nothing written)", outDir);
+        else MS_SetError("export: %s is a file, not a folder (nothing written)", outDir);
+        return 1;
     }
     char staging[MS_PATH_MAX + 16];
     snprintf(staging, sizeof(staging), "%s.partial", outDir);
     if (FileExists(staging) || DirectoryExists(staging)) {
-        snprintf(msg, msgSize, "export: %s is left from an earlier export: move it away first (nothing written)", staging);
-        return false;
+        MS_SetError("export: %s is left from an earlier export: move it away first (nothing written)", staging);
+        return 1;
     }
 
     // Sources: the repo's runtime and templates, the R3D tree monolith was built with
     char rt[MS_PATH_MAX], r3d[MS_PATH_MAX];
     snprintf(rt, sizeof(rt), "%s", PROJECT_PATH);
-    snprintf(r3d, sizeof(r3d), "%s", R3D_SOURCE_PATH[0] ? R3D_SOURCE_PATH : TextFormat("%ssubmodules/r3d/", PROJECT_PATH));
-    if (!rt[0] || !FileExists(TextFormat("%sruntime/monolith_scene.c", rt)) || !FileExists(TextFormat("%sCMakeLists.txt", r3d))) {
-        snprintf(msg, msgSize, "export: needs the monolith repo (runtime/, cmake/ and the R3D source %s): run it from "
-                 "the repo's build (nothing written)", r3d[0] ? r3d : "submodules/r3d/");
-        return false;
+    if (R3D_SOURCE_PATH[0]) snprintf(r3d, sizeof(r3d), "%s", R3D_SOURCE_PATH);
+    else snprintf(r3d, sizeof(r3d), "%ssubmodules/r3d/", PROJECT_PATH);
+    if (!rt[0] || !FileExistsf("%sruntime/monolith_scene.c", rt) || !FileExistsf("%sCMakeLists.txt", r3d)) {
+        MS_SetError("export: needs the monolith repo (runtime/, cmake/ and the R3D source %s): run it from "
+                    "the repo's build (nothing written)", r3d[0] ? r3d : "submodules/r3d/");
+        return 1;
     }
 
     // Package name = the map file's name, so <dir>/<name>/<name>.map loads by folder
@@ -961,7 +1009,7 @@ bool ExportScene(const MS_Scene *s, const char *outDirIn, char *msg, int msgSize
         const char *rel = P.items[k].pkgRel;
         char side[MS_PATH_MAX + 16];
         snprintf(side, sizeof(side), "%s.asset.md", rel);
-        if (FileExists(TextFormat("%s%s", root, side))) AddPkg(&P, root, name, side, NULL);
+        if (FileExistsf("%s%s", root, side)) AddPkg(&P, root, name, side, NULL);
     }
     for (int k = 0, n = P.count; k < n; k++) {
         char dirRel[MS_PATH_MAX];
@@ -969,15 +1017,22 @@ bool ExportScene(const MS_Scene *s, const char *outDirIn, char *msg, int msgSize
         char *slash = strrchr(dirRel, '/');
         if (!slash) continue;               // package root: only MAP.md / ASSETS.md, below
         *slash = 0;
-        FilePathList files = LoadDirectoryFiles(TextFormat("%s%s", root, dirRel));
+        char *dirPath = MonoStrf("%s%s", root, dirRel);
+        if (!dirPath) { fprintf(stderr, "monolith: export: out of memory\n"); P.errors++; continue; }
+        FilePathList files = LoadDirectoryFiles(dirPath);
+        free(dirPath);
         for (unsigned int i = 0; i < files.count; i++) {
             const char *base = GetFileName(files.paths[i]);
             char lower[256];
             int j = 0;
             for (; base[j] && j < (int)sizeof(lower) - 1; j++) lower[j] = (char)tolower((unsigned char)base[j]);
             lower[j] = 0;
-            if (IsPathFile(files.paths[i]) && (strstr(lower, "license") || strstr(lower, "licence") || strstr(lower, "copying")))
-                AddPkg(&P, root, name, TextFormat("%s/%s", dirRel, base), NULL);
+            if (IsPathFile(files.paths[i]) && (strstr(lower, "license") || strstr(lower, "licence") || strstr(lower, "copying"))) {
+                char *rel = MonoStrf("%s/%s", dirRel, base);
+                if (rel) AddPkg(&P, root, name, rel, NULL);
+                else { fprintf(stderr, "monolith: export: out of memory\n"); P.errors++; }
+                free(rel);
+            }
         }
         UnloadDirectoryFiles(files);
     }
@@ -985,29 +1040,34 @@ bool ExportScene(const MS_Scene *s, const char *outDirIn, char *msg, int msgSize
     bool ownFolder = strcmp(GetFileNameWithoutExt(s->path), GetFileName(GetDirectoryPath(s->path))) == 0;
     static const char *const DOCS[] = { "MAP.md", "ASSETS.md" };
     for (int i = 0; i < 2; i++)
-        if (FileExists(TextFormat("%s%s", root, DOCS[i])) && (ownFolder || s->formatVersion >= 2)) AddPkg(&P, root, name, DOCS[i], NULL);
+        if (FileExistsf("%s%s", root, DOCS[i]) && (ownFolder || s->formatVersion >= 2)) AddPkg(&P, root, name, DOCS[i], NULL);
     int pkgFiles = P.count + 1;         // (+ the compiled map, made after writing the package)
 
     // --- Plan: the runtime without its editor parts, viewer.c + build.sh from the templates
     bool failed = false;        // the first reason not to write anything is in MS_LastError()
     static const char *const RT[] = { "monolith_scene.h", "monolith_scene.c" };
     for (int i = 0; i < 2 && !failed; i++) {
-        char *text = LoadFileText(TextFormat("%sruntime/%s", rt, RT[i]));
+        char *textPath = MonoStrf("%sruntime/%s", rt, RT[i]);
+        char *text = textPath ? LoadFileText(textPath) : NULL;
+        free(textPath);
         char *clean = text ? StripEditor(text, RT[i]) : NULL;     // (NULL: it says why)
         if (!text) MS_SetError("cannot read %sruntime/%s", rt, RT[i]);
         failed = !clean;
         if (text) UnloadFileText(text);
         if (clean) AddData(&P, RT[i], clean, false);
     }
-    char *viewer = LoadTemplate(TextFormat("%sruntime/export/viewer.c", rt), name);
-    char *build = LoadTemplate(TextFormat("%sruntime/export/build.sh", rt), name);
+    char *viewerPath = MonoStrf("%sruntime/export/viewer.c", rt), *buildPath = MonoStrf("%sruntime/export/build.sh", rt);
+    char *viewer = viewerPath ? LoadTemplate(viewerPath, name) : NULL;
+    char *build = buildPath ? LoadTemplate(buildPath, name) : NULL;
+    free(viewerPath);
+    free(buildPath);
     if (!failed && (!viewer || !build)) {
         MS_SetError("cannot read %sruntime/export/viewer.c / build.sh", rt);
         failed = true;
     }
     AddData(&P, "viewer.c", viewer, false);
     AddData(&P, "build.sh", build, true);
-    AddCopy(&P, TextFormat("%scmake/mingw-w64-x86_64.cmake", rt), "cmake/mingw-w64-x86_64.cmake", NULL);
+    AddCopyf(&P, "cmake/mingw-w64-x86_64.cmake", "%scmake/mingw-w64-x86_64.cmake", rt);
 
     // --- Plan: R3D and its dependencies, their licences
     R3DScan rs = { .P = &P };
@@ -1020,16 +1080,17 @@ bool ExportScene(const MS_Scene *s, const char *outDirIn, char *msg, int msgSize
         { "LICENSE", "LICENSES/r3d.txt" }, { "external/raylib/LICENSE", "LICENSES/raylib.txt" },
         { "external/assimp/LICENSE", "LICENSES/assimp.txt" }, { "external/uthash/LICENSE", "LICENSES/uthash.txt" },
     };
-    for (int i = 0; i < 4; i++) AddCopy(&P, TextFormat("%s%s", r3d, LIC[i][0]), LIC[i][1], NULL);
-    AddCopy(&P, TextFormat("%sLICENSE", rt), "LICENSES/monolith.txt", NULL);   // the runtime, viewer.c, build.sh
+    for (int i = 0; i < 4; i++) AddCopyf(&P, LIC[i][1], "%s%s", r3d, LIC[i][0]);
+    AddCopyf(&P, "LICENSES/monolith.txt", "%sLICENSE", rt);    // the runtime, viewer.c, build.sh
     // Prebuilt R3D, raylib and assimp for each target monolith has built
     static const char *const TARGETS[][3] = { { "build-linux", "linux", "Linux" }, { "build-mingw", "win", "Windows" } };
     bool prebuilt[2];
-    char skipped[2][MS_PATH_MAX + 128];
     for (int t = 0; t < 2; t++) {
-        prebuilt[t] = AddPrebuilt(&P, r3d, &rs, TARGETS[t][0], TARGETS[t][1], skipped[t], sizeof(skipped[t]));
+        MonoMsg skipped = { 0 };
+        prebuilt[t] = AddPrebuilt(&P, r3d, &rs, TARGETS[t][0], TARGETS[t][1], &skipped);
         if (!prebuilt[t]) printf("monolith: export: no prebuilt %s libraries: %s; the package builds them from source\n",
-                                 TARGETS[t][2], skipped[t]);
+                                 TARGETS[t][2], MsgText(&skipped));
+        MsgFree(&skipped);
     }
 
     char assets[MS_PATH_MAX + 16];
@@ -1049,10 +1110,10 @@ bool ExportScene(const MS_Scene *s, const char *outDirIn, char *msg, int msgSize
     }
     if (failed || P.errors) {
         if (missing > 1) MS_AppendError(" (and %d more, see the log)", missing - 1);
-        snprintf(msg, msgSize, "export: %s%s; nothing written", failed ? MS_LastError() : "errors while collecting the files (see the log)",
-                 failed && P.errors ? " (more errors in the log)" : "");
+        MS_SetError("export: %s%s; nothing written", failed ? MS_LastError() : "errors while collecting the files (see the log)",
+                    failed && P.errors ? " (more errors in the log)" : "");
         FreePlan(&P);
-        return false;
+        return 1;
     }
 
     // --- Write <dir>.partial, check that the package loads, rename it to <dir>
@@ -1060,7 +1121,7 @@ bool ExportScene(const MS_Scene *s, const char *outDirIn, char *msg, int msgSize
     long long bytesPkg = 0, bytesR3d = 0, bytesOther = 0;
     for (int i = 0; i < P.count && ok; i++) {
         const PlanItem *it = &P.items[i];
-        char *to = Fmt("%s/%s", staging, it->to);
+        char *to = MonoStrf("%s/%s", staging, it->to);
         ok = to && (it->from ? CopyFileTo(it->from, to) : WriteFileBytes(to, it->data, it->size, it->exec));
 #ifndef _WIN32
         if (ok && it->from && it->exec) chmod(to, 0755);
@@ -1073,18 +1134,18 @@ bool ExportScene(const MS_Scene *s, const char *outDirIn, char *msg, int msgSize
     }
     // The compiled map, from the copied text: what the exported program loads
     bool written = ok;
-    char *mapText = ok ? Fmt("%s/%s/%s.map", staging, name, name) : NULL;
-    char *compiledTo = ok ? Fmt("%s/%s.mapb", name, name) : NULL;
-    char *compiled = compiledTo ? Fmt("%s/%s", staging, compiledTo) : NULL;
+    char *mapText = ok ? MonoStrf("%s/%s/%s.map", staging, name, name) : NULL;
+    char *compiledTo = ok ? MonoStrf("%s/%s.mapb", name, name) : NULL;
+    char *compiled = compiledTo ? MonoStrf("%s/%s", staging, compiledTo) : NULL;
     if (ok && (!mapText || !compiledTo || !compiled)) {
         ok = false;
-        snprintf(msg, msgSize, "export: out of memory; nothing written");
+        MS_SetError("export: out of memory; nothing written");
     }
     if (ok) {
         AddWritten(&P, compiledTo);
         if (!MS_Compile(mapText, compiled)) {
             ok = false;
-            snprintf(msg, msgSize, "export: the map does not compile: %s; nothing written", MS_LastError());
+            MS_SetError("export: the map does not compile: %s; nothing written", MS_LastError());
         }
         bytesPkg += FileBytes(compiled);
     }
@@ -1092,31 +1153,30 @@ bool ExportScene(const MS_Scene *s, const char *outDirIn, char *msg, int msgSize
         MS_Scene *check = MS_Load(compiled, &(MS_LoadOptions){ .noGpu = true });
         if (!check) {
             ok = false;
-            snprintf(msg, msgSize, "export: the exported package does not load: %s; nothing written", MS_LastError());
+            MS_SetError("export: the exported package does not load: %s; nothing written", MS_LastError());
         } else {
             if (check->boxCount != s->boxCount || check->modelCount != s->modelCount || check->entityCount != s->entityCount) {
                 ok = false;
-                snprintf(msg, msgSize, "export: the exported package has a different object count; nothing written");
+                MS_SetError("export: the exported package has a different object count; nothing written");
             }
             MS_Unload(check);
         }
-    } else if (!written) snprintf(msg, msgSize, "export: writing %s failed (see the log); nothing written", staging);
+    } else if (!written) MS_SetError("export: writing %s failed (see the log); nothing written", staging);
     free(mapText);
     free(compiledTo);
     free(compiled);
     if (ok && DirectoryExists(outDir) && RemoveDir(outDir) != 0) {      // (empty: checked above)
         ok = false;
-        snprintf(msg, msgSize, "export: cannot replace the empty folder %s: %s; nothing written", outDir, strerror(errno));
+        MS_SetError("export: cannot replace the empty folder %s: %s; nothing written", outDir, strerror(errno));
     }
     if (ok && rename(staging, outDir) != 0) {
         ok = false;
-        snprintf(msg, msgSize, "export: cannot rename %s to %s: %s; nothing written", staging, outDir, strerror(errno));
+        MS_SetError("export: cannot rename %s to %s: %s; nothing written", staging, outDir, strerror(errno));
     }
     if (!ok) {
-        if (!RemoveWritten(staging, &P))
-            snprintf(msg + strlen(msg), msgSize - strlen(msg), " (%s could not be removed completely)", staging);
+        if (!RemoveWritten(staging, &P)) MS_AppendError(" (%s could not be removed completely)", staging);
         FreePlan(&P);
-        return false;
+        return 1;
     }
 
     // Files of the source package nothing refers to (only for a real package folder)
@@ -1134,14 +1194,15 @@ bool ExportScene(const MS_Scene *s, const char *outDirIn, char *msg, int msgSize
            "libraries (%.1f MB), runtime, viewer, build, README and licences %d files (%.1f MB)\n", outDir, pkgFiles,
            bytesPkg / 1e6, rs.files, libFiles, bytesR3d / 1e6, P.count - pkgFiles - rs.files - libFiles, bytesOther / 1e6);
 
-    snprintf(msg, msgSize, "exported %s (%d files, %.0f MB; prebuilt libraries: %s): build it with ./build.sh in that folder",
-             outDir, P.count, (bytesPkg + bytesR3d + bytesOther) / 1e6,
-             prebuilt[0] && prebuilt[1] ? "Linux, Windows" : prebuilt[0] ? "Linux only" : prebuilt[1] ? "Windows only" : "none");
+    MsgSetf(&note, "exported %s (%d files, %.0f MB; prebuilt libraries: %s): build it with ./build.sh in that folder",
+            outDir, P.count, (bytesPkg + bytesR3d + bytesOther) / 1e6,
+            prebuilt[0] && prebuilt[1] ? "Linux, Windows" : prebuilt[0] ? "Linux only" : prebuilt[1] ? "Windows only" : "none");
     FreePlan(&P);
-    return true;
+    return 0;
 }
 
-void ExportDefaultDir(const MS_Scene *s, char *out, int outSize)
+// Heap path (free it); NULL when out of memory. root is path scratch (repo root or exe dir)
+char *ExportDefaultDir(const MS_Scene *s)
 {
     char root[1024];
     if (PROJECT_PATH[0] && DirectoryExists(PROJECT_PATH)) snprintf(root, sizeof(root), "%s", PROJECT_PATH);
@@ -1150,7 +1211,7 @@ void ExportDefaultDir(const MS_Scene *s, char *out, int outSize)
     time_t now = time(NULL);
     struct tm *tm = localtime(&now);
     if (tm) strftime(stamp, sizeof(stamp), "%Y-%m-%d_%H%M%S", tm);
-    snprintf(out, outSize, "%sexport/%s-%s", root, GetFileNameWithoutExt(s->path), stamp);
+    return MonoStrf("%sexport/%s-%s", root, GetFileNameWithoutExt(s->path), stamp);
 }
 
 // #endregion

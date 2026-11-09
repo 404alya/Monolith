@@ -617,18 +617,18 @@ static void ApplyEnvironment(const EffectState *fx)
 }
 
 // Shadow map size is an R3D init hint: a new size closes and re-initialises R3D and loads the
-// map again (~1 s). False = nothing changed (the map on disk doesn't load: msg says why);
-// *fatal = R3D was closed but the map then failed to load (the game has to quit).
-static bool RestartRenderer(MS_LoadOptions *opt, int shadowSize, bool *fatal, char *msg, int msgSize)
+// map again (~1 s). Returns 0: restarted; 1: not restarted, nothing changed (the map on disk
+// doesn't load: why in MS_LastError()); 2: R3D was closed but the map then failed to load (why in
+// MS_LastError(); the game has to quit). The caller reports it (its log and the settings panel).
+static unsigned char RestartRenderer(MS_LoadOptions *opt, int shadowSize)
 {
-    *fatal = false;
     char path[MS_PATH_MAX];
     snprintf(path, sizeof(path), "%s", scene->path);
     MS_LoadOptions peekOpt = *opt;
     peekOpt.noGpu = true;
     peekOpt.shadowSizeOverride = shadowSize;
     MS_Scene *peek = MS_Load(path, &peekOpt);
-    if (!peek) { snprintf(msg, msgSize, "renderer not restarted: %s", MS_LastError()); return false; }
+    if (!peek) return 1;
     MS_Unload(scene);
     scene = NULL;
     R3D_Close();
@@ -640,9 +640,8 @@ static bool RestartRenderer(MS_LoadOptions *opt, int shadowSize, bool *fatal, ch
     opt->shadowSizeOverride = shadowSize;
     opt->noGpu = false;
     scene = MS_Load(path, opt);
-    if (!scene) { *fatal = true; snprintf(msg, msgSize, "renderer restart failed: %s", MS_LastError()); return false; }
-    snprintf(msg, msgSize, "renderer restarted: sun shadow map %d px", R3D_GetHint(R3D_HINT_SHADOW_DIR_SIZE));
-    return true;
+    if (!scene) return 2;
+    return 0;
 }
 
 // fps cap of the settings: 0 = uncapped, -1 = the monitor's refresh rate
@@ -790,16 +789,15 @@ static Image ReadTarget(RenderTexture rt)
 // view-marked.png the same pixels plus the selection, hit point and crosshair. One R3D
 // render into `rt`, read back before and after drawing the overlay on top (R3D_End leaves
 // its depth in rt, so the overlay is depth-tested like in the live view).
-static bool Submit(Designer *d, Camera3D cam, float yaw, float pitch, RenderTexture rt,
-                   char *msg, int msgSize)
+static unsigned char Submit(Designer *d, Camera3D cam, float yaw, float pitch, RenderTexture rt)
 {
     // Window mode: an offscreen target at R3D's resolution (the window size), like --shot
     DesignRequest req;
     if (!DesignerBuildRequest(d, cam, yaw, pitch, rt.id ? rt.texture.width : GetScreenWidth(),
                               rt.id ? rt.texture.height : GetScreenHeight(), &req)) {
-        snprintf(msg, msgSize, "out of memory: request not sent");
-        DesignerSubmitDone(d, false, msg);
-        return false;
+        MS_SetError("out of memory: request not sent");
+        DesignerSubmitDone(d, false, MS_LastError());
+        return 1;
     }
     bool own = rt.id == 0;
     if (own) rt = LoadRenderTexture(GetScreenWidth(), GetScreenHeight());
@@ -813,14 +811,15 @@ static bool Submit(Designer *d, Camera3D cam, float yaw, float pitch, RenderText
     EndTextureMode();
     Image marked = ReadTarget(rt);
 
-    bool ok = LauncherSubmit(&req, view, marked, msg, msgSize);
-    TraceLog(ok ? LOG_INFO : LOG_WARNING, "monolith: submit: %s", msg);
+    unsigned char r = LauncherSubmit(&req, view, marked);
+    const char *text = r == 0 ? LauncherNote() : MS_LastError();   // 0: queued / sent
+    TraceLog(r == 0 ? LOG_INFO : LOG_WARNING, "monolith: submit: %s", text);
+    DesignerSubmitDone(d, r == 0, text);    // (copies it)
     DesignerFreeRequest(&req);
     UnloadImage(view);
     UnloadImage(marked);
     if (own) UnloadRenderTexture(rt);
-    DesignerSubmitDone(d, ok, msg);
-    return ok;
+    return r;
 }
 
 // Command line text for --submit / --type: a literal \n becomes a new line. A heap string
@@ -946,6 +945,7 @@ int main(int argc, char **argv)
     int status = Run(argc, argv);
     FreeMainHeap();
     LauncherShutdown();
+    ExportShutdown();
     MS_ClearError();        // (the runtime's last error message, if any)
     return status;
 }
@@ -1541,17 +1541,17 @@ static int Run(int argc, char **argv)
             ModelChoice c;
             LauncherChooseModel(&q, &c);
             printf("tier: %s\nmodel: %s%s\nreason: %s\nsource: %s\nprompt: %s\n", ModelTierName(c.tier), c.name,
-                   c.addFlag ? "" : " (from MONOLITH_CLAUDE_ARGS, no --model added)", c.reason, c.source, text + c.promptSkip);
+                   c.addFlag ? "" : " (from MONOLITH_CLAUDE_ARGS, no --model added)", MsgText(&c.reason), c.source, text + c.promptSkip);
+            ModelChoiceFree(&c);
             free(text);
             MS_Unload(peek);
             return 0;
         }
         if (exportDir) {
-            char msg[1400];
-            bool ok = ExportScene(peek, exportDir, msg, sizeof(msg));
-            fprintf(ok ? stdout : stderr, "monolith: %s\n", msg);
+            // (ExportScene prints its own result line, as this did)
+            unsigned char r = ExportScene(peek, exportDir, true);
             MS_Unload(peek);
-            return ok ? 0 : 1;
+            return r == 0 ? 0 : 1;      // 0: exported
         }
         if (dumpScenePath && peek->modelCount == 0 && !editScriptPath) {
             // Without models nothing needs the GPU: no window at all
@@ -1710,7 +1710,7 @@ static int Run(int argc, char **argv)
 
     // Map hot reload message ("map reloaded (N boxes)" or the error), shown even with the
     // HUD off. Errors stay until the next successful load.
-    char mapMessage[512] = "";
+    MonoMsg mapMessage = { 0 };     // (shown while mapMessageTime runs; freed at the end)
     float mapMessageTime = 0.0f;
     bool mapMessageError = false;
 
@@ -1906,8 +1906,7 @@ static int Run(int argc, char **argv)
         // The edit save mode (settings: Editor): switching to auto writes what is unsaved
         if ((gfx.editSave == 1) != edit.ed.autoSave) {
             edit.ed.autoSave = gfx.editSave == 1;
-            char msg[512];
-            if (edit.ed.autoSave && EditModeUnsaved(&edit) > 0) EditModeSave(&edit, msg, sizeof(msg));
+            if (edit.ed.autoSave && EditModeUnsaved(&edit) > 0) EditModeSave(&edit);     // (it reports on its own)
         }
         bool applyNow = pendingApply;
         bool announced = pendingApply;
@@ -1923,9 +1922,9 @@ static int Run(int argc, char **argv)
                 gfxDirty = true;
                 if (changed == PANEL_RESET || GfxRowIsHeavy(changed)) {
                     pendingApply = true;
-                    PanelStatus(&panel, "applying ...", 30.0f);
+                    PanelStatusStatic(&panel, "applying ...", 30.0f);
                 } else applyNow = true;
-                if (changed >= 0 && GfxRowNeedsRestart(changed)) PanelStatus(&panel, "window MSAA changes at the next start", 4.0f);
+                if (changed >= 0 && GfxRowNeedsRestart(changed)) PanelStatusStatic(&panel, "window MSAA changes at the next start", 4.0f);
             }
             if (wasOpen && !panel.open && gfxDirty && settingsSaveFile) {
                 bool ok = GfxSave(&gfxSaved, settingsSaveFile);
@@ -1943,10 +1942,19 @@ static int Run(int argc, char **argv)
             gfxDirty = applyNow = true;
         }
         if (applyNow) {
-            char msg[256] = "";
+            bool restartTried = false;      // (then the restart's result is the panel's status)
             if (gfx.q.shadowSize != appliedShadowSize) {
-                bool fatal;
-                if (RestartRenderer(&loadOpt, gfx.q.shadowSize, &fatal, msg, sizeof(msg))) {
+                restartTried = true;
+                unsigned char r = RestartRenderer(&loadOpt, gfx.q.shadowSize);
+                if (r == 2) {               // R3D closed, the map failed to load: quit
+                    fprintf(stderr, "monolith: renderer restart failed: %s\n", MS_LastError());
+                    exitStatus = 1;
+                    break;
+                }
+                // (formatted now: the syncs below may replace the last error)
+                char *text = r == 0 ? MonoStrf("renderer restarted: sun shadow map %d px", R3D_GetHint(R3D_HINT_SHADOW_DIR_SIZE))
+                                    : MonoStrf("renderer not restarted: %s", MS_LastError());
+                if (r == 0) {               // restarted
                     appliedShadowSize = gfx.q.shadowSize;
                     designer.version = (unsigned int)-1;   // remap the selection by its keys
                     inspector.scene = NULL;                 // a new scene: the inspector's filter again
@@ -1956,12 +1964,10 @@ static int Run(int argc, char **argv)
                     DrawModeBeforeSync(&drawMode);          // (the paint atlases, for the working copy)
                     EditModeSync(&edit, &designer, true);  // (the working copy goes live again)
                     DrawModeSync(&drawMode, &edit, true);
-                } else if (fatal) {
-                    fprintf(stderr, "monolith: %s\n", msg);
-                    exitStatus = 1;
-                    break;
-                } else gfx.q.shadowSize = appliedShadowSize;   // the map on disk is broken: keep the old one
-                TraceLog(LOG_INFO, "monolith: %s", msg);
+                } else gfx.q.shadowSize = appliedShadowSize;   // 1: the map on disk is broken: keep the old one
+                TraceLog(LOG_INFO, "monolith: %s", text ? text : "out of memory");
+                PanelStatusf(&panel, 5.0f, "%s", text ? text : "out of memory");
+                free(text);
             }
             ApplyEnvironment(&effects);
             if (!hidden && gfx.vsync != appliedVsync) {
@@ -1977,8 +1983,7 @@ static int Run(int argc, char **argv)
                 reuse.enabled = gfx.frameReuse && reuse.composite.id;
                 if (!reuse.enabled) reuse.keyValid = reuse.cacheValid = false;
             }
-            if (msg[0]) PanelStatus(&panel, msg, 5.0f);
-            else if (announced) PanelStatus(&panel, "applied", 1.5f);
+            if (!restartTried && announced) PanelStatusStatic(&panel, "applied", 1.5f);
         }
         typing = typing || PanelCapturesInput(&panel);
         // Render inspector (inspector.c): F3 outlines, SHIFT+F3 its panel (takes the keys while
@@ -2005,7 +2010,8 @@ static int Run(int argc, char **argv)
         bool picking = closeKeys && closePickTime > 0.0f;   // digits belong to the close
         closePickTime = picking ? closePickTime - GetFrameTime() : 0.0f;
         if (closeKeys) {
-            char msg[256] = "";
+            // (each branch posts its text; every outcome of LauncherCloseCoordinator /
+            // LauncherCloseAllDone / LauncherCloseLatestDone is in the launcher's note)
             bool ctrl = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
             bool shift = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
             int number = 0;
@@ -2013,20 +2019,28 @@ static int Run(int argc, char **argv)
                 if (IsKeyPressed(KEY_ZERO + k) || IsKeyPressed(KEY_KP_0 + k)) number = k ? k : 10;
             if (IsKeyPressed(KEY_K)) {
                 closePickTime = 0.0f;
-                if (ctrl && shift) LauncherCloseCoordinator(msg, sizeof(msg));
-                else if (ctrl) {
+                if (ctrl && shift) {
+                    LauncherCloseCoordinator();
+                    SpectatorMessagef(&spec, "%s", LauncherNote());
+                } else if (ctrl) {
                     closePickTime = 3.0f;
-                    snprintf(msg, sizeof(msg), "close which request? press its number (ESC cancels)");
-                } else if (shift) LauncherCloseAllDone(msg, sizeof(msg));
-                else LauncherCloseLatestDone(msg, sizeof(msg));
+                    SpectatorMessageStatic(&spec, "close which request? press its number (ESC cancels)");
+                } else if (shift) {
+                    LauncherCloseAllDone();
+                    SpectatorMessagef(&spec, "%s", LauncherNote());
+                } else {
+                    LauncherCloseLatestDone();
+                    SpectatorMessagef(&spec, "%s", LauncherNote());
+                }
             } else if (picking && IsKeyPressed(KEY_ESCAPE)) {
                 closePickTime = 0.0f;
-                snprintf(msg, sizeof(msg), "nothing closed");
+                SpectatorMessageStatic(&spec, "nothing closed");
             } else if (picking && number) {
-                // a running request asks for its number again: keep waiting for it
-                closePickTime = LauncherCloseNumber(number, msg, sizeof(msg)) == 0 ? 3.0f : 0.0f;
+                unsigned char r = LauncherCloseNumber(number);
+                // a running request asks for its number again (1): keep waiting for it
+                closePickTime = r == 1 ? 3.0f : 0.0f;
+                SpectatorMessagef(&spec, "%s", r >= 2 ? MS_LastError() : LauncherNote());   // 2, 3: failed
             }
-            if (msg[0]) SpectatorMessage(&spec, msg);
         }
 
         // Effect toggles, to see what each one contributes (1 volumetric fog, 2 fog, 3 SSAO,
@@ -2047,13 +2061,19 @@ static int Run(int argc, char **argv)
         // (not while the package on disk is broken: the export copies the files on disk)
         if (!typing && !shotPath && !bench && !mapMessageError && IsKeyPressed(KEY_F9)) {
             // Export the current map (export.c); the result shows in the map message line
-            char dir[1400];
-            ExportDefaultDir(scene, dir, sizeof(dir));
-            // (not shown as a map error: those stay until the next successful reload)
-            bool exported = ExportScene(scene, dir, mapMessage, sizeof(mapMessage));
+            char *dir = ExportDefaultDir(scene);
+            // (ExportScene logs its result line; not shown as a map error: those stay until the
+            // next successful reload)
+            unsigned char r = 1;
+            if (dir) r = ExportScene(scene, dir, false);
+            else {
+                MS_SetError("export: out of memory; nothing written");
+                TraceLog(LOG_WARNING, "monolith: %s", MS_LastError());
+            }
+            free(dir);
+            MsgSetf(&mapMessage, "%s", r == 0 ? ExportNote() : MS_LastError());   // 0: exported
             mapMessageError = false;
             mapMessageTime = 6.0f;
-            TraceLog(exported ? LOG_INFO : LOG_WARNING, "monolith: %s", mapMessage);
         }
 
         if (!typing && !(spec.active && drawMode.active) && IsKeyPressed(KEY_TAB)) {     // (draw mode: the panel)
@@ -2084,11 +2104,11 @@ static int Run(int argc, char **argv)
                 // environment applies again, then the overrides and the current toggles.
                 ApplyEnvironment(&effects);
                 if (scene->modelCount > 0)
-                    snprintf(mapMessage, sizeof(mapMessage), "map reloaded (%d boxes, %d models)", scene->boxCount, scene->modelCount);
-                else snprintf(mapMessage, sizeof(mapMessage), "map reloaded (%d boxes)", scene->boxCount);
+                    MsgSetf(&mapMessage, "map reloaded (%d boxes, %d models)", scene->boxCount, scene->modelCount);
+                else MsgSetf(&mapMessage, "map reloaded (%d boxes)", scene->boxCount);
                 mapMessageTime = 3.0f;
                 mapMessageError = false;
-                TraceLog(LOG_INFO, "monolith: %s", mapMessage);
+                TraceLog(LOG_INFO, "monolith: %s", MsgText(&mapMessage));
                 // A change made elsewhere: unsaved manual edits (and paint) are applied again on top
                 // of it (else the undo history ends)
                 DrawModeBeforeSync(&drawMode);
@@ -2268,8 +2288,8 @@ static int Run(int argc, char **argv)
                 float yaw, pitch;
                 if (LauncherLastDone(&eye, &yaw, &pitch)) {
                     SpectatorFlyToPose(&spec, eye, yaw, pitch);
-                    SpectatorMessage(&spec, "back to the last finished request");
-                } else SpectatorMessage(&spec, "no finished request yet");
+                    SpectatorMessageStatic(&spec, "back to the last finished request");
+                } else SpectatorMessageStatic(&spec, "no finished request yet");
             }
             if (spec.active) { if (!typing) UpdateSpectator(&spec, &player, dt, !DesignerTakesArrows(&designer) && !EditModeTakesArrows(&edit)); }
             else if (!typing) UpdatePlayer(&player, dt);
@@ -2285,9 +2305,8 @@ static int Run(int argc, char **argv)
                                                                 unsaved == 1 ? "" : "s"));
             else if (action == DESIGNER_SUBMIT || saveAndSend) {
                 // The camera is frozen while the box is open: this is the view the user typed at
-                char msg[512];
-                if (saveAndSend && !EditModeSave(&edit, msg, sizeof(msg))) DesignerSubmitDone(&designer, false, msg);
-                else Submit(&designer, SpectatorCamera(&spec), spec.yaw, spec.pitch, (RenderTexture){ 0 }, msg, sizeof(msg));
+                if (saveAndSend && EditModeSave(&edit) == 2) DesignerSubmitDone(&designer, false, MS_LastError());   // not saved
+                else Submit(&designer, SpectatorCamera(&spec), spec.yaw, spec.pitch, (RenderTexture){ 0 });
             }
         }
         Camera3D camera = spec.active ? SpectatorCamera(&spec) : PlayerCamera(&player);
@@ -2419,7 +2438,7 @@ static int Run(int argc, char **argv)
                         LauncherDrawHud(12, y + 4);
                     }
                     if (spec.messageTime > 0.0f && !designer.promptOpen)
-                        UiToast(spec.message, GetScreenWidth() / 2, GetScreenHeight() - 76, UI_XL, UI_INK, fminf(spec.messageTime, 1.0f));
+                        UiToast(MsgText(&spec.message), GetScreenWidth() / 2, GetScreenHeight() - 76, UI_XL, UI_INK, fminf(spec.messageTime, 1.0f));
                 } else if (!shotPath) {
                     LauncherDrawHud(12, 10 + UI_HUD_LINE + 4);  // finished requests also show while walking
                 }
@@ -2432,8 +2451,8 @@ static int Run(int argc, char **argv)
                 else {
                     // Fades as a whole (the alphas scaled, not replaced)
                     Color strip = UiAlpha(UI_BACKDROP, a), ink = UiAlpha(UI_INK, a);
-                    DrawRectangle(6, y, UiMeasure(mapMessage, UI_M) + 12, 26, strip);
-                    UiText(mapMessage, 12, y + (26 - UiLineHeight(UI_M)) / 2, UI_M, ink);
+                    DrawRectangle(6, y, UiMeasure(MsgText(&mapMessage), UI_M) + 12, 26, strip);
+                    UiText(MsgText(&mapMessage), 12, y + (26 - UiLineHeight(UI_M)) / 2, UI_M, ink);
                 }
             }
             // The prompt box shows even with the HUD off (Enter opened it, it must be visible)
@@ -2491,18 +2510,21 @@ static int Run(int argc, char **argv)
             }
             if (reuse.enabled) TraceLog(LOG_INFO, "monolith: frame reuse: %d of %d frames composited from the cache", reusedFrames, frame);
             if (submitText) {
-                char msg[512];
                 float yaw = spec.active ? spec.yaw : player.yaw, pitch = spec.active ? spec.pitch : player.pitch;
                 char *text = Unescape(submitText);
                 if (text) DesignerOpenPrompt(&designer, text);
                 free(text);
                 // (as ENTER in the prompt box: a request needs the file to be what the scene shows)
                 int unsaved = EditModeUnsaved(&edit);
-                if (unsaved > 0) snprintf(msg, sizeof(msg), "%d unsaved edit%s: CTRL+S saves and sends, ESC back", unsaved,
-                                          unsaved == 1 ? "" : "s");
-                bool ok = text && unsaved == 0 && Submit(&designer, camera, yaw, pitch, shotTarget, msg, sizeof(msg));
-                if (!text) snprintf(msg, sizeof(msg), "out of memory");
-                printf("submit: %s: %s\n", ok ? "ok" : "failed", msg);
+                bool ok = false;
+                if (!text) printf("submit: failed: out of memory\n");
+                else if (unsaved > 0) printf("submit: failed: %d unsaved edit%s: CTRL+S saves and sends, ESC back\n", unsaved,
+                                             unsaved == 1 ? "" : "s");
+                else {
+                    unsigned char r = Submit(&designer, camera, yaw, pitch, shotTarget);
+                    ok = r == 0;            // 0: queued / sent; 1: not sent
+                    printf("submit: %s: %s\n", ok ? "ok" : "failed", ok ? LauncherNote() : MS_LastError());
+                }
                 fflush(stdout);
                 // --submit-wait / --close-submitted: poll the request (result.md, the
                 // terminal process) for a while, then close it the way CTRL+K n does
@@ -2511,9 +2533,9 @@ static int Run(int argc, char **argv)
                     if (closeSubmitted) {
                         int n = LauncherNewestNumber();
                         for (int tries = 0; tries < 2; tries++) {   // a running request asks twice
-                            int r = LauncherCloseNumber(n, msg, sizeof(msg));
-                            printf("close [%d]: %s\n", n, msg);
-                            if (r != 0) break;
+                            unsigned char r = LauncherCloseNumber(n);
+                            printf("close [%d]: %s\n", n, r >= 2 ? MS_LastError() : LauncherNote());     // 2, 3: failed
+                            if (r != 1) break;      // 1: asks for the number again
                         }
                         double t0 = GetTime();
                         while (LauncherClosing() && GetTime() - t0 < 10.0) { WaitTime(0.1); LauncherUpdate(0.1f); }
@@ -2536,10 +2558,12 @@ static int Run(int argc, char **argv)
         TraceLog(ok ? LOG_INFO : LOG_WARNING, "monolith: settings %s %s", ok ? "saved to" : "could not be saved to", settingsSaveFile);
     }
     PanelClose(&panel);             // (switches the GPU profiler off if the panel switched it on)
+    PanelFree(&panel);
     LauncherCloseOnExit();          // MONOLITH_CLOSE_ON_EXIT=1: close finished requests' terminals
     R3D_SetProfilerEnabled(false);  // frees its GL queries
     BenchFree();
     DesignerFree(&designer);
+    SpectatorFree(&spec);
     // Closing with unsaved manual edits (raylib can't cancel a close): the working copy goes to
     // the settings folder's unsaved/, the map file is not touched (interactive runs only)
     int unsavedAtExit = EditModeUnsaved(&edit);
@@ -2559,6 +2583,7 @@ static int Run(int argc, char **argv)
                  ok ? path : "no settings folder");
     } else if (unsavedAtExit > 0) TraceLog(LOG_INFO, "monolith: %d unsaved edit%s dropped (automated run)", unsavedAtExit,
                                            unsavedAtExit == 1 ? "" : "s");
+    MsgFree(&mapMessage);
     ModelPickerFree(&picker);
     EditModeFree(&edit);            // (the history releases its paint through the draw mode's hooks)
     DrawModeFree(&drawMode);

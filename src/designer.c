@@ -636,11 +636,26 @@ void DesignerAnalyzeVolume(BoundingBox v, float snap, DesignVolumeInfo *out)
 // #region Selection
 // ======================================================================================
 
-void DesignerMessage(Designer *d, bool error, const char *text)
+// Shows the HUD message for a while (longer for an error)
+static void MessageShown(Designer *d, bool error)
 {
-    snprintf(d->message, sizeof(d->message), "%s", text);
     d->messageTime = error ? 8.0f : 4.0f;
     d->messageError = error;
+}
+
+void DesignerMessageStatic(Designer *d, bool error, const char *literal)
+{
+    MsgSetStatic(&d->message, literal);
+    MessageShown(d, error);
+}
+
+void DesignerMessagef(Designer *d, bool error, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    MsgSetv(&d->message, fmt, ap);
+    va_end(ap);
+    MessageShown(d, error);
 }
 
 // selected[] position + 1 of an object, 0 = not selected (d->selPos, grown on demand)
@@ -696,7 +711,7 @@ static bool SelectionAdd(Designer *d, MS_ObjRef o)
     if (SelectionIndexOf(d, o) >= 0) return true;
     int n = d->selectedCount;
     if (!MS_RESERVE(d->selected, d->selectedCap, n + 1) || !MS_RESERVE(d->keys, d->keyCap, n + 1) || !SetSelPos(d, o, n + 1)) {
-        DesignerMessage(d, true, TextFormat("out of memory: selection stopped at %d objects", n));
+        DesignerMessagef(d, true, "out of memory: selection stopped at %d objects", n);
         return false;
     }
     d->keys[n] = MakeKey(o);
@@ -853,7 +868,7 @@ void DesignerSync(Designer *d)
 
     int lost = oldCount - d->selectedCount;
     if (lost > 0)
-        DesignerMessage(d, false, TextFormat("map reloaded: %d of %d selected objects no longer exist", lost, oldCount));
+        DesignerMessagef(d, false, "map reloaded: %d of %d selected objects no longer exist", lost, oldCount);
 }
 
 // #endregion
@@ -1037,7 +1052,7 @@ static void PromptPaste(Designer *d)
     int before = d->promptLen;
     PromptInsert(d, buf, n);
     free(buf);
-    if (d->promptLen - before < n) DesignerMessage(d, true, TextFormat("prompt limit: %d bytes", PROMPT_LIMIT - 1));
+    if (d->promptLen - before < n) DesignerMessagef(d, true, "prompt limit: %d bytes", PROMPT_LIMIT - 1);
 }
 
 static bool PromptBlank(const Designer *d)
@@ -1084,7 +1099,7 @@ static void ClosePrompt(Designer *d, bool clear)
 // Failure: the box stays open with the text and the regions, to try again.
 void DesignerSubmitDone(Designer *d, bool ok, const char *msg)
 {
-    DesignerMessage(d, !ok, msg);
+    DesignerMessagef(d, !ok, "%s", msg);        // (a copy: msg may be a callee's note or the last error)
     if (ok) {
         DesignerSnipEnd(d);
         ClosePrompt(d, true);
@@ -1107,7 +1122,7 @@ static DesignerAction PromptInput(Designer *d)
         PromptInsert(d, "\n", 1);
         d->wantX = -1.0f;
     } else if (!shift && (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER))) {
-        if (PromptBlank(d)) DesignerMessage(d, true, "type a request first (Esc closes the box)");
+        if (PromptBlank(d)) DesignerMessageStatic(d, true, "type a request first (Esc closes the box)");
         else return DESIGNER_SUBMIT;
     }
 
@@ -1121,7 +1136,7 @@ static DesignerAction PromptInput(Designer *d)
         typed += n;
         d->wantX = -1.0f;
     }
-    if (typed > d->promptLen - before) DesignerMessage(d, true, TextFormat("prompt limit: %d bytes", PROMPT_LIMIT - 1));
+    if (typed > d->promptLen - before) DesignerMessagef(d, true, "prompt limit: %d bytes", PROMPT_LIMIT - 1);
 
     if (ctrl && KeyRepeat(KEY_V)) { PromptPaste(d); d->wantX = -1.0f; }
 
@@ -1263,7 +1278,7 @@ bool DesignerAddVolume(Designer *d, BoundingBox box)
     if (v.max.z - v.min.z < VOLUME_MIN_SIZE) v.max.z = v.min.z + VOLUME_MIN_SIZE;
     DesignVolume *slot = MS_PUSH(d->volumes, d->volumeCount, d->volumeCap);
     if (!slot) {
-        DesignerMessage(d, true, "out of memory: volume not added");
+        DesignerMessageStatic(d, true, "out of memory: volume not added");
         return false;
     }
     slot->box = v;
@@ -1284,12 +1299,12 @@ static void VolumeFromSelection(Designer *d)
         }
     } else if (!ObjIsNone(d->hit.obj)) b = MS_ObjectBounds(scene, d->hit.obj);
     else {
-        DesignerMessage(d, true, "nothing selected and nothing under the crosshair: no volume");
+        DesignerMessageStatic(d, true, "nothing selected and nothing under the crosshair: no volume");
         return;
     }
     if (DesignerAddVolume(d, b))
-        DesignerMessage(d, false, TextFormat("V%d from the %s bounds", d->volumeCount,
-                        d->selectedCount > 0 ? "selection's" : "crosshair object's"));
+        DesignerMessagef(d, false, "V%d from the %s bounds", d->volumeCount,
+                         d->selectedCount > 0 ? "selection's" : "crosshair object's");
 }
 
 static void VolumeCancel(Designer *d)
@@ -1361,7 +1376,7 @@ static DesignerAction VolumeInput(Designer *d)
         }
         if (d->volumeStep == VOLUME_STEP_SECOND) {
             if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-                if (ObjIsNone(d->hit.obj)) { DesignerMessage(d, true, "no surface under the crosshair"); return DESIGNER_NONE; }
+                if (ObjIsNone(d->hit.obj)) { DesignerMessageStatic(d, true, "no surface under the crosshair"); return DESIGNER_NONE; }
                 d->volB = VolumePoint(d);
                 d->volBase = fminf(d->volA.y, d->volB.y);
                 float dy = fabsf(d->volA.y - d->volB.y);
@@ -1382,8 +1397,8 @@ static DesignerAction VolumeInput(Designer *d)
         if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) || enter) {
             if (DesignerAddVolume(d, VolumeDraft(d))) {
                 BoundingBox v = d->volumes[d->activeVolume].box;
-                DesignerMessage(d, false, TextFormat("V%d: %.2f x %.2f x %.2f m", d->volumeCount,
-                                v.max.x - v.min.x, v.max.y - v.min.y, v.max.z - v.min.z));
+                DesignerMessagef(d, false, "V%d: %.2f x %.2f x %.2f m", d->volumeCount,
+                                 v.max.x - v.min.x, v.max.y - v.min.y, v.max.z - v.min.z);
             }
             VolumeCancel(d);
         }
@@ -1399,25 +1414,25 @@ static DesignerAction VolumeInput(Designer *d)
         return DESIGNER_NONE;
     }
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-        if (ObjIsNone(d->hit.obj)) DesignerMessage(d, true, "no surface under the crosshair");
+        if (ObjIsNone(d->hit.obj)) DesignerMessageStatic(d, true, "no surface under the crosshair");
         else {
             d->volA = VolumePoint(d);
             d->volumeStep = VOLUME_STEP_SECOND;
         }
         return DESIGNER_NONE;
     }
-    if (IsKeyPressed(KEY_N)) DesignerMessage(d, false, TextFormat("volume snap %g m", DesignerCycleSnap(d)));
+    if (IsKeyPressed(KEY_N)) DesignerMessagef(d, false, "volume snap %g m", DesignerCycleSnap(d));
     if (d->volumeCount > 0 && (IsKeyPressed(KEY_LEFT_BRACKET) || IsKeyPressed(KEY_RIGHT_BRACKET))) {
         int step = IsKeyPressed(KEY_RIGHT_BRACKET) ? 1 : -1;
         d->activeVolume = ((d->activeVolume < 0 ? 0 : d->activeVolume) + step + d->volumeCount) % d->volumeCount;
     }
     if (IsKeyPressed(KEY_DELETE) && d->volumeCount > 0) {
         if (shift) {
-            DesignerMessage(d, false, TextFormat("%d volume%s cleared", d->volumeCount, d->volumeCount == 1 ? "" : "s"));
+            DesignerMessagef(d, false, "%d volume%s cleared", d->volumeCount, d->volumeCount == 1 ? "" : "s");
             d->volumeCount = 0;
             d->activeVolume = -1;
         } else if (d->activeVolume >= 0 && d->activeVolume < d->volumeCount) {
-            DesignerMessage(d, false, TextFormat("V%d removed", d->activeVolume + 1));
+            DesignerMessagef(d, false, "V%d removed", d->activeVolume + 1);
             memmove(&d->volumes[d->activeVolume], &d->volumes[d->activeVolume + 1],
                     sizeof(DesignVolume) * (d->volumeCount - d->activeVolume - 1));
             d->volumeCount--;
@@ -1474,7 +1489,7 @@ bool DesignerAddRegion(Designer *d, Rectangle rect, int w, int h)
     if (r.width < 1.0f || r.height < 1.0f) return false;
     DesignRegion *slot = MS_PUSH(d->regions, d->regionCount, d->regionCap);
     if (!slot) {
-        DesignerMessage(d, true, "out of memory: region not added");
+        DesignerMessageStatic(d, true, "out of memory: region not added");
         return false;
     }
     slot->rect = r;
@@ -2222,7 +2237,7 @@ void DesignerDrawPrompt(Designer *d, int w, int h)
     }
 
     if (d->messageTime > 0.0f) {
-        UiToast(d->message, w / 2, msgY, UI_L, d->messageError ? UI_ERROR : UI_INK, fminf(d->messageTime, 1.0f));
+        UiToast(MsgText(&d->message), w / 2, msgY, UI_L, d->messageError ? UI_ERROR : UI_INK, fminf(d->messageTime, 1.0f));
     }
 }
 
@@ -2230,6 +2245,7 @@ void DesignerDrawPrompt(Designer *d, int w, int h)
 
 void DesignerFree(Designer *d)
 {
+    MsgFree(&d->message);
     DesignerClearSelection(d);
     free(d->selected);
     free(d->keys);

@@ -100,7 +100,16 @@ static double Round(double v, double step) { return round(v / step) * step; }
 
 bool TransformRunning(const TransformModal *t) { return t->kind != TRANSFORM_NONE; }
 
-const char *TransformCancelNote(const TransformModal *t) { return t->cancelNote[0] ? t->cancelNote : NULL; }
+const char *TransformCancelNote(const TransformModal *t)
+{
+    static const char *const NOTES[4] = {
+        NULL,
+        "nothing written: turned, the objects are where they were (a square footprint turned 90 deg, or any box turned 180)",
+        "nothing written: every object would end where it started",
+        "nothing written: nothing selected can follow",
+    };
+    return t->cancelWhy < 4 ? NOTES[t->cancelWhy] : NULL;
+}
 
 int TransformCommitObjects(const TransformModal *t, const MS_ObjRef **objs)
 {
@@ -117,6 +126,7 @@ void TransformFree(TransformModal *t)
     free(t->follows);
     free(t->commit);
     free(t->gcls);
+    MsgFree(&t->refusal);
     memset(t, 0, sizeof(*t));
 }
 
@@ -498,11 +508,41 @@ static bool Identity(const TransformModal *t)
     return t->value[0] == 1.0 && t->value[1] == 1.0 && t->value[2] == 1.0;
 }
 
-// Appends "; text" (or text) to the refusal line
-static void Refuse(TransformModal *t, const char *text)
+// Appends "; <text>" (or the text) to the refusal line being built
+static void RefuseF(MonoMsg *m, bool *first, const char *fmt, ...) MSG_PRINTF(3, 4);
+static void RefuseF(MonoMsg *m, bool *first, const char *fmt, ...)
 {
-    size_t l = strlen(t->refusal);
-    snprintf(t->refusal + l, sizeof(t->refusal) - l, "%s%s", l ? "; " : "", text);
+    va_list ap;
+    va_start(ap, fmt);
+    char *text = MonoStrv(fmt, ap);
+    va_end(ap);
+    MsgAppendf(m, "%s%s", *first ? "" : "; ", text ? text : "out of memory");
+    free(text);
+    *first = false;
+}
+
+// The refusal line from its parts, rebuilt only when they changed (Compute runs every frame)
+static void RefusalWords(TransformModal *t)
+{
+    const struct TransformRefusal *r = &t->refusalParts;
+    if (memcmp(r, &t->refusalShown, sizeof(*r)) == 0 && t->refusal.text) return;
+    t->refusalShown = *r;
+    MsgSetStatic(&t->refusal, "");
+    bool first = true;
+    const char *verb = t->kind == TRANSFORM_ROTATE ? "turn" : "scale";
+    if (r->other) RefuseF(&t->refusal, &first, "%d box%s from stairs / waffle lines can't %s (they stay)", r->other, r->other == 1 ? "" : "es", verb);
+    if (r->dir)
+        RefuseF(&t->refusal, &first, "%d directional light%s %s no position (%s)", r->dir, r->dir == 1 ? "" : "s",
+                r->dir == 1 ? "has" : "have", r->dir == 1 ? "it stays" : "they stay");
+    if (r->scaleBad) RefuseF(&t->refusal, &first, "%s", "a scale factor must be > 0");
+    if (r->turn) RefuseF(&t->refusal, &first, "%d box%s can't take this turn (%s)", r->turn, r->turn == 1 ? "" : "es", r->turn == 1 ? "it stays" : "they stay");
+    if (r->note == 1)
+        RefuseF(&t->refusal, &first, "this box looks the same turned %g deg (footprint %g x %g m%s): nothing to turn. SHIFT+LMB adds "
+                "neighbours to turn them around their common centre", r->deg, r->sx, r->sz, r->square ? ", square" : "");
+    else if (r->note == 2)
+        RefuseF(&t->refusal, &first, "everything that follows ends where it started: nothing to commit%s",
+                r->noteBoxes ? " (a square footprint turned 90 deg or any box turned 180 is the same box)" : "");
+    t->refused = !first;
 }
 
 // Which objects follow the kind, the refusal text (boxes follow whatever MapEditPreviewTransform
@@ -522,13 +562,10 @@ static void Classify(TransformModal *t)
         }
         t->follows[i] = f;
     }
-    t->refusal[0] = '\0';
-    const char *verb = t->kind == TRANSFORM_ROTATE ? "turn" : "scale";
-    if (refusedOther)
-        Refuse(t, TextFormat("%d box%s from stairs / waffle lines can't %s (they stay)", refusedOther, refusedOther == 1 ? "" : "es", verb));
-    if (refusedDir)
-        Refuse(t, TextFormat("%d directional light%s %s no position (%s)", refusedDir, refusedDir == 1 ? "" : "s",
-                             refusedDir == 1 ? "has" : "have", refusedDir == 1 ? "it stays" : "they stay"));
+    memset(&t->refusalParts, 0, sizeof(t->refusalParts));     // (compared with memcmp: no stray padding)
+    t->refusalParts.kind = (int)t->kind;
+    t->refusalParts.other = refusedOther;
+    t->refusalParts.dir = refusedDir;
 }
 
 // The value from the mouse / typed text, every object's transform, the preview
@@ -551,12 +588,15 @@ static void NoChangeNote(TransformModal *t)
         if (t->follows[i] && (t->cls[i] == EDIT_CLASS_BOX || t->cls[i] == EDIT_CLASS_BLOCK)) { boxes++; if (box < 0) box = i; }
     if (t->kind == TRANSFORM_ROTATE && boxes == 1 && t->commitCount == 1) {
         Vector3 sz = t->start[box].scale;
-        Refuse(t, TextFormat("this box looks the same turned %g deg (footprint %g x %g m%s): nothing to turn. SHIFT+LMB adds "
-                             "neighbours to turn them around their common centre", t->value[0], Round(sz.x, 1e-3), Round(sz.z, 1e-3),
-                             fabsf(sz.x - sz.z) < 1e-4f ? ", square" : ""));
-    } else
-        Refuse(t, TextFormat("everything that follows ends where it started: nothing to commit%s", t->kind == TRANSFORM_ROTATE &&
-                             boxes > 0 ? " (a square footprint turned 90 deg or any box turned 180 is the same box)" : ""));
+        t->refusalParts.note = 1;
+        t->refusalParts.deg = t->value[0];
+        t->refusalParts.sx = Round(sz.x, 1e-3);
+        t->refusalParts.sz = Round(sz.z, 1e-3);
+        t->refusalParts.square = fabsf(sz.x - sz.z) < 1e-4f;
+    } else {
+        t->refusalParts.note = 2;
+        t->refusalParts.noteBoxes = t->kind == TRANSFORM_ROTATE && boxes > 0;
+    }
 }
 
 static void Compute(TransformModal *t, Designer *d, Camera3D cam, bool ctrl)
@@ -570,7 +610,7 @@ static void Compute(TransformModal *t, Designer *d, Camera3D cam, bool ctrl)
     else if (t->kind == TRANSFORM_ROTATE) RotateValue(t, cam, ctrl);
     else {
         ScaleValue(t, cam, ctrl);
-        if (t->value[0] <= 0.0 || t->value[1] <= 0.0 || t->value[2] <= 0.0) Refuse(t, "a scale factor must be > 0");
+        if (t->value[0] <= 0.0 || t->value[1] <= 0.0 || t->value[2] <= 0.0) t->refusalParts.scaleBad = true;
     }
     EditOp op;
     BuildOp(t, cam, &op);
@@ -591,11 +631,12 @@ static void Compute(TransformModal *t, Designer *d, Camera3D cam, bool ctrl)
     }
     // (an object the edits can't turn this way: MapEditPreviewTransform refused it; it stays, named here)
     if (refusedTurn && !Identity(t))
-        Refuse(t, TextFormat("%d box%s can't take this turn (%s)", refusedTurn, refusedTurn == 1 ? "" : "es", refusedTurn == 1 ? "it stays" : "they stay"));
+        t->refusalParts.turn = refusedTurn;
     bool moved = false;
     for (int i = 0; i < t->count && !moved; i++) moved = t->follows[i] && !SameTransform(&t->now[i], &t->start[i]);
     t->noChange = !Identity(t) && t->commitCount > 0 && !moved;
     if (t->noChange) NoChangeNote(t);
+    RefusalWords(t);
     if (t->previewing && changed) {
         MS_EditPreviewSet(scene, t->now);
         DesignerAdoptVersion(d);    // (the same objects at the same indices)
@@ -616,7 +657,7 @@ static void ResetValues(TransformModal *t)
     t->axisMask = 0;
     t->local = false;
     t->typed[0] = '\0';
-    t->cancelNote[0] = '\0';
+    t->cancelWhy = 0;
     t->noChange = false;
     t->haveAngle = false;
     t->sweep = t->lastAngle = 0.0;
@@ -643,11 +684,12 @@ static bool Grow(TransformModal *t, int n)
     return true;
 }
 
-bool TransformBegin(TransformModal *t, Designer *d, TransformKind kind, char *msg, int msgSize)
+// 0 started, 1 nothing selected, 2 out of memory
+unsigned char TransformBegin(TransformModal *t, Designer *d, TransformKind kind)
 {
     int n = d->selectedCount;
-    if (n == 0) { snprintf(msg, msgSize, "nothing selected (LMB selects, SHIFT+LMB adds, CTRL+LMB a group)"); return false; }
-    if (!Grow(t, n)) { snprintf(msg, msgSize, "out of memory"); return false; }
+    if (n == 0) return 1;
+    if (!Grow(t, n)) return 2;
     t->count = n;
     memcpy(t->objs, d->selected, sizeof(MS_ObjRef) * (size_t)n);
     MapEditClassify(t->objs, n, t->cls);
@@ -666,8 +708,7 @@ bool TransformBegin(TransformModal *t, Designer *d, TransformKind kind, char *ms
     t->previewing = MS_EditPreviewBegin(scene, t->objs, n);
     DesignerAdoptVersion(d);
     if (d->interactive) while (GetCharPressed()) {}     // (nothing typed before it opened goes into it)
-    msg[0] = '\0';
-    return true;
+    return 0;
 }
 
 void TransformEnd(TransformModal *t, Designer *d)
@@ -699,15 +740,12 @@ static void Cancel(TransformModal *t, Designer *d)
 }
 
 // LMB / ENTER with nothing to write (no value, nothing follows, or a value that changes
-// nothing): everything back, cancelNote says why when there was a value
+// nothing): everything back, cancelWhy says why when there was a value
 static void CancelNothing(TransformModal *t, Designer *d)
 {
-    t->cancelNote[0] = '\0';
-    if (t->noChange)
-        snprintf(t->cancelNote, sizeof(t->cancelNote), "nothing written: %s", t->kind == TRANSFORM_ROTATE
-                 ? "turned, the objects are where they were (a square footprint turned 90 deg, or any box turned 180)"
-                 : "every object would end where it started");
-    else if (!Identity(t) && t->commitCount == 0) snprintf(t->cancelNote, sizeof(t->cancelNote), "nothing written: nothing selected can follow");
+    t->cancelWhy = 0;
+    if (t->noChange) t->cancelWhy = t->kind == TRANSFORM_ROTATE ? 1 : 2;
+    else if (!Identity(t) && t->commitCount == 0) t->cancelWhy = 3;
     Cancel(t, d);
 }
 
@@ -814,14 +852,16 @@ static int SpecWords(const char *spec, char words[8][32])
     return n;
 }
 
-bool TransformOpenScripted(TransformModal *t, Designer *d, Camera3D cam, const char *spec, char *msg, int msgSize)
+// 0 started, 1 nothing selected, 2 out of memory, 3 the spec is not `<g|r|s> ...`
+unsigned char TransformOpenScripted(TransformModal *t, Designer *d, Camera3D cam, const char *spec)
 {
     char words[8][32] = { { 0 } };
     int n = SpecWords(spec, words);
     TransformKind kind = n > 0 && !strcmp(words[0], "g") ? TRANSFORM_GRAB : n > 0 && !strcmp(words[0], "r") ? TRANSFORM_ROTATE
                        : n > 0 && !strcmp(words[0], "s") ? TRANSFORM_SCALE : TRANSFORM_NONE;
-    if (kind == TRANSFORM_NONE) { snprintf(msg, msgSize, "--edit-modal \"<g|r|s> [x|y|z|X|Y|Z] [typed]\": not '%s'", spec); return false; }
-    if (!TransformBegin(t, d, kind, msg, msgSize)) return false;
+    if (kind == TRANSFORM_NONE) return 3;
+    unsigned char r = TransformBegin(t, d, kind);
+    if (r != 0) return r;       // (nothing selected / out of memory)
     for (int k = 1; k < n; k++) {
         const char *w = words[k];
         char c = w[0];
@@ -837,7 +877,7 @@ bool TransformOpenScripted(TransformModal *t, Designer *d, Camera3D cam, const c
             for (const char *q = w; *q; q++) TypeChar(t, *q);
     }
     Compute(t, d, cam, t->scriptCtrl);
-    return true;
+    return 0;
 }
 
 TransformResult TransformFinish(TransformModal *t, Designer *d, bool commit, EditOp *op)
@@ -996,19 +1036,22 @@ static void SetupDrag(TransformModal *t, Camera3D cam, GizmoPart part, bool loca
     t->dragMoved = false;
 }
 
-bool TransformGizmoBegin(TransformModal *t, Designer *d, Camera3D cam, GizmoPart part, char *msg, int msgSize)
+// 0 started, 1 nothing selected, 2 out of memory, 3 nothing of the gizmo there
+unsigned char TransformGizmoBegin(TransformModal *t, Designer *d, Camera3D cam, GizmoPart part)
 {
-    if (part == GIZMO_NONE) { snprintf(msg, msgSize, "nothing of the gizmo there"); return false; }
+    if (part == GIZMO_NONE) return 3;
     bool local = t->gizmoLocal;
-    if (!TransformBegin(t, d, TRANSFORM_ROTATE, msg, msgSize)) return false;
+    unsigned char r = TransformBegin(t, d, TRANSFORM_ROTATE);
+    if (r != 0) return r;       // (nothing selected / out of memory)
     SetupDrag(t, cam, part, local, true);
     t->dragging = true;
     t->hover = GIZMO_NONE;
     Compute(t, d, cam, Ctrl());
-    return true;
+    return 0;
 }
 
-bool TransformGizmoScripted(TransformModal *t, Designer *d, Camera3D cam, const char *spec, char *msg, int msgSize)
+// 0 started, 1 nothing selected, 2 out of memory, 3 the spec is not a ring / ball spec
+unsigned char TransformGizmoScripted(TransformModal *t, Designer *d, Camera3D cam, const char *spec)
 {
     char words[8][32] = { { 0 } };
     int n = SpecWords(spec, words);
@@ -1025,11 +1068,10 @@ bool TransformGizmoScripted(TransformModal *t, Designer *d, Camera3D cam, const 
     } else if (ball) part = GIZMO_BALL;
     char *end1, *end2;
     double a = strtod(words[1], &end1), b = strtod(words[2], &end2);
-    if (part == GIZMO_NONE || (ring && (*end2 || !isfinite(b))) || (ball && (*end1 || *end2 || !isfinite(a) || !isfinite(b)))) {
-        snprintf(msg, msgSize, "--edit-modal \"ring <x|y|z|xx|yy|zz|view> <deg> | ball <dx> <dy> [ctrl] [step <deg>] [type <v>]\": not '%s'", spec);
-        return false;
-    }
-    if (!TransformBegin(t, d, TRANSFORM_ROTATE, msg, msgSize)) return false;
+    if (part == GIZMO_NONE || (ring && (*end2 || !isfinite(b))) || (ball && (*end1 || *end2 || !isfinite(a) || !isfinite(b))))
+        return 3;
+    unsigned char r = TransformBegin(t, d, TRANSFORM_ROTATE);
+    if (r != 0) return r;       // (nothing selected / out of memory)
     for (int k = 3; k < n; k++) {
         if (!strcmp(words[k], "ctrl")) t->scriptCtrl = true;
         else if (!strcmp(words[k], "step") && k + 1 < n) DesignerSetAngleSnap(d, (float)atof(words[++k]));
@@ -1054,7 +1096,7 @@ bool TransformGizmoScripted(TransformModal *t, Designer *d, Camera3D cam, const 
         }
     }
     Compute(t, d, cam, t->scriptCtrl);
-    return true;
+    return 0;
 }
 
 // "37.5" (at most two decimals, no trailing zeros)
@@ -1212,8 +1254,8 @@ int TransformDrawHud(const TransformModal *t, int x, int y)
     UiHudHints(TextFormat("%s  %s|%s|%s", value, space, typed, snap), x + dx, y, UI_HUD_LINE, UI_S,
                UI_TEXT);
     y += UI_HUD_LINE;
-    if (t->refusal[0]) {
-        UiHudMark(t->refusal, x, y, UI_HUD_LINE, UI_S, UI_ERROR);
+    if (t->refused) {
+        UiHudMark(MsgText(&t->refusal), x, y, UI_HUD_LINE, UI_S, UI_ERROR);
         y += UI_HUD_LINE;
     }
     return y - y0;

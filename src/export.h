@@ -8,11 +8,19 @@
 // scene references, the scene runtime without its editor parts, viewer.c, build.sh, the
 // bundled R3D, licences and README.md. Refuses a non-empty outDir
 // and writes nothing when a source is missing. Works with a noGpu scene (no window needed).
-// Needs the monolith repo (the runtime and R3D sources). msg gets a one-line summary (or the
-// error); details are printed to stdout/stderr.
-bool ExportScene(const MS_Scene *scene, const char *outDir, char *msg, int msgSize);
+// Needs the monolith repo (the runtime and R3D sources). Details are printed to stdout/stderr;
+// the one-line result is printed too: console = true as "monolith: <text>" on stdout (exported)
+// or stderr (not), as --export does; false as a TraceLog (INFO / WARNING) for the in-game key.
+//   0: exported; the text in ExportNote() ("exported <dir> (...): build it with ./build.sh ...")
+//   1: nothing written; the whole "export: ..." sentence in MS_LastError()
+unsigned char ExportScene(const MS_Scene *scene, const char *outDir, bool console);
+// The success sentence of the last export ("" before any); freed by ExportShutdown
+const char *ExportNote(void);
+// Frees the export's note (call once at exit)
+void ExportShutdown(void);
 
-// <repo root or exe dir>/export/<map name>-<YYYY-MM-DD_HHMMSS>/ (the in-game export key)
-void ExportDefaultDir(const MS_Scene *scene, char *out, int outSize);
+// <repo root or exe dir>/export/<map name>-<YYYY-MM-DD_HHMMSS> (the in-game export key): a heap
+// path (free it), NULL when out of memory
+char *ExportDefaultDir(const MS_Scene *scene);
 
 #endif

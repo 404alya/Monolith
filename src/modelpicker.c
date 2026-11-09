@@ -192,7 +192,7 @@ EditModeResult ModelPickerEnter(ModelPicker *p, EditMode *m, Designer *d)
         if (d->selectedCount > 0) MapEditAnchor(d->selected[0], at);
     }
     // (the position as written: --model-picker-key enter is checked against --apply-edits `add`)
-    TraceLog(r == EDITMODE_RELOADED ? LOG_INFO : LOG_WARNING, "monolith: model picker: %s%s", m->message,
+    TraceLog(r == EDITMODE_RELOADED ? LOG_INFO : LOG_WARNING, "monolith: model picker: %s%s", MsgText(&m->message),
              r == EDITMODE_RELOADED ? TextFormat(" at %g %g %g", at[0], at[1], at[2]) : "");
     return r;
 }

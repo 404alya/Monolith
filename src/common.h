@@ -10,6 +10,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include "monolith_scene.h"
+// Text for people: static literals vs heap strings (MonoMsg, MonoStrf)
+#include "msg.h"
 // (raylib's keyboard / mouse calls go through the input shim: --input-script)
 #include "input.h"
 

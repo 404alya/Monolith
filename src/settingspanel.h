@@ -15,14 +15,19 @@ typedef struct {
     bool ownProfiler;           // the panel switched R3D's GPU profiler on (and switches it off)
     float gpuMs;                // last GPU frame time from the profiler, < 0 = none yet
     float msAvg;                // smoothed CPU frame time
-    char status[160];           // "applying ..." and other notes, drawn in the footer
+    MonoMsg status;             // "applying ..." and other notes, drawn in the footer (PanelFree)
     float statusTime;
 } SettingsPanel;
 
 void PanelOpen(SettingsPanel *p);
 void PanelClose(SettingsPanel *p);
 bool PanelCapturesInput(const SettingsPanel *p);    // open, or just closed
-void PanelStatus(SettingsPanel *p, const char *text, float seconds);
+// The footer note for `seconds`: Static takes a literal only; f formats (text of any other
+// lifetime: "%s", text)
+void PanelStatusStatic(SettingsPanel *p, const char *literal, float seconds);
+void PanelStatusf(SettingsPanel *p, float seconds, const char *fmt, ...) MSG_PRINTF(3, 4);
+// Frees the footer note (at exit; PanelClose only closes the panel)
+void PanelFree(SettingsPanel *p);
 
 // Input while open (F2 toggling is main.c's): returns the row whose value changed in *s, or
 // PANEL_RESET, or -1. ESC / F2 / Close close it. Also reads the profiler and frame time.

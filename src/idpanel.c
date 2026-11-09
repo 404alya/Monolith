@@ -204,7 +204,7 @@ EditModeResult IdPanelUpdate(IdPanel *p, EditMode *m, Designer *d, Spectator *sp
         DesignerClearSelection(d);
         for (int k = 0; k < n; k++) DesignerSelectObject(d, p->objs[k]);     // (lights can't be selected)
         FlyTo(spec, b);
-        SpectatorMessage(spec, TextFormat("id %d: line %d (%d object%s)", it->id, it->line, it->objects, it->objects == 1 ? "" : "s"));
+        SpectatorMessagef(spec, "id %d: line %d (%d object%s)", it->id, it->line, it->objects, it->objects == 1 ? "" : "s");
         IdPanelClose(p);
         return EDITMODE_NONE;
     }
