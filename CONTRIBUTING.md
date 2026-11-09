@@ -12,6 +12,10 @@ The rules for changing monolith, whether you write the change yourself or with C
 
 Map-only changes (a `.map` file, `MAP.md`, a package's shaders, models, textures) need none of the builds or the leak check: the game reloads the package while it runs.
 
+## The build
+
+`./build.sh` only compiles and starts the build program: `nob.c` in the repo root, a C program written on the vendored [nob.h](https://github.com/tsoding/nob.h) (`src/vendor/nob/`). Every mode, compiler flag and command of the build lives in `nob.c`, each command with a comment that says what it does and why. `build.sh` recompiles `build/nob` by itself when `nob.c` or `nob.h` changed. Each command is echoed (`[INFO] CMD: …`) and followed by its wall time and the CPU time it and its child processes used (`[TIME] …`); a summary table of all commands ends the build, so you can see where the time goes. A new flag goes into the argument list of the command it belongs to in `nob.c` (and into the matching `compile_commands.json` entry when that list is mirrored there); a new mode is a branch in `main()` / `BuildLinux()` that runs its commands through `RunTimed()`. Commands run one after another (that is what makes the CPU times exact). `examples/build.sh`, `tests/unit/*.sh` and the export's `build.sh` are still shell scripts.
+
 ## Rules
 
 - **No fixed-size buffers for content.** Anything whose size depends on the map, the selection, the regions or the input is a heap array (`MS_RESERVE` / `MS_PUSH`) or a heap string. Fixed arrays only for stack scratch that formats one path or message. The per-frame path never allocates.
@@ -31,7 +35,7 @@ C11, 4-space indent, `static` file-local functions, PascalCase functions, `UPPER
 Code navigation (go to definition, find references, symbol search, call hierarchy) works with any editor that uses [clangd](https://clangd.llvm.org/), and follows calls across files and into R3D and raylib (`submodules/r3d/src/`, `submodules/r3d/external/raylib/src/`).
 
 - **`./build.sh` writes `compile_commands.json`** in the repo root: one entry per file with the exact flags the build uses (includes, `-DMONOLITH_EDITOR`, `-DMS_PATCHED_R3D`, the path defines), so clangd sees each file as the compiler does and editor-only code isn't greyed out. It also covers `tools/profile.c`, the vendored xatlas, `examples/` and `tests/unit/` (with their scripts' flags), and R3D's and raylib's sources (from R3D's own CMake export; assimp is left out). Only the plain Linux build writes it; `debug`, `lsan`, `profile` and `--win` leave it alone. It needs `python3`.
-- **When to regenerate:** after a fresh clone, after adding a `.c` file, and after a change to a flag in `build.sh`: run `./build.sh` again. The file holds absolute paths for your checkout and is gitignored; never edit it by hand. Each git worktree gets its own.
+- **When to regenerate:** after a fresh clone, after adding a `.c` file, and after a change to a flag in `nob.c` (the build program `./build.sh` runs): run `./build.sh` again. The file holds absolute paths for your checkout and is gitignored; never edit it by hand. Each git worktree gets its own.
 - **Let clangd index in the background** (`--background-index`, the default in most setups): it can then jump into files you haven't opened. Its index goes into `.cache/clangd/` (gitignored).
 - **No `.clangd` with `CompileFlags: Add:`** is needed. An old one adds flags on top of the database's (a second `-std`, stale defines): remove that block, or the file.
 - **Neovim:** LSP go-to-definition is `gd` in LazyVim. Ctrl+click is a tags jump by default; map it to the LSP in your own config if you want it, e.g. `vim.keymap.set("n", "<C-LeftMouse>", "<LeftMouse><cmd>lua vim.lsp.buf.definition()<cr>")`.
