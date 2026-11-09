@@ -937,7 +937,7 @@ single-threaded (`XA_MULTITHREADED=0`): two runs give the same bytes.
 **xatlas** is vendored at `f700c779` (MIT, `src/vendor/xatlas/README.md`: URL, commit, sha256 of
 `xatlas.cpp`, `xatlas.h`, `xatlas_c.h`, `LICENSE`); downloaded into an empty scratch folder, read
 (includes, file I/O: only its debug writers, compiled out; no network, no process calls), copied
-unchanged. `build.sh` compiles it once per build folder (`Xatlas`: C++14 — C++11 fails on its
+unchanged. The build (`nob.c`, run by `./build.sh`) compiles it once per build folder (`Xatlas`: C++14 — C++11 fails on its
 single-threaded path — `-w -DNDEBUG -DXATLAS_C_API=1 -DXA_MULTITHREADED=0`, the build's own optimisation
 and sanitizer flags, `-fno-sanitize=function` for UBSan) and links the object into the editor only;
 the export and examples don't get it. Both targets 0 warnings; Linux NEEDED unchanged (libgcc_s, libGL,

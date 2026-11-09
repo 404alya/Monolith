@@ -81,9 +81,10 @@ Trash() {   # moves files we created to the trash (never rm)
 }
 
 # --- Build (incremental: only when a source is newer than the binary)
-# (R3D's sources count too: build.sh then rebuilds the static library incrementally)
+# (R3D's sources count too: build.sh then rebuilds the static library incrementally; so do the build
+# program nob.c and its header, src/vendor/nob/nob.h, which is under src/)
 R3D_SRC="${R3D_DIR:-$ROOT/submodules/r3d}"
-Newer() { [[ ! -x "$1" ]] || [[ -n "$(find "$ROOT/src" "$ROOT/runtime" "$ROOT/build.sh" "$ROOT/examples" \
+Newer() { [[ ! -x "$1" ]] || [[ -n "$(find "$ROOT/src" "$ROOT/runtime" "$ROOT/build.sh" "$ROOT/nob.c" "$ROOT/examples" \
                                           "$R3D_SRC/src" "$R3D_SRC/include" "$R3D_SRC/shaders" -newer "$1" \
                                           \( -name '*.c' -o -name '*.cpp' -o -name '*.h' -o -name '*.sh' -o -name '*.glsl' -o -name '*.vert' -o -name '*.frag' \) \
                                           -not -path '*/build/*' -print -quit 2>/dev/null)" ]]; }
@@ -105,7 +106,7 @@ if [[ $BUILD == 1 ]]; then
 fi
 if [[ $BUILD == 1 ]]; then
   # the paint unwrap test (tests/unit/paintunwrap_test.c) against the build's own xatlas object
-  # (build.sh compiles it into <build folder>-obj/ with the same sanitizer)
+  # (the build, nob.c, compiles it into <build folder>-obj/ with the same sanitizer)
   if [[ ! -x "$BIN_DIR/paintunwrap_test" || -n "$(find "$ROOT/tests/unit/paintunwrap_test.c" "$ROOT/src/paintunwrap.c" \
           "$ROOT/src/paintunwrap.h" "$ROOT/runtime" "$BIN_DIR-obj/xatlas.o" -newer "$BIN_DIR/paintunwrap_test" -print -quit)" ]]; then
     SAN=leak; [[ $MODE == debug ]] && SAN=address,undefined

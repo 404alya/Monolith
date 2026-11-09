@@ -4,6 +4,8 @@
 
 **The first `./build.sh` fails in R3D, raylib or assimp.** The full log is in `submodules/r3d/build-linux/monolith-build.log` (Windows: `build-mingw/`). Usually a missing package: see the install lines in the [README](../README.md). After installing it, run `./build.sh` again; to force a fresh configure, move `submodules/r3d/build-linux` out of the way.
 
+**`./build.sh` fails before any `[INFO] CMD:` line.** It first compiles the build program `nob.c` into `build/nob` with `${CC:-clang}`; the compiler's message says why (usually no C compiler: install clang, or run `CC=gcc ./build.sh`). A `build/nob` from a broken `nob.c` is replaced on the next run once `nob.c` compiles again.
+
 **The Linux binary doesn't start on another machine.** It needs glibc 2.34 or newer, `libGL.so.1`, `libgcc_s.so.1`, and the X11 client libraries (libX11, libXrandr, libXinerama, libXcursor, libXi), which GLFW loads at start-up; `readelf -d build/linux/monolith | grep NEEDED` lists only the first ones.
 
 ## Starting
