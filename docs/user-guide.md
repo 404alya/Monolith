@@ -180,14 +180,14 @@ Removing and giving ids are manual edits like any other: live, undoable with Ctr
 
 The panel has a preset selector, rows for display, shadows, ambient occlusion, fog, post-processing and performance, the editor's **Save edits** row (manual / auto, see *Editing by hand*; not a graphics setting and not part of a preset), and a live frame time readout. Use the arrow keys or the mouse; values that differ from the preset are pink, with a pink bar beside them. Heavy changes (shadow map size, AO mode, fog cache, preset) take a frame to apply; a new shadow map size reloads the map (about a second, your selection is kept). Esc or F2 closes and saves.
 
-**The map is the source of the look.** Every setting is relative to the map: **ultra** shows exactly what the map describes, and an effect the map turns off stays off.
+**The map is the source of the look.** Every setting is relative to the map: **ultra** shows exactly what the map describes, and an effect the map turns off stays off. The one exception is **Detail distance** (display rows, x1 in every preset): small objects far from the camera, whose boxes would cover a pixel or two, are not drawn (their shadows stay). x2 keeps them twice as far, x0.5 drops them earlier, off draws everything. A map can keep a material always drawn, or give it its own distance (`draw_distance`, [map-format.md](map-format.md)).
 
 | Preset | What it trades |
 |---|---|
 | ultra | nothing: the map exactly |
 | high | baked ambient occlusion instead of SSAO + SSIL, baked fog lighting |
 | medium | high + 75% render scale, half the fog steps, 4096 shadow map |
-| low | 50% render scale, no AO, no bloom, baked fog with half the steps, 4096 shadow map |
+| low | 50% render scale, no AO, no bloom, baked fog with half the steps, 2048 shadow map |
 
 Roughly, high takes two thirds of ultra's frame time, medium 40% and low a quarter (measured on the default map with an RTX 4050 Laptop GPU; your machine's numbers will differ, the F2 panel shows them live). The settings are saved in `~/.config/monolith/settings.ini` (`%APPDATA%\monolith\` on Windows) as `key = value` lines; `--settings`, `--no-settings` and `--quality` change that for one run. Vsync is off and frames are uncapped by default; the panel's performance rows change that.
 

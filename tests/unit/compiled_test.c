@@ -18,9 +18,10 @@ static char dir[1024], fuzzPath[1100];
 // The header and section table fields this test changes (docs/compiled-map.md, section 2)
 enum { H_VERSION = 8, H_SIZE = 12, H_ORDER = 16, H_FORMAT = 20, H_COUNT = 24, H_TABLE = 28, H_FILESIZE = 32 };
 enum { S_STRINGS = 1, S_BOXES = 2, S_MATERIALS = 4, S_STATEMENTS = 13, S_ENV = 14, S_BOX_TURNS = 17, S_PAINT = 18, S_SECTIONS = 18 };
-// A material record (version 6) and its face layout, filter and padding bytes, its paint atlas path,
-// paint filter and padding, noPrepass
-enum { MAT_SIZE = 168, MAT_UV_FACES = 148, MAT_FILTER = 154, MAT_PAD = 155, MAT_PAINT = 156, MAT_PAINT_FILTER = 160, MAT_PAD2 = 161, MAT_NO_PREPASS = 164 };
+// A material record (version 7) and its face layout, filter and padding bytes, its paint atlas path,
+// paint filter and padding, noPrepass, drawDistance
+enum { MAT_SIZE = 172, MAT_UV_FACES = 148, MAT_FILTER = 154, MAT_PAD = 155, MAT_PAINT = 156, MAT_PAINT_FILTER = 160, MAT_PAD2 = 161, MAT_NO_PREPASS = 164,
+       MAT_DRAW_DISTANCE = 168 };
 
 static uint32_t Rd32(const unsigned char *b, uint32_t at) { uint32_t v; memcpy(&v, b + at, 4); return v; }
 static void Wr32(unsigned char *b, uint32_t at, uint32_t v) { memcpy(b + at, &v, 4); }
@@ -277,6 +278,10 @@ int main(int argc, char **argv)
     CASE("material paint_filter 2", c[mats + MAT_PAINT_FILTER] = 2);
     CASE("material padding 2 nonzero", c[mats + MAT_PAD2 + 2] = 1);
     CASE("material prepass flag 2", Wr32(c, mats + MAT_NO_PREPASS, 2));
+    // The draw distance (version 7): 0 auto, -1 off, else above 0 and at most 1e6 m
+    CASE("material draw distance -2", Wr32(c, mats + MAT_DRAW_DISTANCE, 0xC0000000u));
+    CASE("material draw distance 2e6", Wr32(c, mats + MAT_DRAW_DISTANCE, 0x49F42400u));
+    CASE("material draw distance NaN", Wr32(c, mats + MAT_DRAW_DISTANCE, 0x7FC00000u));
     CASE("version 4 with the version 5 section table", Wr32(c, H_VERSION, 4));
     // A layout needs uv_scale 1 1 (tests/models: material 2, "tiles", has 2 2); material 0 loads with one
     if (Rd32(orig, mats + 2 * MAT_SIZE + 80) != 0x3F800000u)       // (its uvScale.x is not 1)

@@ -128,6 +128,8 @@ typedef struct {
     int line;               // first map line that defines it, 0 = built-in
     R3D_Material material;  // ready to draw (shader, textures loaded)
     const char *shader;     // package-relative shader path, NULL = none
+    float drawDistance;     // m (`draw_distance`): 0 = automatic (from the size of its boxes),
+                            // < 0 = `off` (always drawn); see MS_RenderSettings.detailDistance
 } MS_Material;
 
 // A model file (glTF/GLB, OBJ, FBX, DAE through R3D's importer), loaded once per map load
@@ -472,12 +474,17 @@ typedef struct {
     BoundingBox bounds;
     long long triangles;        // per pass (a merged mesh: its visible faces)
     bool castShadow;
+    float drawDistance;         // m at detailDistance 1: farther from the camera than this (to its
+                                // bounds) the camera skips it, its shadows stay; INFINITY = always
 } MS_DrawRangeInfo;
 
 // The runtime's draws in MS_DrawGeometry order: box ranges, then model ranges. Valid until the
 // next version change.
 int MS_DrawRangeCount(const MS_Scene *scene);
 bool MS_GetDrawRange(const MS_Scene *scene, int range, MS_DrawRangeInfo *out);
+// Triangles box `box` draws per pass: 2 per face no other box hides (a merged material), else 12;
+// 0 without the GPU upload
+int MS_BoxTriangles(const MS_Scene *scene, int box);
 // hidden[r] true: range r is not drawn (camera and shadow passes). Copied; NULL / count 0 = off.
 // A change redraws the sun shadow tiles and light shadows; fog cache and AO volume keep everything.
 void MS_SetDrawFilter(MS_Scene *scene, const bool *hidden, int count);
@@ -521,7 +528,17 @@ typedef struct {
     bool sunShadow;         // default true; false = the sun is pushed without a shadow map
     float shadowRange;      // > 0: shadow distance in m (10..2000) instead of the map's sun.range; 0 = the map's
     float shadowSoftness;   // > 0: PCF softness instead of the map's sun.softness; 0 = the map's
+    // Draw distance of small objects (a trade-off, on by default): a draw (a material's boxes in
+    // one map cell, a model file's instances in one cell) that is farther from the camera than
+    // its draw distance x detailDistance is skipped by the camera and still casts its shadows.
+    // The draw distance is the material's `draw_distance`, or automatic: MS_DETAIL_FACTOR x the
+    // size of its largest object (the square root of the largest face of its bounds). Uses the
+    // camera of the last MS_PushLights. 1 = default, 0 = draw everything.
+    float detailDistance;
 } MS_RenderSettings;
+
+// The automatic draw distance per metre of object size (MS_RenderSettings.detailDistance)
+#define MS_DETAIL_FACTOR 400.0f
 
 MS_RenderSettings MS_GetRenderSettings(const MS_Scene *scene);
 void MS_SetRenderSettings(MS_Scene *scene, MS_RenderSettings settings);
@@ -531,7 +548,9 @@ void MS_SetRenderSettings(MS_Scene *scene, MS_RenderSettings settings);
 // ======================================================================================
 // The map stays the source of the look: every setting is relative to the map's environment
 // (0 / 1 / "the map's" = unchanged), so MS_QUALITY_ULTRA renders exactly what the map
-// describes, and an effect the map turns off stays off. Lower presets scale the cost down:
+// describes (only small objects beyond their draw distance are skipped in every preset:
+// detailDistance 1; 0 draws them), and an effect the map turns off stays off. Lower presets
+// scale the cost down:
 //     MS_Quality q = MS_QualityPreset(MS_QUALITY_MEDIUM);
 //     MS_LoadOptions opt = { .shadowSizeOverride = q.shadowSize };  // the shadow map size is an
 //     ... peek with opt + .noGpu, MS_SetInitHints(peek), R3D_Init, MS_InitRenderer ...  // init hint
@@ -585,9 +604,12 @@ typedef struct {
     float exposure, brightness, contrast, saturation;
     // Performance (same image)
     bool depthPrepass;
+    // Detail
+    float detailDistance;           // x the draw distance of small objects (MS_RenderSettings), 0 = off
 } MS_Quality;
 
-// Low / medium / high / ultra (= the map exactly); MS_QUALITY_CUSTOM returns ultra
+// Low / medium / high / ultra (= the map exactly, but for detailDistance 1 in every preset);
+// MS_QUALITY_CUSTOM returns ultra
 MS_Quality MS_QualityPreset(MS_QualityLevel level);
 const char *MS_QualityName(MS_QualityLevel level);  // "low" .. "ultra", "custom"
 bool MS_QualityFromName(const char *name, MS_QualityLevel *level);

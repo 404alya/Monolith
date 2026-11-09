@@ -471,3 +471,10 @@ Scratch copies of the map package with two viewpoints at one ivy sheet (30 m and
 - **Cost floor** (a one-hash stand-in shader of similar coverage): ivy geometry +7.7 ms at 2 m against +21.9 for the shader then; with `cull back` too +4.5 ms. The gap was the shader's own work.
 - **Pattern bake** (`textures/ivy/*.png`, one `texelFetch` a pixel; pixel-identical, 2 pairs): 2 m geometry −14.1 ms (−26 %), ivy cost 22.0 → 7.9 ms, at the floor; 30 m −1.9 ms.
 - **`cull back` on the baked ivy** (2 pairs): 2 m geometry −3.3 ms, ivy cost 7.9 → 4.6 ms; 30 m −0.45 ms. Not pixel-identical (the back face's leaves, 2 cm behind, showed at leaf edges up close); applied by the developer's decision.
+
+## Draw distance of small objects (2026-11-08, machine C)
+
+`MS_RenderSettings.detailDistance` (R3D patch 30): a draw range farther from the camera than 400 × the size of its largest box (√ of its largest face) goes in shadow-only. Triangles the camera can still draw by distance alone (`--tri-report`, no frustum), `maps/monolith` (469,396 triangles): x1 70–91 % per viewpoint, x0.5 31–75 %, x2 88–95 %. `maps/pine_forest`: 100 % at x1 (its smallest models are ~1 m).
+
+- **Frame time, x1 vs the build before** (headless 1920 × 1006, ultra, full 600-frame runs, 3 interleaved pairs, cool-down below 68 °C before every run, plugged in): frame +0.43 / −0.65 / +0.06 ms (median +0.06, noise level); geometry pass −0.34 / −0.43 / −0.10 ms (median −0.34 ms, −2.5 % of 13.5). The frame here is ~119 ms, of which geometry is 13.5 and vfog radiance 30.5, SSIL 16, ambient 13: the triangles it drops were worth a few tenths of a millisecond. Reports `benchmark/2026-11-08_022849` … `_032126` (local).
+- **Look:** x1 changes 56–1758 of 1,440,000 pixels per viewpoint of `maps/monolith` (max 36/255; leaf and weed specks at 25–200 m), `pine_forest` none. x0 is pixel-identical to the build before.

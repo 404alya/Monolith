@@ -119,6 +119,11 @@
 //                                    the shading pass (for a cheap shader on very many triangles, where
 //                                    the pre-pass would only double the vertex cost). With R3D patch 28;
 //                                    upstream R3D always pre-passes, so the key changes nothing there
+//         draw_distance <m>|auto|off   [auto] beyond this distance from the camera (to the bounds of
+//                                    a map cell's boxes of the material) the camera skips its boxes,
+//                                    their shadows stay; x the detail distance setting (0 there: always
+//                                    drawn). auto: 400 x the size of its largest box (the square root
+//                                    of its largest face); off: always drawn. With R3D patch 30
 //         blend alpha|additive|add_alpha|multiply|premultiplied  unlit on|off  priority n
 //         inherit albedo|normal|orm|emission|all   (model overrides: keep the model's own map)
 //         wrap repeat|clamp|mirror   wrapping of this material's textures and samplers
@@ -463,8 +468,9 @@ typedef struct {
 
 // One draw: instances [first, first + count) of a buffer (group = the material for boxes, the
 // ModelGroup for models), bounds = the union of their boxes. Clustered and instanced, except a
-// merged box range (MatDef.merge): its draw is `mesh`, the visible faces of its boxes (empty: none)
-typedef struct { int group, first, count; BoundingBox bounds; R3D_Mesh mesh; } DrawRange;
+// merged box range (MatDef.merge): its draw is `mesh`, the visible faces of its boxes (empty: none).
+// size: its largest object's ObjectSize (the automatic draw distance, RangeDrawDistance)
+typedef struct { int group, first, count; BoundingBox bounds; R3D_Mesh mesh; float size; } DrawRange;
 
 // An object to sort into cells: group, then big (wider than a cell in x or z: one cluster per
 // group), then turned (a turned box: ranges of their own after the axis-aligned ones), then cell,
@@ -478,6 +484,7 @@ typedef struct {
     int *slotMat;               // per material slot of the file: materials[] index, -1 = the file's own
     R3D_Model model;            // shallow copy of the file's model with its own materials[] (and meshes[] if shadow off)
     bool ownMeshes;
+    R3D_Mesh *farMeshes;        // castShadow: model.meshes casting shadows only (beyond the draw distance)
     R3D_InstanceBuffer inst;
     bool instLoaded;            // inst exists (a failed BuildModelGroups may stop before it)
     int count;
@@ -781,6 +788,7 @@ struct MS_Private {
     unsigned int aoVersion;                     // scene version the occlusion volume was baked for, 0 = none
     bool warnedShadowSize;                      // the shadow.size vs. R3D hint warning, once
     unsigned int frameVersion;                  // scene version MS_PushLights last saw
+    Vector3 viewPos;                            // its camera position (MS_DrawGeometry's draw distances)
     double frameStart;                          // time of its last call
     int firstFrames;                            // frames timed since the last load (first two)
     double firstFrameMs[2];
@@ -3200,6 +3208,19 @@ static bool ParseMaterial(Parser *P, Token *tok, int n)
             ONE_WORD();
             if (!Keyword(P, v[0], IN, 5, "inherit map", &e)) return false;
             D->inherit |= e == 4 ? 15u : (1u << e);
+        } else if (strcmp(k, "draw_distance") == 0) {
+            // metres, or auto (from the size of its boxes) / off (always drawn)
+            if (nv == 1) {
+                if (!NumF(P, v[0], &f)) return false;
+                if (!(f > 0.0f && f <= 1e6f)) return Fail(P, "draw_distance must be above 0 and at most 1000000 m", NULL);
+                M->drawDistance = f;
+            } else {
+                static const char *const DD[] = { "auto", "off" };
+                int e;
+                ONE_WORD();
+                if (!Keyword(P, v[0], DD, 2, "draw distance (a number of metres, auto or off)", &e)) return false;
+                M->drawDistance = e == 0 ? 0.0f : -1.0f;
+            }
         } else {
             float *dst = strcmp(k, "normal_scale") == 0 ? &m->normal.scale :
                          strcmp(k, "occlusion") == 0 ? &m->orm.occlusion :
@@ -3216,11 +3237,12 @@ static bool ParseMaterial(Parser *P, Token *tok, int n)
         #undef NEED
         #undef ONE_WORD
         // The key into the material's hashes (the shape hash leaves out what a live edit can change
-        // without a full upload: the face layout, the filter, the albedo map and the paint keys; the
-        // paintless hash leaves out only the paint keys, whose change rebuilds no mesh)
+        // without a full upload: the face layout, the filter, the albedo map, the draw distance and
+        // the paint keys; the paintless hash leaves out only the paint keys, whose change rebuilds no mesh)
         bool paintKey = strcmp(k, "paint") == 0 || strcmp(k, "paint_filter") == 0;
         d->matLookHash[mi] = HashTokens(d->matLookHash[mi], &tok[t], 1 + used);
-        if (strcmp(k, "uv_faces") != 0 && strcmp(k, "filter") != 0 && strcmp(k, "albedo_map") != 0 && !paintKey)
+        if (strcmp(k, "uv_faces") != 0 && strcmp(k, "filter") != 0 && strcmp(k, "albedo_map") != 0 &&
+            strcmp(k, "draw_distance") != 0 && !paintKey)
             d->matShapeHash[mi] = HashTokens(d->matShapeHash[mi], &tok[t], 1 + used);
         if (!paintKey) d->matPaintlessHash[mi] = HashTokens(d->matPaintlessHash[mi], &tok[t], 1 + used);
         t += 1 + used;
@@ -4098,10 +4120,11 @@ static bool ParseText(Parser *P, const char *text, int size)
 // reader (CmRead*) in ReadCompiled's list after the sections its records point into, and the
 // matching section writer (CmPut*). The layout goes into docs/compiled-map.md.
 
-#define CM_VERSION          6           // MS_COMPILED_VERSION: bump on any change to a record or section
+#define CM_VERSION          7           // MS_COMPILED_VERSION: bump on any change to a record or section
 #define CM_VERSION_OLDEST   2           // the oldest version still read (2: no box turns section; 2 and 3:
                                         // materials without uvFaces and filter; 2 to 4: materials without
-                                        // paint, no paint section; 2 to 5: materials without noPrepass)
+                                        // paint, no paint section; 2 to 5: materials without noPrepass;
+                                        // 2 to 6: materials without drawDistance)
 #define CM_BYTE_ORDER       0x01020304u
 #define CM_NONE             0xFFFFFFFFu // a string field without a string
 #define CM_MAX_ENV          4096        // env records (the key tables have ~120 keys)
@@ -4149,6 +4172,8 @@ typedef struct {
 // Version 5: paint: the paint atlas (`paint`, CM_NONE for none); paintFilter: TEX_* (`paint_filter`);
 // pad2: 0. A version 4 record ends before paint.
 // Version 6: noPrepass: 0 or 1 (`prepass off`). A version 5 record ends before noPrepass.
+// Version 7: drawDistance: MS_Material.drawDistance (`draw_distance`: m, 0 auto, -1 off). A version 6
+// record ends before drawDistance.
 typedef struct {
     uint32_t name, shader, maps[MAP_COUNT];     // maps: albedo, normal, orm, emission
     int32_t line, shaderLine, mapLine[MAP_COUNT];
@@ -4162,11 +4187,13 @@ typedef struct {
     uint32_t paint;                             // version 5
     uint8_t paintFilter, pad2[3];
     uint32_t noPrepass;                         // version 6
+    float drawDistance;                         // version 7
 } CmMaterial;
 
 #define CM_MATERIAL_V3_SIZE ((uint32_t)offsetof(CmMaterial, uvFaces))  // a version 2 / 3 material record
 #define CM_MATERIAL_V4_SIZE ((uint32_t)offsetof(CmMaterial, paint))    // a version 4 material record
 #define CM_MATERIAL_V5_SIZE ((uint32_t)offsetof(CmMaterial, noPrepass)) // a version 5 material record
+#define CM_MATERIAL_V6_SIZE ((uint32_t)offsetof(CmMaterial, drawDistance)) // a version 6 material record
 
 // A `paint` statement (version 5), its entity resolved to the object: material (CM_NONE: the model
 // slot's own material), kind (0 a box, 1 a model instance), object (index into the boxes or models
@@ -4342,12 +4369,13 @@ static void CmRecord(const CmReader *R, int id, uint32_t i, void *out)
 }
 
 // The record size of section `id` in a file of `version` (a material had no uvFaces before 4, no
-// paint before 5, no noPrepass before 6)
+// paint before 5, no noPrepass before 6, no drawDistance before 7)
 static uint32_t CmRecordSize(uint32_t version, uint32_t id)
 {
     if (id == CM_MATERIALS && version < 4) return CM_MATERIAL_V3_SIZE;
     if (id == CM_MATERIALS && version < 5) return CM_MATERIAL_V4_SIZE;
     if (id == CM_MATERIALS && version < 6) return CM_MATERIAL_V5_SIZE;
+    if (id == CM_MATERIALS && version < 7) return CM_MATERIAL_V6_SIZE;
     return CM_SECTION[id].size;
 }
 
@@ -4604,6 +4632,7 @@ static bool CmMaterialInRange(const CmMaterial *c)
            c->unlit <= 1 &&
            c->instanced <= 1 &&
            c->noPrepass <= 1 &&
+           (c->drawDistance == 0.0f || c->drawDistance == -1.0f || (c->drawDistance > 0.0f && c->drawDistance <= 1e6f)) &&
            c->filter <= TEX_NEAREST &&
            c->pad == 0 &&
            c->paintFilter <= TEX_NEAREST &&
@@ -4627,6 +4656,7 @@ static void CmFillMaterial(const CmMaterial *c, MS_Material *M, MatDef *D)
     // What R3D draws with
     R3D_Material *m = &M->material;
     M->line = c->line;
+    M->drawDistance = c->drawDistance;
     m->albedo.color = (Color){ c->albedo[0], c->albedo[1], c->albedo[2], c->albedo[3] };
     m->emission.color = (Color){ c->emission[0], c->emission[1], c->emission[2], c->emission[3] };
     m->emission.energy = c->emissionEnergy;
@@ -5483,7 +5513,7 @@ static void CmPutMaterials(CmWriter *W, const SceneData *d)
             .uniformFirst = W->count[CM_UNIFORMS], .uniformCount = (uint32_t)D->uniformCount,
             .samplerFirst = W->count[CM_SAMPLERS], .samplerCount = (uint32_t)D->samplerCount,
             .uvFaces = { 255, 255, 255, 255, 255, 255 }, .filter = D->filter,
-            .paintFilter = D->paintFilter, .noPrepass = D->noPrepass,
+            .paintFilter = D->paintFilter, .noPrepass = D->noPrepass, .drawDistance = M->drawDistance,
         };
         if (D->hasFaces) memcpy(c.uvFaces, D->uvFaces, sizeof(c.uvFaces));
         for (int k = 0; k < MAP_COUNT; k++) {
@@ -6945,6 +6975,37 @@ static int CompareCellItems(const void *pa, const void *pb)
     return a->index < b->index ? -1 : a->index > b->index;
 }
 
+// How big an object looks from afar: the square root of the largest face of its bounds (a 2 m
+// strip of moss 4 cm high counts like a 28 cm tuft, a 1 m post 10 cm thick like a 32 cm one)
+static float ObjectSize(BoundingBox b)
+{
+    float x = b.max.x - b.min.x, y = b.max.y - b.min.y, z = b.max.z - b.min.z;
+    return sqrtf(fmaxf(x * y, fmaxf(y * z, x * z)));
+}
+
+// The mesh as a draw beyond its draw distance: it casts the shadows it cast (R3D patch 30 makes
+// the camera passes skip SHADOW_CAST_ONLY_*; without it the mesh is drawn as before)
+static R3D_Mesh ShadowOnlyMesh(R3D_Mesh m)
+{
+    switch (m.shadowCastMode) {
+    case R3D_SHADOW_CAST_ON_AUTO: m.shadowCastMode = R3D_SHADOW_CAST_ONLY_AUTO; break;
+    case R3D_SHADOW_CAST_ON_DOUBLE_SIDED: m.shadowCastMode = R3D_SHADOW_CAST_ONLY_DOUBLE_SIDED; break;
+    case R3D_SHADOW_CAST_ON_FRONT_SIDE: m.shadowCastMode = R3D_SHADOW_CAST_ONLY_FRONT_SIDE; break;
+    case R3D_SHADOW_CAST_ON_BACK_SIDE: m.shadowCastMode = R3D_SHADOW_CAST_ONLY_BACK_SIDE; break;
+    default: break;     // already shadow-only, or no shadow (the caller skips the draw)
+    }
+    return m;
+}
+
+// Range R's draw distance at detailDistance 1 (boxes: the material's `draw_distance`, else
+// automatic; models: automatic); INFINITY = always drawn
+static float RangeDrawDistance(const SceneData *d, const DrawRange *R, bool box)
+{
+    float m = box ? d->materials[R->group].drawDistance : 0.0f;
+    if (m < 0.0f) return INFINITY;
+    return m > 0.0f ? m : MS_DETAIL_FACTOR * R->size;
+}
+
 // Appends the ranges of items[0..count) (one group, sorted): a new one wherever the cell changes
 static bool AddRanges(DrawRange **ranges, int *n, int *cap, int group, const CellItem *items, int count)
 {
@@ -6960,6 +7021,7 @@ static bool AddRanges(DrawRange **ranges, int *n, int *cap, int group, const Cel
         r->count++;
         r->bounds.min = Vector3Min(r->bounds.min, it->bounds.min);
         r->bounds.max = Vector3Max(r->bounds.max, it->bounds.max);
+        r->size = fmaxf(r->size, ObjectSize(it->bounds));
     }
     return true;
 }
@@ -6972,6 +7034,7 @@ static void FreeModelGroups(SceneData *d)
         free(G->slotMat);
         free(G->model.materials);
         if (G->ownMeshes) free(G->model.meshes);
+        free(G->farMeshes);
     }
     free(d->modelGroups);
     d->modelGroups = NULL;
@@ -7096,6 +7159,10 @@ static bool BuildModelGroups(SceneData *d)
                 G->model.meshes[k] = src[k];
                 G->model.meshes[k].shadowCastMode = R3D_SHADOW_CAST_DISABLED;
             }
+        } else {
+            G->farMeshes = malloc(sizeof(R3D_Mesh) * F->model.meshCount);
+            if (!G->farMeshes && F->model.meshCount > 0) { ok = false; break; }
+            for (int k = 0; k < F->model.meshCount; k++) G->farMeshes[k] = ShadowOnlyMesh(G->model.meshes[k]);
         }
         int count = G->count;
         G->inst = R3D_LoadInstanceBuffer(count, R3D_INSTANCE_POSITION | R3D_INSTANCE_ROTATION | R3D_INSTANCE_SCALE |
@@ -8930,11 +8997,11 @@ MS_Scene *MS_Load(const char *path, const MS_LoadOptions *opt)
 #ifdef MS_PATCHED_R3D
     p->rs = (MS_RenderSettings){ .shadowMode = MS_SHADOW_TILES, .fogCacheSub = 2, .depthPrepass = true,
                                  .renderScale = 1.0f, .upscale = R3D_UPSCALE_BICUBIC, .aoVolumeIntensity = 1.0f,
-                                 .sunShadow = true };
+                                 .sunShadow = true, .detailDistance = 1.0f };
 #else
     p->rs = (MS_RenderSettings){ .shadowMode = MS_SHADOW_CAMERA, .fogCacheSub = 2, .depthPrepass = true,
                                  .renderScale = 1.0f, .upscale = R3D_UPSCALE_BICUBIC, .aoVolumeIntensity = 1.0f,
-                                 .sunShadow = true };
+                                 .sunShadow = true, .detailDistance = 1.0f };
 #endif
 #ifdef MONOLITH_EDITOR
     p->rs.sunOn = true;
@@ -10896,6 +10963,18 @@ static bool DrawRangeObjects(const MS_Scene *s)
     return true;
 }
 
+int MS_BoxTriangles(const MS_Scene *s, int box)
+{
+    const SceneData *d = s->priv->d;
+    if (!d->gpu || box < 0 || box >= d->boxCount) return 0;
+    int m = d->boxRefs[box].material;
+    if (m < 0 || m >= d->materialCount) return 0;
+    if (!d->matDefs[m].merge || !d->hidden) return 12;
+    int visible = 0;
+    for (int f = 0; f < 6; f++) visible += !(d->hidden[box] >> f & 1);
+    return 2 * visible;
+}
+
 int MS_DrawRangeCount(const MS_Scene *s)
 {
     const SceneData *d = s->priv->d;
@@ -10919,6 +10998,7 @@ bool MS_GetDrawRange(const MS_Scene *s, int range, MS_DrawRangeInfo *out)
         out->bounds = R->bounds;
         // (a merged range drawn by a transform preview lacks the selected boxes' faces)
         out->triangles = merged ? R->mesh.indexCount / 3 : 12LL * R->count;
+        out->drawDistance = RangeDrawDistance(d, R, true);
         return true;
     }
     const DrawRange *R = &d->modelRanges[range - d->boxRangeCount];
@@ -10931,6 +11011,7 @@ bool MS_GetDrawRange(const MS_Scene *s, int range, MS_DrawRangeInfo *out)
     out->bounds = R->bounds;
     out->triangles = (long long)F->triangleCount * R->count;
     out->castShadow = G->castShadow;
+    out->drawDistance = RangeDrawDistance(d, R, false);
     return true;
 }
 
@@ -11631,6 +11712,7 @@ void MS_SetRenderSettings(MS_Scene *s, MS_RenderSettings rs)
     if (!(rs.aoVolumeIntensity >= 0.0f)) rs.aoVolumeIntensity = 1.0f;
     rs.shadowRange = rs.shadowRange > 0.0f ? Clamp(rs.shadowRange, 10.0f, 2000.0f) : 0.0f;
     rs.shadowSoftness = rs.shadowSoftness > 0.0f ? rs.shadowSoftness : 0.0f;
+    rs.detailDistance = rs.detailDistance > 0.0f ? Clamp(rs.detailDistance, 0.1f, 100.0f) : 0.0f;  // (NaN: off)
     if ((int)rs.upscale < (int)R3D_UPSCALE_NEAREST || (int)rs.upscale > (int)R3D_UPSCALE_LANCZOS) rs.upscale = R3D_UPSCALE_BICUBIC;
     MS_RenderSettings old = p->rs;
     p->rs = rs;
@@ -11668,9 +11750,10 @@ void MS_ApplyRenderResolution(const MS_Scene *s, int outW, int outH)
 
 // --- Graphics quality (MS_Quality, monolith_scene.h)
 // Presets from the measured trade-off knobs (.claude/skills/benchmarking/measurements.md "Trade-off knobs" and
-// docs/user-guide.md "Graphics settings"): ultra is the map exactly; high trades SSAO + SSIL for the baked
+// docs/user-guide.md "Graphics settings"): ultra is the map exactly (but for the detail distance,
+// on in every preset); high trades SSAO + SSIL for the baked
 // occlusion volume and bakes the fog's sun visibility; medium also renders at 75% with half
-// the fog march steps and a 4096 shadow map; low renders at 50% without AO and bloom.
+// the fog march steps and a 4096 shadow map; low renders at 50% without AO and bloom, 2048 shadow map.
 
 MS_Quality MS_QualityPreset(MS_QualityLevel level)
 {
@@ -11682,13 +11765,14 @@ MS_Quality MS_QualityPreset(MS_QualityLevel level)
         .bloom = true, .bloomIntensityScale = 1.0f,
         .exposure = 1.0f, .brightness = 1.0f, .contrast = 1.0f, .saturation = 1.0f,
         .depthPrepass = true,
+        .detailDistance = 1.0f,     // (on in every preset, ultra too: the developer's choice, 2026-11-08)
     };
     switch (level) {
     case MS_QUALITY_LOW:
         q.renderScale = 0.5f;
         q.ao = MS_AO_OFF;
         q.bloom = false;
-        q.shadowSize = 4096;
+        q.shadowSize = 2048;
         q.fogCacheVoxel = 0.5f;
         q.fogStepScale = 2.0f;
         break;
@@ -11734,7 +11818,7 @@ bool MS_QualityEqual(const MS_Quality *a, const MS_Quality *b)
            EQ(aoVolumeIntensity) && EQ(ssaoSamples) && EQ(ssilSamples) && EQ(ssaoRadius) && EQ(ssaoIntensity) &&
            EQ(ssilRadius) && EQ(volumetricFog) && EQ(fogStepScale) && EQ(fogLengthScale) && EQ(fogCacheVoxel) &&
            EQ(fogCacheSub) && EQ(distanceFog) && EQ(bloom) && EQ(bloomIntensityScale) && EQ(ssr) && EQ(ssgi) &&
-           EQ(exposure) && EQ(brightness) && EQ(contrast) && EQ(saturation) && EQ(depthPrepass);
+           EQ(exposure) && EQ(brightness) && EQ(contrast) && EQ(saturation) && EQ(depthPrepass) && EQ(detailDistance);
 #undef EQ
 }
 
@@ -11770,6 +11854,7 @@ static int QualitySanitize(MS_Quality *q)
         { "brightness", &q->brightness, ultra.brightness },
         { "contrast", &q->contrast, ultra.contrast },
         { "saturation", &q->saturation, ultra.saturation },
+        { "detailDistance", &q->detailDistance, ultra.detailDistance },
     };
     int n = 0;
     for (int i = 0; i < (int)(sizeof(fields) / sizeof(fields[0])); i++) {
@@ -11796,6 +11881,7 @@ void MS_ApplyQuality(MS_Scene *s, const MS_Quality *qIn)
     rs.fogCacheVoxel = q->fogCacheVoxel;
     rs.fogCacheSub = q->fogCacheSub;
     rs.depthPrepass = q->depthPrepass;
+    rs.detailDistance = q->detailDistance;
     if (q->ao == MS_AO_BAKED) {
         // 0.6 matched the mean brightness of full SSAO + SSIL in views 1-3 within 1.3/255
         rs.aoVolumeVoxel = q->aoVolumeVoxel > 0.0f ? q->aoVolumeVoxel : 0.5f;
@@ -11885,6 +11971,7 @@ bool MS_PushLights(MS_Scene *s, Camera3D camera, float aspect)
             TraceLog(LOG_INFO, "monolith_scene: first frames after the load %.1f + %.1f ms", p->firstFrameMs[0], p->firstFrameMs[1]);
     }
     p->frameStart = now;
+    p->viewPos = camera.position;
     if (SunOn(p)) {
         R3D_Light sun = d->sunLight;
         // (the tiles and the camera-fitted cache key on the range, so a new one redraws them)
@@ -11925,33 +12012,55 @@ bool MS_PushLights(MS_Scene *s, Camera3D camera, float aspect)
     return update;
 }
 
+// --- Draw distance (MS_RenderSettings.detailDistance)
+// A range farther from the camera than its draw distance is still submitted, as a draw that only
+// casts shadows: the sun's tiles and the light shadows are drawn once and must not lose it, and
+// R3D culls it per shadow view as before. So the image changes only where the camera saw it.
+
+// Is range R beyond its draw distance from the camera of the last MS_PushLights?
+static bool RangeFar(const MS_Private *p, const SceneData *d, const DrawRange *R, bool box)
+{
+    if (!(p->rs.detailDistance > 0.0f)) return false;
+    float limit = RangeDrawDistance(d, R, box) * p->rs.detailDistance;
+    if (!isfinite(limit)) return false;
+    Vector3 c = Vector3Clamp(p->viewPos, R->bounds.min, R->bounds.max);    // nearest point of its bounds
+    return Vector3DistanceSqr(p->viewPos, c) > limit * limit;
+}
+
 // One draw per cell and material. Instanced ones are clusters: R3D tests a cluster against
 // each view's frustum (the camera, the shadow maps) and skips its draw when outside
 static inline void DrawBoxRange(const MS_Private *p, const SceneData *d, const DrawRange *R)
 {
     const R3D_Material mat = d->materials[R->group].material;
+    bool far = RangeFar(p, d, R, true);
     if (!d->matDefs[R->group].merge) {
         int c = d->matDefs[R->group].faceCube;     // (a face layout's cube, else R3D's)
+        R3D_Mesh cube = c > 0 ? d->faceCubes[c - 1].mesh : p->cube;
         R3D_BeginCluster(R->bounds);
-        R3D_DrawMeshInstancedEx(c > 0 ? d->faceCubes[c - 1].mesh : p->cube, mat, d->inst[R->group], R->first, R->count);
+        R3D_DrawMeshInstancedEx(far ? ShadowOnlyMesh(cube) : cube, mat, d->inst[R->group], R->first, R->count);
         R3D_EndCluster();
     } else if (R->mesh.vertexCount > 0) {
         // A merged range is its mesh drawn as one instance at the origin: it stays in R3D's
         // instanced draw list, sorted like the cubes were (where boxes overlap exactly, the
         // draw order decides which one shows), and the cluster culls it the same way
         R3D_BeginCluster(R->bounds);
-        R3D_DrawMeshInstancedEx(R->mesh, mat, d->unit, 0, 1);
+        R3D_DrawMeshInstancedEx(far ? ShadowOnlyMesh(R->mesh) : R->mesh, mat, d->unit, 0, 1);
         R3D_EndCluster();
     }
 }
 
 // Models: the same per (file, materials, shadow) group; they go into the sun's shadow tiles
 // too, which are drawn once per map load like for the boxes
-static inline void DrawModelRange(const SceneData *d, const DrawRange *R)
+static inline void DrawModelRange(const MS_Private *p, const SceneData *d, const DrawRange *R)
 {
     const ModelGroup *G = &d->modelGroups[R->group];
+    R3D_Model model = G->model;
+    if (RangeFar(p, d, R, false)) {
+        if (!G->farMeshes) return;              // (no shadow either: nothing to draw)
+        model.meshes = G->farMeshes;
+    }
     R3D_BeginCluster(R->bounds);
-    R3D_DrawModelInstancedEx(G->model, G->inst, R->first, R->count);
+    R3D_DrawModelInstancedEx(model, G->inst, R->first, R->count);
     R3D_EndCluster();
 }
 
@@ -11964,7 +12073,7 @@ static void DrawFiltered(MS_Private *p, const SceneData *d)
         if (r >= n || !p->drawHidden[r]) DrawBoxRange(p, d, &d->boxRanges[r]);
     if (p->pv) PreviewDraw(p);
     for (int r = 0; r < d->modelRangeCount; r++)
-        if (d->boxRangeCount + r >= n || !p->drawHidden[d->boxRangeCount + r]) DrawModelRange(d, &d->modelRanges[r]);
+        if (d->boxRangeCount + r >= n || !p->drawHidden[d->boxRangeCount + r]) DrawModelRange(p, d, &d->modelRanges[r]);
 }
 #endif
 
@@ -11983,7 +12092,7 @@ void MS_DrawGeometry(MS_Scene *s)
 #ifdef MONOLITH_EDITOR
     if (p->pv) PreviewDraw(p);      // the boxes of a transform preview
 #endif
-    for (int r = 0; r < d->modelRangeCount; r++) DrawModelRange(d, &d->modelRanges[r]);
+    for (int r = 0; r < d->modelRangeCount; r++) DrawModelRange(p, d, &d->modelRanges[r]);
 #ifdef MONOLITH_EDITOR
     }
 #endif

@@ -302,6 +302,9 @@
 //   --dump-scene-diff <file>   the same without object indices and map lines, references
 //                  by name (group, material, model file): diff two of these to see only the
 //                  objects an edit changed, even after inserted lines (src/dumpscene.c)
+//   --tri-report <file>   the map's triangles as the runtime draws them (hidden faces left out),
+//                  per viewpoint what the detail distance leaves out, then per group, material,
+//                  map line and draw range (format: src/trireport.c); loads in a hidden window
 //   --inspect-model <file>   print what a model file contains and exit, without a window:
 //                  bounds, size, origin, mesh/triangle/vertex counts, materials (= the slots
 //                  for material.N) and their textures (embedded or external, sizes), up axis
@@ -489,6 +492,7 @@
 #include "inspect.h"
 #include "bake.h"
 #include "dumpscene.h"
+#include "trireport.h"
 #include "mapedit.h"
 #include "editmode.h"
 #include "windowemu.h"
@@ -998,6 +1002,7 @@ static int Run(int argc, char **argv)
     const char *mapPath = NULL;
     const char *dumpPath = NULL;
     const char *dumpScenePath = NULL;   // --dump-scene, --dump-scene-diff
+    const char *triReportPath = NULL;   // --tri-report
     const char *dumpEntitiesPath = NULL;    // --dump-entities
     const char *applyEditsPath = NULL;      // --apply-edits
     const char *editScriptPath = NULL;      // --edit-script
@@ -1177,6 +1182,7 @@ static int Run(int argc, char **argv)
         else if (strcmp(a, "--dump-boxes") == 0) { NEED(1); dumpPath = argv[++i]; }
         else if (strcmp(a, "--dump-scene") == 0) { NEED(1); dumpScenePath = argv[++i]; dumpSceneDiff = false; }
         else if (strcmp(a, "--dump-scene-diff") == 0) { NEED(1); dumpScenePath = argv[++i]; dumpSceneDiff = true; }
+        else if (strcmp(a, "--tri-report") == 0) { NEED(1); triReportPath = argv[++i]; }
         else if (strcmp(a, "--dump-entities") == 0) { NEED(1); dumpEntitiesPath = argv[++i]; }
         else if (strcmp(a, "--apply-edits") == 0) { NEED(1); applyEditsPath = argv[++i]; }
         else if (strcmp(a, "--inspect-model") == 0) { NEED(1); inspectPath = argv[++i]; }
@@ -1370,7 +1376,7 @@ static int Run(int argc, char **argv)
     // may not (a mistyped or forgotten flag would put the game on the developer's screen).
     // (--edit-script is no mode of its own: it runs before --shot or a --dump-* flag, see below)
     bool windowless = shotPath || (bench && headless) || dumpPath || dumpScenePath || dumpEntitiesPath || applyEditsPath ||
-                      exportDir || compilePath || classifyText || bake.material;
+                      exportDir || compilePath || classifyText || bake.material || triReportPath;
     bool editDump = editScriptPath && (dumpPath || dumpScenePath || dumpEntitiesPath);
     if (editScriptPath && !shotPath && !editDump) {
         fprintf(stderr, "monolith: --edit-script runs before --shot or --dump-boxes / --dump-scene(-diff) / --dump-entities: give one of them\n");
@@ -1421,7 +1427,7 @@ static int Run(int argc, char **argv)
     // --quality, then the single flags: they apply to this run and are never saved.
     // Last --settings-set: a change "as if made in the panel" (applies, and is saved).
     bool automated = shotPath || bench || dumpPath || dumpScenePath || dumpEntitiesPath || applyEditsPath || exportDir ||
-                     compilePath || classifyText || bake.material;
+                     compilePath || classifyText || bake.material || triReportPath;
     const char *settingsFile = noSettings ? NULL : settingsPath ? settingsPath : automated ? NULL : GfxDefaultPath();
     GfxSettings gfx = GfxDefaults();
     if (settingsFile) {
@@ -1580,7 +1586,8 @@ static int Run(int argc, char **argv)
     // --bench --headless too: then nothing ever appears on screen
     // --dump-scene of a map with models: model files load through R3D, which needs GL
     // --edit-script with a dump: the edits go live on the GPU scene first (a hidden window)
-    bool hidden = shotPath || (bench && headless) || dumpScenePath || editDump || paintApply;
+    // --tri-report: the hidden faces are found by the GPU upload
+    bool hidden = shotPath || (bench && headless) || dumpScenePath || editDump || paintApply || triReportPath;
     windowFlags |= hidden ? FLAG_WINDOW_HIDDEN : FLAG_WINDOW_RESIZABLE;
     if (!hidden && gfx.vsync) windowFlags |= FLAG_VSYNC_HINT;     // (settings: Performance)
     SetConfigFlags(windowFlags);
@@ -1590,7 +1597,7 @@ static int Run(int argc, char **argv)
     // their numbers line up with the visible runs.
     bool headlessBench = bench && headless;
     InitWindow(headlessBench ? 1920 : shotPath ? shotW : 1600, headlessBench ? 1006 : shotPath ? shotH : 900,
-               bench ? "monolith-bench" : (shotPath || dumpScenePath || editDump || paintApply) ? "monolith-shot" : "monolith");
+               bench ? "monolith-bench" : (shotPath || dumpScenePath || editDump || paintApply || triReportPath) ? "monolith-shot" : "monolith");
     SetTargetFPS(hidden || bench ? 0 : FpsTarget(gfx.fpsCap));
     // Esc closes the prompt box, snip mode, the panel and request-close prompts; it no longer
     // quits (the window's close button ends WindowShouldClose()). Raylib's default Esc exit
@@ -1692,6 +1699,15 @@ static int Run(int argc, char **argv)
         if (dumpScenePath) {
             bool ok = DumpScene(scene, dumpScenePath, dumpSceneDiff);
             fprintf(ok ? stdout : stderr, ok ? "monolith: wrote the scene to %s\n" : "monolith: cannot write %s\n", dumpScenePath);
+            MS_Unload(scene);
+            R3D_Close();
+            CloseWindow();
+            return ok ? 0 : 1;
+        }
+        if (triReportPath) {
+            bool ok = WriteTriReport(scene, triReportPath, gfx.q.detailDistance);
+            fprintf(ok ? stdout : stderr, ok ? "monolith: wrote the triangle report to %s\n" : "monolith: cannot write %s\n",
+                    triReportPath);
             MS_Unload(scene);
             R3D_Close();
             CloseWindow();
