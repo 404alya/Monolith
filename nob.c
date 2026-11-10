@@ -16,8 +16,12 @@
 //                                $R3D_DIR/build-linux-profile (so build-linux stays Release), plus the
 //                                profiling tool build/linux-profile/profile (tools/profile.c, libc only)
 //   ./build.sh --win          -> Windows x86_64 build in build/win/ (MinGW-w64): monolith.exe (statically
-//                                linked) + maps/ (packages); the folder can be zipped and copied as-is
-//   ./build.sh --win run [args]  -> Windows build, then run it under wine (replaces this process)
+//                                linked) + maps/ (packages); the folder can be zipped and copied as-is.
+//                                It is the view-only editor (benchmark, view, debug a map; no editing or
+//                                requests: MONOLITH_EDITING in src/common.h, src/main.c "View-only build")
+//   ./build.sh --win run [args]  -> Windows build, then run it under wine (replaces this process): the way to
+//                                open the view-only build on Linux (from an agent's shell only with --shot or
+//                                --bench --headless, as the Linux build)
 //   ./build.sh --win debug|lsan  -> refused: the sanitizers don't work with MinGW
 // Any other first argument builds like the plain Linux build but writes no compile_commands.json (as the
 // shell script did: only "" and "run" write it).
@@ -1169,7 +1173,8 @@ static int BuildWindows(int argc, char **argv)
     // generated config; --inspect-model reads models through assimp, src/inspect.c), assimp's zlib (the PNG
     // writer, src/png.c). R3D_BUILD_TYPE_NAME: shown in bench reports. -I runtime: the scene runtime's header;
     // MS_PATCHED_R3D: the runtime may use monolith's R3D patches; MONOLITH_EDITOR: the editor build of the
-    // runtime. Then the sources (src/*.c, runtime/*.c in glob order) and the xatlas object.
+    // runtime. Then the sources (src/*.c but launcher.c and import.c, runtime/*.c in glob order) and the xatlas
+    // object.
     // -s: strip the symbols (a smaller .exe). -static: libgcc, libstdc++ (assimp) and winpthread are linked
     // in as well, leaving only system DLLs (opengl32, gdi32, winmm, kernel32, ...) as imports. -lstdc++:
     // assimp is C++; opengl32/gdi32/winmm/shell32: what raylib's GLFW and the editor call.
@@ -1184,7 +1189,16 @@ static int BuildWindows(int argc, char **argv)
                    nob_temp_sprintf("-I%s/external/assimp/contrib/zlib", r3dWin),
                    "-DR3D_BUILD_TYPE_NAME=\"Release\"",
                    nob_temp_sprintf("-I%s/runtime", gRoot), "-DMS_PATCHED_R3D", "-DMONOLITH_EDITOR");
+    // The Windows build is the view-only editor (MONOLITH_EDITING 0, src/common.h): the launcher and
+    // --import (POSIX, Linux only) are left out; their headers give the stubs it links against.
+    size_t first = cmd.count, kept = first;
     AppendGlob(&cmd, nob_temp_sprintf("%s/src/*.c", gRoot));
+    for (size_t k = first; k < cmd.count; k++) {
+        const char *base = strrchr(cmd.items[k], '/');
+        base = base ? base + 1 : cmd.items[k];
+        if (strcmp(base, "launcher.c") != 0 && strcmp(base, "import.c") != 0) cmd.items[kept++] = cmd.items[k];
+    }
+    cmd.count = kept;
     AppendGlob(&cmd, nob_temp_sprintf("%s/runtime/*.c", gRoot));
     nob_cmd_append(&cmd, xatlasObj, "-o", nob_temp_sprintf("%s/monolith.exe", out),
                    "-s", "-static", nob_temp_sprintf("-L%s/lib", r3dWin), "-lr3d", "-lraylib", "-lassimp",
@@ -1426,10 +1440,6 @@ static int BuildLinux(int argc, char **argv)
             nob_cmd_append(&e, nob_temp_sprintf("%s/%s", gRoot, units[i].file));
             ENTRY_END();
         }
-        ENTRY_BEGIN();
-        nob_cmd_append(&e, cc, "-std=c11", "-Wall", "-Wextra", srcInclude,
-                       nob_temp_sprintf("%s/tests/unit/wincmd_test.c", gRoot));
-        ENTRY_END();
 #undef ENTRY_BEGIN
 #undef ENTRY_END
         if (!WriteCompileCommands(gRoot, gR3dDir, r3dLinux, &entries)) Fail(1);

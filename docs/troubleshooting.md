@@ -28,6 +28,6 @@
 
 **A request stays `queued`.** The coordinator runs requests on the same map one at a time and code requests alone, at most three at once; a request on a map whose earlier request is asking a question (`[?]` in the HUD) waits until you answer it in the coordinator terminal. If the coordinator's terminal was closed, the next submit starts a new one, which picks up the queue. `requests/.coordinator/log` shows what the coordinator did (starts, claims, state changes, requeues); a request that never appears there was never claimed.
 
-**The coordinator asks for approval of every command.** The working folder has no `CLAUDE.md` (a copied build folder, the unsupported Windows build), or `MONOLITH_CLAUDE_SAFE` is set. Run the game from a repository checkout to work without prompts.
+**The coordinator asks for approval of every command.** The working folder has no `CLAUDE.md` (a copied build folder), or `MONOLITH_CLAUDE_SAFE` is set. Run the game from a repository checkout to work without prompts.
 
 **A request finished as `failed` with "Interrupted".** The coordinator stopped while that request was changing files. Its `result.md` lists the changed files; check them, then send the request again if needed.

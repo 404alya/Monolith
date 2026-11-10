@@ -36,6 +36,10 @@ const char *MsgText(const MonoMsg *m);
 // Frees the owned text; the message is empty again
 void MsgFree(MonoMsg *m);
 
+// The view-only build's refusal (MONOLITH_EDITING 0, common.h): the HUD line of a refused key, the
+// error of a refused flag
+#define MSG_VIEW_ONLY "view-only build: editing and requests need the Linux editor"
+
 // A heap printf for one-off texts (sized to fit; free it). NULL when out of memory.
 char *MonoStrf(const char *fmt, ...) MSG_PRINTF(1, 2);
 char *MonoStrv(const char *fmt, va_list ap);

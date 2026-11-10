@@ -9,4 +9,4 @@
 18394907280734056012 - task: decide medium/low shadow map size, low render scale Graphics preset values. docs/known-issues.md, Open decisions 5
 16849537629031576708 - idea: skip volumetric fog lookups in uniform air Bit-identical first, then a closed form for lit rays. project-history skill, Private maps and the weed pre-pass
 16845012953862367618 - idea: compile the game per file, in parallel Incremental build is one serial compile (~11 s). project-history skill, The build program: nob.c
-14071567816549104739 - task: remove the editor-only Windows code launcher.c _WIN32 branch, wincmd_test.c, --win run, %APPDATA% path. project-history, The stated purpose
+10246106896539768441 - idea: native macOS export build on a GitHub macos-14 runner export build.sh macOS branch (clang, Mac frameworks, from source), ad-hoc signed .app, --shot check. docs/export.md

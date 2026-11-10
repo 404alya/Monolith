@@ -6,17 +6,23 @@
 // typing searches every section at once, UP / DOWN / PGUP / PGDN / HOME / END scroll, ESC or F1
 // closes. While the menu or the panel is open the camera and the game keys are frozen and the
 // cursor is free (like the settings panel). Keep the table in step with src/main.c's header
-// comment and docs/user-guide.md.
+// comment and docs/user-guide.md. The view-only build (MONOLITH_EDITING 0, common.h) lists only
+// the keys that work there: no editing sections, no rows marked EDITING, its own VIEWING rows.
 #include "keyspanel.h"
 #include <ctype.h>
 
-typedef struct { int section; const char *keys, *action; } KeyRow;
+// only: 0 in both builds, EDITING only in the editing build, VIEWING only in the view-only build
+enum { EDITING = 1, VIEWING = 2 };
+typedef struct { int section; const char *keys, *action; int only; } KeyRow;
 
 static const char *const SECTIONS[] = {
     "Walking", "Spectator", "Selecting and requests", "Snip and volumes", "Edit mode", "Grab, rotate, scale", "Rotate gizmo",
     "Draw mode", "Panels and views",
 };
 #define SECTION_COUNT ((int)(sizeof(SECTIONS) / sizeof(SECTIONS[0])))
+// The sections only the editing build has: snip and volumes, edit mode, grab / rotate / scale, the
+// rotate gizmo, draw mode
+static const bool SECTION_EDITING[SECTION_COUNT] = { false, false, false, true, true, true, true, true, false };
 
 static const KeyRow ROWS[] = {
     { 0, "WASD + mouse", "walk and look" },
@@ -26,7 +32,7 @@ static const KeyRow ROWS[] = {
     { 0, "TAB", "spectator mode and back" },
     { 0, "1 .. 6", "toggle volumetric fog, distance fog, SSAO, SSIL, bloom, sun (relative to the map)" },
     { 0, "F1", "hide / show the HUD" },
-    { 0, "F9", "export the open map to export/<map>-<stamp>/" },
+    { 0, "F9", "export the open map to export/<map>-<stamp>/", EDITING },
     { 0, "F12", "save screenshot.png" },
     { 0, "ESC", "this menu (when there is nothing else to close)" },
 
@@ -36,18 +42,20 @@ static const KeyRow ROWS[] = {
     { 1, "LEFT / RIGHT", "fly to the previous / next viewpoint" },
     { 1, "P", "print and copy the view as --pos / --look" },
     { 1, "G", "move the player here" },
-    { 1, "R", "fly back to where the last finished request was made" },
+    { 1, "R", "fly back to where the last finished request was made", EDITING },
     { 1, "TAB", "back to walking" },
 
-    { 2, "LMB", "select the object under the crosshair (edit mode: under the cursor)" },
+    { 2, "LMB", "select the object under the crosshair (edit mode: under the cursor)", EDITING },
+    { 2, "LMB", "select the object under the crosshair (the HUD shows its group and map line)", VIEWING },
     { 2, "SHIFT+LMB", "add / remove that object" },
     { 2, "CTRL+LMB", "select its whole group (CTRL+SHIFT+LMB: add it)" },
-    { 2, "RMB", "clear the selection (edit mode: a short click)" },
-    { 2, "ENTER", "the request prompt box" },
-    { 2, "in the prompt box", "type; SHIFT+ENTER new line, CTRL+V paste, ENTER send, ESC cancel" },
-    { 2, "K / SHIFT+K", "take the latest / all finished requests off the list" },
-    { 2, "CTRL+K, then n", "request n: finished off the list, queued cancel, running: n again cancels" },
-    { 2, "CTRL+SHIFT+K", "close the coordinator's terminal" },
+    { 2, "RMB", "clear the selection (edit mode: a short click)", EDITING },
+    { 2, "RMB", "clear the selection", VIEWING },
+    { 2, "ENTER", "the request prompt box", EDITING },
+    { 2, "in the prompt box", "type; SHIFT+ENTER new line, CTRL+V paste, ENTER send, ESC cancel", EDITING },
+    { 2, "K / SHIFT+K", "take the latest / all finished requests off the list", EDITING },
+    { 2, "CTRL+K, then n", "request n: finished off the list, queued cancel, running: n again cancels", EDITING },
+    { 2, "CTRL+SHIFT+K", "close the coordinator's terminal", EDITING },
 
     { 3, "C", "snip mode: drag screen regions (SHIFT+drag adds one); ENTER prompt; RMB / ESC / C leave" },
     { 3, "V", "volume mode: LMB first corner, LMB opposite corner, mouse / wheel height, LMB / ENTER add" },
@@ -113,8 +121,9 @@ static const KeyRow ROWS[] = {
     { 8, "F3", "inspector outlines: by material, by shader, by draw kind, off" },
     { 8, "SHIFT+F3", "inspector panel: SPACE hide / show, I alone (CTRL+I while typing)" },
     { 8, "F4 / SHIFT+F4", "buffer view: albedo, normal, ORM, SSAO, SSIL, ... and back" },
-    { 8, "F5", "id panel: ENTER fly there, DELETE remove the id, SHIFT+DELETE the objects" },
-    { 8, "I (edit mode)", "model picker: type to filter, ENTER place at the cursor, ESC close" },
+    { 8, "F5", "id panel: ENTER fly there, DELETE remove the id, SHIFT+DELETE the objects", EDITING },
+    { 8, "F5", "id panel: type to filter, ENTER fly there and select", VIEWING },
+    { 8, "I (edit mode)", "model picker: type to filter, ENTER place at the cursor, ESC close", EDITING },
     { 8, "in a list panel", "type to filter, UP / DOWN / PGUP / PGDN / HOME / END select" },
 };
 #define ROW_COUNT ((int)(sizeof(ROWS) / sizeof(ROWS[0])))
@@ -133,17 +142,32 @@ static bool Contains(const char *s, const char *needle)
     return false;
 }
 
+// What this build lists (the editing build: everything but the VIEWING rows)
+static bool RowShown(int item)
+{
+    if (MONOLITH_EDITING) return ROWS[item].only != VIEWING;
+    return ROWS[item].only != EDITING && !SECTION_EDITING[ROWS[item].section];
+}
+
+static bool SectionShown(int s) { return MONOLITH_EDITING || !SECTION_EDITING[s]; }
+
+static const char *SectionName(int s)
+{
+    return !MONOLITH_EDITING && s == 2 ? "Selecting" : SECTIONS[s];     // (view-only: no requests)
+}
+
 static bool Match(int item, const char *filter, void *user)
 {
     (void)user;
-    return Contains(ROWS[item].keys, filter) || Contains(ROWS[item].action, filter) || Contains(SECTIONS[ROWS[item].section], filter);
+    return RowShown(item) &&
+           (Contains(ROWS[item].keys, filter) || Contains(ROWS[item].action, filter) || Contains(SectionName(ROWS[item].section), filter));
 }
 
 // Without a filter: only the rows of the current section
 static bool MatchSection(int item, const char *filter, void *user)
 {
     (void)filter;
-    return ROWS[item].section == *(const int *)user;
+    return ROWS[item].section == *(const int *)user && RowShown(item);
 }
 
 static void Refilter(KeysPanel *k)
@@ -184,7 +208,7 @@ void KeysOpen(KeysPanel *k, const char *section)
 {
     k->section = 0;
     for (int s = 0; section && s < SECTION_COUNT; s++)
-        if (Contains(SECTIONS[s], section)) { k->section = s; break; }
+        if (SectionShown(s) && Contains(SectionName(s), section)) { k->section = s; break; }
     OpenPanel(k);
 }
 
@@ -210,7 +234,8 @@ void KeysUpdate(KeysPanel *k, bool escFree)
     if (IsKeyPressed(KEY_ESCAPE) || IsKeyPressed(KEY_F1)) { Close(k); return; }
     int step = IsKeyPressed(KEY_RIGHT) ? 1 : IsKeyPressed(KEY_LEFT) ? -1 : 0;
     if (step && k->list.filterLen == 0) {
-        k->section = (k->section + step + SECTION_COUNT) % SECTION_COUNT;
+        do k->section = (k->section + step + SECTION_COUNT) % SECTION_COUNT;
+        while (!SectionShown(k->section));
         k->list.sel = k->list.scroll = 0;
         Refilter(k);
     }
@@ -228,7 +253,7 @@ static void DrawRow(int item, Rectangle row, bool selected, void *user)
     int ax = x + KEYS_W;
     if (k->list.filterLen > 0) {
         // searching every section: say which one the row is from
-        const char *sec = TextFormat("%s:", SECTIONS[r->section]);
+        const char *sec = TextFormat("%s:", SectionName(r->section));
         UiText(sec, ax, ty, UI_S, UI_DIM);
         ax += UiMeasure(sec, UI_S) + 8;
     }
@@ -262,7 +287,8 @@ void KeysDraw(KeysPanel *k, int screenW, int screenH)
     // Section tabs above the list (click one to show it)
     int tx = (int)r.x, ty = (int)r.y - 34;
     for (int s = 0; s < SECTION_COUNT; s++) {
-        int tw = UiMeasure(SECTIONS[s], UI_S) + 20;
+        if (!SectionShown(s)) continue;
+        int tw = UiMeasure(SectionName(s), UI_S) + 20;
         Rectangle tab = { (float)tx, (float)ty, (float)tw, 28 };
         bool on = s == k->section && k->list.filterLen == 0;
         if (k->interactive && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(GetMousePosition(), tab)) {
@@ -275,10 +301,10 @@ void KeysDraw(KeysPanel *k, int screenW, int screenH)
         bool hover = !on && k->interactive && CheckCollisionPointRec(GetMousePosition(), tab);
         UiRoundRect(tab, UI_RADIUS, UI_PANEL, BLANK);
         UiRoundRect(tab, UI_RADIUS, on ? UI_INK : hover ? UI_HOVER : UI_RAISED, BLANK);
-        UiText(SECTIONS[s], tx + 10, ty + (28 - UiLineHeight(UI_S)) / 2, UI_S, on ? UI_ON_INK : hover ? UI_HOT : UI_BODY);
+        UiText(SectionName(s), tx + 10, ty + (28 - UiLineHeight(UI_S)) / 2, UI_S, on ? UI_ON_INK : hover ? UI_HOT : UI_BODY);
         tx += tw + 6;
     }
-    const char *title = k->list.filterLen > 0 ? "Keybindings: every section" : TextFormat("Keybindings: %s", SECTIONS[k->section]);
+    const char *title = k->list.filterLen > 0 ? "Keybindings: every section" : TextFormat("Keybindings: %s", SectionName(k->section));
     k->visibleRows = UiListDraw(&k->list, r, title, 26, DrawRow, k, HINTS);
 }
 

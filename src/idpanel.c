@@ -194,6 +194,11 @@ EditModeResult IdPanelUpdate(IdPanel *p, EditMode *m, Designer *d, Spectator *sp
     if (ctrl) while (GetCharPressed() > 0) { }      // (CTRL+I is no 'i' in the filter)
     UiListKeys(&p->list, p->visibleRows);
     if (p->list.dirty) UiListRefilter(&p->list, p->itemCount, MatchItem, p);
+    // The view-only build (common.h): the panel only finds and flies; its edits are refused
+    if (!MONOLITH_EDITING && (IsKeyPressed(KEY_DELETE) || (ctrl && IsKeyPressed(KEY_I)))) {
+        DesignerMessageStatic(d, true, MSG_VIEW_ONLY);
+        return EDITMODE_NONE;
+    }
     if (ctrl && IsKeyPressed(KEY_I)) return EditModeIdKey(m, d);
     int item = UiListSelected(&p->list);
     if (item < 0) return EDITMODE_NONE;
@@ -222,8 +227,13 @@ EditModeResult IdPanelUpdate(IdPanel *p, EditMode *m, Designer *d, Spectator *sp
 
 // #region Drawing
 
+#if MONOLITH_EDITING
 #define HINTS "{UP}/{DOWN} select|{ENTER} fly to, select|{DEL} remove the id|{SHIFT+DEL} remove the objects|" \
               "{CTRL+I} id for the selection|type to filter|{ESC} close"
+#else
+// (the view-only build: no edits from the panel)
+#define HINTS "{UP}/{DOWN} select|{ENTER} fly to, select|type to filter|{ESC} close"
+#endif
 
 // Text cut by characters until it fits in room px ("..." added); drawn at x
 static void FitText(const char *s, int x, int y, int room, int size, Color c)

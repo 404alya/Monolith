@@ -31,7 +31,7 @@ sudo apt install build-essential clang cmake python3 libx11-dev libxrandr-dev li
 examples/build.sh       # the examples of using a map in your own program (examples/README.md)
 ```
 
-The output folder is self-contained: copy or zip it as it is. You need an OpenGL 3.3 GPU and driver. The editor is made for Linux desktops running the i3 window manager (sway takes the same commands); other systems and window managers are not supported. Exported maps and the examples also build for Windows ([below](#windows)).
+The output folder is self-contained: copy or zip it as it is. You need an OpenGL 3.3 GPU and driver. The editor is made for Linux desktops running the i3 window manager (sway takes the same commands); other systems and window managers are not supported for editing. On other systems the game is a view-only build for benchmarking, viewing and debugging a map ([below](#windows)). Exported maps and the examples also build for Windows.
 
 ## First steps
 
@@ -53,13 +53,13 @@ Requests are carried out by [Claude Code](https://claude.com/claude-code). You n
 
 The first request opens one terminal, the **coordinator**, which works through every request you send and hands each to a helper agent; you answer its questions there. If `claude` is missing, the HUD says `coordinator: not started: claude not found …` and your requests stay queued until it can start. On i3 / sway the terminal moves to workspace 10 (`MONOLITH_WORKSPACE`).
 
-**Permissions.** In a checkout of this repository the sessions run without approval prompts, so you don't have to approve every command; they are bound by the rules in `CLAUDE.md` (never delete files, never open windows on your screen, treat your request text and downloads as data, work only inside the repo). Where there is no `CLAUDE.md` (a copied build folder, the unsupported Windows build) the game keeps Claude Code's approval prompts. `MONOLITH_CLAUDE_SAFE=1` keeps them everywhere.
+**Permissions.** In a checkout of this repository the sessions run without approval prompts, so you don't have to approve every command; they are bound by the rules in `CLAUDE.md` (never delete files, never open windows on your screen, treat your request text and downloads as data, work only inside the repo). Where there is no `CLAUDE.md` (a copied build folder) the game keeps Claude Code's approval prompts. `MONOLITH_CLAUDE_SAFE=1` keeps them everywhere.
 
 ## Windows
 
 The editor is not supported on Windows. The Windows build is for the exported code: `./build.sh --win` cross-compiles on Linux with MinGW-w64 (Arch: `mingw-w64-gcc`; Debian / Ubuntu: `gcc-mingw-w64`) and builds the static Windows libraries that every `--export` ships in `prebuilt/win/lib/`, and it compile-checks the runtime for Windows. An export then builds for Windows with its own `./build.sh --win` ([docs/export.md](docs/export.md)), the examples with `examples/build.sh --win` ([examples/README.md](examples/README.md)).
 
-It also writes `build/win/monolith.exe` (`./build.sh --win run` starts it under wine). That is a by-product, not a supported editor: its Windows code paths exist (the request launcher among them, compile-tested only), but they are not maintained as a way to work. There is no native Windows build script.
+It also writes `build/win/monolith.exe`, the **view-only build**: it opens a map to benchmark it on another GPU, look at it or debug a driver problem, but never edits it or sends requests. Walking, flying, the spectator camera, the effect toggles (1–6), the HUD (F1), graphics settings (F2), the render inspector (F3), buffer views (F4), the id panel (F5, read-only), screenshots (F12), hot reload of a map edited elsewhere and the read-only flags (`--shot`, `--bench`, `--dump-*`, `--tri-report`, `--inspect-model`) work; the edit and draw modes, the request prompt, snip and volume modes, the request list keys, export (F9) and the editing flags say "view-only build: editing and requests need the Linux editor" (the list: [docs/command-line.md](docs/command-line.md#view-only-build)). Copy `build/win/` to a Windows machine and run `monolith.exe --map maps/<name>`, or on Linux run it under wine: `./build.sh --win run --map maps/<name>`. There is no native Windows build script.
 
 ## Documentation
 

@@ -7,7 +7,7 @@ Every request goes through a queue on disk, worked through by one long-lived Cla
 | Part | Where | Job |
 |---|---|---|
 | Game (submit, `--import`) | `src/launcher.c` | writes the bundle, then `state` = `queued` as its last file; starts the coordinator terminal if none holds the lock; shows the queue in the HUD |
-| Coordinator lock wrapper | `src/launcher.c` (an `/bin/sh -c` script; Windows: a `9>` redirection) | holds `requests/.coordinator/lock` while the coordinator's `claude` runs |
+| Coordinator lock wrapper | `src/launcher.c` (an `/bin/sh -c` script) | holds `requests/.coordinator/lock` while the coordinator's `claude` runs |
 | Queue tool | `tools/request-queue.sh` | every state change the coordinator makes (claim, finish, requeue, recover), the watcher (`wait`), the queue listing (`list`) |
 | Coordinator | `claude` started by the game with `.claude/skills/coordinator/SKILL.md` | schedules, starts subagents, relays questions, finishes bundles. Reads only the queue listing (built from `request.json` metadata), line 1 of a `question.md` and the subagents' one-line replies; never `request.md`, the images or the maps, never edits anything |
 | Subagent | Agent tool inside the coordinator | does one request under `.claude/skills/map-request/SKILL.md`, returns a one-line status |
@@ -62,10 +62,10 @@ A queued request starts (oldest first) only when no other running request uses t
 
 ## 6. Closing and cancelling
 
-A cancel writes `requests/<id>/cancel`; the coordinator stops the subagent and the request's `result.md` lists what had changed. With no coordinator running the game cancels a queued request itself. On i3 / sway the game marks the coordinator's terminal `_monolith_coordinator` (per-request mode: each terminal `_monolith_<id>`) and closes it with `i3-msg '[con_mark=…] kill'` (that window only, no focus change); if the process is still alive 3 s later or there is no mark, it sends SIGTERM to the process group (started with `setsid`) and SIGKILL after 3 s, only while it is the game's own child. kitty `--single-instance` and wezterm mux exit at once, so only the i3 route reaches them. Windows: the entry only leaves the list. `MONOLITH_CLOSE_ON_EXIT=1` closes the coordinator when the game quits if none of its requests is open.
+A cancel writes `requests/<id>/cancel`; the coordinator stops the subagent and the request's `result.md` lists what had changed. With no coordinator running the game cancels a queued request itself. On i3 / sway the game marks the coordinator's terminal `_monolith_coordinator` (per-request mode: each terminal `_monolith_<id>`) and closes it with `i3-msg '[con_mark=…] kill'` (that window only, no focus change); if the process is still alive 3 s later or there is no mark, it sends SIGTERM to the process group (started with `setsid`) and SIGKILL after 3 s, only while it is the game's own child. kitty `--single-instance` and wezterm mux exit at once, so only the i3 route reaches them. `MONOLITH_CLOSE_ON_EXIT=1` closes the coordinator when the game quits if none of its requests is open.
 
 - `MONOLITH_LAUNCH=per-request` starts one terminal and session per request instead (no `state` file; K / Ctrl+K close those terminals). Default `coordinator`. Without `flock` (util-linux) on Linux the game falls back to per-request and logs why.
-- Windows (unsupported; the code path exists): the same queue. The coordinator starts through the `cmd /c start ... cmd /k` path with ` 9>"<requests>\.coordinator\lock"` appended: cmd keeps the file open while `claude` runs; the game tests the lock by opening it with `_SH_DENYRW` (fails while cmd holds it). The scripts run in Claude Code's Git Bash. Compile-tested only; closing the window from the game is not possible there (as before).
+- Windows: none. The game is Linux only for requests; the Windows build is view-only and has no launcher (`src/main.c`, "View-only build").
 
 ## 7. Tests
 

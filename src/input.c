@@ -18,7 +18,7 @@
 //   click <left|right>    a button down this frame, up the next one
 //   down lmb|rmb / up lmb|rmb   hold / release a mouse button (a drag: down lmb, move ..., up lmb)
 // Keys: A-Z, 0-9, ENTER, KP_ENTER, ESCAPE, BACKSPACE, TAB, DELETE, SPACE, MINUS, PERIOD,
-// SHIFT, RSHIFT, CTRL, RCTRL, ALT, RALT, UP, DOWN, LEFT, RIGHT, LBRACKET, RBRACKET.
+// SHIFT, RSHIFT, CTRL, RCTRL, ALT, RALT, UP, DOWN, LEFT, RIGHT, LBRACKET, RBRACKET, F1 .. F12.
 #define MONOLITH_INPUT_IMPL
 #include "input.h"
 #include "monolith_scene.h"
@@ -57,6 +57,8 @@ static const struct { const char *name; int key; } KEY_NAMES[] = {
     { "CTRL", KEY_LEFT_CONTROL }, { "RCTRL", KEY_RIGHT_CONTROL }, { "ALT", KEY_LEFT_ALT }, { "RALT", KEY_RIGHT_ALT },
     { "UP", KEY_UP }, { "DOWN", KEY_DOWN }, { "LEFT", KEY_LEFT }, { "RIGHT", KEY_RIGHT },
     { "LBRACKET", KEY_LEFT_BRACKET }, { "RBRACKET", KEY_RIGHT_BRACKET },
+    { "F1", KEY_F1 }, { "F2", KEY_F2 }, { "F3", KEY_F3 }, { "F4", KEY_F4 }, { "F5", KEY_F5 }, { "F6", KEY_F6 },
+    { "F7", KEY_F7 }, { "F8", KEY_F8 }, { "F9", KEY_F9 }, { "F10", KEY_F10 }, { "F11", KEY_F11 }, { "F12", KEY_F12 },
 };
 
 static int KeyByName(const char *w)

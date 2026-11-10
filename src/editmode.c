@@ -594,6 +594,12 @@ EditModeResult EditModeUpdate(EditMode *m, Designer *d, Camera3D cam, float dt)
     if (m->idOpen) return IdPanel(m, d);
 
     bool ctrl = Ctrl(), shift = Shift();
+    // The view-only build (common.h): the mode never opens and nothing is edited, saved or undone
+    if (!MONOLITH_EDITING) {
+        if (IsKeyPressed(KEY_M) || (ctrl && (IsKeyPressed(KEY_S) || IsKeyPressed(KEY_Z) || IsKeyPressed(KEY_Y))))
+            DesignerMessageStatic(d, true, MSG_VIEW_ONLY);
+        return EDITMODE_NONE;
+    }
     if (ctrl && IsKeyPressed(KEY_Z)) return History(m, d, !shift);
     if (ctrl && IsKeyPressed(KEY_Y)) return History(m, d, false);
     if (ctrl && IsKeyPressed(KEY_S)) {

@@ -1587,6 +1587,12 @@ DesignerAction DesignerUpdate(Designer *d, float dt)
     if (d->snipping) return SnipInput(d);
     if (frozen) return DESIGNER_NONE;   // the frame(s) right after the box closed
 
+    // The view-only build (common.h): no prompt box, snip or volume mode (so neither of the two
+    // branches above is ever taken there)
+    if (!MONOLITH_EDITING && (IsKeyPressed(KEY_V) || IsKeyPressed(KEY_C) || IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER))) {
+        DesignerMessageStatic(d, true, MSG_VIEW_ONLY);
+        return DESIGNER_NONE;
+    }
     if (IsKeyPressed(KEY_V)) {
         if (IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT)) VolumeFromSelection(d);
         else if (d->volumeMode) VolumeModeEnd(d);

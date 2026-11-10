@@ -13,10 +13,9 @@
 //    copies its assets into the package, translates the scene into format 2, fills MAP.md
 //    and lists what it couldn't translate in result.md.
 // Runs without a window. The project folder is only read (listed), never executed here.
+// Linux only, like the launcher: the view-only build leaves it out (nob.c; the stub in import.h).
 
-#ifndef _WIN32
-#   define _XOPEN_SOURCE 700           // POSIX 2008 + XSI: realpath, mkdir
-#endif
+#define _XOPEN_SOURCE 700           // POSIX 2008 + XSI: realpath, mkdir
 
 #include "import.h"
 #include "dirscan.h"
@@ -25,35 +24,21 @@
 #include <ctype.h>
 #include <errno.h>
 #include <time.h>
-
-#ifdef _WIN32
-#   include <direct.h>
-#   include <stdlib.h>
-#else
-#   include <stdlib.h>
-#   include <sys/stat.h>
-#endif
+#include <stdlib.h>
+#include <sys/stat.h>
 
 #define INVENTORY_MAX 200       // files listed per kind in request.md
 
 static void AbsPathOf(const char *in, char *out, int outSize)
 {
-#ifdef _WIN32
-    if (!_fullpath(out, in, outSize)) snprintf(out, outSize, "%s", in);
-#else
     char buf[4096];
     if (realpath(in, buf)) snprintf(out, outSize, "%s", buf);
     else snprintf(out, outSize, "%s", in);
-#endif
 }
 
 static int MakeOneDir(const char *path)
 {
-#ifdef _WIN32
-    return _mkdir(path);
-#else
     return mkdir(path, 0755);
-#endif
 }
 
 static void JsonStr(FILE *f, const char *s)
@@ -112,16 +97,10 @@ static int InventoryKind(const char *rel)
     return -1;
 }
 
-// malloc'd absolute, resolved path of p (symlinks resolved on POSIX), NULL if it doesn't exist
+// malloc'd absolute, resolved path of p (symlinks resolved), NULL if it doesn't exist
 static char *RealPathDup(const char *p)
 {
-#ifdef _WIN32
-    char *r = _fullpath(NULL, p, 0);
-    if (r && !FileExists(r)) { free(r); r = NULL; }
-    return r;
-#else
     return realpath(p, NULL);
-#endif
 }
 
 // True if `path` (absolute) lies inside folder `dir` (absolute, no trailing separator)
@@ -331,11 +310,7 @@ static bool ImportInto(const char *mapsDir, const char *projectDirIn, const char
     }
 
     char binary[2048];
-#ifdef _WIN32
-    snprintf(binary, sizeof(binary), "%smonolith.exe", GetApplicationDirectory());
-#else
     snprintf(binary, sizeof(binary), "%smonolith", GetApplicationDirectory());
-#endif
     char prompt[4608];
     snprintf(prompt, sizeof(prompt), "Import the raylib + R3D project in %s into the new map package %s/: "
              "translate its whole scene (geometry, models, textures, materials, shaders, lights, sky, fog, "

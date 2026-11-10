@@ -150,7 +150,7 @@ static const Row ROWS[] = {
       V_BOOL, OFF(vsync) },
     { GFX_GROUP_PERF, 0, "Depth pre-pass", "depth_prepass", "same image; off only for A/B tests (slower)",
       V_BOOL, OFF(q.depthPrepass) },
-    // --- Editor
+    // --- Editor (keep these rows last: the view-only build's panel stops before them, GfxRowCount)
     { GFX_GROUP_EDITOR, 0, "Save edits", "edit_save", "manual: CTRL+S writes the map; auto: every edit, undo and redo at once",
       V_ENUM, OFF(editSave), .names = NAMES("manual", "auto") },
 };
@@ -163,7 +163,10 @@ _Static_assert(sizeof(MS_AoMode) == sizeof(int) && sizeof(R3D_UpscaleMode) == si
 static const char *const GROUP_NAMES[GFX_GROUP_COUNT] = {
     "Display", "Shadows", "Ambient occlusion", "Fog", "Post", "Performance", "Editor" };
 
-int GfxRowCount(void) { return ROW_COUNT; }
+// The panel's rows. The view-only build (MONOLITH_EDITING 0, common.h) can't edit, so its panel
+// leaves out the Editor rows at the end; the file still reads and writes their keys (ROW_COUNT)
+#define EDITOR_ROW_COUNT 1
+int GfxRowCount(void) { return MONOLITH_EDITING ? ROW_COUNT : ROW_COUNT - EDITOR_ROW_COUNT; }
 static bool RowOk(int r) { return r >= 0 && r < ROW_COUNT; }
 GfxGroup GfxRowGroup(int r) { return RowOk(r) ? ROWS[r].group : GFX_GROUP_DISPLAY; }
 GfxRowKind GfxRowKindOf(int r) { return RowOk(r) ? ROWS[r].kind : GFX_ROW_VALUE; }

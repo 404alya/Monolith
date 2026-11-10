@@ -31,6 +31,10 @@ typedef struct {
     bool droppedModelArg;   // MONOLITH_CLAUDE_ARGS had a --model without a name (ignored)
 } ModelChoice;
 
+// The view-only build (MONOLITH_EDITING 0, common.h) has no launcher: launcher.c is POSIX and
+// left out of that build (nob.c); the stubs at the end stand in for the calls its modules keep
+#if MONOLITH_EDITING
+
 const char *ModelTierName(ModelTier tier);
 // Pure classifier (no environment): tier + reason (set in *reason: a literal for fixed
 // reasons, a heap text otherwise; MsgFree it); strips nothing
@@ -121,5 +125,36 @@ bool LauncherLastDone(Vector3 *eye, float *yaw, float *pitch);
 // Frees the request list and the launcher's texts (call once at exit; requests started later
 // are tracked anew)
 void LauncherShutdown(void);
+
+
+#else   // !MONOLITH_EDITING: no requests; the callers refuse before they get here (main.c)
+static inline const char *ModelTierName(ModelTier tier) { (void)tier; return "none"; }
+static inline void LauncherChooseModel(const ModelQuery *q, ModelChoice *out)
+{
+    (void)q;
+    *out = (ModelChoice){ .tier = MODEL_TIER_DEFAULT, .reason = { .text = MSG_VIEW_ONLY }, .source = "none" };
+}
+static inline void ModelChoiceFree(ModelChoice *c) { MsgFree(&c->reason); }
+static inline const char *LauncherNote(void) { return MSG_VIEW_ONLY; }
+static inline unsigned char LauncherSubmit(const DesignRequest *req, Image view, Image marked)
+{
+    (void)req; (void)view; (void)marked;
+    MS_SetError(MSG_VIEW_ONLY);
+    return 1;
+}
+static inline void LauncherScrubEnv(void) { }
+static inline void LauncherUpdate(float dt) { (void)dt; }
+static inline int LauncherDrawHud(int x, int y) { (void)x; (void)y; return 0; }
+static inline unsigned char LauncherCloseLatestDone(void) { return 1; }
+static inline int LauncherCloseAllDone(void) { return 0; }
+static inline unsigned char LauncherCloseNumber(int number) { (void)number; MS_SetError(MSG_VIEW_ONLY); return 2; }
+static inline unsigned char LauncherCloseCoordinator(void) { return 2; }
+static inline int LauncherNewestNumber(void) { return 0; }
+static inline int LauncherOpenOnMap(const char *mapPath, int *newest) { (void)mapPath; *newest = 0; return 0; }
+static inline bool LauncherClosing(void) { return false; }
+static inline void LauncherCloseOnExit(void) { }
+static inline bool LauncherLastDone(Vector3 *eye, float *yaw, float *pitch) { (void)eye; (void)yaw; (void)pitch; return false; }
+static inline void LauncherShutdown(void) { }
+#endif
 
 #endif

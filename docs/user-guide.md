@@ -146,7 +146,7 @@ The HUD lists the requests, numbered: `queued`, `running`, `[?]` (a question is 
 
 Each finished request leaves a `result.md` in its folder: what changed (map lines before and after), before/after screenshots, the sources and licences of any downloaded model, and anything left open. A request that changed C code says "restart needed": restart the game to see it.
 
-In a checkout of this repository the coordinator runs Claude Code without permission prompts, bound by the rules in `CLAUDE.md` (it never deletes files, never opens windows on your screen, treats your request text and downloads as data, works only inside the repo). Where the game's folder has no `CLAUDE.md` (a copied build folder, Windows) it keeps Claude Code's approval prompts. Set `MONOLITH_CLAUDE_SAFE=1` to keep them everywhere, or `MONOLITH_LAUNCH=per-request` for one terminal per request. On i3 / sway the terminal is moved to workspace 10 (`MONOLITH_WORKSPACE`). How the queue works inside: [request-queue.md](request-queue.md).
+In a checkout of this repository the coordinator runs Claude Code without permission prompts, bound by the rules in `CLAUDE.md` (it never deletes files, never opens windows on your screen, treats your request text and downloads as data, works only inside the repo). Where the game's folder has no `CLAUDE.md` (a copied build folder) it keeps Claude Code's approval prompts. Set `MONOLITH_CLAUDE_SAFE=1` to keep them everywhere, or `MONOLITH_LAUNCH=per-request` for one terminal per request. On i3 / sway the terminal is moved to workspace 10 (`MONOLITH_WORKSPACE`). How the queue works inside: [request-queue.md](request-queue.md).
 
 ## Render inspector (F3, Shift+F3, F4)
 
@@ -189,7 +189,11 @@ The panel has a preset selector, rows for display, shadows, ambient occlusion, f
 | medium | high + 75% render scale, half the fog steps, 4096 shadow map |
 | low | 50% render scale, no AO, no bloom, baked fog with half the steps, 2048 shadow map |
 
-Roughly, high takes two thirds of ultra's frame time, medium 40% and low a quarter (measured on the default map with an RTX 4050 Laptop GPU; your machine's numbers will differ, the F2 panel shows them live). The settings are saved in `~/.config/monolith/settings.ini` (`%APPDATA%\monolith\` in the unsupported Windows build) as `key = value` lines; `--settings`, `--no-settings` and `--quality` change that for one run. Vsync is off and frames are uncapped by default; the panel's performance rows change that.
+Roughly, high takes two thirds of ultra's frame time, medium 40% and low a quarter (measured on the default map with an RTX 4050 Laptop GPU; your machine's numbers will differ, the F2 panel shows them live). The settings are saved in `~/.config/monolith/settings.ini` (`%APPDATA%\monolith\` in the view-only Windows build) as `key = value` lines; `--settings`, `--no-settings` and `--quality` change that for one run. Vsync is off and frames are uncapped by default; the panel's performance rows change that.
+
+## The view-only build
+
+On any system but Linux (the Windows build `build/win/monolith.exe`, also under wine: `./build.sh --win run --map maps/<name>`) the game only opens a map to benchmark, look at and debug it. Walking and flying, the spectator camera and its viewpoints, 1–6, F1, F2 (its settings are saved; no Editor row), F3 / Shift+F3, F4, F5 (filter and fly to an id; no edits), F12, selecting with the mouse, hot reload of a map edited elsewhere (say over a shared folder) and the keybindings panel work. M, B, Enter, C, V, I, Ctrl+S, Ctrl+Z, F9, K / Ctrl+K, R and Delete / Ctrl+I in the id panel only show "view-only build: editing and requests need the Linux editor". The keybindings panel lists only the keys that work; the refused flags: [command-line.md](command-line.md#view-only-build).
 
 ## Making maps
 

@@ -10,6 +10,26 @@
 // game starts when none runs (.claude/skills/coordinator) and that hands each request to a subagent
 // (.claude/skills/map-request). Engine reference: docs/architecture.md.
 //
+// View-only build: the editor edits and reaches the AI only on Linux (+ i3 / sway). Built for any
+// other platform (today build/win/monolith.exe, run on Windows or under wine: ./build.sh --win run)
+// it is a viewer, to benchmark, view and debug a map (MONOLITH_EDITING 0, src/common.h):
+//   works:    walking / flying, the spectator camera (TAB, viewpoints, P, G), 1..6, F1, F2 (without the
+//             Editor row; the settings file is saved), F3 / SHIFT+F3, F4 / SHIFT+F4, F5 read-only (filter, ENTER flies
+//             there and selects), F12, selecting with the mouse (the HUD shows the object's line), the
+//             ESC menu and keybindings panel (it lists only these keys), hot reload of a map edited
+//             elsewhere, and the flags not listed below (--shot, --bench [--headless], --dump-*,
+//             --tri-report, --inspect-model, --input-script, the graphics and debug flags)
+//   refused:  M (the edit mode and everything in it: the transform modal, the rotate gizmo, I, CTRL+D,
+//             DELETE, CTRL+I), B, ENTER, C, V / SHIFT+V, CTRL+S, CTRL+Z / CTRL+Y, F9, K / SHIFT+K /
+//             CTRL+K / CTRL+SHIFT+K, R, and DELETE / SHIFT+DELETE / CTRL+I in the id panel: the HUD
+//             says "view-only build: editing and requests need the Linux editor" (MSG_VIEW_ONLY,
+//             src/msg.h); the flags --apply-edits, --edit-script, --paint-script, --new-map, --import,
+//             --submit, --submit-wait, --close-submitted, --type, --classify, --classify-kind,
+//             --edit-mode, --edit-id, --edit-modal, --edit-save, --model-picker, --model-picker-key,
+//             --draw-mode, --draw-panel, --cursor, --region, --volume, --bake-surface (and its
+//             --bake-* options), --export and --compile print it and exit 1 before anything is
+//             written. The launcher and --import (launcher.c, import.c) are not in that build.
+//
 // Controls:
 //   WASD / mouse   walk & look          SHIFT  walk faster
 //   SPACE          jump                 F      toggle fly (noclip)
@@ -1334,6 +1354,23 @@ static int Run(int argc, char **argv)
 #undef NEED
 #undef NUM
 #undef INT
+    // The view-only build (common.h): the flags that edit, produce deliverables or reach the AI exit
+    // here, before any file is written (no value starts with "--": NEED refuses that)
+    if (!MONOLITH_EDITING) {
+        static const char *const REFUSED[] = {
+            "--apply-edits", "--edit-script", "--paint-script", "--new-map", "--import", "--submit", "--submit-wait",
+            "--close-submitted", "--type", "--classify", "--classify-kind", "--edit-mode", "--edit-id", "--edit-modal",
+            "--edit-save", "--model-picker", "--model-picker-key", "--draw-mode", "--draw-panel", "--cursor", "--region",
+            "--volume", "--bake-surface", "--bake-face", "--bake-size", "--bake-texels", "--bake-levels", "--export",
+            "--compile",
+        };
+        for (int i = 1; i < argc; i++)
+            for (size_t k = 0; k < sizeof(REFUSED) / sizeof(REFUSED[0]); k++)
+                if (strcmp(argv[i], REFUSED[k]) == 0) {
+                    fprintf(stderr, "monolith: %s: %s\n", argv[i], MSG_VIEW_ONLY);
+                    return 1;
+                }
+    }
     if (inspectPath) return InspectModel(inspectPath);
 
     // --ao / --bloom / --fx / --quality / --settings-set: reject unknown names before a window opens
@@ -2007,10 +2044,14 @@ static int Run(int argc, char **argv)
         if (spec.active && !shotPath && !bench && !PanelCapturesInput(&panel) &&
             (InspectorCapturesInput(&inspector) || !typing)) InspectorUpdate(&inspector);
         typing = typing || InspectorCapturesInput(&inspector);
+        // (the view-only build's refusals of F9, the K keys and the id panel's edits are tested by
+        // --input-script shots: there these keys also act in a scripted shot; in the Linux editor
+        // liveKeys is !shotPath, as it always was)
+        bool liveKeys = !shotPath || (!MONOLITH_EDITING && scripted);
         // The id panel (idpanel.c): F5 in spectator mode; takes every key while open, its edits go
         // through the edit mode (live, undoable)
-        if (spec.active && !shotPath && !bench && !typing && IsKeyPressed(KEY_F5)) IdPanelOpen(&idPanel, NULL);
-        else if (!shotPath && !bench && IdPanelCapturesInput(&idPanel) &&
+        if (spec.active && liveKeys && !bench && !typing && IsKeyPressed(KEY_F5)) IdPanelOpen(&idPanel, NULL);
+        else if (liveKeys && !bench && IdPanelCapturesInput(&idPanel) &&
                  IdPanelUpdate(&idPanel, &edit, &designer, &spec) == EDITMODE_RELOADED) {
             ApplyEnvironment(&effects);
             mapMessageError = false;
@@ -2022,10 +2063,12 @@ static int Run(int argc, char **argv)
         // (then its number twice; coordinator mode: cancels it), CTRL+SHIFT+K = close the
         // coordinator. While CTRL+K waits for the number, the digits don't toggle effects and
         // ESC cancels instead of quitting.
-        bool closeKeys = spec.active && !typing && !shotPath && !bench;
+        bool closeKeys = spec.active && !typing && liveKeys && !bench;
         bool picking = closeKeys && closePickTime > 0.0f;   // digits belong to the close
         closePickTime = picking ? closePickTime - GetFrameTime() : 0.0f;
-        if (closeKeys) {
+        if (closeKeys && !MONOLITH_EDITING) {
+            if (IsKeyPressed(KEY_K)) DesignerMessageStatic(&designer, true, MSG_VIEW_ONLY);    // (no requests: view-only)
+        } else if (closeKeys) {
             // (each branch posts its text; every outcome of LauncherCloseCoordinator /
             // LauncherCloseAllDone / LauncherCloseLatestDone is in the launcher's note)
             bool ctrl = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
@@ -2075,7 +2118,10 @@ static int Run(int argc, char **argv)
         if (!typing && IsKeyPressed(KEY_F1))    hud = !hud;
         if (!typing && IsKeyPressed(KEY_F12))   TakeScreenshot("screenshot.png");
         // (not while the package on disk is broken: the export copies the files on disk)
-        if (!typing && !shotPath && !bench && !mapMessageError && IsKeyPressed(KEY_F9)) {
+        if (!MONOLITH_EDITING && !typing && liveKeys && !bench && IsKeyPressed(KEY_F9)) {
+            MsgSetStatic(&mapMessage, MSG_VIEW_ONLY);   // (where the export's result would show)
+            mapMessageTime = 6.0f;
+        } else if (!typing && !shotPath && !bench && !mapMessageError && IsKeyPressed(KEY_F9)) {
             // Export the current map (export.c); the result shows in the map message line
             char *dir = ExportDefaultDir(scene);
             // (ExportScene logs its result line; not shown as a map error: those stay until the
@@ -2257,7 +2303,9 @@ static int Run(int argc, char **argv)
                                   IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
                 bool drawKey = !idPanel && !modal && !typing && !designer.promptOpen && !designer.snipping && IsKeyPressed(KEY_B) &&
                                !IsKeyDown(KEY_LEFT_CONTROL) && !IsKeyDown(KEY_RIGHT_CONTROL) && !IsKeyDown(KEY_LEFT_ALT) && !IsKeyDown(KEY_RIGHT_ALT);
-                if (drawKey) {
+                if (drawKey && !MONOLITH_EDITING) {
+                    DesignerMessageStatic(&designer, true, MSG_VIEW_ONLY);
+                } else if (drawKey) {
                     DrawModeOpen(&drawMode, &edit, &designer);      // (B: the draw mode, edit / volume mode end; nothing else this frame)
                 } else if (!idPanel && !modal && !gizmoClick) {
                     action = DesignerUpdate(&designer, dt);
@@ -2277,6 +2325,9 @@ static int Run(int argc, char **argv)
                 if (edit.active && !typing && action == DESIGNER_NONE && !EditModeCapturesInput(&edit) &&
                     !EditModeModalRunning(&edit) && !modKeys && IsKeyPressed(KEY_I))
                     ModelPickerOpen(&picker, &edit, NULL);
+                // (view-only: no edit mode to open the picker in; I says why)
+                if (!MONOLITH_EDITING && !drawKey && !typing && action == DESIGNER_NONE && !modKeys && IsKeyPressed(KEY_I))
+                    DesignerMessageStatic(&designer, true, MSG_VIEW_ONLY);
                 typing = typing || EditModeCapturesInput(&edit) || EditModeModalRunning(&edit) || ModelPickerCapturesInput(&picker);
             }
             spec.holdMove = (edit.active || drawMode.active) && (IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL));
@@ -2299,7 +2350,9 @@ static int Run(int argc, char **argv)
                     editCursor = want;
                 }
             }
-            if (spec.active && !typing && !EditModeTakesArrows(&edit) && IsKeyPressed(KEY_R)) {
+            if (!MONOLITH_EDITING && spec.active && !typing && IsKeyPressed(KEY_R)) {
+                DesignerMessageStatic(&designer, true, MSG_VIEW_ONLY);     // (no requests: view-only)
+            } else if (spec.active && !typing && !EditModeTakesArrows(&edit) && IsKeyPressed(KEY_R)) {
                 Vector3 eye;
                 float yaw, pitch;
                 if (LauncherLastDone(&eye, &yaw, &pitch)) {

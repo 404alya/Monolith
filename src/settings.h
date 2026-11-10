@@ -51,7 +51,7 @@ typedef enum {
     GFX_ROW_PRESET,             // the preset selector (key "preset")
 } GfxRowKind;
 
-int GfxRowCount(void);
+int GfxRowCount(void);                          // rows of the panel (view-only build: no Editor rows)
 GfxGroup GfxRowGroup(int row);
 GfxRowKind GfxRowKindOf(int row);
 const char *GfxRowLabel(int row);

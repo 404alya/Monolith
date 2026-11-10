@@ -26,7 +26,7 @@
 // Where things go:
 //   - requests/ and the working directory of Claude Code: the repo root baked in by
 //     build.sh (PROJECT_PATH) while it exists, i.e. in a repo checkout; otherwise the
-//     directory of the executable (a copied build/linux or build/win folder).
+//     directory of the executable (a copied build/linux folder).
 //     MONOLITH_REQUESTS_DIR (tests only) moves requests/ (bundles, queue, lock) elsewhere.
 //   - terminal: $MONOLITH_TERMINAL, else $TERMINAL, else the first of alacritty, kitty,
 //     foot, wezterm, xterm found in PATH. The variables may hold a program name or path
@@ -41,7 +41,7 @@
 //     --dangerously-skip-permissions, so the developer isn't asked to approve each
 //     command; the guard rails live in CLAUDE.md and the coordinator / map-request
 //     skills (.claude/skills/) instead. MONOLITH_CLAUDE_SAFE=1 (any value but empty or "0") drops the two flags.
-//     So does a working directory without CLAUDE.md (Windows, a copied build folder): with no
+//     So does a working directory without CLAUDE.md (a copied build folder): with no
 //     guard rails to read, the session keeps Claude Code's approval prompts.
 //   - model: per request MONOLITH_MODEL, MONOLITH_MODEL_FAST / _DEFAULT / _HEAVY and an @tier
 //     prompt prefix steer it (region "Model choice"); the coordinator passes it to the
@@ -70,47 +70,27 @@
 //     closes the finished requests' terminals (coordinator mode: the coordinator, if none of
 //     this run's requests is still open) when the game quits.
 //
-// Windows: the same bundle and queue, then `cmd /c start "<title>" /D <root> cmd /k
-// "<claude>" <permission flags> --model <name> ...` via _spawnvp (no workspace move)
-// (<process.h>, so no <windows.h> clash with raylib); the coordinator's command ends in
-// ` 9>"<requests>\.coordinator\lock"`, which cmd holds open while claude runs. Only
-// compile-tested; failures of `start` itself can't be seen from here.
+// Linux only: the other platforms' build is view-only and leaves this file out (nob.c; the
+// stubs in launcher.h; MONOLITH_EDITING in common.h).
 
-#ifndef _WIN32
-#   define _XOPEN_SOURCE 700           // POSIX 2008 + XSI: fork, setsid, readlink, realpath
-#   define _DEFAULT_SOURCE             // flock (the coordinator's lock)
-#endif
+#define _XOPEN_SOURCE 700           // POSIX 2008 + XSI: fork, setsid, readlink, realpath
+#define _DEFAULT_SOURCE             // flock (the coordinator's lock)
 
 #include "launcher.h"
-#include "wincmd.h"
 #include "ui.h"
 #include "png.h"
 #include <ctype.h>
 #include <errno.h>
 #include <math.h>
 #include <time.h>
-
-#ifdef _WIN32
-#   include <direct.h>     // _mkdir
-#   include <io.h>         // _access
-#   include <process.h>    // _spawnvp
-#   include <share.h>      // _SH_DENYRW (the coordinator's lock)
-#   include <fcntl.h>
-#   include <sys/stat.h>
-#   include <stdint.h>
-// Declared by hand like the GL functions in main.c (<windows.h> clashes with raylib).
-// x64 has one calling convention, so this matches kernel32.dll.
-extern int CloseHandle(void *handle);
-#else
-#   include <fcntl.h>
-#   include <signal.h>
-#   include <sys/file.h>   // flock
-#   include <sys/stat.h>
-#   include <sys/types.h>
-#   include <sys/wait.h>
-#   include <unistd.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <sys/file.h>   // flock
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
 extern char **environ;
-#endif
 
 #ifndef PROJECT_PATH
 #   define PROJECT_PATH ""
@@ -140,12 +120,8 @@ static void AbsPath(const char *in, char *out, int outSize);
 static void InitPaths(void)
 {
     if (requestsDir[0]) return;
-#ifdef _WIN32
-    snprintf(rootDir, sizeof(rootDir), "%s", GetApplicationDirectory());
-#else
     if (PROJECT_PATH[0] && DirectoryExists(PROJECT_PATH)) snprintf(rootDir, sizeof(rootDir), "%s", PROJECT_PATH);
     else snprintf(rootDir, sizeof(rootDir), "%s", GetApplicationDirectory());
-#endif
     size_t n = strlen(rootDir);
     if (n == 0) snprintf(rootDir, sizeof(rootDir), "./");
     else if (rootDir[n - 1] != '/' && rootDir[n - 1] != '\\' && n + 1 < sizeof(rootDir)) strcat(rootDir, "/");
@@ -169,34 +145,22 @@ static void InitPaths(void)
 // Absolute path of a file (falls back to the input if it can't be resolved)
 static void AbsPath(const char *in, char *out, int outSize)
 {
-#ifdef _WIN32
-    if (!_fullpath(out, in, outSize)) snprintf(out, outSize, "%s", in);
-#else
     char buf[4096];
     if (realpath(in, buf)) snprintf(out, outSize, "%s", buf);
     else snprintf(out, outSize, "%s", in);
-#endif
 }
 
 static void BinaryPath(char *out, int outSize)
 {
-#ifdef _WIN32
-    snprintf(out, outSize, "%smonolith.exe", GetApplicationDirectory());
-#else
     char buf[4096];
     ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
     if (n > 0) { buf[n] = 0; snprintf(out, outSize, "%s", buf); }
     else snprintf(out, outSize, "%smonolith", GetApplicationDirectory());
-#endif
 }
 
 static int MakeDir(const char *path)
 {
-#ifdef _WIN32
-    return _mkdir(path);
-#else
     return mkdir(path, 0755);
-#endif
 }
 
 // Words of a command line (an environment variable): a heap copy of the text, split in place
@@ -250,14 +214,12 @@ static bool ClaudeArgs(ArgList *a, bool *dropped, bool warn)
     return true;
 }
 
-#ifndef _WIN32
 static const char *BaseName(const char *path)
 {
     const char *b = path;
     for (const char *p = path; *p; p++) if (*p == '/' || *p == '\\') b = p + 1;
     return b;
 }
-#endif
 
 // Lowercase ASCII words of the prompt joined by '-', cut at a word boundary
 static void MakeSlug(const char *prompt, char *out, int outSize)
@@ -1728,12 +1690,10 @@ static bool WriteRequestJson(const char *path, const Bundle *B)
 typedef struct {
     bool launched;              // false: launching failed (or never tried)
     bool exited;                // the terminal process is gone (result may still come)
-#ifndef _WIN32
     pid_t pid;                  // the terminal (session + process group leader, setsid)
     char mark[160];             // i3/sway mark set on its window by the workspace helper
     int killStage;              // after a close: 1 = WM closed it, wait; 2 = SIGTERM sent, wait
     double killTime;            // clockTime of the next escalation step
-#endif
 } TermWindow;
 
 typedef struct {
@@ -1784,13 +1744,10 @@ static struct {
 // Its window's i3 / sway mark: fixed, so a restarted game can still close it through the WM
 static void InitCoordinatorMark(void)
 {
-#ifndef _WIN32
     if (requestsHash) snprintf(coord.term.mark, sizeof(coord.term.mark), "_monolith_coordinator_%08x", requestsHash);
     else snprintf(coord.term.mark, sizeof(coord.term.mark), "_monolith_coordinator");
-#endif
 }
 
-#ifndef _WIN32
 // Every child is reaped with waitpid(pid, WNOHANG) from LauncherUpdate. Not waitpid(-1):
 // that would also collect children some other code might start and wait for. Not a
 // SIGCHLD handler: it would interrupt raylib's and the driver's system calls. Children
@@ -1805,7 +1762,6 @@ static void TrackChild(pid_t pid)
     // out of memory: not tracked, init reaps it after we exit
     else TraceLog(LOG_WARNING, "monolith: out of memory, pid %d not tracked", (int)pid);
 }
-#endif
 
 static bool Listed(const OpenRequest *q) { return q->used && !q->closed; }
 
@@ -1822,11 +1778,7 @@ static bool WindowMaybeOpen(const OpenRequest *q)
 static bool Retired(const OpenRequest *q)
 {
     if (!q->used) return true;
-#ifndef _WIN32
     if (q->closed) return q->term.killStage == 0;
-#else
-    if (q->closed) return true;
-#endif
     return q->done && clockTime - q->doneTime > DONE_SHOW_TIME && !WindowMaybeOpen(q);
 }
 
@@ -1864,14 +1816,11 @@ void LauncherShutdown(void)
     free(reqs);
     reqs = NULL;
     reqCount = reqCap = 0;
-#ifndef _WIN32
     free(children);
     children = NULL;
     childCount = childCap = 0;
-#endif
 }
 
-#ifndef _WIN32
 // Is this child of ours still running? Reaps it (and marks its requests exited) if not.
 // While a child is unreaped its pid, and so its process group id, can't be reused: that
 // is what makes kill(-pid) safe in CloseRequest.
@@ -1899,7 +1848,6 @@ static bool ChildAlive(pid_t pid)
 }
 
 static void CloseEscalate(void);
-#endif
 
 // Reads the first non-empty line of a bundle file (result.md, question.md) into out, without
 // leading '#'s and blanks. *lastSize: the file's size at the previous call (NULL: accept only
@@ -1966,11 +1914,9 @@ void LauncherUpdate(float dt)
     if (pollTimer < POLL_INTERVAL) return;
     pollTimer = 0.0f;
 
-#ifndef _WIN32
     // (a reaped child leaves the list: its slot then holds another one, so don't advance)
     for (int i = 0; i < childCount; ) if (ChildAlive(children[i])) i++;
     CloseEscalate();
-#endif
 
     CoordinatorCheck();
 
@@ -2082,7 +2028,7 @@ bool LauncherLastDone(Vector3 *eye, float *yaw, float *pitch)
 // #endregion
 
 // ======================================================================================
-// #region Launching (Linux: fork + execve; Windows: cmd start)
+// #region Launching (fork + execve)
 // ======================================================================================
 
 // The request terminal's window title: "monolith-claude: <slug> <HHMMSS>" plus the bundle
@@ -2112,7 +2058,7 @@ static bool ClaudeSafe(void)
 }
 
 // The permission flags are passed only where the session can read its guard rails: the
-// working directory (rootDir) must hold CLAUDE.md. Without it (Windows, a copied build folder)
+// working directory (rootDir) must hold CLAUDE.md. Without it (a copied build folder)
 // the session keeps Claude Code's approval prompts, and the log says why once.
 static bool SkipPermissions(void)
 {
@@ -2139,14 +2085,10 @@ static bool FindClaude(char *out, int outSize)
     const char *env = getenv("MONOLITH_CLAUDE");
     if (env && *env) return FindProgram(env, out, outSize);
     if (FindProgram("claude", out, outSize)) return true;
-#ifdef _WIN32
-    return false;
-#else
     if (!getenv("HOME")) return false;
     char cand[2048];
     snprintf(cand, sizeof(cand), "%s/.local/bin/claude", getenv("HOME"));
     return FindProgram(cand, out, outSize);
-#endif
 }
 
 // An AI agent's shell (CLAUDECODE / AI_AGENT set) never opens a real terminal: a scripted --shot run
@@ -2166,100 +2108,6 @@ static bool AgentShellRefuses(void)
     MS_SetError("refusing to open a terminal from an AI agent's shell (set MONOLITH_TERMINAL to tools/stub-terminal.sh)");
     return true;
 }
-
-#ifdef _WIN32
-
-static bool FindProgram(const char *name, char *out, int outSize)
-{
-    static const char *exts[] = { ".exe", ".cmd", ".bat", "" };
-    if (strpbrk(name, "/\\")) {         // a path (MONOLITH_CLAUDE)
-        snprintf(out, outSize, "%s", name);
-        return _access(out, 0) == 0;
-    }
-    const char *path = getenv("PATH");
-    char dirs[8192];
-    snprintf(dirs, sizeof(dirs), "%s", path ? path : "");
-    for (char *d = dirs; d && *d; ) {
-        char *semi = strchr(d, ';');
-        if (semi) *semi = 0;
-        for (int e = 0; e < 4; e++) {
-            int w = snprintf(out, outSize, "%s\\%s%s", d, name, exts[e]);
-            if (*d && w > 0 && w < outSize && _access(out, 0) == 0) return true;
-        }
-        d = semi ? semi + 1 : NULL;
-    }
-    const char *home = getenv("USERPROFILE");
-    if (home) {
-        snprintf(out, outSize, "%s\\.local\\bin\\%s.exe", home, name);
-        if (_access(out, 0) == 0) return true;
-    }
-    return false;
-}
-
-static bool Launch(const char *title, const char *mark, const char *prompt, const char *model, const char *lock,
-                   TermWindow *t)
-{
-    (void)t;
-    (void)mark;
-    if (AgentShellRefuses()) return false;
-    char claude[1024];
-    if (!FindClaude(claude, sizeof(claude))) {
-        MS_SetError("claude not found in PATH (or MONOLITH_CLAUDE)");
-        return false;
-    }
-    char dir[1024];
-    snprintf(dir, sizeof(dir), "%s", rootDir);
-    for (char *c = dir; *c; c++) if (*c == '/') *c = '\\';
-    size_t n = strlen(dir);
-    if (n > 1 && dir[n - 1] == '\\') dir[n - 1] = 0;     // "C:\x\" would escape the closing quote
-
-    // (quoting for cmd /k: see wincmd.c)
-    ArgList args;
-    if (!ClaudeArgs(&args, NULL, false)) { MS_SetError("out of memory"); return false; }
-    int skipped = 0;
-    char *cmd = WinClaudeCommand(claude, SKIP_PERMISSION_FLAGS, SkipPermissions() ? SKIP_PERMISSION_COUNT : 0, model,
-                                 args.tok, args.count, prompt, &skipped);
-    FreeArgs(&args);
-    if (!cmd) { MS_SetError("out of memory"); return false; }
-    if (skipped) TraceLog(LOG_WARNING, "monolith: %d word%s with a double quote left out of the claude command line (cmd can't pass them)",
-                          skipped, skipped == 1 ? "" : "s");
-    // The coordinator: ` 9>"<lock>"` inside the outer quotes, so cmd keeps the lock file
-    // open (without delete / write sharing) while claude runs (CoordinatorAlive)
-    if (lock) {
-        if (strchr(lock, '"')) { free(cmd); MS_SetError("the requests folder has a double quote in its path"); return false; }
-        size_t cl = strlen(cmd);
-        char *with = malloc(cl + strlen(lock) + 8);
-        if (!with) { free(cmd); MS_SetError("out of memory"); return false; }
-        memcpy(with, cmd, cl - 1);                              // without the closing outer quote
-        sprintf(with + cl - 1, " 9>\"%s\"\"", lock);
-        free(cmd);
-        cmd = with;
-        for (char *c = cmd + cl; *c; c++) if (*c == '/') *c = '\\';
-    }
-    char titleArg[300], dirArg[1100];
-    snprintf(titleArg, sizeof(titleArg), "\"%s\"", title);
-    snprintf(dirArg, sizeof(dirArg), "\"%s\"", dir);
-    // cmd.exe takes command lines of at most 8191 characters: say so instead of a bare
-    // "cannot start" (or a window that drops the end)
-    size_t total = strlen(cmd) + strlen(titleArg) + strlen(dirArg) + 40;
-    if (total > 8191) {
-        MS_SetError("the claude command line is %zu characters, cmd.exe takes at most 8191 (shorten MONOLITH_CLAUDE_ARGS)", total);
-        free(cmd);
-        return false;
-    }
-    const char *argv[] = { "cmd.exe", "/c", "start", titleArg, "/D", dirArg, "cmd.exe", "/k", cmd, NULL };
-    intptr_t h = _spawnvp(_P_NOWAIT, "cmd.exe", argv);
-    free(cmd);
-    if (h == -1) {
-        MS_SetError("cannot start cmd.exe: %s", strerror(errno));
-        return false;
-    }
-    CloseHandle((void *)h);     // cmd /c start exits right away; nothing to wait for
-    TraceLog(LOG_INFO, "monolith: launched '%s' via cmd start", title);
-    return true;
-}
-
-#else
 
 // Like execvp's PATH search, done in the parent (the child may only call
 // async-signal-safe functions between fork and exec)
@@ -2506,8 +2354,6 @@ fail:
     return ok;
 }
 
-#endif
-
 // #endregion
 
 // ======================================================================================
@@ -2531,15 +2377,12 @@ fail:
 // Terminals that hand the window to a daemon and exit at once (kitty --single-instance,
 // wezterm with a mux) leave no process to signal: only step 1 can close those.
 // MONOLITH_CLOSE_METHOD=wm / signal restricts closing to one of the two (for tests).
-// Windows: `cmd /c start` leaves no handle to the window, so a close only takes the entry
-// off the list and says to close the window by hand.
 
 #define CLOSE_GRACE         3.0     // seconds before escalating (WM close -> SIGTERM -> SIGKILL)
 #define CONFIRM_TIME        3.0     // seconds to press again to stop a running request
 
 typedef enum { CLOSED_WINDOW, CLOSED_GONE, CLOSED_LISTED } CloseOutcome;
 
-#ifndef _WIN32
 // 1: the WM closed a window with the mark, 0: no such window, -1: no i3 / sway
 static int WmCloseMarked(const TermWindow *t)
 {
@@ -2590,16 +2433,10 @@ static void CloseEscalate(void)
     for (int i = 0; i < reqCount; i++) if (reqs[i].used) EscalateTerm(&reqs[i].term, reqs[i].id);
     EscalateTerm(&coord.term, "the coordinator");
 }
-#endif
 
 // Closes a terminal window: through the WM, then by signals (above). what: for the log
 static CloseOutcome CloseTerm(TermWindow *t, const char *what)
 {
-#ifdef _WIN32
-    (void)t;
-    (void)what;
-    return CLOSED_LISTED;
-#else
     const char *method = getenv("MONOLITH_CLOSE_METHOD");
     bool useWm = !method || strcmp(method, "signal") != 0;
     bool useSignal = !method || strcmp(method, "wm") != 0;
@@ -2618,7 +2455,6 @@ static CloseOutcome CloseTerm(TermWindow *t, const char *what)
         return CLOSED_WINDOW;
     }
     return CLOSED_GONE;
-#endif
 }
 
 static CloseOutcome CloseRequest(OpenRequest *q)
@@ -2634,9 +2470,6 @@ static void CloseMessage(const OpenRequest *q, CloseOutcome o)
 {
     if (q->queue) MsgSetf(&note, "%s off the list", q->slug);
     else if (o == CLOSED_WINDOW) MsgSetf(&note, "closed %s", q->slug);
-#ifdef _WIN32
-    else if (q->term.launched) MsgSetf(&note, "%s off the list; close its window by hand (not supported on Windows)", q->slug);
-#endif
     else if (o == CLOSED_LISTED) MsgSetf(&note, "%s off the list (it was never launched)", q->slug);
     else MsgSetf(&note, "%s: window already gone", q->slug);
     TraceLog(LOG_INFO, "monolith: %s", MsgText(&note));
@@ -2716,11 +2549,9 @@ int LauncherNewestNumber(void)
 
 bool LauncherClosing(void)
 {
-#ifndef _WIN32
     for (int i = 0; i < reqCount; i++)
         if (reqs[i].used && reqs[i].closed && reqs[i].term.launched && ChildAlive(reqs[i].term.pid)) return true;
     if (coord.term.killStage && ChildAlive(coord.term.pid)) return true;
-#endif
     return false;
 }
 
@@ -2756,8 +2587,6 @@ void LauncherCloseOnExit(void)
 // and hands each to a subagent; after "queued" only it writes state (claimed, question,
 // done, failed, cancelled). The game asks for a cancel with requests/<id>/cancel, and turns
 // a queued bundle into "cancelled" itself only while no coordinator holds the lock.
-// Windows: the lock is the coordinator's `9>` redirection held open by cmd; the game tests
-// it with an exclusive open (_SH_DENYRW).
 
 #define COORD_CHECK_INTERVAL 2.0f   // seconds between lock tests (only while relevant)
 #define COORD_START_TIME     20.0   // after a start, "starting" this long before "not running"
@@ -2774,13 +2603,11 @@ static bool QueueMode(void)
         else if (strcmp(m, "coordinator") != 0)
             TraceLog(LOG_WARNING, "monolith: MONOLITH_LAUNCH=%s unknown (coordinator or per-request); using coordinator", m);
     }
-#ifndef _WIN32
     char path[4096];
     if (queueMode && !FindProgram("flock", path, sizeof(path))) {
         TraceLog(LOG_WARNING, "monolith: flock (util-linux) not found: one terminal per request instead of the coordinator");
         queueMode = 0;
     }
-#endif
     return queueMode;
 }
 
@@ -2799,21 +2626,17 @@ static bool WriteText(const char *path, const char *text)
     return fclose(f) == 0 && ok;
 }
 
-// requests/<id>/state = "<state> <time> game" (Linux: temp file + rename, so a reader never
-// sees half a line; Windows' rename doesn't replace a file, and the line is one write anyway)
+// requests/<id>/state = "<state> <time> game" (temp file + rename, so a reader never sees half
+// a line)
 static bool WriteState(const char *dir, const char *state)
 {
     char path[1400], line[96], stamp[32];
     Stamp(stamp, sizeof(stamp));
     snprintf(line, sizeof(line), "%s %s game\n", state, stamp);
     snprintf(path, sizeof(path), "%sstate", dir);
-#ifdef _WIN32
-    return WriteText(path, line);
-#else
     char tmp[1400];
     snprintf(tmp, sizeof(tmp), "%sstate.tmp", dir);
     return WriteText(tmp, line) && rename(tmp, path) == 0;
-#endif
 }
 
 static void ReadState(OpenRequest *q)
@@ -2839,18 +2662,11 @@ static bool CoordinatorAlive(void)
 {
     char path[1300];
     snprintf(path, sizeof(path), "%slock", coordDir);
-#ifdef _WIN32
-    int fd = -1;
-    int e = _sopen_s(&fd, path, _O_RDWR | _O_CREAT, _SH_DENYRW, _S_IREAD | _S_IWRITE);
-    if (e == 0) { _close(fd); return false; }
-    return e == EACCES;
-#else
     int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
     if (fd < 0) return false;                   // no requests folder: nobody runs
     bool held = flock(fd, LOCK_EX | LOCK_NB) != 0 && errno == EWOULDBLOCK;
     close(fd);                                  // (drops the lock if we just took it)
     return held;
-#endif
 }
 
 static bool CoordinatorStarting(void)
@@ -2949,9 +2765,7 @@ static unsigned char StartCoordinator(void)
                                      "and follow it exactly. Requests folder: %s", requestsDir);
     TermWindow t = { 0 };
     char mark[160] = "";
-#ifndef _WIN32
     snprintf(mark, sizeof(mark), "%s", coord.term.mark);
-#endif
     if (!Launch(title, mark, prompt, CoordinatorModel(), lock, &t)) {
         coord.failed = true;
         MsgSetf(&coord.failedLine, "coordinator: not started: %s (the requests stay queued)", MS_LastError());
@@ -3044,12 +2858,8 @@ unsigned char LauncherCloseCoordinator(void)
     coord.confirmUntil = 0.0;
     CloseOutcome o = CloseTerm(&coord.term, "the coordinator");
     if (o == CLOSED_WINDOW) MsgSetStatic(&note, "closed the coordinator");
-#ifdef _WIN32
-    else MsgSetStatic(&note, "close the coordinator window by hand (not supported on Windows)");
-#else
     else if (alive) MsgSetStatic(&note, "the coordinator runs, but its window can't be closed from here (not started by this game run, or no i3 / sway): close it by hand");
     else MsgSetStatic(&note, "the coordinator's window is already gone");
-#endif
     coord.alive = -1;               // test the lock again at the next poll
     TraceLog(LOG_INFO, "monolith: %s", MsgText(&note));
     return 0;
@@ -3234,11 +3044,7 @@ const char *LauncherRootDir(void)
 
 void LauncherScrubEnv(void)
 {
-#ifdef _WIN32
-    _putenv("MONOLITH_ALLOW_WINDOW=");
-#else
     unsetenv("MONOLITH_ALLOW_WINDOW");
-#endif
 }
 
 // #endregion
