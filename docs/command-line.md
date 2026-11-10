@@ -1,6 +1,6 @@
 # Command line
 
-Every flag and environment variable of `monolith` (Linux: `./build/linux/monolith`, Windows: `build\win\monolith.exe`; the debug, LeakSanitizer and profiling builds of `./build.sh debug|lsan|profile` in `build/linux-<mode>/` take the same flags). The header comment of `src/main.c` is the source of truth. Timings quoted below were measured on an RTX 4050 Laptop GPU: a rough guide only, your machine's will differ. Keys and mouse: [user-guide.md](user-guide.md). "Patch N" means a local change to R3D ([glossary.md](glossary.md)).
+Every flag and environment variable of `monolith` (Linux: `./build/linux/monolith`; the unsupported Windows by-product `build\win\monolith.exe` takes them too; the debug, LeakSanitizer and profiling builds of `./build.sh debug|lsan|profile` in `build/linux-<mode>/` take the same flags). The header comment of `src/main.c` is the source of truth. Timings quoted below were measured on an RTX 4050 Laptop GPU: a rough guide only, your machine's will differ. Keys and mouse: [user-guide.md](user-guide.md). "Patch N" means a local change to R3D ([glossary.md](glossary.md)).
 
 Flags that never open a visible window, safe for scripts: `--shot` (renders in a hidden window), `--dump-boxes`, `--dump-scene`, `--dump-scene-diff`, `--dump-entities` (each of these also with `--edit-script`, which is refused without one of them), `--tri-report`, `--apply-edits`, `--inspect-model`, `--new-map`, `--export`, `--compile`, `--classify`, `--bake-surface`, and `--bench` together with `--headless`. `--import` opens no game window either, but it queues an import request, which can open the coordinator's terminal. Anything else opens the game window.
 
@@ -22,7 +22,7 @@ An unknown flag, a missing or unparsable value, a value that is itself a `--flag
 | `--window-msaa` | 4× multisampled window (smoother overlay lines, ~0.1 ms); scene image unchanged. Default single-sampled. |
 | `--bloom on\|off` | `off` skips bloom and multiplies exposure by the map's `env bloom.offExposure` (default 1.19) so the mean brightness stays |
 | `--quality low\|medium\|high\|ultra` | Preset for this run (not saved). Default: the settings file in the interactive game, else ultra (= the map exactly) |
-| `--settings <file>` / `--no-settings` | Use this settings file instead of `~/.config/monolith/settings.ini` (`$XDG_CONFIG_HOME`; Windows `%APPDATA%\monolith\`) / read and save none |
+| `--settings <file>` / `--no-settings` | Use this settings file instead of `~/.config/monolith/settings.ini` (`$XDG_CONFIG_HOME`; the unsupported Windows build: `%APPDATA%\monolith\`) / read and save none |
 | `--settings-set key=value` | Change a setting as in the panel and **save** it (in `--shot`, `--dump-*`, `--bench`, `--export` and `--classify` runs only when `--settings <file>` names one) (repeatable, applied last; works with `--dump-boxes` without a window). Keys are the file's: `preset=medium`, `render_scale=0.75`, `ao=baked`, `shadow_size=4096`, `fps_cap=monitor`, … |
 | `--settings-change key=value` | With `--shot`: apply after 10 frames through the panel's live path; must give the same image as a shot started with `--settings-set` |
 | `--settings-panel` | With `--shot --shot-hud`: draw the open panel |

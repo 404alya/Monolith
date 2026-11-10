@@ -19,6 +19,7 @@ How the developer wants larger changes to monolith carried out: the engine, the 
 - **The look is the developer's.** Every change is either pixel-identical to the build before it (prove it: `--shot` pixel diffs with a count of changed pixels, plus `--dump-boxes`, on every map in `maps/`) or kept behind a switch and presented as a trade-off with before/after images and the measured gain. Never ship an image change silently.
 - **Fix causes, not symptoms.** Don't turn off shadow casting to hide a shadow bug, don't brighten the fog to hide a dark map (`.claude/skills/lighting-fog-shadows/r3d-pitfalls.md`).
 - **The level is data.** Nothing in the engine, the docs or the AI instructions may assume one style. Style lives in a map's package and its `MAP.md`; map-editing examples in the docs come from more than one style.
+- **The purpose decides close calls** (`project-history`, 2026-11-10): prefer the deterministic path (map text, the edit language, a dump or shot that proves the result) over a convenient one; the exported code's quality and speed weigh more than editor convenience; spend nothing on editor platforms other than Linux + i3, but keep exports and the runtime building for Windows.
 - **Work around R3D from the app side** where reasonable. When R3D itself must change, change it minimally and record it in `submodules/r3d/patches.md`.
 
 ## 3. Multi-agent work

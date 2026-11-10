@@ -1,4 +1,4 @@
-// monolith -- AI-assisted map designer for 3D levels of any style (raylib + R3D)
+// monolith -- AI-assisted map designer with deterministic edits, for 3D levels of any style (raylib + R3D)
 //
 // The level is a map package (maps/<name>/: a plain-text <name>.map of boxes, models,
 // materials, lights and environment, plus its design brief MAP.md, shaders, models, textures

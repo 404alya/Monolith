@@ -228,6 +228,15 @@ Open bugs and ideas were spread over `docs/known-issues.md` ("Open decisions"), 
 - **Kind as a title prefix** (`bug:` / `task:` / `idea:`): the tool stores one text per line and has no fields.
 - **Migration:** the known-issues items and the two "Next:" notes (volumetric fog lookups in uniform air, a per-file parallel build) became AI entries; the docs kept their text, known-issues got a pointer (the developer's call). Sessions may read `TODO.md` but never write it (the developer's call).
 
+## The stated purpose (2026-11-10)
+
+The texts described a cross-platform "map designer for 3D levels of any style" and left out what the developer sees as the project's value. The purpose was restated (descriptions only, no code changed) in `CLAUDE.md`, the README, `docs/architecture.md` §1/§2/§6, `docs/export.md` and `src/main.c`'s first line, as three points:
+- **Deterministic edits, with AI.** The AI decides *what* changes; the change goes through deterministic, checkable paths: the `.map` text, the edit language (`src/mapedit.c`), the compiled map (same bytes on every compile), deterministic rendering (patch 17), `--dump-boxes`, `--dump-scene-diff` and pixel-compared shots. This is the reason those paths exist (round 1's one primitive per line, the compiled map's one parser, the QA pass's readable diffs) said once as a goal.
+- **High-quality, optimised exported C.** `--export` writes plain C11 held to the editor's rules (stripped runtime, no fixed-size content buffers, failure as a return value, zero warnings and leaks, no per-frame allocation, measured caches and presets).
+- **The editor is Linux + i3 only; the exported code is portable.** The editor (game, launcher, coordinator, tools) is made for Linux with i3; sway and the other i3-related paths stay as they are. Windows and macOS editors aren't supported or considered in decisions. Exports and the examples build for Linux and Windows x86_64; other export platforms are untested.
+- **Why `./build.sh --win` stays:** it builds the static Windows libraries every export ships in `prebuilt/win/lib/` and compile-checks the runtime for Windows, so the both-targets zero-warnings rule stays, its reason now "exports and the runtime run on Windows". `build/win/monolith.exe` is a by-product. The editor's Windows code (the launcher branch, `tests/unit/wincmd_test.c`, the `%APPDATA%` settings path, `--win run` under wine) is still there and called unsupported; removing it is a separate decision.
+- "Levels of any style" is unchanged: the purpose changed, not the style-agnostic rule.
+
 ## The instruction files
 
 Superseded layouts, for reading old bundles, commits and notes; the current layout is `CLAUDE.md` + `.claude/skills/` + `docs/`.

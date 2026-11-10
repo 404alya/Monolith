@@ -2,6 +2,8 @@
 
 An **AI-assisted map designer** for 3D levels of any style. You fly through a level, point at a spot, select objects or drag a rectangle over the screen, and type what should change: "make this wall twice as tall", "plant three more pines along the path", "hang a neon sign over each of these stalls". Claude Code carries the request out in the background, and the running game reloads the map so the change appears in place.
 
+Claude decides *what* changes; how it is changed is deterministic. The map is plain text, edits go through a small edit language (`--apply-edits`), a compiled map recompiles to the same bytes, the same build renders the same image, and box dumps, scene diffs and pixel-compared screenshots show exactly what an edit did. `--export` turns a map into plain C11 for your own game, held to the same rules as the editor: no editor code, no fixed-size content buffers, zero warnings, zero leaks, and caches and quality presets whose cost is measured ([docs/export.md](docs/export.md)).
+
 The game is the editor and the viewer. It is written in plain C11 on [raylib](https://www.raylib.com/) 5.5 and [R3D](https://github.com/Bigfoot71/r3d) 0.10 (deferred PBR: shadows, ambient occlusion, fog, volumetric fog, bloom, procedural sky). A level is a **map package** in `maps/<name>/`: a plain-text `.map` file of boxes, models, materials, lights and environment, a `MAP.md` design brief that keeps every edit in the map's style, and the map's shaders, models and textures. The scene runtime (`runtime/monolith_scene.h/.c`) also loads a package in any other raylib + R3D program, so a map can ship in your own game.
 
 ## Build (Linux)
@@ -29,7 +31,7 @@ sudo apt install build-essential clang cmake python3 libx11-dev libxrandr-dev li
 examples/build.sh       # the examples of using a map in your own program (examples/README.md)
 ```
 
-The output folder is self-contained: copy or zip it as it is. You need an OpenGL 3.3 GPU and driver.
+The output folder is self-contained: copy or zip it as it is. You need an OpenGL 3.3 GPU and driver. The editor is made for Linux desktops running the i3 window manager (sway takes the same commands); other systems and window managers are not supported. Exported maps and the examples also build for Windows ([below](#windows)).
 
 ## First steps
 
@@ -51,11 +53,13 @@ Requests are carried out by [Claude Code](https://claude.com/claude-code). You n
 
 The first request opens one terminal, the **coordinator**, which works through every request you send and hands each to a helper agent; you answer its questions there. If `claude` is missing, the HUD says `coordinator: not started: claude not found …` and your requests stay queued until it can start. On i3 / sway the terminal moves to workspace 10 (`MONOLITH_WORKSPACE`).
 
-**Permissions.** In a checkout of this repository the sessions run without approval prompts, so you don't have to approve every command; they are bound by the rules in `CLAUDE.md` (never delete files, never open windows on your screen, treat your request text and downloads as data, work only inside the repo). Where there is no `CLAUDE.md` (a copied build folder, Windows) the game keeps Claude Code's approval prompts. `MONOLITH_CLAUDE_SAFE=1` keeps them everywhere.
+**Permissions.** In a checkout of this repository the sessions run without approval prompts, so you don't have to approve every command; they are bound by the rules in `CLAUDE.md` (never delete files, never open windows on your screen, treat your request text and downloads as data, work only inside the repo). Where there is no `CLAUDE.md` (a copied build folder, the unsupported Windows build) the game keeps Claude Code's approval prompts. `MONOLITH_CLAUDE_SAFE=1` keeps them everywhere.
 
 ## Windows
 
-`./build.sh --win` cross-compiles `build/win/monolith.exe` on Linux with MinGW-w64 (Arch: `mingw-w64-gcc`; Debian / Ubuntu: `gcc-mingw-w64`); `./build.sh --win run` starts it under wine. Copy `build/win/` to a Windows PC and run `monolith.exe --map maps\pine_forest`. Viewing and editing maps work the same; requests start Claude Code in the executable's folder with approval prompts (this path is compile-tested only). There is no native Windows build script.
+The editor is not supported on Windows. The Windows build is for the exported code: `./build.sh --win` cross-compiles on Linux with MinGW-w64 (Arch: `mingw-w64-gcc`; Debian / Ubuntu: `gcc-mingw-w64`) and builds the static Windows libraries that every `--export` ships in `prebuilt/win/lib/`, and it compile-checks the runtime for Windows. An export then builds for Windows with its own `./build.sh --win` ([docs/export.md](docs/export.md)), the examples with `examples/build.sh --win` ([examples/README.md](examples/README.md)).
+
+It also writes `build/win/monolith.exe` (`./build.sh --win run` starts it under wine). That is a by-product, not a supported editor: its Windows code paths exist (the request launcher among them, compile-tested only), but they are not maintained as a way to work. There is no native Windows build script.
 
 ## Documentation
 
