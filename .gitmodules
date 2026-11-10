@@ -1,3 +1,6 @@
 [submodule "maps/monolith"]
 	path = maps/monolith
 	url = git@github.com:404alya/Monolith-map1.git
+[submodule "submodules/simple-todo"]
+	path = submodules/simple-todo
+	url = git@github.com:404alya/Simple-Todo.git

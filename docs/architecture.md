@@ -40,7 +40,9 @@ monolith/
 ├── cmake/mingw-w64-x86_64.cmake, .gitignore
 ├── compile_commands.json        # clangd's compilation database, written by ./build.sh (gitignored; CONTRIBUTING.md, Editor setup)
 ├── README.md, CONTRIBUTING.md, LICENSE (MIT)
+├── TODO.md                      # the maintainer's bug and task list (tools/todo.sh; CONTRIBUTING.md, Bugs and tasks)
 ├── CLAUDE.md                    # Claude Code: guard rails, hard rules, index of skills (always loaded)
+├── .claude/TODO.md              # the AI's bug and task list: what Claude Code sessions found or deferred (tools/ai-todo.sh)
 ├── .claude/skills/<topic>/      # Claude Code: workflows and lessons (map-request, engine-code, ...), loaded per task
 ├── .claude/commands/            # Claude Code: slash commands (/task-prompt)
 ├── docs/                        # this documentation: user guide, command line, map format, export, architecture,
@@ -56,7 +58,8 @@ monolith/
 │                                #   leakcheck.sh + lsan.supp + lsan_report.py (build and run); request-queue.sh (the coordinator's queue);
 │                                #   profile.c (CPU profiles with perf of ./build.sh profile, which builds it: build/linux-profile/profile);
 │                                #   stub-terminal.sh, stub-coordinator.sh, test-coordinator.sh (launcher tests);
-│                                #   bench-export-ab.sh (A/B bench pairs of two exports, through the harness's bench mode)
+│                                #   bench-export-ab.sh (A/B bench pairs of two exports, through the harness's bench mode);
+│                                #   todo.sh, ai-todo.sh (the two task lists, TODO.md and .claude/TODO.md, through submodules/simple-todo)
 ├── examples/                    # 01_minimal (+ scene/), 02_existing_project, 03_live_editing, 04_import_source, 05_entities,
 │                                #   build.sh (§4.3)
 ├── tests/examples/harness.h     # test build of the examples: --shot in a hidden window, --bench (headless bench) (§4.3)
@@ -90,7 +93,8 @@ monolith/
 │   ├── png.c                    # PNG writer for --shot and request images (zlib level 1, ~4x faster than ExportImage)
 │   ├── glibc_compat.c           # Linux only: old glibc symbol versions (build and run)
 │   └── vendor/                  # third-party code, unmodified: xatlas/ (C++, MIT; the paint unwrap), nob/ (nob.h, the build program's library; MIT / public domain)
-└── submodules/r3d/              # vendored R3D; local fixes in patches.md
+├── submodules/r3d/              # vendored R3D; local fixes in patches.md
+└── submodules/simple-todo/      # git submodule: Simple-Todo, the task lists' CLI (prebuilt todo.o, x86-64 Linux; not part of the build or an export)
 ```
 
 **Data paths.** `InitDataPaths()` (`main.c`) sets `benchmarkDir` and the maps directory. On Linux the repo directories baked in (`-DBENCHMARK_PATH`, `-DMAPS_PATH`) win while they exist, so in a repo checkout the game loads and hot-reloads the **repo's** `maps/`, not the copy in `build/`. Otherwise (and on Windows) the folders next to the executable are used. `build.sh` copies `maps/` and `runtime/` (+ `viewer.c`, for `--export`) into both output folders, and the fonts' licences as `OFL-Outfit.txt` and `OFL-PixelifySans.txt` (the fonts themselves are compiled in). `launcher.c` puts `requests/` and starts Claude Code in the repo root (`-DPROJECT_PATH`) while it exists, else (always on Windows) in the executable's directory.

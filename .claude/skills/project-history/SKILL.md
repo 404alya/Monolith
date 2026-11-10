@@ -218,6 +218,16 @@ The 2026-11-06 round gave the runtime a heap last error but left the editor's ow
 - **Words unchanged:** every console line, HUD text and bundle stayed byte-identical (a capture of the leak check's runs plus every map's views and exports, logs normalised, images compared outside the frame-time strip). The only visible difference is that text a buffer used to cut is now whole. Explicit precisions in formats (`%.80s`) are wording and stayed.
 - **Kept:** formatters bounded by a few numbers (`MapEditStatsText`, `MapEditIdText`, `MapEditDescribe`, `GfxRowFormat`), path scratch (`char path[…]`, `GfxUnsavedPath`), and the runtime's `MS_GetLine(…, out, outSize)` (a public API copying one source line; a heap return would need the developer's yes). `MapEditSync` had no caller and went.
 
+## Bug and task lists (2026-11-10)
+
+Open bugs and ideas were spread over `docs/known-issues.md` ("Open decisions"), this skill's "Next:" notes and `benchmarking/measurements.md`. The developer wanted them tracked in the repo with their own CLI, Simple-Todo (`github.com/404alya/Simple-Todo`).
+- **A submodule, not a copy** (`submodules/simple-todo`, pinned like `maps/monolith`): the tool stays the developer's own project with its own history; monolith pins a commit and upstream changes come in by moving the pointer.
+- **The committed `todo.o` is used as is:** no build step, no `nob.c` change. A tracker isn't worth a build dependency. Cost: x86-64 Linux only (it reads `/proc/self/exe`), linked against the building machine's glibc; if it fails on an older glibc, that is to be reported, not fixed with a build step.
+- **Two lists, two scripts:** the developer's `TODO.md` stays free of AI entries; sessions (request subagents included) write `.claude/TODO.md` through `tools/ai-todo.sh`. Two scripts rather than one with an `--ai` flag, because a forgotten flag would write into the developer's file; each script fixes its file and ignores `TODO_FILE` from the environment for the same reason. `rm` takes only digits, so the `#` header line (which the tool keys as id `#`) can't be removed.
+- **Limits in the script, not only in the skill** (title ≤ 60, description ≤ 120 characters): a session can overlook a skill's rule, not a rejected command. Entries point to details instead of holding them.
+- **Kind as a title prefix** (`bug:` / `task:` / `idea:`): the tool stores one text per line and has no fields.
+- **Migration:** the known-issues items and the two "Next:" notes (volumetric fog lookups in uniform air, a per-file parallel build) became AI entries; the docs kept their text, known-issues got a pointer (the developer's call). Sessions may read `TODO.md` but never write it (the developer's call).
+
 ## The instruction files
 
 Superseded layouts, for reading old bundles, commits and notes; the current layout is `CLAUDE.md` + `.claude/skills/` + `docs/`.

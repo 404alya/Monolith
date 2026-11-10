@@ -6,6 +6,13 @@ The game is the editor and the viewer. It is written in plain C11 on [raylib](ht
 
 ## Build (Linux)
 
+Clone with the submodules (the bug and task lists' tool, `submodules/simple-todo`; [CONTRIBUTING.md](CONTRIBUTING.md#bugs-and-tasks)):
+
+```bash
+git clone --recurse-submodules git@github.com:404alya/Monolith.git
+git submodule update --init submodules/simple-todo   # in a checkout cloned without them
+```
+
 Install the tools and libraries first. R3D, raylib and assimp come with the repo (`submodules/r3d`) and are built on the first run, which takes a few minutes.
 
 ```bash

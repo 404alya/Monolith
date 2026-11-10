@@ -27,6 +27,29 @@ Map-only changes (a `.map` file, `MAP.md`, a package's shaders, models, textures
 - **Automated runs never open a visible window:** use `--shot`, the dump flags, `--inspect-model` or `--bench --headless`. In an AI agent's shell the game enforces this (it refuses and exits 1 unless `MONOLITH_ALLOW_WINDOW=1`); keep new modes that show no window in `src/main.c`'s `windowless` check. The examples are plain programs that always open a window; tests run their test build (`examples/build.sh test`, `tests/examples/harness.h`), which needs `--shot` and never shows one.
 - **Don't commit** `build/`, screenshots, `benchmark/`, `requests/`, `export/` or your `.claude/settings.local.json`. Most maps in `maps/` are kept locally and are gitignored; only `maps/pine_forest/` is in the repository.
 
+## Bugs and tasks
+
+Open bugs and future work live in two plain-text lists, one task per line (`<id> - <title> <description>`), each behind its own script. Both run [Simple-Todo](https://github.com/404alya/Simple-Todo) (`submodules/simple-todo/todo.o`, prebuilt for x86-64 Linux; nothing to build). After a clone without `--recurse-submodules`, run `git submodule update --init submodules/simple-todo` first.
+
+| List | File | Script | Written by |
+|---|---|---|---|
+| the maintainer's | `TODO.md` | `tools/todo.sh` | the maintainer only; Claude Code may read it, never change it |
+| the AI's | `.claude/TODO.md` | `tools/ai-todo.sh` | Claude Code sessions: bugs they found outside their task, work they deferred |
+
+```bash
+tools/todo.sh list                                   # print the list with the ids
+tools/todo.sh add "bug: <what>" "<where: file:line, doc section, request id>"
+tools/todo.sh rm <id> [<id>...]                      # close entries
+```
+
+`tools/ai-todo.sh` takes the same commands. Each script writes only its own file (it ignores a `TODO_FILE` set in the environment), and `rm` accepts only numeric ids, so a list's `#` header line can't be removed.
+
+- **Titles start with the kind:** `bug: …` (something is wrong), `task: …` (planned work, a check or a decision), `idea: …` (could be done, not decided). The tool has no other fields, so the kind is part of the title.
+- **AI entries are short:** `tools/ai-todo.sh add` rejects a title over 60 characters or a description over 120 (counted in characters) and writes nothing. The description says what is wrong or wanted and where the details are; the details themselves go into the code, a doc or a request's `result.md`.
+- **Promoting an AI entry:** add it to your list with `tools/todo.sh add`, then remove it with `tools/ai-todo.sh rm <id>`. Prune the AI list the same way.
+- An id is a hash of the entry's text, so it stays the same until the entry is removed.
+- `docs/known-issues.md` keeps the longer descriptions of known problems; the AI list has an entry for each open one.
+
 ## Style
 
 C11, 4-space indent, `static` file-local functions, PascalCase functions, `UPPER_CASE` macros, `// #region` sections, one module per concern with a header comment, short comments that explain *why*. Comment non-obvious engine workarounds with their reason so nobody "cleans them up". English everywhere.
