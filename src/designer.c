@@ -1677,7 +1677,7 @@ bool DesignerBuildRequest(const Designer *d, Camera3D cam, float yaw, float pitc
     for (int i = 0; i < d->regionCount; i++) {
         DesignRegionInfo *r = &req->regions[i];
         DesignerAnalyzeRegion(cam, width, height, d->regions[i].rect, r);
-        int objects = r->objectCount + r->omittedObjects;
+        int objects = r->objectCount;
         TraceLog(LOG_INFO, "monolith: region %d: %.0fx%.0f px, %dx%d rays, %d object%s, sky %.0f%%, %.1f ms (%d boxes, %d models)",
                  i + 1, r->rect.width, r->rect.height, r->gridW, r->gridH, objects, objects == 1 ? "" : "s",
                  100.0f * r->sky, r->ms, scene->boxCount, scene->modelCount);

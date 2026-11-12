@@ -1,4 +1,4 @@
-monolith 2
+monolith 3
 # pine_forest.map -- a foggy pine forest at dusk. Design brief: MAP.md (read it first).
 # Format: the header comment of runtime/monolith_scene.c (and docs/map-format.md). Paths are
 # relative to this folder. Asset provenance: ASSETS.md and models/*.asset.md.

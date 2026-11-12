@@ -15,9 +15,10 @@ The workflows are project skills in `.claude/skills/<name>/SKILL.md`. They load 
 
 | Skill | Use it for |
 |---|---|
-| `map-request` | a request bundle `requests/<id>/request.md` (also: an old bundle that says to read `AI-MAP-TOOL.md`); its first section lists the files to read before any edit |
+| `map-request` | a request bundle `requests/<id>/request.md`; its first section lists the files to read before any edit |
 | `import-request` | a bundle with `kind: "import"` (with `map-request`) |
 | `map-editing` | any change to a map package, by hand or for a request: rules and verification |
+| `migrate-map` | a map whose format is older than this monolith: `/migrate-map <package>` rewrites it to the current format, proven against a build of the last reader |
 | `assets-and-licences` | a model or texture: sources, licences, download, Blender, `ASSETS.md`, restyling |
 | `engine-code` | code: C, the runtime, R3D, shaders outside a package, build, tools |
 | `shaders` | any GLSL: the kinds of shader, validating with `glslangValidator` (its checkers), variants, verifying a shader change |

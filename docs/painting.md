@@ -186,8 +186,7 @@ paint own 41:0 slot 0 0 0 256 256 paint_filter nearest
 - The painter appends entries to a **paint block** at the end of the file, under the comment
   `# paint (draw mode)`, sorted by material, then entity, then face or slot. The developer may move
   them anywhere after the material's line.
-- `paint` is a statement of format 2; `MS_FORMAT_VERSION` doesn't change (an older runtime refuses an
-  unknown statement, as for any new one).
+- `paint` is a statement of the current map format (3).
 
 ### 4.3 The paint stage
 
@@ -315,7 +314,7 @@ and attribution).
   entity to the object: `{ uint32 material (CM_NONE: a model's own), uint32 kind (0 box, 1 model),
   uint32 object (boxes[] or models[] index), uint32 faces (bits +x −x +y −y +z −z) or slot, uint32
   x, y, w, h, uint32 filter, int32 line }`. Inactive entries are written too (the runtime decides
-  activity the same way). `CM_VERSION` 5; the reader accepts 2–5 (older files have no paint). Changes:
+  activity the same way). `CM_VERSION` 5; the reader then accepted 2–5 (since 2026-11-12 it reads only the current version: `docs/compiled-map.md`). Changes:
   `docs/compiled-map.md` and its version history.
 - The export copies a package's dependencies as now; atlases and `.paintuv` sidecars are dependencies,
   so they go with it. The exported runtime generates the paint shaders and keys like the editor.

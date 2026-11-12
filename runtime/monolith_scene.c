@@ -12,24 +12,24 @@
 // ======================================================================================
 //
 //   # comment                      '#' starts a comment anywhere outside a "string"
-//   monolith 2                     format version: the first statement of the file. Without it
-//                                  the file is format 1 (only the v1 statements marked [1]
-//                                  below; everything else uses the built-in defaults)
-//   group "name"               [1] following primitives (boxes, lights, models) belong to this
+//   monolith 3                     format version: the first statement of the file, required.
+//                                  The parser reads exactly MS_FORMAT_VERSION; a file without
+//                                  this line is format 1
+//   group "name"                   following primitives (boxes, lights, models) belong to this
 //                                  group, until the next `group` (names: any length, no '"')
 //
 // Primitives (meters; +Y is up; numbers are plain decimals, e.g. 12, -4.5, 0.75):
-//   box    x0 y0 z0 x1 y1 z1 [rot y p r]        [1] two opposite corners, any order
-//   block  cx y0 cz sx sy sz [rot y p r]        [1] centered on (cx, cz), from y0 up to y0 + sy
-//       rot yawDeg pitchDeg rollDeg   (format 2) turns the box as written about its own centre,
+//   box    x0 y0 z0 x1 y1 z1 [rot y p r]        two opposite corners, any order
+//   block  cx y0 cz sx sy sz [rot y p r]        centered on (cx, cz), from y0 up to y0 + sy
+//       rot yawDeg pitchDeg rollDeg   turns the box as written about its own centre,
 //                                     with the models' convention (R = Ry * Rx * Rz). Never
-//                                     shifted: every repeat / at copy turns about its own centre.
+//                                     shifted: every repeat copy turns about its own centre.
 //                                     rot 0 0 0 is the box without rot. A turned box draws, collides
 //                                     and picks as its turned shape; its boxes[] / colliders[] entry
 //                                     is its world AABB (MS_Scene.turnedBoxes, boxTurned)
-//   stairs cx baseY startZ width steps rise run [1] `steps` (integer) solid steps climbing
+//   stairs cx baseY startZ width steps rise run     `steps` (integer) solid steps climbing
 //                                                   toward -Z from startZ, each down to baseY
-//   waffle x0 x1 y0 y1 z depth bayW floorH      [1] facade: back wall z-1..z, vertical fins
+//   waffle x0 x1 y0 y1 z depth bayW floorH          facade: back wall z-1..z, vertical fins
 //                                                   every bayW along x, ledges every floorH,
 //                                                   both sticking out from z to z + depth
 //   light point x y z [key value ...]               point light (R3D omni light)
@@ -81,23 +81,19 @@
 //                                  unique in the file), written first: id 12 repeat 4 0 0 3 box ...
 //                                  Changes nothing in the scene; it keys the entities (MS_EntityId)
 //                                  so they keep their identity when the line itself changes
-//   repeat n dx dy dz [from k] [1] n copies, copy i (0-based) shifted by i * (dx, dy, dz); up to 3
+//   repeat n dx dy dz [from k]     n copies, copy i (0-based) shifted by i * (dx, dy, dz); up to 3
 //                                  repeats on one line give a grid (the first is the outer loop,
 //                                  so it decides the box order). `from k`: the copies are
 //                                  i = k .. k+n-1 instead (the same floats as copies k.. of the
 //                                  longer row, so a row split in two keeps its exact positions)
-//   at x y z                   [1] shift by (x, y, z): the primitive's own coordinates are
-//                                  relative to this point
 // Shifts apply to the position arguments only (box: all six; block: cx y0 cz; stairs:
 // cx baseY startZ; waffle: x0 x1 y0 y1 z; light, model: x y z, never a direction), never to sizes
-// or counts. Each position is computed as (at + i*d1 + j*d2 + k*d3) + value, in float. With
+// or counts. Each position is computed as (i*d1 + j*d2 + k*d3) + value, in float. With
 // whole or half numbers the order doesn't matter; with values like 2.6 it can change the last
-// bit of a float ((-36 + 4.5) + 2.6 vs -33.4 + 4.5). `at` exists to reproduce the original C
-// loops, which computed (start + i*step) + 2.6. Example, 17 roof beams 4.5 m apart, each
-// 2.6 m deep, the first one at z = -36:
-//   repeat 17 0 0 4.5 at 0 0 -36 box -40 20 0 40 22 2.6
+// bit of a float ((-36 + 4.5) + 2.6 vs -36 + (4.5 + 2.6)). `from` gives the copies of a row split
+// in two the same floats as the longer row's.
 //
-// Materials (format 2):
+// Materials:
 //   material "name" key value [key value ...]   define a material, or add keys to one (a long
 //                                  definition may span several lines with the same name).
 //                                  "default" always exists (plain PBR: albedo 180 180 180,
@@ -154,7 +150,7 @@
 //         paint_filter trilinear|nearest   how the atlas is sampled (nearest: crisp paint texels)
 //   Colours are 0-255 sRGB. Unset keys keep R3D's defaults (R3D_MATERIAL_BASE).
 //
-// Paint (format 2; docs/painting.md 4.2), anywhere after the material's line:
+// Paint (docs/painting.md 4.2), anywhere after the material's line:
 //   paint "material" N:i <faces> x y w h   faces of box i of the line with `id N` (its index within the
 //                                  line, map order), `<faces>` a comma list of +x -x +y -y +z -z (a
 //                                  turned box: its own axes), get the rectangle x y w h (texels) of the
@@ -172,7 +168,7 @@
 //   longer draws that face or slot with that material, or whose rectangle lies outside its atlas,
 //   draws nothing (logged). `paint` lines are no statements: they take no statement key.
 //
-// Environment (format 2):  env <key> <value...>
+// Environment:  env <key> <value...>
 //   Every field of R3D_Environment, by its C name: background.color/energy/skyBlur/rotation
 //   (x y z w), ambient.color/energy, ssao.*, ssil.*, ssgi.*, ssr.*, fog.*, volumetricFog.*,
 //   dof.*, bloom.*, autoExposure.*, tonemap.*, color.* (table ENV_KEYS below). Enums by
@@ -207,11 +203,11 @@
 //   Cache hints (optional; derived from the map bounds without them, see "Caches"):
 //   shadow.home x y z, fogCache.region x0 y0 z0 x1 y1 z1.
 //   Every key has a built-in default (BuiltinEnvironment(): the values the default map was
-//   built with), so a v1 map renders as before apart from its material. Numeric values
+//   built with): a map without env lines renders with those. Numeric values
 //   outside sane ranges (ENV_RANGES, e.g. volumetricFog.stepSize >= 0.05) and zero
 //   directions are rejected.
 //
-// Player and cameras (format 2):
+// Player and cameras:
 //   spawn x y z yawDeg [pitchDeg]          player start, feet position (default 0 0 0, yaw 0)
 //   viewpoint "Name" ex ey ez tx ty tz     camera viewpoint (eye, target), in order 1..n;
 //                                          without any, one viewpoint is made from the spawn
@@ -1287,7 +1283,7 @@ static int TypeSize(int type)
 
 // The built-in environment (docs/map-format.md 2.5): the look the default map was built
 // with, which used to be hard-coded in SetupEnvironment() and main(). A map overrides
-// any key with `env`; a v1 map gets exactly these.
+// any key with `env`; a map without env lines gets exactly these.
 static void BuiltinEnvironment(EnvDef *e)
 {
     memset(e, 0, sizeof(*e));
@@ -2649,7 +2645,7 @@ static bool Box(Parser *P, float x0, float y0, float z0, float x1, float y1, flo
         { fminf(x0, x1), fminf(y0, y1), fminf(z0, z1) },
         { fmaxf(x0, x1), fmaxf(y0, y1), fmaxf(z0, z1) },
     };
-    // Each number is finite, but shifts (repeat * d, at) or the size can still overflow;
+    // Each number is finite, but shifts (repeat * d) or the size can still overflow;
     // inf/NaN would reach the instance scale, collision and picking
     if (!isfinite(b.min.x) || !isfinite(b.min.y) || !isfinite(b.min.z) ||
         !isfinite(b.max.x) || !isfinite(b.max.y) || !isfinite(b.max.z) ||
@@ -2738,10 +2734,8 @@ static const PrimDef PRIMS[] = {
     { "waffle", 8, { AX_X, AX_X, AX_Y, AX_Y, AX_Z, AX_NONE, AX_NONE, AX_NONE } },
 };
 
-// `id` / `repeat` / `at` prefixes of a line
+// `id` / `repeat` prefixes of a line
 typedef struct {
-    float at[3];
-    bool hasAt;
     int repN[MS_REPEATS_MAX];
     int repFrom[MS_REPEATS_MAX];        // `from k`: the first copy index of that repeat (default 0)
     float repD[MS_REPEATS_MAX][3];
@@ -2756,7 +2750,7 @@ static bool ParsePlacement(Parser *P, Token *tok, int n, int *tIn, Placement *pl
     long total = 1;
     int t = 0;
     for (;;) {
-        if (t >= n) return Fail(P, "missing primitive after repeat/at", NULL);
+        if (t >= n) return Fail(P, "missing primitive after id/repeat", NULL);
         if (strcmp(tok[t].s, "repeat") == 0 && !tok[t].quoted) {
             if (pl->reps == MS_REPEATS_MAX) return Fail(P, "at most 3 repeats per line", NULL);
             if (t + 4 >= n) return Fail(P, "repeat takes 4 numbers: repeat n dx dy dz", NULL);
@@ -2779,25 +2773,18 @@ static bool ParsePlacement(Parser *P, Token *tok, int n, int *tIn, Placement *pl
             if (!NumI(P, tok[t + 1], 1, 2147483647, &pl->id)) return false;
             pl->hasId = true;
             t += 2;
-        } else if (strcmp(tok[t].s, "at") == 0 && !tok[t].quoted) {
-            if (pl->hasAt) return Fail(P, "only one 'at' per line", NULL);
-            if (t + 3 >= n) return Fail(P, "at takes 3 numbers: at x y z", NULL);
-            for (int a = 0; a < 3; a++)
-                if (!NumF(P, tok[t + 1 + a], &pl->at[a])) return false;
-            pl->hasAt = true;
-            t += 4;
         } else break;
     }
     *tIn = t;
     return true;
 }
 
-// Offset of copy (i0, i1, i2): (at + i*d1 + j*d2 + k*d3), in this order of float additions;
+// Offset of copy (i0, i1, i2): (0 + i*d1 + j*d2 + k*d3), in this order of float additions;
 // with `from`, i counts from there (the same floats as that copy of the longer row)
 static void CopyOffset(const Placement *pl, const int *idx, float off[3])
 {
     for (int a = 0; a < 3; a++) {
-        off[a] = pl->at[a];
+        off[a] = 0.0f;
         for (int r = 0; r < pl->reps; r++) off[a] += (float)(idx[r] + pl->repFrom[r]) * pl->repD[r][a];
     }
 }
@@ -2811,11 +2798,10 @@ static void BeginCopy(Parser *P, const int *cnt, int i0, int i1, int i2)
 
 static bool ParsePrimitive(Parser *P, const PrimDef *def, Token *args, int argc, const Placement *pl)
 {
-    // `rot yaw pitch roll` after a box's or block's numbers (format 2): turned about its centre
+    // `rot yaw pitch roll` after a box's or block's numbers: turned about its centre
     Vector3 rot = { 0 };
     if (argc > def->argc && strcmp(args[def->argc].s, "rot") == 0) {
         if (def->argc != 6) return Fail(P, "%s can't turn (rot is for box and block lines)", def->name);
-        if (P->d->formatVersion < 2) return Fail(P, "rot on a %s needs map format 2: add 'monolith 2' as the first line", def->name);
         if (argc != def->argc + 4) return Fail(P, "rot takes 3 numbers: rot yawDeg pitchDeg rollDeg", NULL);
         for (int i = 0; i < 3; i++)
             if (!NumF(P, args[def->argc + 1 + i], &((float *)&rot)[i])) return false;
@@ -2837,7 +2823,7 @@ static bool ParsePrimitive(Parser *P, const PrimDef *def, Token *args, int argc,
     }
     if (def->argc == 8 && (v[6] <= 0.0f || v[7] <= 0.0f)) return Fail(P, "waffle bayW and floorH must be > 0", NULL);
 
-    bool shifted = pl->hasAt || pl->reps > 0;
+    bool shifted = pl->reps > 0;
     int cnt[MS_REPEATS_MAX] = { 1, 1, 1 };
     for (int r = 0; r < pl->reps; r++) cnt[r] = pl->repN[r];
 
@@ -2938,7 +2924,7 @@ static bool ParseLight(Parser *P, Token *args, int n, const Placement *pl)
     }
     if (type == R3D_LIGHT_SPOT && L.innerCutOff > L.outerCutOff) return Fail(P, "spot light: inner must be <= outer", NULL);
 
-    bool shifted = pl->hasAt || pl->reps > 0;
+    bool shifted = pl->reps > 0;
     int cnt[MS_REPEATS_MAX] = { 1, 1, 1 };
     for (int r = 0; r < pl->reps; r++) cnt[r] = pl->repN[r];
     for (int i0 = 0; i0 < cnt[0]; i0++)
@@ -2955,7 +2941,7 @@ static bool ParseLight(Parser *P, Token *args, int n, const Placement *pl)
         if (shifted && nPos) c.position = (Vector3){ off[0] + pos.x, off[1] + pos.y, off[2] + pos.z };
         BoundingBox cbox = { 0 };
         if (clip) {
-            // shifted like box corners: (at + i * d) + value
+            // shifted like box corners: (i * d) + value
             float a[6];
             for (int k = 0; k < 6; k++) a[k] = shifted ? off[k % 3] + cb[k] : cb[k];
             cbox.min = (Vector3){ fminf(a[0], a[3]), fminf(a[1], a[4]), fminf(a[2], a[5]) };
@@ -3888,7 +3874,7 @@ static bool ParseModel(Parser *P, Token *args, int n, const Placement *pl)
     M.colliderCount = M.collide == MS_COLLIDE_BOXES ? d->localColliderCount - M.colliderFirst : 0;
     int perCopy = M.collide == MS_COLLIDE_AABB ? 1 : M.colliderCount;
 
-    bool shifted = pl->hasAt || pl->reps > 0;
+    bool shifted = pl->reps > 0;
     int cnt[MS_REPEATS_MAX] = { 1, 1, 1 };
     for (int r = 0; r < pl->reps; r++) cnt[r] = pl->repN[r];
     for (int i0 = 0; i0 < cnt[0]; i0++)
@@ -3947,6 +3933,14 @@ static bool AddStatement(Parser *P, const Placement *pl, const Token *tok, int n
     return true;
 }
 
+// A map of an older format v (1: no format line), reported at the current line. The parser reads
+// only the current format; an older map is rewritten to it (docs/map-format.md 1.3).
+static bool OlderFormat(Parser *P, int v)
+{
+    return FailF(P, "map format %d is older than this monolith (%d): run /migrate-map %s in Claude Code "
+                    "(docs/map-format.md \xC2\xA7" "1.3)", v, MS_FORMAT_VERSION, P->path);
+}
+
 // A statement that is not an object, group, use, spawn or viewpoint (format, material, env): its
 // tokens go into d->lookHash, so a live edit knows whether the text changed anything but objects.
 // The format and env lines also go into restLookHash (a material line into its own hashes:
@@ -3961,7 +3955,6 @@ static void HashLook(SceneData *d, const Token *tok, int n)
 static bool ParseStatement(Parser *P, Token *tok, int n)
 {
     SceneData *d = P->d;
-    bool v2 = d->formatVersion >= 2;
     const char *kw = tok[0].quoted ? "" : tok[0].s;
     if (strcmp(kw, "monolith") == 0 || strcmp(kw, "material") == 0 || strcmp(kw, "env") == 0) HashLook(d, tok, n);
 
@@ -3969,17 +3962,14 @@ static bool ParseStatement(Parser *P, Token *tok, int n)
         if (P->sawStatement) return Fail(P, "the format line 'monolith N' must be the first statement", NULL);
         int v;
         if (n != 2 || !NumI(P, tok[1], 1, 1000000, &v)) return n != 2 ? Fail(P, "format line: monolith <version>", NULL) : false;
-        if (v > MS_FORMAT_VERSION) {
-            char m[160];
-            snprintf(m, sizeof(m), "map format %d is newer than this runtime supports (%d); update monolith_scene",
-                     v, MS_FORMAT_VERSION);
-            return Fail(P, "%s", m);
-        }
+        if (v < MS_FORMAT_VERSION) return OlderFormat(P, v);
+        if (v > MS_FORMAT_VERSION)
+            return FailF(P, "map format %d is newer than this monolith (%d): update monolith", v, MS_FORMAT_VERSION);
         d->formatVersion = v;
         P->sawStatement = true;
         return true;
     }
-    P->sawStatement = true;
+    if (!P->sawStatement) return OlderFormat(P, 1);       // no format line: format 1
 
     if (strcmp(kw, "group") == 0) {
         const char *name;
@@ -3994,11 +3984,6 @@ static bool ParseStatement(Parser *P, Token *tok, int n)
         P->cur.group = d->groupCount - 1;
         return true;
     }
-
-    static const char *const V2_STATEMENTS[] = { "material", "use", "env", "spawn", "viewpoint", "light", "model", "paint" };
-    for (int i = 0; i < COUNT(V2_STATEMENTS); i++)
-        if (!v2 && strcmp(kw, V2_STATEMENTS[i]) == 0)
-            return Fail(P, "'%s' needs map format 2: add 'monolith 2' as the first line", kw);
 
     if (strcmp(kw, "material") == 0) return ParseMaterial(P, tok, n);
     if (strcmp(kw, "use") == 0) {
@@ -4052,20 +4037,17 @@ static bool ParseStatement(Parser *P, Token *tok, int n)
     if (!AddStatement(P, &pl, tok, n)) return false;
     P->cur.copy = P->cur.part = 0;
     if (strcmp(prim, "light") == 0) {
-        if (!v2) return Fail(P, "'light' needs map format 2: add 'monolith 2' as the first line", NULL);
         if (!NoStrings(P, tok, t + 1, n)) return false;
         return ParseLight(P, &tok[t + 1], n - t - 1, &pl);
     }
     if (strcmp(prim, "model") == 0) {
-        if (!v2) return Fail(P, "'model' needs map format 2: add 'monolith 2' as the first line", NULL);
         return ParseModel(P, &tok[t + 1], n - t - 1, &pl);
     }
     if (!NoStrings(P, tok, 0, n)) return false;
     for (int i = 0; i < COUNT(PRIMS); i++)
         if (strcmp(prim, PRIMS[i].name) == 0) return ParsePrimitive(P, &PRIMS[i], &tok[t + 1], n - t - 1, &pl);
-    if (v2) return Fail(P, "unknown keyword '%s' (expected group, box, block, stairs, waffle, model, light, material, use, env, "
-                           "paint, spawn, viewpoint, repeat or at)", prim);
-    return Fail(P, "unknown keyword '%s' (expected group, box, block, stairs, waffle, repeat or at)", prim);
+    return Fail(P, "unknown keyword '%s' (expected group, box, block, stairs, waffle, model, light, material, use, env, "
+                   "paint, spawn, viewpoint, id or repeat)", prim);
 }
 
 static bool ParseText(Parser *P, const char *text, int size)
@@ -4096,7 +4078,7 @@ static bool ParseText(Parser *P, const char *text, int size)
     }
     P->line = 0;
     if (P->d->boxCount == 0 && P->d->modelCount == 0)
-        return Fail(P, P->d->formatVersion >= 2 ? "map is empty (no boxes and no models)" : "map is empty (no boxes)", NULL);
+        return Fail(P, "map is empty (no boxes and no models)", NULL);
     return ResolvePaintEntities(P);
 }
 
@@ -4112,19 +4094,15 @@ static bool ParseText(Parser *P, const char *text, int size)
 // fixed-width fields, every record a multiple of 4 bytes, sections at multiples of 8. The
 // reader checks the whole file before it uses any of it.
 //
-// The version is the guard: a file names its CM_VERSION and each section its record size, and the
-// reader refuses a version it doesn't know or a record size that differs. So bump CM_VERSION on any
-// change to a record (a field added, removed, resized or moved), to a section or to a stored T_*
-// value, even one that keeps the size. A new record: a section id at the end of the enum with its
-// CM_SECTION entry, CM_VERSION bumped (CmReadHeader: how many sections each version has), a section
-// reader (CmRead*) in ReadCompiled's list after the sections its records point into, and the
-// matching section writer (CmPut*). The layout goes into docs/compiled-map.md.
+// The version is the guard: a file names its CM_VERSION, the map format it was compiled from and
+// each section its record size, and the reader refuses any other version or format and a record
+// size that differs. So bump CM_VERSION on any change to a record (a field added, removed, resized
+// or moved), to a section or to a stored T_* value, even one that keeps the size. A new record: a
+// section id at the end of the enum with its CM_SECTION entry, CM_VERSION bumped, a section reader
+// (CmRead*) in ReadCompiled's list after the sections its records point into, and the matching
+// section writer (CmPut*). The layout goes into docs/compiled-map.md.
 
 #define CM_VERSION          7           // MS_COMPILED_VERSION: bump on any change to a record or section
-#define CM_VERSION_OLDEST   2           // the oldest version still read (2: no box turns section; 2 and 3:
-                                        // materials without uvFaces and filter; 2 to 4: materials without
-                                        // paint, no paint section; 2 to 5: materials without noPrepass;
-                                        // 2 to 6: materials without drawDistance)
 #define CM_BYTE_ORDER       0x01020304u
 #define CM_NONE             0xFFFFFFFFu // a string field without a string
 #define CM_MAX_ENV          4096        // env records (the key tables have ~120 keys)
@@ -4156,7 +4134,7 @@ typedef struct {
     int32_t line, prim, group, material, copy, part;
 } CmRef;
 
-// A box (section "boxes"), already expanded from repeat / at / stairs / waffle. A turned box holds
+// A box (section "boxes"), already expanded from repeat / stairs / waffle. A turned box holds
 // the box as written (before the turn); its CmBoxTurn holds the rotation.
 typedef struct {
     float min[3], max[3];
@@ -4167,13 +4145,10 @@ typedef struct {
 // cull, transparency, blend: R3D's enums; inherit: INHERIT_* bits (`inherit`, model overrides);
 // unlit / instanced: 0 or 1; uniformFirst / samplerFirst: the material's first record in the
 // uniforms / samplers sections (each material's ranges follow the previous material's).
-// Version 4: uvFaces: the box face layout (`uv_faces`, a cell per face +x -x +y -y +z -z; all
-// 255 = none); filter: TEX_* (`filter`); pad: 0. A version 2 or 3 record ends before uvFaces.
-// Version 5: paint: the paint atlas (`paint`, CM_NONE for none); paintFilter: TEX_* (`paint_filter`);
-// pad2: 0. A version 4 record ends before paint.
-// Version 6: noPrepass: 0 or 1 (`prepass off`). A version 5 record ends before noPrepass.
-// Version 7: drawDistance: MS_Material.drawDistance (`draw_distance`: m, 0 auto, -1 off). A version 6
-// record ends before drawDistance.
+// uvFaces: the box face layout (`uv_faces`, a cell per face +x -x +y -y +z -z; all 255 = none);
+// filter: TEX_* (`filter`); pad: 0. paint: the paint atlas (`paint`, CM_NONE for none);
+// paintFilter: TEX_* (`paint_filter`); pad2: 0. noPrepass: 0 or 1 (`prepass off`).
+// drawDistance: MS_Material.drawDistance (`draw_distance`: m, 0 auto, -1 off).
 typedef struct {
     uint32_t name, shader, maps[MAP_COUNT];     // maps: albedo, normal, orm, emission
     int32_t line, shaderLine, mapLine[MAP_COUNT];
@@ -4183,19 +4158,14 @@ typedef struct {
     int32_t cull, transparency, blend, priority, wrap;
     uint32_t inherit, unlit, instanced;
     uint32_t uniformFirst, uniformCount, samplerFirst, samplerCount;
-    uint8_t uvFaces[6], filter, pad;            // version 4
-    uint32_t paint;                             // version 5
+    uint8_t uvFaces[6], filter, pad;
+    uint32_t paint;
     uint8_t paintFilter, pad2[3];
-    uint32_t noPrepass;                         // version 6
-    float drawDistance;                         // version 7
+    uint32_t noPrepass;
+    float drawDistance;
 } CmMaterial;
 
-#define CM_MATERIAL_V3_SIZE ((uint32_t)offsetof(CmMaterial, uvFaces))  // a version 2 / 3 material record
-#define CM_MATERIAL_V4_SIZE ((uint32_t)offsetof(CmMaterial, paint))    // a version 4 material record
-#define CM_MATERIAL_V5_SIZE ((uint32_t)offsetof(CmMaterial, noPrepass)) // a version 5 material record
-#define CM_MATERIAL_V6_SIZE ((uint32_t)offsetof(CmMaterial, drawDistance)) // a version 6 material record
-
-// A `paint` statement (version 5), its entity resolved to the object: material (CM_NONE: the model
+// A `paint` statement, its entity resolved to the object: material (CM_NONE: the model
 // slot's own material), kind (0 a box, 1 a model instance), object (index into the boxes or models
 // section), faces (a box: bit f for face f, +x -x +y -y +z -z) or the slot (a model), the rectangle
 // in texels of the atlas, filter (TEX_*: `paint own … paint_filter`; 0 for a material's entry), the
@@ -4280,7 +4250,7 @@ typedef struct {
     float feet[3], yawDeg, pitchDeg;
 } CmSpawn;
 
-// A box's turn (`box … rot`, version 3): the box's index and its rotation as written (yaw, pitch,
+// A box's turn (`box … rot`): the box's index and its rotation as written (yaw, pitch,
 // roll). The turned box's CmBox holds the box as written.
 typedef struct {
     uint32_t box;
@@ -4291,11 +4261,8 @@ typedef struct {
 enum {
     CM_STRINGS = 1, CM_BOXES, CM_GROUPS, CM_MATERIALS, CM_UNIFORMS, CM_SAMPLERS, CM_LIGHTS, CM_VIEWPOINTS,
     CM_MODEL_FILES, CM_MODELS, CM_COLLIDERS, CM_SLOTS, CM_STATEMENTS, CM_ENV, CM_SPAWN, CM_DEPS,
-    CM_BOX_TURNS,                       // version 3
-    CM_PAINT,                           // version 5
-    CM_SECTIONS = CM_PAINT,
-    CM_SECTIONS_V2 = CM_DEPS,           // the sections of a version 2 file
-    CM_SECTIONS_V4 = CM_BOX_TURNS       //   and of a version 3 or 4 file
+    CM_BOX_TURNS, CM_PAINT,
+    CM_SECTIONS = CM_PAINT
 };
 
 // What the code knows about one section: its name (for messages), its record size and the most
@@ -4341,8 +4308,7 @@ typedef struct {
     SceneData *d;                   // the scene being filled
     const unsigned char *bytes;
     uint32_t size;
-    CmSection sec[CM_SECTIONS + 1]; // by section id, from the checked section table (empty: not in the file)
-    uint32_t version;               // the file's CM_VERSION
+    CmSection sec[CM_SECTIONS + 1]; // by section id, from the checked section table
     const char *str;                // the string table (NUL-terminated: checked)
     uint32_t strSize;
 } CmReader;
@@ -4359,24 +4325,11 @@ static bool CmFail(CmReader *R, const char *fmt, ...)
 }
 
 // Record i of section `id` (in range: checked by the caller's loop over the section's count),
-// copied out (sections are aligned, but a copy keeps the reads free of aliasing questions). A record
-// of an older version that is shorter (CmRecordSize) leaves the newer fields zero.
+// copied out (sections are aligned, but a copy keeps the reads free of aliasing questions)
 static void CmRecord(const CmReader *R, int id, uint32_t i, void *out)
 {
     uint32_t size = R->sec[id].recordSize;
-    memset(out, 0, CM_SECTION[id].size);
     memcpy(out, R->bytes + R->sec[id].offset + (size_t)i * size, size);
-}
-
-// The record size of section `id` in a file of `version` (a material had no uvFaces before 4, no
-// paint before 5, no noPrepass before 6, no drawDistance before 7)
-static uint32_t CmRecordSize(uint32_t version, uint32_t id)
-{
-    if (id == CM_MATERIALS && version < 4) return CM_MATERIAL_V3_SIZE;
-    if (id == CM_MATERIALS && version < 5) return CM_MATERIAL_V4_SIZE;
-    if (id == CM_MATERIALS && version < 6) return CM_MATERIAL_V5_SIZE;
-    if (id == CM_MATERIALS && version < 7) return CM_MATERIAL_V6_SIZE;
-    return CM_SECTION[id].size;
 }
 
 // A string field: *out = the string (NULL for CM_NONE when `optional`), false with a message otherwise
@@ -4486,22 +4439,22 @@ static bool CmReadHeader(CmReader *R, CmHeader *h)
     if (memcmp(h->magic, CM_MAGIC, sizeof(CM_MAGIC)) != 0) return CmFail(R, "not a compiled map");
     if (h->byteOrder != CM_BYTE_ORDER)
         return CmFail(R, "compiled map: unsupported byte order (compiled maps are little-endian; big-endian hosts are not supported)");
-    if (h->version < CM_VERSION_OLDEST || h->version > CM_VERSION)
-        return CmFail(R, "compiled map version %u; this runtime reads compiled map versions %d to %d: compile the map again",
-                      h->version, CM_VERSION_OLDEST, CM_VERSION);
-    // The sections of this version (a section's id is its place in this list)
-    uint32_t sections = h->version == 2 ? CM_SECTIONS_V2 : h->version < 5 ? CM_SECTIONS_V4 : CM_SECTIONS;
-    R->version = h->version;
+    if (h->version != CM_VERSION)
+        return CmFail(R, "compiled map version %u; this runtime reads compiled map version %d: compile the map again",
+                      h->version, CM_VERSION);
     if (h->headerSize != sizeof(CmHeader) || h->flags != 0) return CmFail(R, "compiled map: bad header");
     if (h->fileSize != R->size)
         return CmFail(R, "compiled map: the header says %llu bytes, the file has %u (truncated or damaged)",
                       (unsigned long long)h->fileSize, R->size);
-    if (h->formatVersion < 1 || h->formatVersion > MS_FORMAT_VERSION)
-        return CmFail(R, "map format %u is newer than this runtime supports (%d); update monolith_scene",
+    if (h->formatVersion < MS_FORMAT_VERSION)
+        return CmFail(R, "compiled map of map format %u; this runtime reads map format %d: compile the map again",
+                      h->formatVersion, MS_FORMAT_VERSION);
+    if (h->formatVersion > MS_FORMAT_VERSION)
+        return CmFail(R, "compiled map of map format %u is newer than this runtime (%d): update monolith",
                       h->formatVersion, MS_FORMAT_VERSION);
 
-    // The section table: one entry per section of this version, inside the file
-    if (h->sectionCount != sections ||
+    // The section table: one entry per section, inside the file
+    if (h->sectionCount != CM_SECTIONS ||
         h->sectionTable < sizeof(CmHeader) ||
         h->sectionTable % 4 ||
         (uint64_t)h->sectionTable + (uint64_t)h->sectionCount * sizeof(CmSection) > R->size)
@@ -4512,12 +4465,12 @@ static bool CmReadHeader(CmReader *R, CmHeader *h)
     for (uint32_t i = 0; i < h->sectionCount; i++) {
         CmSection s;
         memcpy(&s, R->bytes + h->sectionTable + i * sizeof(CmSection), sizeof(s));
-        if (s.id < 1 || s.id > sections) return CmFail(R, "compiled map: unknown section %u", s.id);
+        if (s.id < 1 || s.id > CM_SECTIONS) return CmFail(R, "compiled map: unknown section %u", s.id);
         const char *name = CM_SECTION[s.id].name;
         if (R->sec[s.id].id) return CmFail(R, "compiled map: section '%s' appears twice", name);
-        if (s.recordSize != CmRecordSize(h->version, s.id))
+        if (s.recordSize != CM_SECTION[s.id].size)
             return CmFail(R, "compiled map: section '%s' has %u-byte records, expected %u",
-                          name, s.recordSize, CmRecordSize(h->version, s.id));
+                          name, s.recordSize, CM_SECTION[s.id].size);
         if (s.count > CM_SECTION[s.id].max)
             return CmFail(R, "compiled map: section '%s' has too many records (%u)", name, s.count);
         if (s.offset < sizeof(CmHeader) ||
@@ -4526,8 +4479,7 @@ static bool CmReadHeader(CmReader *R, CmHeader *h)
             return CmFail(R, "compiled map: section '%s' lies outside the file", name);
         R->sec[s.id] = s;
     }
-    // (all ids of the version present: sectionCount of them, none twice, none unknown; a version 2
-    // file leaves the newer sections empty)
+    // (every id present: sectionCount of them, none twice, none unknown)
     if (R->sec[CM_SPAWN].count != 1) return CmFail(R, "compiled map: section 'spawn' must have one record");
 
     // The string table: starts and ends with a NUL (so every offset inside it ends in one), no
@@ -4740,8 +4692,6 @@ static bool CmReadMaterial(CmReader *R, uint32_t i, uint32_t *uniformsUsed, uint
     SceneData *d = R->d;
     CmMaterial c;
     CmRecord(R, CM_MATERIALS, i, &c);
-    if (R->version < 4) memset(c.uvFaces, 255, sizeof(c.uvFaces));     // (no layout, filter 0: trilinear)
-    if (R->version < 5) c.paint = CM_NONE;                              // (no paint, paint_filter trilinear)
 
     // Counted first: the strings below are heap copies FreeData must find
     MS_Material *M = &d->materials[i];
@@ -4819,7 +4769,7 @@ static bool CmReadBoxes(CmReader *R)
     return true;
 }
 
-// The box turns (version 3), after the boxes they turn: each turned box's CmBox holds the box as
+// The box turns, after the boxes they turn: each turned box's CmBox holds the box as
 // written; its record and world AABB are rebuilt with the parser's own code (TurnedBoxMake), so
 // the bits match a text load. TurnedBox's guarantees: one record per turned box, in box order, a
 // finite nonzero rotation, then TurnedBox's and Box()'s checks on the result.
@@ -4976,7 +4926,7 @@ static bool CmReadModels(CmReader *R)
     return true;
 }
 
-// The paint entries (version 5), after the materials, boxes and models they point into. The
+// The paint entries, after the materials, boxes and models they point into. The
 // parser's guarantees for a `paint` line: a material with a paint key (or a model slot's own), a
 // box with faces or a model with a slot, made by a line with an explicit `id`, a rectangle of at
 // least one texel, paint_filter only on own entries, and the rules between the entries
@@ -5024,7 +4974,7 @@ static bool CmReadPaint(CmReader *R)
 }
 
 // The parser's guarantees for a `light` line: the numbers as written are finite (positions within
-// the coordinate limit, but `repeat` / `at` may shift them past it), a point light has no
+// the coordinate limit, but `repeat` may shift them past it), a point light has no
 // direction and the others a normalised one, a spot's inner angle is at most its outer one, the
 // clip box is ordered and not flat. (Numbers so large or small that normalising or shifting them
 // breaks this fail when the map is compiled, which reads the result back.)
@@ -5250,13 +5200,12 @@ static bool CmReadDeps(CmReader *R)
     return true;
 }
 
-// The parser refuses a map without boxes and models (format 1 had no models)
+// The parser refuses a map without boxes and models
 static bool CmCheckNotEmpty(CmReader *R)
 {
     const SceneData *d = R->d;
     if (d->boxCount == 0 && d->modelCount == 0)
-        return CmFail(R, d->formatVersion >= 2 ? "map is empty (no boxes and no models)"
-                                               : "map is empty (no boxes)");
+        return CmFail(R, "map is empty (no boxes and no models)");
     return true;
 }
 
@@ -6499,7 +6448,6 @@ static bool InitData(SceneData *d, const char *mapPath)
     d->path = MS_StrDup(mapPath);
     d->srcPath = MS_StrDup(mapPath);
     d->root = MS_StrDup(root);
-    d->formatVersion = 1;
     BuiltinEnvironment(&d->env);
     bool mem = d->path && d->srcPath && d->root;
 #ifdef MONOLITH_EDITOR

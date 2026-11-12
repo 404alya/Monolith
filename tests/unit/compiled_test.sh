@@ -19,7 +19,7 @@ E="$(printf '\xc3\xa9%.0s' {1..120})"
 LONG="$OUT/longname"
 mkdir -p "$LONG/textures/$E/$E/$E"
 cp "$ROOT/tests/models/textures/tiles.png" "$LONG/textures/$E/$E/$E/tile.png"
-printf 'monolith 2\nmaterial "long" albedo_map "textures/%s/%s/%s/tile.png"\nuse "long"\nbox 0 0 0 1 1 1\nspawn 0 0 3 0\n' \
+printf 'monolith 3\nmaterial "long" albedo_map "textures/%s/%s/%s/tile.png"\nuse "long"\nbox 0 0 0 1 1 1\nspawn 0 0 3 0\n' \
   "$E" "$E" "$E" > "$LONG/longname.map"
 for p in "${PACKAGES[@]}"; do
   if [[ "$p" == longname ]]; then

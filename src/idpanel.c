@@ -28,8 +28,8 @@ static bool Ctrl(void) { return IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIG
 
 // #region The items
 
-// The statement keyword of a map line after its prefixes (`id n`, `repeat n dx dy dz [from k]`,
-// `at x y z`), into out (cut to outSize - 1); "" when there is none
+// The statement keyword of a map line after its prefixes (`id n`, `repeat n dx dy dz [from k]`),
+// into out (cut to outSize - 1); "" when there is none
 static void LineKeyword(int line, char *out, int outSize)
 {
     out[0] = '\0';
@@ -48,7 +48,6 @@ static void LineKeyword(int line, char *out, int outSize)
         else if (n == 2 && memcmp(s + p, "id", 2) == 0) skip = 1;
         else if (n == 6 && memcmp(s + p, "repeat", 6) == 0) skip = 4;
         else if (n == 4 && memcmp(s + p, "from", 4) == 0) skip = 1;
-        else if (n == 2 && memcmp(s + p, "at", 2) == 0) skip = 3;
         else {
             snprintf(out, (size_t)outSize, "%.*s", n, s + p);
             return;

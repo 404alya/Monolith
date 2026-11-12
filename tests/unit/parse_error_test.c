@@ -55,6 +55,27 @@ static void ExpectExact(const char *what, const char *text, int line, const char
     else printf("ok   %s: %s\n", what, MS_LastError());
 }
 
+// An older map: refused at `line` with the message that names the map's own path (format N)
+static void ExpectOlder(const char *what, const char *text, int line, int format)
+{
+    char path[1100], message[1400];
+    snprintf(path, sizeof(path), "%s/%s.map", dir, what);
+    snprintf(message, sizeof(message), "map format %d is older than this monolith (3): run /migrate-map %s in "
+             "Claude Code (docs/map-format.md \xC2\xA7" "1.3)", format, path);
+    ExpectExact(what, text, line, message);
+}
+
+// A map refused with exactly "<path>: <message>" (no line: a message about the whole file)
+static void ExpectFile(const char *what, const char *text, const char *message)
+{
+    char path[1100], want[2048];
+    WriteMap(what, text, path, sizeof(path));
+    snprintf(want, sizeof(want), "%s: %s", path, message);
+    if (!Refused(path)) { printf("FAIL %s: loaded\n", what); fails++; }
+    else if (strcmp(MS_LastError(), want) != 0) { printf("FAIL %s:\n  got  %s\n  want %s\n", what, MS_LastError(), want); fails++; }
+    else printf("ok   %s: %s\n", what, MS_LastError());
+}
+
 // A long message: whole (it starts with "<path>:<line>: ", contains `token` and ends with `tail`),
 // valid UTF-8, the same on a second failing load
 static void ExpectLong(const char *what, const char *text, int line, const char *token, const char *tail)
@@ -99,19 +120,29 @@ int main(int argc, char **argv)
     snprintf(dir, sizeof(dir), "%s", argv[1]);
 
     // Short messages: the exact text
-    ExpectExact("short-number", "monolith 2\nbox 0 0 0 1 1 abc\n", 2, "bad number 'abc'");
-    ExpectExact("short-keyword", "monolith 2\nenv fog.mode fuzzy\n", 2,
+    ExpectExact("short-number", "monolith 3\nbox 0 0 0 1 1 abc\n", 2, "bad number 'abc'");
+    ExpectExact("short-keyword", "monolith 3\nenv fog.mode fuzzy\n", 2,
                 "bad fog mode 'fuzzy' (expected disabled linear exp2 exp)");
-    ExpectExact("short-format", "monolith 99\n", 1,
-                "map format 99 is newer than this runtime supports (2); update monolith_scene");
+    ExpectExact("short-format", "monolith 99\n", 1, "map format 99 is newer than this monolith (3): update monolith");
+
+    // The format line: exactly the current format (3). Without one a file is format 1, reported at
+    // its first statement; a file of only comments has nothing to migrate
+    ExpectOlder("format-none", "# an old map\n\nbox 0 0 0 1 1 1\n", 3, 1);
+    ExpectOlder("format-2", "monolith 2\nbox 0 0 0 1 1 1\n", 1, 2);
+    ExpectExact("format-4", "# a newer map\nmonolith 4\nbox 0 0 0 1 1 1\n", 2,
+                "map format 4 is newer than this monolith (3): update monolith");
+    ExpectExact("format-3-at", "monolith 3\nrepeat 2 0 0 1 at 0 0 5 box 0 0 0 1 1 1\n", 2,
+                "unknown keyword 'at' (expected group, box, block, stairs, waffle, model, light, material, use, env, "
+                "paint, spawn, viewpoint, id or repeat)");
+    ExpectFile("comments-only", "# nothing\n\n   # but comments\n", "map is empty (no boxes and no models)");
 
     // A bad token of 300 'é' (600 bytes) and 400 'x': longer than the parser's old message buffers
     char token[1200] = "", text[1400];
     for (int i = 0; i < 300; i++) strcat(token, "\xC3\xA9");
     for (int i = 0; i < 400; i++) strcat(token, "x");
-    snprintf(text, sizeof(text), "monolith 2\nbox 0 0 0 1 1 %s\n", token);
+    snprintf(text, sizeof(text), "monolith 3\nbox 0 0 0 1 1 %s\n", token);
     ExpectLong("long-number", text, 2, token, "x'");
-    snprintf(text, sizeof(text), "monolith 2\n\nenv fog.mode %s\n", token);
+    snprintf(text, sizeof(text), "monolith 3\n\nenv fog.mode %s\n", token);
     ExpectLong("long-keyword", text, 3, token, "' (expected disabled linear exp2 exp)");
 
     // No length limit at all: a token of 100 000 bytes
@@ -120,13 +151,13 @@ int main(int argc, char **argv)
     if (!huge || !hugeText) exit(1);
     memset(huge, 'y', hugeLen);
     huge[hugeLen] = '\0';
-    snprintf(hugeText, hugeLen + 64, "monolith 2\nbox 0 0 0 1 1 %s\n", huge);
+    snprintf(hugeText, hugeLen + 64, "monolith 3\nbox 0 0 0 1 1 %s\n", huge);
     ExpectLong("huge-number", hugeText, 2, huge, "y'");
     free(hugeText);
     free(huge);
 
     // A success after the failures clears the last error
-    ExpectCleared("loads", "monolith 2\nbox 0 0 0 1 1 1\nspawn 0 0 3 0\n");
+    ExpectCleared("loads", "monolith 3\nbox 0 0 0 1 1 1\nspawn 0 0 3 0\n");
 
     printf("%s: %d loads, %d failures\n", fails ? "FAILED" : "PASSED", loads, fails);
     MS_ClearError();

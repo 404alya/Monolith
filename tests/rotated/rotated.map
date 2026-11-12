@@ -1,4 +1,4 @@
-monolith 2
+monolith 3
 # rotated.map -- the test package of turned boxes (box / block lines with `rot`): a walkable
 # 30 degree ramp, a 45 degree yawed wall, a tumbled crate, a turned repeat row, turned blocks and a
 # turned box in an `instanced on` material. Used by tests/unit/collision_test.sh and the engine

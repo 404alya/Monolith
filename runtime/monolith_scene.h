@@ -51,7 +51,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 
-#define MS_FORMAT_VERSION       2       // newest map format this runtime reads
+#define MS_FORMAT_VERSION       3       // the map format this runtime reads (the only one)
 
 // No content limits: boxes, models, groups, materials, lights, viewpoints, dependencies,
 // names and map lines live in heap arrays sized to the map. The remaining caps only stop
@@ -150,7 +150,7 @@ typedef struct { int slot, material; } MS_SlotMaterial;
 
 typedef struct {
     int file;                   // index into modelFiles[]
-    Vector3 position;           // as written (after repeat/at), before `origin` adjustment
+    Vector3 position;           // as written (after repeat), before `origin` adjustment
     Vector3 rotationDeg;        // yaw, pitch, roll (R = Ry * Rx * Rz: roll first, then pitch, then yaw)
     Vector3 scale;
     MS_ModelOrigin origin;
@@ -189,7 +189,7 @@ typedef struct {
 typedef struct MS_Private MS_Private;
 
 typedef struct {
-    int formatVersion;              // 1 or 2 (of the loaded file)
+    int formatVersion;              // MS_FORMAT_VERSION (the only map format a scene loads from)
     const char *path;               // the map file
     const char *root;               // package root (folder of the map file), trailing '/'
     unsigned int version;           // 1 after MS_Load (the runtime's caches key on it)
@@ -383,7 +383,7 @@ const char *MS_LineText(const MS_Scene *scene, int line, int *length);
 const char *MS_MapText(const MS_Scene *scene, int *size);
 
 // The argument layout of a box primitive (box, block, stairs, waffle): returns the argument
-// count and fills axes[0..count-1] with what `repeat` / `at` shift: MS_AXIS_X/Y/Z, MS_AXIS_NONE
+// count and fills axes[0..count-1] with what `repeat` shifts: MS_AXIS_X/Y/Z, MS_AXIS_NONE
 // (a size), MS_AXIS_INT (a count). -1 if `name` is not a box primitive. For tools that edit
 // map lines.
 enum { MS_AXIS_NONE = 0, MS_AXIS_X, MS_AXIS_Y, MS_AXIS_Z, MS_AXIS_INT };

@@ -1,4 +1,4 @@
-monolith 2
+monolith 3
 # models.map -- a small test package for tools/leakcheck.sh (and any loader test): every kind of
 # statement once. Boxes with plain, textured and shader materials; model instances with
 # overrides, per-slot materials, collision boxes, origin and shadow switches; shadowed and

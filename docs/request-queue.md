@@ -19,7 +19,7 @@ Every request goes through a queue on disk, worked through by one long-lived Cla
 
 | State | Written by | Meaning |
 |---|---|---|
-| `queued` | game / `--import` | the bundle is complete and waits for the coordinator. **A bundle without `state` is never picked up** (older bundles, per-request mode, a bundle still being written) |
+| `queued` | game / `--import` | the bundle is complete and waits for the coordinator. **A bundle without `state` is never picked up** (per-request mode, a bundle still being written) |
 | `claimed` | `request-queue.sh claim` | a subagent has it. `claim.txt` next to it holds the fingerprint taken at the claim (§4) |
 | `question` | `request-queue.sh set <id> question` | the subagent asked something (`question.md`, line 1 = the question); the coordinator asks the developer in its terminal. Back to `claimed` when answered |
 | `done` | `request-queue.sh finish <id> done` | the subagent finished; `result.md` exists (required) |

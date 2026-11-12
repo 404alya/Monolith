@@ -1,0 +1,23 @@
+monolith 2   # format2.map -- migration fixture: every case of the 2 -> 3 rules (see tests/migrate/README.md)
+
+material "stone" albedo 150 146 140 roughness 0.9 metalness 0
+material "brick" albedo 160 90 70 roughness 0.8 metalness 0
+
+spawn 0 0 8 0
+viewpoint "Overview" 10 7 12 0 0 -4
+viewpoint "Close" -4 2 2 2 1 -6
+
+group "ground"
+use "stone"
+box -20 -1 -20 20 0 20
+
+group "posts at the gate"   # the word at inside a string and a comment (at 1 2 3) stays
+use "brick"
+repeat 3 4 0 0 at 2 0 -8 box 0 0 0 1 1 1              # rule 2a: folds exactly
+repeat 5 0 0 2.6 at 0 0 -3.3 box -1 0 -1 1 1.5 0.2    # rule 2b: the fold is not exact
+at 6 0 4 block 0 0 0 2 3 0.5 rot 30 0 0               # block with rot: rot is never shifted
+id 7 repeat 2 1.5 0 0 at 0.1 0 0.1 box 0.2 0 0.2 1 1 1   # id: form (b) goes after it
+use "default"
+
+group "lamp"
+at 0 2.5 -4 light point 1 0.5 0 color 255 180 120 energy 3 range 8

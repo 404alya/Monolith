@@ -1038,11 +1038,11 @@ static unsigned char Export(const MS_Scene *s, const char *outDirIn)
         }
         UnloadDirectoryFiles(files);
     }
-    // Docs of the package (a single v1 file outside a package has neither)
+    // Docs of the package (each one that exists next to the map)
     bool ownFolder = strcmp(GetFileNameWithoutExt(s->path), GetFileName(GetDirectoryPath(s->path))) == 0;
     static const char *const DOCS[] = { "MAP.md", "ASSETS.md" };
     for (int i = 0; i < 2; i++)
-        if (FileExistsf("%s%s", root, DOCS[i]) && (ownFolder || s->formatVersion >= 2)) AddPkg(&P, root, name, DOCS[i], NULL);
+        if (FileExistsf("%s%s", root, DOCS[i])) AddPkg(&P, root, name, DOCS[i], NULL);
     int pkgFiles = P.count + 1;         // (+ the compiled map, made after writing the package)
 
     // --- Plan: the runtime without its editor parts, viewer.c + build.sh from the templates
@@ -1097,7 +1097,7 @@ static unsigned char Export(const MS_Scene *s, const char *outDirIn)
 
     char assets[MS_PATH_MAX + 16];
     snprintf(assets, sizeof(assets), "%sASSETS.md", root);
-    AddData(&P, "README.md", MakeReadme(s, name, (ownFolder || s->formatVersion >= 2) ? assets : "", pkgFiles, prebuilt), false);
+    AddData(&P, "README.md", MakeReadme(s, name, assets, pkgFiles, prebuilt), false);
 
     // --- Every source must exist before anything is written
     int missing = 0;

@@ -201,20 +201,20 @@ if [[ $BENCH == 1 ]]; then
 fi
 Run reload-to-models 0  "$M" --shot "$TMP/r1.png" --view 2 --reload-test tests/models
 Run reload-to-default 0 "$M" --shot "$TMP/r2.png" --view 1 --map tests/models --reload-test maps/monolith --frame-reuse
-printf 'monolith 2\nbox 0 0 0 1 1 1\nbogus statement here\n' > "$TMP/broken.map"
+printf 'monolith 3\nbox 0 0 0 1 1 1\nbogus statement here\n' > "$TMP/broken.map"
 Run reload-to-broken 0  "$M" --shot "$TMP/r3.png" --view 1 --map tests/models --reload-test "$TMP/broken.map"
 Run broken-map 1        "$M" --dump-boxes "$TMP/broken.txt" --map "$TMP/broken.map"
 # A failing load whose message grows past any fixed size (the runtime's last error, MS_LastError):
 # a package folder with 60 long-named .map files and no <name>.map lists every one of them
 mkdir -p "$TMP/several"
-for i in $(seq 1 60); do printf 'monolith 2\nbox 0 0 0 1 1 1\n' > "$TMP/several/candidate-$i-with-a-long-name-so-the-list-outgrows-old-buffers.map"; done
+for i in $(seq 1 60); do printf 'monolith 3\nbox 0 0 0 1 1 1\n' > "$TMP/several/candidate-$i-with-a-long-name-so-the-list-outgrows-old-buffers.map"; done
 Run several-maps 1      "$M" --dump-boxes "$TMP/several.txt" --map "$TMP/several"
 Run reload-to-several 0 "$M" --shot "$TMP/r4.png" --view 1 --map tests/models --reload-test "$TMP/several"
 # --bake-surface (bake.c): a shader with an MS_BAKE path, 3 levels into an atlas, then a map that
 # reads the tile through a data_sampler; and a material that doesn't exist (exit 1)
 mkdir -p "$TMP/bake/shaders"
 printf '#pragma usage opaque\nvoid fragment()\n{\n#ifdef MS_BAKE\n    ALBEDO = vec3(fract(POSITION.xy), float(MS_BAKE_LEVEL) / 8.0);\n#else\n    ALBEDO = vec3(0.5);\n#endif\n    ROUGHNESS = 0.5;\n}\n' > "$TMP/bake/shaders/s.glsl"
-printf 'monolith 2\nmaterial "s" shader "shaders/s.glsl" alpha_cutoff 0\nbox 0 0 0 1 1 1\n' > "$TMP/bake/bake.map"
+printf 'monolith 3\nmaterial "s" shader "shaders/s.glsl" alpha_cutoff 0\nbox 0 0 0 1 1 1\n' > "$TMP/bake/bake.map"
 Run bake-surface 0      "$M" --map "$TMP/bake" --bake-surface s "$TMP/bake/tile" --bake-size 64 --bake-levels 3 --bake-face side
 printf '#pragma usage opaque\nuniform sampler2D u_tile;\nvoid fragment()\n{\n    ALBEDO = texelFetch(u_tile, ivec2(fract(POSITION.xz) * 64.0), 0).rgb;\n}\n' > "$TMP/bake/shaders/t.glsl"
 printf 'material "t" shader "shaders/t.glsl" data_sampler u_tile "tile.png" alpha_cutoff 0\nuse "t"\nbox 2 0 0 3 1 1\n' >> "$TMP/bake/bake.map"

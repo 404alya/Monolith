@@ -150,7 +150,7 @@ bool NewMapIn(const char *dir, const char *name, const char *mapsDir)
     FILE *f = fopen(path, "wb");
     if (!f) { fprintf(stderr, "monolith: cannot write %s\n", path); free(path); return false; }
     fprintf(f,
-        "monolith 2\n"
+        "monolith 3\n"
         "# %s.map -- created by `monolith --new-map %s`. Edit while the game runs: it reloads on save.\n"
         "# Format: the header comment of runtime/monolith_scene.c (and docs/map-format.md). The\n"
         "# design brief is MAP.md next to this file: read it first, and write it before building.\n"

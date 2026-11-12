@@ -16,11 +16,11 @@ Rules and verification for every change to a map package. Read the map's `MAP.md
 
 ## 0a. The primitives at a glance
 
-From `docs/map-format.md` §2 (read it in full; this is only a reminder): `box x0 y0 z0 x1 y1 z1 [rot y p r]` (two opposite corners), `block cx y0 cz sx sy sz [rot y p r]` (centred on cx cz, from y0 up, full sizes; `rot`: turned about the box's own centre, format 2), `stairs cx baseY startZ width steps rise run` (climbs toward −Z), `waffle x0 x1 y0 y1 z depth bayW floorH` (facade facing +Z); prefixes `id n` (a stable name for the line's objects, written first), `repeat n dx dy dz [from k]` (≤ 3 per line, first = outer loop; `from k`: the copies are k … k+n−1, for exact splits) and `at x y z` (legacy, don't add); `use "material"` and `group "name"` apply to the lines after them.
+From `docs/map-format.md` §2 (read it in full; this is only a reminder): `box x0 y0 z0 x1 y1 z1 [rot y p r]` (two opposite corners), `block cx y0 cz sx sy sz [rot y p r]` (centred on cx cz, from y0 up, full sizes; `rot`: turned about the box's own centre), `stairs cx baseY startZ width steps rise run` (climbs toward −Z), `waffle x0 x1 y0 y1 z depth bayW floorH` (facade facing +Z); prefixes `id n` (a stable name for the line's objects, written first), `repeat n dx dy dz [from k]` (≤ 3 per line, first = outer loop; `from k`: the copies are k … k+n−1, for exact splits; there is no `at` prefix in format 3); `use "material"` and `group "name"` apply to the lines after them.
 
 ## 1. Coordinates and scale
 
-- Units are **metres**. **+Y is up**. The world is right-handed. Boxes are axis-aligned unless their line has `rot yaw pitch roll` (format 2; R = Ry · Rx · Rz about the box's own centre, as for models).
+- Units are **metres**. **+Y is up**. The world is right-handed. Boxes are axis-aligned unless their line has `rot yaw pitch roll` (R = Ry · Rx · Rz about the box's own centre, as for models).
 - **The player** (engine facts, the same in every map): an AABB of radius 0.3 m and height 1.75 m (~1.8 m), with the **eye at 1.62 m** above the feet. It starts at the map's `spawn` (feet).
 - **Walkability.** Walkways need **≥ 2.2 m headroom**. Stairs can rise **≤ 0.45 m per step** (`STEP_HEIGHT`: higher steps can't be climbed). A jump reaches about 0.9 m. Openings must be at least 0.6 m wide for the player to fit through; for comfort make them ≥ 1 m.
 - **The map's scale** (ground size, reference sizes of buildings, trees, props, the route that must stay walkable) is in its `MAP.md`, *Scale and walkability*. Examples: in a monumental concrete map pillars are 20 m and buildings 50–260 m; in a forest map pines are 11–25 m and a tent 2.7 m wide.

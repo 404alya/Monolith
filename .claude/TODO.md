@@ -10,3 +10,4 @@
 16849537629031576708 - idea: skip volumetric fog lookups in uniform air Bit-identical first, then a closed form for lit rays. project-history skill, Private maps and the weed pre-pass
 16845012953862367618 - idea: compile the game per file, in parallel Incremental build is one serial compile (~11 s). project-history skill, The build program: nob.c
 10246106896539768441 - idea: native macOS export build on a GitHub macos-14 runner export build.sh macOS branch (clang, Mac frameworks, from source), ad-hoc signed .app, --shot check. docs/export.md
+14170958598076717712 - idea: in-game key to queue /migrate-map for an old map Game shows only the message now (project-history 2026-11-12); a key would queue it as a bundle

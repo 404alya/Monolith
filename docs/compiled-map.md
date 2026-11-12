@@ -10,13 +10,13 @@ The compiled file holds what the text parser produces, before anything that depe
 
 | Stored | Computed at load (both inputs, same code) |
 |---|---|
-| boxes, already expanded from `repeat` / `at` / `stairs` / `waffle`, each with its `MS_Ref` (line, statement, group, material, copy, part); a turned box (`rot`) as written, its corners before the turn | the default viewpoint made from the spawn (when the map has none), the sun light, `shadowSizeOverride` / `shadowRangeOverride` |
+| boxes, already expanded from `repeat` / `stairs` / `waffle`, each with its `MS_Ref` (line, statement, group, material, copy, part); a turned box (`rot`) as written, its corners before the turn | the default viewpoint made from the spawn (when the map has none), the sun light, `shadowSizeOverride` / `shadowRangeOverride` |
 | box turns: the rotation of each turned box | a turned box's record (centre, size, axes) and its world AABB, which becomes its entry in the box list (the parser's own code, `TurnedBoxMake`) |
 | materials (every key the map can set, shader and texture paths, uniforms, samplers, `wrap`, `inherit`, `instanced`, the map lines of the keys) | model bounds, `origin` shifts, transforms and colliders (they need the model file) |
 | groups, model files, model instances (as written: position, rotation, scale, origin, collide boxes in model space, slot materials, shadow) | the collider list and its BVH, the scene bounds |
 | lights (as the parser leaves them: direction normalised, defaults filled in, clip box shifted) | entities (ids come from the stored statement keys) |
 | the environment: every `env` key with its final value | hidden box faces, the per-cell meshes, every GPU object |
-| spawn, viewpoints, the map format version (1 or 2) | |
+| spawn, viewpoints, the map format version (3) | |
 | paint entries (`paint` lines), each resolved to its box or model instance; a material's paint atlas and `paint_filter` | which entries draw (the atlas sizes, the model files' slots and UVs: [painting.md](painting.md) §4.2), the paint keys and their table, the paint shaders, the models' paint meshes |
 | one key per statement (its `id`, or the implicit key from its text) | |
 | the dependency list (every file the map references, also the files model files name) | |
@@ -36,8 +36,8 @@ Little-endian only, every field a fixed-width integer or an IEEE-754 `float`, ev
 | 8 | `u32` | binary-format version, `MS_COMPILED_VERSION` (7; see *Versions* below). Separate from the map format version `MS_FORMAT_VERSION`; bumped whenever a record or section changes |
 | 12 | `u32` | header size (64) |
 | 16 | `u32` | byte-order tag `0x01020304` (a big-endian reader sees `0x04030201` and refuses the file) |
-| 20 | `u32` | map format version of the source (1 or 2) |
-| 24 | `u32` | section count (18; 17 in versions 3 and 4, 16 in version 2) |
+| 20 | `u32` | map format version of the source (`MS_FORMAT_VERSION`, 3) |
+| 24 | `u32` | section count (18) |
 | 28 | `u32` | offset of the section table |
 | 32 | `u64` | file size in bytes (a truncated file fails here) |
 | 40 | `u64` | FNV-1a 64 of the source `.map` bytes |
@@ -54,7 +54,7 @@ Little-endian only, every field a fixed-width integer or an IEEE-754 `float`, ev
 | 1 | strings | the string table: NUL-terminated UTF-8, `count` bytes, first byte and last byte `0` | 1 |
 | 2 | boxes | `f32 min[3], max[3]; i32 line, prim, group, material, copy, part` | 48 |
 | 3 | groups | `u32 name` | 4 |
-| 4 | materials | names and paths (`name`, `shader`, `maps[4]`: albedo, normal, orm, emission), `i32 line, shaderLine, mapLine[4]`, `u8 albedo[4], emission[4]` (RGBA), `f32 emissionEnergy, normalScale, occlusion, roughness, metalness, specular, uvScale[2], uvOffset[2], alphaCutoff`, `i32 cull, transparency, blend, priority, wrap`, `u32 inherit, unlit, instanced`, `u32 uniformFirst, uniformCount, samplerFirst, samplerCount`, `u8 uvFaces[6], filter, pad` (version 4: the box face layout `uv_faces`, a cell per face +x −x +y −y +z −z, all 255 = none; `filter` 0 trilinear, 1 nearest; `pad` 0), `paint` (version 5: the paint atlas path, `paint`, or none), `u8 paintFilter, pad2[3]` (`paint_filter` 0 trilinear, 1 nearest; padding 0), `u32 noPrepass` (version 6: `prepass off` = 1, else 0), `f32 drawDistance` (version 7: `draw_distance` in m, 0 = auto, −1 = off) | 172 (168 in version 6, 164 in version 5, 156 in version 4, 148 in versions 2 and 3) |
+| 4 | materials | names and paths (`name`, `shader`, `maps[4]`: albedo, normal, orm, emission), `i32 line, shaderLine, mapLine[4]`, `u8 albedo[4], emission[4]` (RGBA), `f32 emissionEnergy, normalScale, occlusion, roughness, metalness, specular, uvScale[2], uvOffset[2], alphaCutoff`, `i32 cull, transparency, blend, priority, wrap`, `u32 inherit, unlit, instanced`, `u32 uniformFirst, uniformCount, samplerFirst, samplerCount`, `u8 uvFaces[6], filter, pad` (the box face layout `uv_faces`, a cell per face +x −x +y −y +z −z, all 255 = none; `filter` 0 trilinear, 1 nearest; `pad` 0), `paint` (the paint atlas path, `paint`, or none), `u8 paintFilter, pad2[3]` (`paint_filter` 0 trilinear, 1 nearest; padding 0), `u32 noPrepass` (`prepass off` = 1, else 0), `f32 drawDistance` (`draw_distance` in m, 0 = auto, −1 = off) | 172 |
 | 5 | uniforms | `u32 name, count; f32 v[4]` | 24 |
 | 6 | samplers | `u32 name, path; i32 line; u32 data` (1 = `data_sampler`) | 16 |
 | 7 | lights | `u32 type; f32 position[3], direction[3]; u8 color[4]; f32 energy, specular, range, falloff, inner, outer, fogEnergy; u32 shadow, clip; f32 clipMin[3], clipMax[3]; i32 ref[6]` | 116 |
@@ -67,25 +67,31 @@ Little-endian only, every field a fixed-width integer or an IEEE-754 `float`, ev
 | 14 | environment | `u32 key` (string: the `env` key, e.g. `fog.density`), `u32 type`, `u32 value[6]` | 32 |
 | 15 | spawn | one record: `u32 hasSpawn; f32 feet[3], yawDeg, pitchDeg` | 24 |
 | 16 | dependencies | `u32 path` (package-relative) | 4 |
-| 17 | box turns (version 3) | `u32 box; f32 rotationDeg[3]` (yaw, pitch, roll as written): one record per turned box, sorted by box, each box at most once | 16 |
-| 18 | paint (version 5) | `u32 material` (`0xFFFFFFFF`: the model slot's own material), `u32 kind` (0 a box, 1 a model instance), `u32 object` (index into boxes or models), `u32 facesOrSlot` (a box: bit f for face f, +x −x +y −y +z −z; a model: the slot), `u32 x, y, w, h` (texels of the atlas), `u32 filter` (`paint own … paint_filter`: 0 trilinear, 1 nearest; 0 for a material's entry), `i32 line`: one record per `paint` line in map order, also the ones that don't draw | 40 |
+| 17 | box turns | `u32 box; f32 rotationDeg[3]` (yaw, pitch, roll as written): one record per turned box, sorted by box, each box at most once | 16 |
+| 18 | paint | `u32 material` (`0xFFFFFFFF`: the model slot's own material), `u32 kind` (0 a box, 1 a model instance), `u32 object` (index into boxes or models), `u32 facesOrSlot` (a box: bit f for face f, +x −x +y −y +z −z; a model: the slot), `u32 x, y, w, h` (texels of the atlas), `u32 filter` (`paint own … paint_filter`: 0 trilinear, 1 nearest; 0 for a material's entry), `i32 line`: one record per `paint` line in map order, also the ones that don't draw | 40 |
 
-**Turned boxes:** for a box with a box turn record, its `boxes` record holds the box **as written** (the two corners before the turn, ordered), not its world AABB; the reader rebuilds the turned-box record (centre, size, axes) and the AABB with the parser's own code, so the bits match a text load. Every other box is stored as its corners, as in version 2.
+**Turned boxes:** for a box with a box turn record, its `boxes` record holds the box **as written** (the two corners before the turn, ordered), not its world AABB; the reader rebuilds the turned-box record (centre, size, axes) and the AABB with the parser's own code, so the bits match a text load. Every other box is stored as its corners.
 
-**Versions:** 1 had no sampler kind (`CmSampler.data`); 2 added it; 3 added the box turns section (17), and a turned box's `boxes` record became the box as written; 4 added `uvFaces`, `filter` and `pad` at the end of the material record (156 bytes instead of 148); 5 added `paint`, `paintFilter` and `pad2` at the end of the material record (164 bytes) and the paint section (18); 6 added `noPrepass` at the end of the material record (168 bytes); 7 added `drawDistance` there (172 bytes). The reader reads versions 2 to 7 (a version 2 file has 16 sections and no turned boxes; a version 2 or 3 file has 148-byte materials, read as having no `uv_faces` and the trilinear filter; a version 2 to 4 file has no paint: 156- or 148-byte materials and no paint section; a version 2 to 5 file has no `noPrepass`, read as 0; a version 2 to 6 file has no `drawDistance`, read as 0 = auto); the writer always writes 7. Older or newer files are refused with a message that names the file's version and the versions the runtime reads, and asks to compile the map again. A change to the layout always comes with a new version: the version, not a check in the code, is what tells a reader whether it can read a file.
+**Versions:** the reader reads exactly one binary-format version, 7, and only files compiled from the current map format (3); the writer writes the same. Any other file is refused and nothing is loaded:
+
+- another binary-format version: `compiled map version 6; this runtime reads compiled map version 7: compile the map again`;
+- compiled from an older map format (every file an earlier monolith wrote): `compiled map of map format 2; this runtime reads map format 3: compile the map again`;
+- compiled from a newer map format: `compiled map of map format 4 is newer than this runtime (3): update monolith`.
+
+A compiled map is build output, so the way out is always to compile the `.map` again (`--compile`, or `--export`), after migrating the text if it is an older format ([map-format.md](map-format.md) §1.3). A change to the layout always comes with a new version: the version, not a check in the code, is what tells a reader whether it can read a file.
 
 `ref[6]` is `MS_Ref` in its field order (line, prim, group, material, copy, part). A string field holds an offset into the string table; `0xFFFFFFFF` means none (a material without a shader). Every name and path is stored once. Unused bytes are zero.
 
 **Environment values** are stored by key name rather than by position, so the key tables can grow or be reordered without breaking compiled files. The value words by type: float and degree keys one `f32` (degree keys hold the radians the parser computed), integers one `i32`, switches 0 / 1, colours four words 0–255, vectors 3, quaternions 4, boxes 6 (`min`, then `max`), enums their index, paths a string offset. The compiler writes every key with its final value (built-in defaults included), except the optional ones the map didn't set (`shadow.home`, `fogCache.region`, `sky.sunDirection`, unset `ambientSky.*`, an empty `sky.panorama`). The reader starts from the built-in environment and applies the records, which gives the same environment as the text parser.
 
-The records are defined once, in `runtime/monolith_scene.c` (region "Compiled maps"). The file's version is what guards the layout: any change to a record (a field added, removed, resized or moved, even one that keeps the size), to a section or to a stored value type bumps `CM_VERSION`, and the reader refuses versions it doesn't read and sections whose record size differs.
+The records are defined once, in `runtime/monolith_scene.c` (region "Compiled maps"). The file's version is what guards the layout: any change to a record (a field added, removed, resized or moved, even one that keeps the size), to a section or to a stored value type bumps `CM_VERSION`, and the reader refuses every other version and sections whose record size differs.
 
 **Deterministic output:** the same map gives byte-identical compiled files: records in map order, strings in first-use order, no timestamps, padding zeroed.
 
 ## 3. The reader checks everything first
 
 A compiled file is input like any other. Before it trusts a byte, the reader checks:
-- the magic, the format version, the byte-order tag, the header size, the file size against the real size, and a size cap (`MS_MAX_COMPILED_BYTES`, 256 MB);
+- the magic, the binary-format version and the map format version, the byte-order tag, the header size, the file size against the real size, and a size cap (`MS_MAX_COMPILED_BYTES`, 256 MB);
 - the section table: every section inside the file, aligned, known, once, with the expected record size; counts against `MS_MAX_OBJECTS` (boxes + models + lights, model collision boxes, and every other list);
 - every string offset inside the table, the table NUL-terminated, no control characters in a name or path;
 - every index in range: `MS_Ref` group / material / statement, a model's file, slot and collider ranges, slot materials; each material's uniforms and samplers follow the previous material's (no shared ranges, which would let a small file make the reader allocate a lot);
@@ -93,7 +99,7 @@ A compiled file is input like any other. Before it trusts a byte, the reader che
 - every path package-relative (no absolute path, drive letter, backslash or `..`; the parser's own check), and the file present;
 - material 0 named `default`, statement keys unique and not 0, boxes, models and lights in map order, a map that makes at least one box or model.
 
-A file that fails any check is rejected with `<file>: <message>` (for example `forest.mapb: compiled map: section 'boxes' lies outside the file`, or `forest.mapb: compiled map version 7; this runtime reads compiled map versions 2 to 6: compile the map again`) and nothing is loaded; a bad file never crashes the reader. Errors found later in the load (a texture that won't load) name the source map and line, as for a text load: `forest.map:41: cannot load the texture "textures/bark.png"`.
+A file that fails any check is rejected with `<file>: <message>` (for example `forest.mapb: compiled map: section 'boxes' lies outside the file`, or `forest.mapb: compiled map version 8; this runtime reads compiled map version 7: compile the map again`) and nothing is loaded; a bad file never crashes the reader. Errors found later in the load (a texture that won't load) name the source map and line, as for a text load: `forest.map:41: cannot load the texture "textures/bark.png"`.
 
 ## 4. API and detection
 
@@ -117,7 +123,7 @@ A file that fails any check is rejected with `<file>: <message>` (for example `f
 | compiled-file writer | yes (`MS_Compile`) | no |
 | compiled-file reader | yes | yes |
 
-A new statement that only makes boxes needs no format change (boxes are stored expanded), and neither does an `env` key of an existing type (keys are stored by name). Anything else the parser stores (a new field or kind of object, a new value type) needs a compiled record or field and a bump of `MS_COMPILED_VERSION` (`CM_VERSION` in the code); older compiled files are then rejected with a message to recompile, unless the reader keeps reading them (`CM_VERSION_OLDEST`: version 2 files have no box turns section and still load; version 2 to 6 files have shorter material records, version 2 to 4 files no paint section, `CmRecordSize`).
+A new statement that only makes boxes needs no format change (boxes are stored expanded), and neither does an `env` key of an existing type (keys are stored by name). Anything else the parser stores (a new field or kind of object, a new value type) needs a compiled record or field and a bump of `MS_COMPILED_VERSION` (`CM_VERSION` in the code); older compiled files are then rejected with a message to recompile.
 
 The model-file reference check (glTF URIs, OBJ material libraries and their textures must stay inside the package and fit R3D's importer path buffer) is part of the text parser, so it runs when a map is compiled and exported, not when a game loads the compiled file. A game trusts the model files it ships with, as it trusts its own executable.
 

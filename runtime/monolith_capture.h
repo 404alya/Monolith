@@ -557,9 +557,9 @@ static void MscWrite(void)
     snprintf(path, sizeof(path), "%s/%s.map", msc.dir, msc.name);
     FILE *f = fopen(path, "wb");
     if (!f) { fprintf(stderr, "monolith_capture: cannot write %s\n", path); return; }
-    fprintf(f, "monolith 2\n# %s.map -- captured from a running R3D program (runtime/monolith_capture.h), frame %d.\n"
+    fprintf(f, "monolith %d\n# %s.map -- captured from a running R3D program (runtime/monolith_capture.h), frame %d.\n"
                "# What could not be translated is listed in CAPTURE.md.\n\n# --- Materials (m<n>: one per distinct material of the boxes)\n",
-            msc.name, msc.target);
+            MS_FORMAT_VERSION, msc.name, msc.target);
     for (int i = 0; i < msc.matCount; i++) {
         MscMatKey *k = &msc.mats[i];
         fprintf(f, "material \"m%d\"", i);

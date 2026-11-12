@@ -8,7 +8,7 @@ Everything inside a map package: the folder layout, the design brief (`MAP.md`) 
 
 ```
 maps/<name>/
-├── <name>.map     geometry, models, materials, lights, environment, spawn, viewpoints (format 2)
+├── <name>.map     geometry, models, materials, lights, environment, spawn, viewpoints (format 3)
 ├── MAP.md         the design brief: the map's style and rules (Claude reads it first on every request)
 ├── shaders/       surface shaders the map's materials use (e.g. maps/monolith/shaders/concrete.glsl)
 ├── models/        model files (+ the .bin / textures a .gltf names), each with a <file>.asset.md sidecar
@@ -17,7 +17,7 @@ maps/<name>/
 ```
 
 - Every path in a map file is **relative to the package root** (the folder of the map file). Absolute paths and `..` are rejected, so a package can be copied anywhere (and exported, [export.md](export.md)).
-- `--map <path>` takes a package folder (it loads `<folder>/<folder name>.map`, else its only `.map`) or a `.map` file. A single `.map` file outside a package (format 1 or 2) loads too; its folder is its root.
+- `--map <path>` takes a package folder (it loads `<folder>/<folder name>.map`, else its only `.map`) or a `.map` file. A single `.map` file outside a package loads too; its folder is its root.
 - Hot reload watches every file the package uses: the map, shaders, textures, panoramas, model files and the files a model file names.
 
 ### 1.2 `MAP.md`: the design brief
@@ -30,7 +30,27 @@ The brief is what keeps a map consistent: every request on the map is carried ou
 
 ### 1.3 Format versions
 
-The first statement `monolith 2` makes a file format 2: everything in §2. Without it a file is **format 1** (only `group`, `box`, `block`, `stairs`, `waffle`, `repeat`, `at`; everything else takes the built-in defaults, and boxes use the plain `"default"` material). To give a format-1 file materials, models or `env` lines, add `monolith 2` as its first statement. A file with `monolith N` newer than the runtime supports is rejected with a clear message.
+The current map format is **3**, and it is the only one monolith reads. Every map starts with the format line `monolith 3` as its first statement (comments and blank lines may come before it); a file without it counts as format 1.
+
+**An older map** is refused when it loads, with a message that names the map and the way out:
+
+```
+maps/old/old.map:1: map format 2 is older than this monolith (3): run /migrate-map maps/old/old.map in Claude Code (docs/map-format.md §1.3)
+```
+
+To bring it to the current format, run `/migrate-map <package>` (or the `.map` file) in Claude Code in this repository. The migration rewrites the map one format step at a time and proves each step against a build of the last monolith that read the old format: the box list, the scene dump and shots from every viewpoint must come out identical. If that old build can't be made, or any proof fails, it refuses and leaves the map untouched. On success it keeps the original next to the new file as `<name>.map.v<N>` (N: the old format), which you can remove once you no longer need it.
+
+**A newer map** (`map format N is newer than this monolith (3): update monolith`) was written for a later monolith: update monolith.
+
+**Compiled maps** (`.mapb`) aren't migrated: compile the map again from its `.map` text ([compiled-map.md](compiled-map.md)).
+
+The versions:
+
+| Format | Used | What it is |
+|---|---|---|
+| 1 | until 2026-10 | No format line: only `group`, `box`, `block`, `stairs`, `waffle`, `repeat` and `at`; everything else took the built-in defaults. |
+| 2 | 2026-10 to 2026-11-12 | The format line `monolith 2`, plus materials, models, lights, environment, paint, spawn, viewpoints and turned boxes. |
+| 3 | current | Format 2 without the `at` prefix; the format line is required. |
 
 ### 1.4 The compiled form
 
@@ -42,7 +62,7 @@ Each statement takes one line, so a line number identifies an object. The parser
 
 ```
 # comment                      '#' starts a comment anywhere outside "quotes"
-monolith 2                     format version, the first statement
+monolith 3                     format version, the first statement (required)
 group "name"                   every following box, model and light belongs to this group, until the next group
 ```
 
@@ -57,7 +77,7 @@ Numbers are plain decimals (`12`, `-4.5`, `0.75`). Corners can be given in any o
 | `stairs` | `cx baseY startZ width steps rise run` | `steps` boxes (integer) climbing toward **−Z**. Step *i* (0-based) spans z from `startZ − i·run` to `startZ − (i+1)·run`, x `cx ± width/2`, y from `baseY` up to `baseY + (i+1)·rise`. The steps are solid down to baseY. |
 | `waffle` | `x0 x1 y0 y1 z depth bayW floorH` | A facade facing **+Z**: a back wall (x0..x1, y0..y1, z−1..z), 0.6 m vertical fins centred at x = x0, x0+bayW, … while ≤ x1, and 0.5 m ledges with their tops at y0+floorH, y0+2·floorH, … while ≤ y1. Fins and ledges stick out from z to z + depth. bayW and floorH must be > 0. |
 
-**Turned boxes** (format 2): `rot yawDeg pitchDeg rollDeg` after a `box`'s or `block`'s six numbers turns that box about **its own centre**, with the models' convention (R = Ry · Rx · Rz: roll about +Z, then pitch about +X, then yaw about +Y). The numbers before `rot` describe the box before it turns. `rot` is never shifted: every `repeat` / `at` copy turns the same way about its own centre (a row of identically turned boxes). `rot 0 0 0` is the box without `rot`. `stairs` and `waffle` can't turn, and a format-1 file can't use it (both are errors). A turned box draws with all six faces (it hides no other box's face and none of its own), collides and is picked as its turned shape (a 30° ramp is walkable: the player walks on slopes up to 46°), and casts its turned shadow; the runtime's `boxes[]` / `colliders[]` hold its world AABB, `turnedBoxes` / `boxTurned` its centre, size and axes. Its texture follows it (the box's UVs in its own frame).
+**Turned boxes**: `rot yawDeg pitchDeg rollDeg` after a `box`'s or `block`'s six numbers turns that box about **its own centre**, with the models' convention (R = Ry · Rx · Rz: roll about +Z, then pitch about +X, then yaw about +Y). The numbers before `rot` describe the box before it turns. `rot` is never shifted: every `repeat` copy turns the same way about its own centre (a row of identically turned boxes). `rot 0 0 0` is the box without `rot`. `stairs` and `waffle` can't turn (an error). A turned box draws with all six faces (it hides no other box's face and none of its own), collides and is picked as its turned shape (a 30° ramp is walkable: the player walks on slopes up to 46°), and casts its turned shadow; the runtime's `boxes[]` / `colliders[]` hold its world AABB, `turnedBoxes` / `boxTurned` its centre, size and axes. Its texture follows it (the box's UVs in its own frame).
 
 ```
 block 10 2.1268 -5 10 0.4 3 rot 0 0 30          # a 30 degree ramp climbing +X: a 10 m slab rolled about +Z
@@ -82,7 +102,6 @@ They go in front of a primitive (box primitive, `model` or `light`) on the same 
 - `repeat n dx dy dz` makes n copies (n ≥ 0). Copy *i* (0-based) is shifted by `i · (dx, dy, dz)`. Up to **3** repeats on one line make a grid. The first repeat is the outer loop, so it decides the object order.
 - `repeat n dx dy dz from k` counts the copies from *k*: copy *i* = k … k+n−1 is shifted by `i · (dx, dy, dz)`. It gives exactly the same floats as copies k… of the longer row, so a row split in two (`repeat 3 0 0 2.6 …` + `repeat 5 0 0 2.6 from 3 …`) keeps every position bit for bit, even with steps like 2.6 where moving the start value into the coordinates would change the last bit. Manual edits write it when they split a row (§2.9); for whole and half-number steps they write plain start values instead.
 - `id n` gives the line's objects a stable name (an integer 1 … 2147483647, unique in the file, written first: `id 12 repeat 4 0 0 3 box …`). It changes nothing in the scene. It is the key of the line's entities (§2.9), so they keep their identity when the line's numbers change. Manual edits add it to the lines they change; keep it when you edit such a line, and when you split it, keep it on the first piece only (two lines with the same id fail to load).
-- `at x y z` shifts the primitive by (x, y, z), so its own coordinates become relative to that point. Only one `at` is allowed per line.
 - Shifts move **position arguments only** (box: all six numbers; block: `cx y0 cz`; stairs: `cx baseY startZ`; waffle: `x0 x1 y0 y1 z`; model and light: `x y z`, never a direction). Sizes, `steps`, `rise`, `run`, `depth`, `bayW`, `floorH`, rotations and scales are never shifted.
 
 ```
@@ -91,7 +110,7 @@ repeat 5 1 0.4 0 box 17 -1 -28 18 0.4 -25                  # pine_forest: 5 step
 repeat 8 4 0 0 light point -14 3.2 -11 color 255 40 160 energy 2 range 6   # neon street: a row of pink signs
 ```
 
-**`at` is legacy:** it reproduces the default map's original C loops bit for bit (`(at + i·d) + value` in float). For new content write the first copy's real coordinates and a `repeat`.
+Each shifted number is computed as `(i·d1 + j·d2 + k·d3) + value` in float, in that order. With whole or half-number steps the order doesn't matter; with steps like 2.6 it can change the last bit of a float, which is why `from` (above) keeps the copies of a split row at the same floats as the longer row's.
 
 ### 2.3 Groups
 
@@ -198,8 +217,8 @@ spawn x y z yawDeg [pitchDeg]               player start (feet)
 viewpoint "Name" ex ey ez tx ty tz          spectator viewpoint (eye, target), in order: --view 1..n, --bench, ← / →
 ```
 
-- Lights belong to the current group and are shifted by `repeat` / `at`. A shadowed point or spot light renders its shadow map once per map load; use `shadow on` only for the few lights that matter (`maps/pine_forest`: the campfire, `light point 0 1.1 0 color 255 130 50 energy 5 range 18 falloff 1 fogEnergy 0.8 shadow on`; its lanterns are unshadowed).
-- **Unshadowed lights shine through walls and floors.** A light's `range` is a sphere, so a lamp in a room also lights the room below, above and beside it. `clip x0 y0 z0 x1 y1 z1` (a world box, shifted by `repeat` / `at` like a box) limits the light to points inside the box: give every interior light the box of its own room or storey, from the middle of the slab below to the middle of the slab above, so the slab's top face is lit and the storey below is not (`maps/monolith` tower: `clip -31 15.85 -141 31 19.85 -99` on storey 1). It also clips the light's volumetric fog, and a tight box makes the light cheaper: the light is skipped when its box is out of view and drawn only on the pixels where the inside of its box can be seen (a room behind a wall costs almost nothing). R3D patches 16, 22 and 23; ignored with upstream R3D.
+- Lights belong to the current group and are shifted by `repeat`. A shadowed point or spot light renders its shadow map once per map load; use `shadow on` only for the few lights that matter (`maps/pine_forest`: the campfire, `light point 0 1.1 0 color 255 130 50 energy 5 range 18 falloff 1 fogEnergy 0.8 shadow on`; its lanterns are unshadowed).
+- **Unshadowed lights shine through walls and floors.** A light's `range` is a sphere, so a lamp in a room also lights the room below, above and beside it. `clip x0 y0 z0 x1 y1 z1` (a world box, shifted by `repeat` like a box) limits the light to points inside the box: give every interior light the box of its own room or storey, from the middle of the slab below to the middle of the slab above, so the slab's top face is lit and the storey below is not (`maps/monolith` tower: `clip -31 15.85 -141 31 19.85 -99` on storey 1). It also clips the light's volumetric fog, and a tight box makes the light cheaper: the light is skipped when its box is out of view and drawn only on the pixels where the inside of its box can be seen (a room behind a wall costs almost nothing). R3D patches 16, 22 and 23; ignored with upstream R3D.
 - Without `spawn` the player starts at feet (0, 0, 0), yaw 0; without viewpoints one is made from the spawn. Viewpoints are what ← / → fly between and what `--bench` measures, so add one for each area worth looking at.
 
 ### 2.7 Models
@@ -234,5 +253,5 @@ Every box, model instance and light is an **entity**: an id plus its data (compo
 
 `examples/05_entities` shows how a game uses them (its own components and systems, lookup by id). `--dump-entities <file>` lists them (`entity <e> id <key>:<index> explicit|implicit <kind> …`).
 
-**Manual edits** (the edit mode, **M**, and `--apply-edits`) change the map file itself, with the smallest text edit, and the game reloads it: moving or turning an object rewrites the numbers on its line (and adds `id n` to it), removing it deletes the line, and one copy of a `repeat` line is split out onto its own line (the other copies keep their exact floats, with `from` where needed). Giving a line an id (**Ctrl+I**, the script's `id [n]`) changes only its `id n` prefix; removing one (**Delete** in the id panel, **F5**, the script's `id remove`) deletes only that prefix (with the blanks after it), and the line's objects get implicit keys again. Duplicated and added objects are new lines with a new `id`; an added model goes right after the line of the object it stands on (in its group), wrapped in `use "default"` … `use "<material>"` when a `use` is active there (a `use` would restyle it). Comments, spacing, groups and every other line stay as they were. Boxes from `box` and `block` lines turn freely, like models: about any axis, globally or about their own axes (`local`), each about its own centre or orbiting a pivot (`turn … pivot x y z`). The result is written the simplest way: when the box ends up axis-aligned (a 90° step, or a turned box turned back) its corners are rewritten (a block's sizes swap places) and a `rot` it had is removed; otherwise its centre moves and `rot yaw pitch roll` is written (a turn about the vertical adds to the yaw and one about the box's own z to the roll, exactly; any other turn is composed and written with 6 decimals). `rotation y p r` (the script) / reset sets an absolute rotation (`0 0 0`: the plain box again; on a model it removes `rot`). Boxes can be scaled (corners about a pivot; a block's centre and sizes; a turned box's extents along its own axes, each by the factor of the world axis nearest to it) and resized (`size`, along the box's own axes). Stairs and waffles can only move. A model's turn about another axis than the vertical composes with its `rot` (R = Ry · Rx · Rz) and is written back as yaw, pitch and roll with 6 decimals; a turn about the vertical adds to the yaw and one about the model's own z to the roll, exactly. Scaling a model multiplies its `scale` (each model axis by the factor of the world axis nearest to it) and moves its position about the pivot. A turned or scaled whole `repeat` line with a pivot gets its steps (and `at`) turned or scaled too.
+**Manual edits** (the edit mode, **M**, and `--apply-edits`) change the map file itself, with the smallest text edit, and the game reloads it: moving or turning an object rewrites the numbers on its line (and adds `id n` to it), removing it deletes the line, and one copy of a `repeat` line is split out onto its own line (the other copies keep their exact floats, with `from` where needed). Giving a line an id (**Ctrl+I**, the script's `id [n]`) changes only its `id n` prefix; removing one (**Delete** in the id panel, **F5**, the script's `id remove`) deletes only that prefix (with the blanks after it), and the line's objects get implicit keys again. Duplicated and added objects are new lines with a new `id`; an added model goes right after the line of the object it stands on (in its group), wrapped in `use "default"` … `use "<material>"` when a `use` is active there (a `use` would restyle it). Comments, spacing, groups and every other line stay as they were. Boxes from `box` and `block` lines turn freely, like models: about any axis, globally or about their own axes (`local`), each about its own centre or orbiting a pivot (`turn … pivot x y z`). The result is written the simplest way: when the box ends up axis-aligned (a 90° step, or a turned box turned back) its corners are rewritten (a block's sizes swap places) and a `rot` it had is removed; otherwise its centre moves and `rot yaw pitch roll` is written (a turn about the vertical adds to the yaw and one about the box's own z to the roll, exactly; any other turn is composed and written with 6 decimals). `rotation y p r` (the script) / reset sets an absolute rotation (`0 0 0`: the plain box again; on a model it removes `rot`). Boxes can be scaled (corners about a pivot; a block's centre and sizes; a turned box's extents along its own axes, each by the factor of the world axis nearest to it) and resized (`size`, along the box's own axes). Stairs and waffles can only move. A model's turn about another axis than the vertical composes with its `rot` (R = Ry · Rx · Rz) and is written back as yaw, pitch and roll with 6 decimals; a turn about the vertical adds to the yaw and one about the model's own z to the roll, exactly. Scaling a model multiplies its `scale` (each model axis by the factor of the world axis nearest to it) and moves its position about the pivot. A turned or scaled whole `repeat` line with a pivot gets its steps turned or scaled too.
 

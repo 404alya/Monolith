@@ -542,8 +542,8 @@ block cx y0 cz sx sy sz [rot yawDeg pitchDeg rollDeg]
 - The numbers before `rot` describe the box **before** it turns (two corners, or a block's centre,
   floor and sizes); `rot` turns it about **its own centre**, with the models' convention:
   `R = Ry · Rx · Rz` (roll about +Z, then pitch about +X, then yaw about +Y).
-- `rot` is optional and needs `monolith 2` (a format-1 file with it is an error). It is never
-  shifted: every `repeat` / `at` copy gets the same rotation about its own centre (so a turned
+- `rot` is optional and part of the current map format. It is never
+  shifted: every `repeat` copy gets the same rotation about its own centre (so a turned
   `repeat` line is a row of identically turned boxes; turning the row as a whole about a pivot
   is a mapedit op that also turns the steps, 11.9). `stairs` and `waffle` don't take it (error).
 - `rot 0 0 0` parses to an axis-aligned box (no turned-box record): exactly the box without
@@ -696,7 +696,7 @@ comment becomes "face normal (boxes: their face's, turned with a turned box)".
     and `y0` = centre y − sy / 2), and `rot` is written / added as yaw, pitch, roll: **exact**
     for a world-Y turn (adds to yaw) and a local-Z turn (adds to roll), 6 decimals otherwise
     (as for models).
-- A whole `repeat` line turned with a pivot: the steps and `at` turn too (as today); every copy
+- A whole `repeat` line turned with a pivot: the steps turn too (as today); every copy
   gets the same new `rot`. One copy: split out as today.
 - **New op `EDIT_SET_ROTATION`** (reset and typed yaw / pitch / roll): `ypr[3]` absolute, each
   object about its own centre (boxes) / origin (models). Boxes: the same written rule (0 0 0 or
@@ -1004,7 +1004,7 @@ back as before); a commit with nothing changed or nothing that follows is a canc
 gained `pitch` and `roll` (the script's `turn y p r`; the modal uses `axis` + `angle`). The old
 `turn <yaw>` (no pivot, axis, pitch, roll or local) keeps the old code path (`RwTurn`), so old scripts
 give the same bytes. The new path (`RwTransform`) maps the positional numbers (a whole line: its own
-numbers, and with a pivot its `repeat` steps and `at` too; one copy: its world numbers, through the
+numbers, and with a pivot its `repeat` steps too; one copy: its world numbers, through the
 existing split machinery) and splices the other numbers it changes: block sizes (swapped by an odd
 quarter turn, scaled, set), a model's `rot` (a world-Y turn adds to the yaw, a local-Z turn to the
 roll, exactly; anything else composed, global on the left, local on the right, and decomposed back
@@ -1438,8 +1438,8 @@ dumps and the bundle, §11.7–11.8, are a later step; the controls, §11.10, an
 
 **Runtime** (`runtime/monolith_scene.c`):
 
-- **Parse.** `ParsePrimitive` takes `rot y p r` after a `box` / `block`'s six numbers (format 2;
-  an error on `stairs` / `waffle` and in format 1); `rot 0 0 0` is the plain box. `TurnedBox` makes
+- **Parse.** `ParsePrimitive` takes `rot y p r` after a `box` / `block`'s six numbers (an error
+  on `stairs` / `waffle`); `rot 0 0 0` is the plain box. `TurnedBox` makes
   the record with `TurnedBoxMake` (centre and size of the box as written, the axes from
   `RotationYpr`, the models' quaternion code, and the AABB of the 8 turned corners) and adds the
   AABB through `Box`. `SceneData.turned[]` / `boxTurned[]` (allocated with the first turned box,

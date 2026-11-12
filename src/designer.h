@@ -87,8 +87,6 @@ typedef struct {
     float depthMin, depthMax;   // distance from the eye over the samples that hit, metres
     DesignRegionObject *objects;    // every object hit, by samples descending (heap; DesignerFreeRequest)
     int objectCount;
-    int omittedObjects;     // objects hit but not listed: always 0 now (kept for the bundle format)
-    float omittedShare;
     float sky;              // share of samples that hit nothing
     // Edge objects: rays on a ring edgeOffset px outside the rect (sides that leave the frame
     // are skipped), nearest first (heap; DesignerFreeRequest)

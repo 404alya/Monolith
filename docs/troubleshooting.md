@@ -12,6 +12,12 @@
 
 **`cannot load the map`.** Without `--map` the game opens `maps/monolith`, which is not in this repository. Start with `--map maps/pine_forest`, or create a map with `--new-map <name>`.
 
+**`map format N is older than this monolith (3)`.** The map was written for an earlier monolith, which read another map format; this one reads only the current format. Run `/migrate-map <package>` in Claude Code in this repository (the message names the map): it rewrites the map to the current format, proves the result identical against a build of the last monolith that read the old format, and keeps the original as `<name>.map.v<N>`. If it refuses, its report says why, and the map is left as it was ([map-format.md](map-format.md) §1.3). A map without a `monolith N` line at the top counts as format 1.
+
+**`map format N is newer than this monolith (3): update monolith`.** The map comes from a later monolith: update your checkout and build again.
+
+**`compiled map version …` or `compiled map of map format …`.** A `.mapb` compiled by another monolith, or from an older map format. Compile it again from its `.map` (`--compile`, or `--export`), migrating the `.map` first if it is older ([compiled-map.md](compiled-map.md)). An exported game is not affected: it ships the runtime that reads its own compiled map ([export.md](export.md)).
+
 **A red `file:line: message` in the HUD.** The map file has an error; the game keeps showing the last version that loaded. Fix the line and save; to see the error without the game, run `./build/linux/monolith --dump-boxes /tmp/x.txt --map <map>`.
 
 **Black or empty window, or a crash at start.** The GPU driver must support OpenGL 3.3 core. On AMD and Intel drivers a surface shader can fail to compile where NVIDIA accepts it; the log names the shader. Check shaders with `glslangValidator` and avoid GLSL built-in names such as `noise1`–`noise4`, `length` or `distance` as identifiers.

@@ -18,7 +18,7 @@ static char dir[1024], fuzzPath[1100];
 // The header and section table fields this test changes (docs/compiled-map.md, section 2)
 enum { H_VERSION = 8, H_SIZE = 12, H_ORDER = 16, H_FORMAT = 20, H_COUNT = 24, H_TABLE = 28, H_FILESIZE = 32 };
 enum { S_STRINGS = 1, S_BOXES = 2, S_MATERIALS = 4, S_STATEMENTS = 13, S_ENV = 14, S_BOX_TURNS = 17, S_PAINT = 18, S_SECTIONS = 18 };
-// A material record (version 7) and its face layout, filter and padding bytes, its paint atlas path,
+// A material record and its face layout, filter and padding bytes, its paint atlas path,
 // paint filter and padding, noPrepass, drawDistance
 enum { MAT_SIZE = 172, MAT_UV_FACES = 148, MAT_FILTER = 154, MAT_PAD = 155, MAT_PAINT = 156, MAT_PAINT_FILTER = 160, MAT_PAD2 = 161, MAT_NO_PREPASS = 164,
        MAT_DRAW_DISTANCE = 168 };
@@ -217,20 +217,28 @@ int main(int argc, char **argv)
     unsigned char *c;
     #define CASE(what, change) do { c = Copy(orig, size); change; ExpectRefused(what, c, size); free(c); } while (0)
     CASE("magic", c[1] = 'X');
-    // A version this runtime doesn't read: the message names the file's version and the versions read
-    // (the reader holds no layout asserts: the version and the record sizes are the guard)
+    // A version this runtime doesn't read, older or newer: the message names the file's version and
+    // the one version read (the reader holds no layout asserts: the version and the record sizes are
+    // the guard)
     uint32_t version = Rd32(orig, H_VERSION);
-    char want[96];
-    snprintf(want, sizeof(want), "compiled map version %u; this runtime reads compiled map versions 2 to %u", version + 1, version);
-    c = Copy(orig, size); Wr32(c, H_VERSION, version + 1); ExpectMessage("format version", c, size, want); free(c);
-    snprintf(want, sizeof(want), "compiled map version 1; this runtime reads compiled map versions 2 to %u", version);
-    c = Copy(orig, size); Wr32(c, H_VERSION, 1); ExpectMessage("version 1", c, size, want); free(c);
+    char want[160];
+    snprintf(want, sizeof(want), "compiled map version %u; this runtime reads compiled map version %u: compile the map again",
+             version + 1, version);
+    c = Copy(orig, size); Wr32(c, H_VERSION, version + 1); ExpectMessage("version + 1", c, size, want); free(c);
+    snprintf(want, sizeof(want), "compiled map version %u; this runtime reads compiled map version %u: compile the map again",
+             version - 1, version);
+    c = Copy(orig, size); Wr32(c, H_VERSION, version - 1); ExpectMessage("version - 1", c, size, want); free(c);
+    // The map format it was compiled from: exactly the runtime's (MS_FORMAT_VERSION, 3)
+    snprintf(want, sizeof(want), "compiled map of map format 2; this runtime reads map format %d: compile the map again",
+             MS_FORMAT_VERSION);
+    c = Copy(orig, size); Wr32(c, H_FORMAT, 2); ExpectMessage("map format 2", c, size, want); free(c);
+    snprintf(want, sizeof(want), "compiled map of map format 4 is newer than this runtime (%d): update monolith", MS_FORMAT_VERSION);
+    c = Copy(orig, size); Wr32(c, H_FORMAT, 4); ExpectMessage("map format 4", c, size, want); free(c);
     CASE("header size", Wr32(c, H_SIZE, 60));
     CASE("big-endian byte order", Wr32(c, H_ORDER, 0x04030201u));
     CASE("map format 99", Wr32(c, H_FORMAT, 99));
     CASE("file size + 1", Wr32(c, H_FILESIZE, Rd32(c, H_FILESIZE) + 1));
     CASE("section count 15", Wr32(c, H_COUNT, 15));
-    CASE("version 2 with the version 3 section table", Wr32(c, H_VERSION, 2));
     CASE("section table past the end", Wr32(c, H_TABLE, (uint32_t)size));
     for (int id = 1; id <= S_SECTIONS; id++) {
         uint32_t e;
@@ -272,17 +280,16 @@ int main(int argc, char **argv)
     CASE("material uv_faces partly none", memcpy(c + mats + MAT_UV_FACES, PART, 6));
     CASE("material filter 2", c[mats + MAT_FILTER] = 2);
     CASE("material padding 1", c[mats + MAT_PAD] = 1);
-    // The paint atlas (version 5): a path inside the package that exists, paint_filter 0 / 1, padding 0
+    // The paint atlas: a path inside the package that exists, paint_filter 0 / 1, padding 0
     CASE("material paint atlas offset outside the string table", Wr32(c, mats + MAT_PAINT, strCount));
     CASE("material paint atlas not a file", Wr32(c, mats + MAT_PAINT, Rd32(c, mats)));   // ("default")
     CASE("material paint_filter 2", c[mats + MAT_PAINT_FILTER] = 2);
     CASE("material padding 2 nonzero", c[mats + MAT_PAD2 + 2] = 1);
     CASE("material prepass flag 2", Wr32(c, mats + MAT_NO_PREPASS, 2));
-    // The draw distance (version 7): 0 auto, -1 off, else above 0 and at most 1e6 m
+    // The draw distance: 0 auto, -1 off, else above 0 and at most 1e6 m
     CASE("material draw distance -2", Wr32(c, mats + MAT_DRAW_DISTANCE, 0xC0000000u));
     CASE("material draw distance 2e6", Wr32(c, mats + MAT_DRAW_DISTANCE, 0x49F42400u));
     CASE("material draw distance NaN", Wr32(c, mats + MAT_DRAW_DISTANCE, 0x7FC00000u));
-    CASE("version 4 with the version 5 section table", Wr32(c, H_VERSION, 4));
     // A layout needs uv_scale 1 1 (tests/models: material 2, "tiles", has 2 2); material 0 loads with one
     if (Rd32(orig, mats + 2 * MAT_SIZE + 80) != 0x3F800000u)       // (its uvScale.x is not 1)
         CASE("uv_faces on a material with uv_scale 2 2", memcpy(c + mats + 2 * MAT_SIZE + MAT_UV_FACES, ALL, 6));

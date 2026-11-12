@@ -199,6 +199,8 @@ On any system but Linux (the Windows build `build/win/monolith.exe`, also under 
 
 A map is a folder in `maps/` ([map-format.md](map-format.md)): a text file of boxes, models, materials, lights and environment, plus `MAP.md`, the map's design brief.
 
+monolith reads one map format, the current one (3, the `monolith 3` line at the top of the file). A map made for an earlier monolith doesn't load: the game says `map format N is older than this monolith (3): run /migrate-map <map> in Claude Code` (on start-up it prints that and exits; on a hot reload the HUD shows it and the old map stays). Run `/migrate-map <package>` in Claude Code to rewrite it to the current format; it proves the result looks and behaves exactly like the original and keeps the original next to it ([map-format.md](map-format.md) §1.3). A map from a newer monolith asks you to update monolith.
+
 - **New map:** `./build/linux/monolith --new-map <name>` creates `maps/<name>/` with a ground slab, daylight and a brief template, then `--map maps/<name>` opens it. Describe the map in your first request ("a foggy pine forest at dusk"): Claude writes the brief and builds to it.
 - **Edit by hand:** open the `.map` file in any editor while the game runs; it reloads on save.
 - **Import a scene** from an existing raylib + R3D project: `./build/linux/monolith --import <project folder> <name>` creates the map and queues an import request. Claude reads the project's source (as data, never running it except as a build in a scratch copy), copies and records its assets, translates boxes, models, materials, lights, environment and camera into the new map, fills in the brief, compares screenshots, and lists in `result.md` what it could not translate (custom render passes, gameplay, animation, …).

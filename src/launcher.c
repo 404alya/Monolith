@@ -2,7 +2,7 @@
 //
 // A submitted request becomes a self-contained folder requests/<YYYY-MM-DD_HHMMSS>_<slug>/
 // (view.png, view-marked.png, region-<n>.png per screen region, request.md, request.json;
-// bundle format 2, .claude/skills/map-request/bundle-reference.md). The model is chosen per request (fast /
+// bundle format 5, .claude/skills/map-request/bundle-reference.md). The model is chosen per request (fast /
 // default / heavy tier, see "Model choice" below) and recorded in request.md / request.json.
 // The user's prompt never goes on a command line: it only lives in the bundle, and every
 // process is started from an argv array (no shell).
@@ -329,7 +329,7 @@ static CopyInfo ObjCopy(MS_ObjRef o)
     int line = ObjLine(o), count = o.kind == MS_OBJ_MODEL ? scene->modelCount : scene->boxCount;
     c.total = c.nth + 1;
     for (int i = o.index + 1; i < count && MS_ObjectRef(scene, (MS_ObjRef){ o.kind, i })->line == line; i++) c.total++;
-    // The line's placement prefixes: repeat n dx dy dz (up to 3), at x y z
+    // The line's placement prefixes: repeat n dx dy dz (up to 3)
     int len = 0;
     const char *p = line > 0 ? MS_LineText(scene, line, &len) : NULL;
     const char *end = p ? p + len : NULL;
@@ -344,8 +344,7 @@ static CopyInfo ObjCopy(MS_ObjRef o)
             c.counts[c.repeats++] = (int)strtol(p, NULL, 10);
             p = SkipWord(p, end);
             skip = 3;
-        } else if (p - w == 2 && strncmp(w, "at", 2) == 0) skip = 3;
-        else break;
+        } else break;
         for (int k = 0; k < skip; k++) p = SkipWord(SkipSpace(p, end), end);
     }
     long long copies = c.repeats > 0 ? 1 : 0;
@@ -986,9 +985,9 @@ static void WriteRegionsMd(FILE *f, const Bundle *B)
                     GroupName(ObjGroup(o)), ObjLine(o));
             MdVec(f, b.min); fprintf(f, " | "); MdVec(f, b.max); fprintf(f, " |\n");
         }
-        int more = g->objectCount - rows + g->omittedObjects;
+        int more = g->objectCount - rows;
         if (more > 0) {
-            float share = g->omittedShare;
+            float share = 0.0f;
             for (int k = rows; k < g->objectCount; k++) share += g->objects[k].share;
             fprintf(f, "| %.1f%% | %d more object%s (see `request.json`) | | | | |\n", 100.0f * share, more, more == 1 ? "" : "s");
         }
@@ -1179,7 +1178,7 @@ static bool WriteRequestMd(const char *path, const Bundle *B)
 
     fprintf(f, "# Map edit request: %s\n\n", B->slug);
     fprintf(f, "Model: %s (%s tier: %s)\n\n", B->model.name, ModelTierName(B->model.tier), MsgText(&B->model.reason));
-    fprintf(f, "Request `%s`, submitted %s from the monolith map designer. Bundle format 4: besides the "
+    fprintf(f, "Request `%s`, submitted %s from the monolith map designer. Bundle format 5: besides the "
                "crosshair hit and the selected objects it may contain **screen regions** the developer "
                "dragged over the frame and **volumes**, boxes marked in world space (see *Screen regions* and "
                "*Volumes* below and `.claude/skills/map-request/bundle-reference.md`).\n\n", B->id, B->created);
@@ -1459,8 +1458,7 @@ static void WriteVolumesJson(FILE *f, const DesignRequest *r)
             fprintf(f, ", \"max\": "); JsonVec(f, b.max);
             fprintf(f, " }");
         }
-        fprintf(f, "%s],\n      \"objectCount\": %d,\n      \"omittedObjects\": %d", listed ? "\n      " : "",
-                v->objectCount, v->objectCount - listed);
+        fprintf(f, "%s],\n      \"objectCount\": %d", listed ? "\n      " : "", v->objectCount);
         int lineCount = 0, groupCount = 0;
         VolumeTally *lines = VolumeTallies(v, false, &lineCount);
         VolumeTally *groups = VolumeTallies(v, true, &groupCount);
@@ -1497,7 +1495,7 @@ static bool WriteRequestJson(const char *path, const Bundle *B)
     FILE *f = fopen(path, "wb");
     if (!f) return false;
 
-    fprintf(f, "{\n  \"format\": 4,\n  \"kind\": \"edit\",\n  \"id\": "); JsonStr(f, B->id);
+    fprintf(f, "{\n  \"format\": 5,\n  \"kind\": \"edit\",\n  \"id\": "); JsonStr(f, B->id);
     fprintf(f, ",\n  \"slug\": "); JsonStr(f, B->slug);
     fprintf(f, ",\n  \"created\": "); JsonStr(f, B->created);
     fprintf(f, ",\n  \"instructions\": ");
@@ -1609,9 +1607,7 @@ static bool WriteRequestJson(const char *path, const Bundle *B)
             fprintf(f, ", \"max\": "); JsonVec(f, b.max);
             fprintf(f, " }");
         }
-        fprintf(f, "%s],\n      \"omittedObjects\": %d,\n      \"omittedShare\": ", listed ? "\n      " : "", g->omittedObjects);
-        JsonNum(f, g->omittedShare);
-        fprintf(f, ",\n      \"sky\": "); JsonNum(f, g->sky);
+        fprintf(f, "%s],\n      \"sky\": ", listed ? "\n      " : ""); JsonNum(f, g->sky);
         int lineCount = 0;
         LineShare *ls = RegionLines(g, &lineCount);
         fprintf(f, ",\n      \"lines\": [");

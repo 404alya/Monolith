@@ -60,7 +60,7 @@ bool DumpScene(const MS_Scene *s, const char *path, bool diff)
     fprintf(f, "monolith-scene-dump 1%s\nmap \"%s\" format %d\n", diff ? " diff" : "", s->path, s->formatVersion);
     fprintf(f, "counts boxes %d models %d modelFiles %d materials %d lights %d groups %d colliders %d", s->boxCount,
             s->modelCount, s->modelFileCount, s->materialCount, s->lightCount, s->groupCount, s->colliderCount);
-    if (s->turnedBoxCount > 0) fprintf(f, " turned %d", s->turnedBoxCount);    // (only then: older dumps stay equal)
+    if (s->turnedBoxCount > 0) fprintf(f, " turned %d", s->turnedBoxCount);    // (only when the map has turned boxes)
     fprintf(f, "\n");
     for (int i = 0; i < s->groupCount; i++) {
         fprintf(f, "group");

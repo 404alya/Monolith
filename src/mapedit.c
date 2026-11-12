@@ -254,9 +254,6 @@ typedef struct {
     int repN[3], repFrom[3];
     double repD[3][3];
     float repDf[3][3];
-    int atTok;              // -1 = no `at`
-    double at[3];
-    float atF[3];
     int kw;                 // the primitive keyword
     int kind;               // ST_*
     char prim[16];
@@ -348,13 +345,11 @@ static bool Analyze(Stmt *st, const char *text, int len, const char **why)
 {
     st->text = text;
     st->len = len;
-    st->idTok = st->atTok = st->rotTok = st->zTok = st->scaleTok = -1;
+    st->idTok = st->rotTok = st->zTok = st->scaleTok = -1;
     st->scaleN = 0;
     st->reps = st->posCount = 0;
     memset(st->repN, 0, sizeof(st->repN));
     memset(st->repFrom, 0, sizeof(st->repFrom));
-    memset(st->at, 0, sizeof(st->at));
-    memset(st->atF, 0, sizeof(st->atF));
     if (!Tokenize(st)) { *why = "cannot read the line"; return false; }
     int t = 0;
     for (;;) {
@@ -376,11 +371,6 @@ static bool Analyze(Stmt *st, const char *text, int len, const char **why)
             }
             st->repEnd[r] = t;
             st->reps++;
-        } else if (TokIs(st, t, "at")) {
-            st->atTok = t;
-            for (int a = 0; a < 3; a++)
-                if (!TokNum(st, t + 1 + a, &st->at[a], &st->atF[a])) { *why = "bad at"; return false; }
-            t += 4;
         } else break;
     }
     st->kw = t;
@@ -451,9 +441,9 @@ static double WorldValue(const Stmt *st, int k, const int g[3])
 {
     double v;
     TokNum(st, st->posTok[k], &v, NULL);
-    if (st->atTok < 0 && st->reps == 0) return v;
+    if (st->reps == 0) return v;
     int a = st->posAxis[k];
-    double off = st->at[a];
+    double off = 0.0;
     for (int r = 0; r < st->reps; r++) off += g[r] * st->repD[r][a];
     return off + v;
 }
@@ -464,7 +454,6 @@ static int ValueDecimals(const Stmt *st, int k)
 {
     int d = TokDecimals(st, st->posTok[k]);
     for (int r = 0; r < st->reps; r++) for (int a = 0; a < 3; a++) d = d > TokDecimals(st, st->repTok[r] + 2 + a) ? d : TokDecimals(st, st->repTok[r] + 2 + a);
-    if (st->atTok >= 0) for (int a = 0; a < 3; a++) d = d > TokDecimals(st, st->atTok + 1 + a) ? d : TokDecimals(st, st->atTok + 1 + a);
     return d > 6 ? d : 6;
 }
 
@@ -577,9 +566,9 @@ static float SimOriginal(const Stmt *st, int k, const int g[3])
 {
     float v;
     TokNum(st, st->posTok[k], NULL, &v);
-    if (st->atTok < 0 && st->reps == 0) return v;
+    if (st->reps == 0) return v;
     int a = st->posAxis[k];
-    float off = st->atF[a];
+    float off = 0.0f;
     for (int r = 0; r < st->reps; r++) off += (float)g[r] * st->repDf[r][a];
     return off + v;
 }
@@ -614,7 +603,7 @@ static bool FoldExact(const Stmt *st, const Piece *pc, const bool *fold, double 
         FormatNum(v, decs[k], buf, sizeof(buf));
         vf[k] = strtof(buf, NULL);
     }
-    bool shifted = st->atTok >= 0 || keptReps > 0;
+    bool shifted = keptReps > 0;
     int total = pc->count[0] * pc->count[1] * pc->count[2];
     for (int c = 0; c < total; c++) {
         int j[3] = { c / (pc->count[1] * pc->count[2]), (c / pc->count[2]) % pc->count[1], c % pc->count[2] };
@@ -624,7 +613,7 @@ static bool FoldExact(const Stmt *st, const Piece *pc, const bool *fold, double 
             int a = st->posAxis[k];
             float p = vf[k];
             if (shifted) {
-                float off = st->atF[a];
+                float off = 0.0f;
                 for (int r = 0; r < st->reps; r++)
                     if (kept[r]) off += (float)(fold[r] ? j[r] : g[r]) * st->repDf[r][a];
                 p = off + vf[k];
@@ -706,10 +695,10 @@ static double NormalizeYaw(double y)
 // ---- Turns about any axis or a pivot, scales and sizes (the transform modal's ops) ----
 //
 // Each op maps the line's positional numbers (a whole line: its own numbers, the copies'
-// `repeat` steps and `at` with it when the op has a pivot; one copy: its world numbers) and
+// `repeat` steps with it when the op has a pivot; one copy: its world numbers) and
 // rewrites the other numbers it changes (block sizes, a model's `rot` and `scale`). A whole
-// line with a pivot: copy g is at + base + sum g_r d_r, so M(copy - P) + P is the line with
-// base' = M(base - P) + P, at' = M at and d' = M d (M linear: a turn or the factors).
+// line with a pivot: copy g is base + sum g_r d_r, so M(copy - P) + P is the line with
+// base' = M(base - P) + P and d' = M d (M linear: a turn or the factors).
 
 #define EDIT_PI 3.14159265358979323846
 
@@ -866,18 +855,13 @@ static void RwVec3(Rewrite *w, const Stmt *st, int first, const double v[3])
         if (!SameNumber(v[a], TokValue(st, first + a), NumDecimals(st, first + a))) RwNumber(w, st, first + a, v[a], NumDecimals(st, first + a));
 }
 
-// A whole line with a pivot: its `repeat` steps and `at` go through M (factors: diagonal)
+// A whole line with a pivot: its `repeat` steps go through M (factors: diagonal)
 static void RwSteps(Rewrite *w, const Stmt *st, const Mat3 *M)
 {
     for (int r = 0; r < st->reps; r++) {
         double d[3] = { st->repD[r][0], st->repD[r][1], st->repD[r][2] };
         MatVec(M, d, d);
         RwVec3(w, st, st->repTok[r] + 2, d);
-    }
-    if (st->atTok >= 0) {
-        double a[3] = { st->at[0], st->at[1], st->at[2] };
-        MatVec(M, a, a);
-        RwVec3(w, st, st->atTok + 1, a);
     }
 }
 
@@ -1259,7 +1243,7 @@ bool MapEditPreviewTransform(const EditOp *op, int cls, const MS_Transform *in, 
     return false;
 }
 
-// Copy c of the line as a plain line of its own (world numbers, no repeat / at, new id),
+// Copy c of the line as a plain line of its own (world numbers, no repeat, new id),
 // moved / turned / scaled / resized / shifted by the op (EDIT_REMOVE never gets here)
 static bool CopyLine(Ctx *C, const Stmt *st, int c, StrBuf *out)
 {
@@ -1268,7 +1252,6 @@ static bool CopyLine(Ctx *C, const Stmt *st, int c, StrBuf *out)
     int g[3];
     CopyIndices(st, c, g);
     for (int r = 0; r < st->reps; r++) RwDropTokens(w, st, st->repTok[r], st->repEnd[r]);
-    if (st->atTok >= 0) RwDropTokens(w, st, st->atTok, st->atTok + 4);
     RwDropComment(w, st);
     double vals[POS_MAX];
     int decs[POS_MAX];
