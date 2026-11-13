@@ -1,3 +1,16 @@
 {
-  "idleCompaction": false
+  "idleCompaction": false,
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Monitor",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -x \"$CLAUDE_PROJECT_DIR/build/run-sh.o\" ] || \"$CLAUDE_PROJECT_DIR/build.sh\" --tools run-sh >&2 || { echo \"run-sh: build/run-sh.o is missing and ./build.sh --tools run-sh failed (above), so every shell command is blocked. Fix tools/run-sh.c with the file tools, or turn this hook off in /hooks.\" >&2; exit 2; }; \"$CLAUDE_PROJECT_DIR/build/run-sh.o\" --hook || { echo \"run-sh: build/run-sh.o --hook failed (above), so this command is blocked. Turn this hook off in /hooks if it keeps failing.\" >&2; exit 2; }"
+          }
+        ]
+      }
+    ]
+  }
 }

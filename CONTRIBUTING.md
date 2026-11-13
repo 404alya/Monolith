@@ -4,17 +4,19 @@ The rules for changing monolith, whether you write the change yourself or with C
 
 ## A code change is done when
 
-1. **Both targets build with zero warnings** (the Windows build is for exports, the runtime and the view-only editor): `./build.sh` and `./build.sh --win`, plus `examples/build.sh` (and `--win`) when the runtime or an example changed. Changed shaders pass `glslangValidator` (Arch: `glslang`; Debian / Ubuntu: `glslang-tools`). A change to `runtime/` also builds without `MONOLITH_EDITOR` (an `--export` package builds it that way) and without `MS_PATCHED_R3D`.
-2. **The leak check passes:** `tools/leakcheck.sh` ends with `leakcheck: OK: zero leaks of ours` (about 1.5 minutes, hidden windows only). After larger changes also `tools/leakcheck.sh --asan`.
+1. **Both targets build with zero warnings** (the Windows build is for exports, the runtime and the view-only editor): `./build.sh` and `./build.sh --win`, plus `./build.sh examples` (and `--win`) when the runtime or an example changed. Changed shaders pass `glslangValidator` (Arch: `glslang`; Debian / Ubuntu: `glslang-tools`). A change to `runtime/` also builds without `MONOLITH_EDITOR` (an `--export` package builds it that way) and without `MS_PATCHED_R3D`.
+2. **The leak check passes:** `build/tools/leakcheck` ends with `leakcheck: OK: zero leaks of ours` (about 5 minutes, hidden windows only). After larger changes also `build/tools/leakcheck --asan`.
 3. **Every map looks the same**, unless changing the look is the point of the change: identical box lists (`--dump-boxes`) and pixel-identical `--shot` images of each map's viewpoints, before vs. after. A change that alters the look is presented as a trade-off (behind a setting, with before / after images) and needs the maintainer's approval.
-4. **The tests that cover it pass:** `tools/test-coordinator.sh` for the launcher and request queue; `--reload-test`, `--shot` and the dump flags for the loader and renderer ([command-line.md](docs/command-line.md)).
+4. **The tests that cover it pass:** `build/tools/test-coordinator` for the launcher and request queue; `--reload-test`, `--shot` and the dump flags for the loader and renderer ([command-line.md](docs/command-line.md)).
 5. **The docs say what the code does:** the header comment of `src/main.c` (controls and flags), the pages in `docs/`, and the skill in `.claude/skills/` whose workflow changed.
 
 Map-only changes (a `.map` file, `MAP.md`, a package's shaders, models, textures) need none of the builds or the leak check: the game reloads the package while it runs.
 
 ## The build
 
-`./build.sh` only compiles and starts the build program: `nob.c` in the repo root, a C program written on the vendored [nob.h](https://github.com/tsoding/nob.h) (`src/vendor/nob/`). Every mode, compiler flag and command of the build lives in `nob.c`, each command with a comment that says what it does and why. `build.sh` recompiles `build/nob` by itself when `nob.c` or `nob.h` changed. Each command is echoed (`[INFO] CMD: …`) and followed by its wall time and the CPU time it and its child processes used (`[TIME] …`); a summary table of all commands ends the build, so you can see where the time goes. A new flag goes into the argument list of the command it belongs to in `nob.c` (and into the matching `compile_commands.json` entry when that list is mirrored there); a new mode is a branch in `main()` / `BuildLinux()` that runs its commands through `RunTimed()`. Commands run one after another (that is what makes the CPU times exact). `examples/build.sh`, `tests/unit/*.sh` and the export's `build.sh` are still shell scripts.
+`./build.sh` only compiles and starts the build program: `nob.c` in the repo root, a C program written on the vendored [nob.h](https://github.com/tsoding/nob.h) (`src/vendor/nob/`). Every mode, compiler flag and command of the build lives in `nob.c`, each command with a comment that says what it does and why. `build.sh` recompiles `build/nob` by itself when `nob.c` or `nob.h` changed. Each command is echoed (`[INFO] CMD: …`) and followed by its wall time and the CPU time it and its child processes used (`[TIME] …`); a summary table of all commands ends the build, so you can see where the time goes. A new flag goes into the argument list of the command it belongs to in `nob.c` (and into the matching `compile_commands.json` entry when that list is mirrored there); a new mode is a branch in `main()` / `BuildLinux()` that runs its commands through `RunTimed()`. Commands run one after another (that is what makes the CPU times exact). `./build.sh examples`, `tests/unit/*.sh` and the export's `build.sh` are still shell scripts.
+
+**The tools** in `tools/` are C programs too (one file each, on `tools/tool.h`; no shell scripts besides the two `build.sh` launchers): `./build.sh --tools` builds all of them into `build/tools/<name>` (`tools/run-sh.c` into `build/run-sh.o`), `./build.sh --tools <name>` one; after that each rebuilds itself when its source changes. `./build.sh examples [--win|test|lsan]` builds the examples, `./build.sh test [name]` builds and runs the unit tests in `tests/unit/`. Claude Code sessions run every shell command through `build/run-sh.o` (a hook in `.claude/settings.json` that refuses commands breaking the rules below, such as `rm` outside `/tmp` or a visible window); turn it off in `/hooks` if it ever blocks you.
 
 ## Rules
 
@@ -22,32 +24,32 @@ Map-only changes (a `.map` file, `MAP.md`, a package's shaders, models, textures
 - **Results are status codes, messages are for people.** A function that can fail or end in several ways returns an `unsigned char` (0 = success, the other values listed in its comment); callers compare with the number and never branch on a message. Text that is logged or shown is never a fixed-size buffer: a literal stays a `const char *`, run-time text is a heap string sized to fit (`MonoMsg` / `MonoStrf`, `src/msg.h`), failures go to `MS_LastError()`.
 - **R3D changes are patches.** Work around R3D from the app side where reasonable. When R3D itself must change, change it minimally and record it in `submodules/r3d/patches.md` (symptom, cause, files, diff, verification).
 - **Assets need a recorded licence:** CC0 / public domain, or CC-BY with the attribution. Every external file gets a row in its package's `ASSETS.md` and a `<file>.asset.md` sidecar (`tools/record_asset.py` writes both). Models are restyled with material overrides in the map, never by editing the file. The editor's own font (`resources/fonts/`) is the one exception: it may be under the SIL Open Font License 1.1, recorded the same way, with its `OFL.txt` shipped next to the binary.
-- **One version of each format in the code.** Monolith reads only the current map format, compiled-map version and request-bundle format; any other version is refused with a message that says what to do, never read through an old-version branch. A change that alters or removes anything in the map text bumps `MS_FORMAT_VERSION` and, in the same change, adds the step to `.claude/skills/migrate-map/versions.md` (rewrite rules, lossless or not, the `last-reader:` commit that still reads the old version and must build with `tools/old-monolith.sh`), migrates the repo's maps with `/migrate-map` in Claude Code, and adds a rejection test to `tests/unit/parse_error_test.c`. Compiled maps are compiled again; old bundles are not migrated.
+- **One version of each format in the code.** Monolith reads only the current map format, compiled-map version and request-bundle format; any other version is refused with a message that says what to do, never read through an old-version branch. A change that alters or removes anything in the map text bumps `MS_FORMAT_VERSION` and, in the same change, adds the step to `.claude/skills/migrate-map/versions.md` (rewrite rules, lossless or not, the `last-reader:` commit that still reads the old version and must build with `build/tools/old-monolith`), migrates the repo's maps with `/migrate-map` in Claude Code, and adds a rejection test to `tests/unit/parse_error_test.c`. Compiled maps are compiled again; old bundles are not migrated.
 - **The level is data.** Nothing in the engine or the shared docs assumes one map's style; a map's style and rules live in its `MAP.md`.
 - **Performance claims** come with interleaved A/B runs of the old and new binary on the same machine (`--bench --headless`, at least 3 pairs), reported as relative changes together with the machine (the bench report's GPU, driver and CPU). Numbers from another machine are not a baseline.
-- **Automated runs never open a visible window:** use `--shot`, the dump flags, `--inspect-model` or `--bench --headless`. In an AI agent's shell the game enforces this (it refuses and exits 1 unless `MONOLITH_ALLOW_WINDOW=1`); keep new modes that show no window in `src/main.c`'s `windowless` check. The examples are plain programs that always open a window; tests run their test build (`examples/build.sh test`, `tests/examples/harness.h`), which needs `--shot` and never shows one.
+- **Automated runs never open a visible window:** use `--shot`, the dump flags, `--inspect-model` or `--bench --headless`. In an AI agent's shell the game enforces this (it refuses and exits 1 unless `MONOLITH_ALLOW_WINDOW=1`); keep new modes that show no window in `src/main.c`'s `windowless` check. The examples are plain programs that always open a window; tests run their test build (`./build.sh examples test`, `tests/examples/harness.h`), which needs `--shot` and never shows one.
 - **Don't commit** `build/`, screenshots, `benchmark/`, `requests/`, `export/` or your `.claude/settings.local.json`. Most maps in `maps/` are kept locally and are gitignored; only `maps/pine_forest/` is in the repository.
 
 ## Bugs and tasks
 
-Open bugs and future work live in two plain-text lists, one task per line (`<id> - <title> <description>`), each behind its own script. Both run [Simple-Todo](https://github.com/404alya/Simple-Todo) (`submodules/simple-todo/todo.o`, prebuilt for x86-64 Linux; nothing to build). After a clone without `--recurse-submodules`, run `git submodule update --init submodules/simple-todo` first.
+Open bugs and future work live in two plain-text lists, one task per line (`<id> - <title> <description>`), each behind its own program. Both run [Simple-Todo](https://github.com/404alya/Simple-Todo) (`submodules/simple-todo/todo.o`, prebuilt for x86-64 Linux; nothing to build). After a clone without `--recurse-submodules`, run `git submodule update --init submodules/simple-todo` first.
 
-| List | File | Script | Written by |
+| List | File | Program | Written by |
 |---|---|---|---|
-| the maintainer's | `TODO.md` | `tools/todo.sh` | the maintainer only; Claude Code may read it, never change it |
-| the AI's | `.claude/TODO.md` | `tools/ai-todo.sh` | Claude Code sessions: bugs they found outside their task, work they deferred |
+| the maintainer's | `TODO.md` | `build/tools/todo` | the maintainer only; Claude Code may read it, never change it |
+| the AI's | `.claude/TODO.md` | `build/tools/ai-todo` | Claude Code sessions: bugs they found outside their task, work they deferred |
 
 ```bash
-tools/todo.sh list                                   # print the list with the ids
-tools/todo.sh add "bug: <what>" "<where: file:line, doc section, request id>"
-tools/todo.sh rm <id> [<id>...]                      # close entries
+build/tools/todo list                                   # print the list with the ids
+build/tools/todo add "bug: <what>" "<where: file:line, doc section, request id>"
+build/tools/todo rm <id> [<id>...]                      # close entries
 ```
 
-`tools/ai-todo.sh` takes the same commands. Each script writes only its own file (it ignores a `TODO_FILE` set in the environment), and `rm` accepts only numeric ids, so a list's `#` header line can't be removed.
+`build/tools/ai-todo` takes the same commands. Each program writes only its own file (it ignores a `TODO_FILE` set in the environment), and `rm` accepts only numeric ids, so a list's `#` header line can't be removed.
 
 - **Titles start with the kind:** `bug: …` (something is wrong), `task: …` (planned work, a check or a decision), `idea: …` (could be done, not decided). The tool has no other fields, so the kind is part of the title.
-- **AI entries are short:** `tools/ai-todo.sh add` rejects a title over 60 characters or a description over 120 (counted in characters) and writes nothing. The description says what is wrong or wanted and where the details are; the details themselves go into the code, a doc or a request's `result.md`.
-- **Promoting an AI entry:** add it to your list with `tools/todo.sh add`, then remove it with `tools/ai-todo.sh rm <id>`. Prune the AI list the same way.
+- **AI entries are short:** `build/tools/ai-todo add` rejects a title over 60 characters or a description over 120 (counted in characters) and writes nothing. The description says what is wrong or wanted and where the details are; the details themselves go into the code, a doc or a request's `result.md`.
+- **Promoting an AI entry:** add it to your list with `build/tools/todo add`, then remove it with `build/tools/ai-todo rm <id>`. Prune the AI list the same way.
 - An id is a hash of the entry's text, so it stays the same until the entry is removed.
 - `docs/known-issues.md` keeps the longer descriptions of known problems; the AI list has an entry for each open one.
 

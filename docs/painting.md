@@ -433,7 +433,7 @@ pixel read back and turned from linear to sRGB bytes. One extra scene render per
 ## 8. The runtime API (editor builds only)
 
 Declared in `runtime/monolith_scene.h`, in the `MONOLITH_EDITOR` block "Painting". The game build and
-`--export` don't have them (`tests/unit/export_strip_test.sh`). The game build reads and draws paint
+`--export` don't have them (`./build.sh test export_strip`). The game build reads and draws paint
 (§4) without any of these functions.
 
 ### 8.1 Surface picking
@@ -724,7 +724,7 @@ to run without `--bench` or `--shot`, like the test build always does.
 | Phase | Who | Files | Done when |
 |---|---|---|---|
 | 0 | lead | this note §1–§16; headers and stubs (`monolith_scene.h` and its stubs, `mapedit.h`, `harness.h`'s interface) | both builds 0 warnings with the stubs |
-| 1 | agent A | `runtime/monolith_scene.c/.h`, `docs/compiled-map.md`, `src/export.c` if needed | §4, §6, §8, §9; every map unchanged (shots, dumps); a scratch package with an alpha-0 entry on a box of each draw kind (merged, instanced, turned, a `stairs` step) and model slots (own material, shader override, tiled UVs with an unwrap, `transparency alpha`, `unlit`, emissive): **0 changed pixels** against the unpainted package at every view; a known rectangle painted: changes only inside its mask (light bounced by the paint reported separately); compiled round trip; `examples/build.sh test`; leak check |
+| 1 | agent A | `runtime/monolith_scene.c/.h`, `docs/compiled-map.md`, `src/export.c` if needed | §4, §6, §8, §9; every map unchanged (shots, dumps); a scratch package with an alpha-0 entry on a box of each draw kind (merged, instanced, turned, a `stairs` step) and model slots (own material, shader override, tiled UVs with an unwrap, `transparency alpha`, `unlit`, emissive): **0 changed pixels** against the unpainted package at every view; a known rectangle painted: changes only inside its mask (light bounced by the paint reported separately); compiled round trip; `./build.sh examples test`; leak check |
 | 3a | agent B (beside A) | `tests/examples/harness.h` bench mode; `src/paintunwrap.c/.h` (xatlas, vendored under `src/vendor/xatlas/` with its licence), `build.sh` | the harness bench on every exported map; base numbers for every map in `maps/` (benches through the lead); an unwrap of each Kenney model in `maps/` written and read back (`MS_PaintUnwrapRead`), no overlapping charts |
 | 2 | agent C (after A) | `src/drawmode.c/.h`, `src/drawpanel.c/.h`, `src/mapedit.c/.h`, the draw-mode wiring in `src/main.c`; `src/surfacebake.c/.h` to the trash | §3, §5, §7, §10–§14; `--paint-script` shots of every pen on every kind of phase 1, including the monolith map's concrete, weeds, tower, porcelain, poster and ivy, and pine_forest's ground; alpha-0 first stroke: 0 pixels; undo restores the map bytes and leaves no atlas; minimal `--apply-edits` diff; save → reload identical; leak check, `--asan` |
 | 3b | agent D (after C) | benches through the lead; a fix if needed | painted monolith (N = 10, 100, 1000 objects over its materials) against the same map unpainted, exported, interleaved pairs; draw counts; per-pass GPU table |
@@ -870,13 +870,13 @@ What phase 1 built in `runtime/monolith_scene.c/.h`, and where it differs from �
   every effect on, the indirect light changes 1.96 M pixels outside it. Live edits (a first paint on a new
   material, an entry on an already keyed box, an entry removed, back to the start) vs a load of the same
   text: 0 pixels; a stroke (`MS_TextureUpdate` of every atlas) vs loading those atlases: 0; an atlas grown
-  through `MS_PaintAtlasProvide`: 0. Compiled round trip, `compiled_test.sh`, `parse_error_test.sh`,
-  `export_strip_test.sh` pass; the export renders identically with the examples' game runtime.
+  through `MS_PaintAtlasProvide`: 0. Compiled round trip, `./build.sh test compiled`, `./build.sh test parse_error`,
+  `./build.sh test export_strip` pass; the export renders identically with the examples' game runtime.
 
 ### Implementation notes: paint layer phase 3a (harness bench, unwrap)
 
 **The harness bench** (`tests/examples/harness.h`, §14). `<example> --bench <report.md>
-[--bench-frames N] [--note …]` in any test build (`examples/build.sh test`) or an export's `viewer.c`
+[--bench-frames N] [--note …]` in any test build (`./build.sh examples test`) or an export's `viewer.c`
 compiled with `-include <repo>/tests/examples/harness.h`. It mirrors `monolith --bench --headless`
 (`src/main.c`'s bench loop, `src/bench.c`), whose code can't be included (it needs the editor's
 `common.h`, the global `scene`, the spectator): the hidden window is always 1920 × 1006 (titled
@@ -897,7 +897,7 @@ example's shots (`01_minimal` ×3 incl. `--quality medium`, `02` before / after,
 capture shim, `05`) are byte-identical to the phase-0 harness. `--shot` with `--bench`, and
 `--bench-frames` / `--note` without `--bench`, are refused (exit 1).
 
-**`tools/bench-export-ab.sh`** `<base export> <new export> --note "…" [--map <name>] [--pairs N ≥ 3]
+**`build/tools/bench-export-ab`** `<base export> <new export> --note "…" [--map <name>] [--pairs N ≥ 3]
 [--frames N] [--out <dir>] [--dry-run]`, `--summarize <out dir>`: compiles each export's `viewer.c`
 with the harness (its own object; the runtime is compiled without it) against that export's
 `monolith_scene.c/.h` and its libraries (`prebuilt/linux/lib`, else `build/r3d-linux/lib`), runs
@@ -942,7 +942,7 @@ and sanitizer flags, `-fno-sanitize=function` for UBSan) and links the object in
 the export and examples don't get it. Both targets 0 warnings; Linux NEEDED unchanged (libgcc_s, libGL,
 libm, libc, ld-linux), newest GLIBC symbol 2.34; Windows imports unchanged (system DLLs and UCRT only).
 
-**The test** (`tests/unit/paintunwrap_test.c` + `.sh`, ASan + UBSan; also in `tools/leakcheck.sh` as
+**The test** (`tests/unit/paintunwrap_test.c`, ASan + UBSan; also in `build/tools/leakcheck` as
 `paintunwrap`): synthetic meshes (a cube whose six faces share UVs 0..1, the same without UVs, a cube
 of 8 shared vertices, a mirrored quad pair with overlapping UVs, five meshes over four slots with an
 empty mesh, an unindexed one, tiled UVs and a degenerate triangle, three kinds of bad input) and every
@@ -983,7 +983,7 @@ be painted at.
 ### Implementation notes: paint layer phase 2 (draw mode)
 
 What phase 2 built (`src/drawmode.c/.h`, `src/drawpanel.c/.h`, `src/mapedit.c/.h`, `src/paintunwrap.c/.h`,
-the draw-mode wiring in `src/main.c`, `src/keyspanel.c`, `tools/leakcheck.sh`, a removal in the runtime),
+the draw-mode wiring in `src/main.c`, `src/keyspanel.c`, `build/tools/leakcheck`, a removal in the runtime),
 and where it differs from §1–§14 (which now say what was settled).
 
 - **The bake and the canvases are gone**: `src/surfacebake.c/.h` (to the trash), shared mode and H, the
@@ -1094,10 +1094,10 @@ session's scratch folder `agentC/`):
    line gains `id N `, and the file gains `# paint (draw mode)` and seven sorted `paint` lines.
 6. **Save → reload**: live painted shots against the saved copies loaded fresh: 0 pixels (`tests/models`,
    `kinds` with every pen, the six monolith surfaces, pine_forest's ground).
-7. `./build.sh`, `./build.sh --win`, `examples/build.sh` and `examples/build.sh test`: 0 warnings;
-   `tools/leakcheck.sh` and `tools/leakcheck.sh --asan`: `leakcheck: OK: zero leaks of ours` (ASan: no
-   sanitizer error); `tests/unit/compiled_test.sh`, `parse_error_test.sh`, `export_strip_test.sh`,
-   `paintunwrap_test.sh` (with `PaintUnwrapModelFile`'s new parameter) pass.
+7. `./build.sh`, `./build.sh --win`, `./build.sh examples` and `./build.sh examples test`: 0 warnings;
+   `build/tools/leakcheck` and `build/tools/leakcheck --asan`: `leakcheck: OK: zero leaks of ours` (ASan: no
+   sanitizer error); `./build.sh test compiled`, `./build.sh test parse_error`, `./build.sh test export_strip`,
+   `./build.sh test paintunwrap` (with `PaintUnwrapModelFile`'s new parameter) pass.
 
 **Open**: `--apply-edits` needs the atlas file of a new `paint` key (the loader's strict path check for a
 load from disk); the unwrap of a large scan blocks a frame for seconds (a worker thread would need copies
@@ -1420,7 +1420,7 @@ where it differs from the sections above.
 ### Implementation notes: phase 3b (the panel on real state, the brush cursor, the HUD, the keys)
 
 What phase 3b built (`src/drawmode.c/.h`, `src/drawpanel.c/.h`, `src/keyspanel.c`, the draw-mode
-wiring in `src/main.c`, `tools/leakcheck.sh`), and where it differs from the sections above.
+wiring in `src/main.c`, `build/tools/leakcheck`), and where it differs from the sections above.
 
 - **The panel's target** (§13.2) is not the surface under the cursor of this frame but the one the
   cursor last **rested** on (`DrawMode.target`, a `DrawTarget`): the hover becomes the target after
@@ -1486,7 +1486,7 @@ wiring in `src/main.c`, `tools/leakcheck.sh`), and where it differs from the sec
   request). A panel field that has the keyboard still blocks every draw-mode and game key.
 - **Verification**: every map in `maps/` at every viewpoint pixel-identical to the base without
   `--shot-hud`; with it only the fps text of the status line differs; `--dump-boxes` identical.
-  `tools/leakcheck.sh` gained `draw-cursor-fill`, `draw-cursor-model` and `draw-panel-canvas`, and the
+  `build/tools/leakcheck` gained `draw-cursor-fill`, `draw-cursor-model` and `draw-panel-canvas`, and the
   panel-click run's coordinates follow the new layout.
 - **Open**: the settle time (0.3 s) and the 0.3 % lift are by eye and need a hand test; a soft-pen
   panel scrolls a little at 720p; regrouping faces keeps each new cell's first face's paint (§5.2),
@@ -1502,7 +1502,7 @@ unchanged), every pen on a plain, a turned, a `repeat` copy, a `stairs` statemen
 (widths, alpha, eraser, fill measured on the saved PNGs), minimal map diffs equal to
 `--apply-edits`, undo / redo interleaved with text edits, hot reload and rebase, licence records,
 face layouts, panel / cursor / HUD shots, the input safety (no bundle, no terminal), the live-edit
-mesh fix (12 runs, 0 differing), builds, unit tests, `tools/leakcheck.sh` and `--asan`, and painted
+mesh fix (12 runs, 0 differing), builds, unit tests, `build/tools/leakcheck` and `--asan`, and painted
 packages exported and rendered by `01_minimal` (0 pixels on 13 views). Fixed by the lead:
 
 - `RwBuild` (`mapedit.c`) called `qsort` with a NULL array (a first stroke on a line that already
@@ -1518,7 +1518,7 @@ makes the material and an empty step; the script's `put` accepts `../` paths (a 
 ### Implementation notes: shader bake (§3.6, after the round)
 
 What the shader bake built (`src/surfacebake.c/.h` new, `src/drawmode.c/.h`, one call in `src/main.c`,
-`MS_BoxDrawOf` in the runtime, `tools/leakcheck.sh`), and where it differs from §3.6.
+`MS_BoxDrawOf` in the runtime, `build/tools/leakcheck`), and where it differs from §3.6.
 
 - **Where the render lives**: `src/surfacebake.c`, not `bake.c`. `--bake-surface` is a tool of its own
   (its own window and R3D context, the map loaded again with `MS_BAKE` defines); this one renders the
@@ -1667,7 +1667,7 @@ runs moved to the worktree's `build/agentE-scratch/` when `/tmp` filled up):
   were picked with a temporary hook in a scratch build, not in the change.)
 - **Unpainted**: every viewpoint of every map in `maps/` and `tests/models`, `tests/rotated` against the
   base build: 0 changed pixels, `--dump-boxes` identical.
-- `tools/leakcheck.sh` gained `paint-bake` (the awning: bake, undo, redo, save, a model stroke),
+- `build/tools/leakcheck` gained `paint-bake` (the awning: bake, undo, redo, save, a model stroke),
   `paint-bake-rot` (the scratch `tests/rotated` with shaders, `--apply-edits`) and `paint-bake-input`
   (a click and a drag through the input shim, undo, a second bake); `paint-script`'s last command is now
   shared mode on the awning (refused, exit 1).

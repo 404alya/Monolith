@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Build monolith: ./build.sh [run [args] | debug | lsan | profile]  or  ./build.sh --win [run [args]]
+# The small programs in tools/ (build/tools/<name>, build/run-sh.o): ./build.sh --tools [name...]
+# The examples: ./build.sh examples [--win | test | lsan]; the unit tests: ./build.sh test [name...]
 # (every mode, the environment variables R3D_DIR, CC, CXX, R3D_BUILD_TYPE and what each mode builds are
 # described at the top of nob.c).
 #

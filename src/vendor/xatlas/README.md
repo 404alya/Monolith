@@ -33,4 +33,4 @@ MinGW `build/win-obj/xatlas.o`). Sanitizer builds compile it with the same sanit
 pointer of the base struct type).
 
 To update: download the four files at a new commit into an empty folder outside the repo, read
-them, copy them here, update this table and run `tests/unit/paintunwrap_test.sh`.
+them, copy them here, update this table and run `./build.sh test paintunwrap`.

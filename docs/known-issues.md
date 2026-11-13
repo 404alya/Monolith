@@ -4,7 +4,7 @@ Open questions that need a decision, and what automated checks can't cover. Limi
 
 ## Open decisions
 
-Each open item below also has an entry in the AI's task list (`tools/ai-todo.sh list`; [CONTRIBUTING.md](../CONTRIBUTING.md#bugs-and-tasks)).
+Each open item below also has an entry in the AI's task list (`build/tools/ai-todo list`; [CONTRIBUTING.md](../CONTRIBUTING.md#bugs-and-tasks)).
 1. **R3D's contrast step clips dark values to black.** `color.contrast` is applied in linear space after tonemapping (`submodules/r3d/shaders/post/output.frag`, `Adjustments()`): everything below 0.5·(1−1/c) becomes pure black. Fixing it in R3D (contrast around mid-grey in a perceptual space) would change the default map's look, so maps keep contrast 1 where it matters instead.
 2. **R3D texture path overflow:** `r3d_importer_texture.c` joins the model folder and the texture path into a 256-byte stack buffer without a bounds check. The map loader rejects joins that would reach 256 bytes, so maps can't trigger it; R3D itself is unpatched.
 3. **An assimp leak** of about 1.4 KB when a glTF buffer file is shorter than declared, in assimp's own glTF code; not patched.

@@ -2,6 +2,8 @@
 
 Every flag and environment variable of `monolith` (Linux: `./build/linux/monolith`; the view-only Windows build `build\win\monolith.exe` takes the ones it doesn't refuse, [below](#view-only-build); the debug, LeakSanitizer and profiling builds of `./build.sh debug|lsan|profile` in `build/linux-<mode>/` take the same flags). The header comment of `src/main.c` is the source of truth. Timings quoted below were measured on an RTX 4050 Laptop GPU: a rough guide only, your machine's will differ. Keys and mouse: [user-guide.md](user-guide.md). "Patch N" means a local change to R3D ([glossary.md](glossary.md)).
 
+The build itself: `./build.sh [run [args] | debug | lsan | profile]`, `./build.sh --win [run [args]]`, `./build.sh --tools [name…]` (the programs in `tools/`: `build/tools/<name>` and `build/run-sh.o`, only what is missing or older than its source; the plain build doesn't build them), `./build.sh examples [--win | test | lsan]` and `./build.sh test [name…] [-- args]` (the unit tests); every mode is described at the top of `nob.c` ([architecture.md](architecture.md) §8 for the tools).
+
 Flags that never open a visible window, safe for scripts: `--shot` (renders in a hidden window), `--dump-boxes`, `--dump-scene`, `--dump-scene-diff`, `--dump-entities` (each of these also with `--edit-script`, which is refused without one of them), `--tri-report`, `--apply-edits`, `--inspect-model`, `--new-map`, `--export`, `--compile`, `--classify`, `--bake-surface`, and `--bench` together with `--headless`. `--import` opens no game window either, but it queues an import request, which can open the coordinator's terminal. Anything else opens the game window.
 
 ## Flags
@@ -70,7 +72,7 @@ For testing the designer without a visible window:
 | `--select <line>` | Select every object of this map line (repeatable) |
 | `--region x y w h` | Attach a screen region (repeatable) |
 | `--volume x0 y0 z0 x1 y1 z1` | Attach a volume: the axis-aligned box between two opposite corners in map coordinates, any order (repeatable). `--shot-hud` draws it, `--submit` writes it into the bundle |
-| `--submit "text"` | With `--shot`: run the real submit path (bundle + queue + **real coordinator terminal** if none runs). For tests, point `MONOLITH_REQUESTS_DIR` at a scratch folder and `MONOLITH_TERMINAL` at `tools/stub-terminal.sh`, so no real Claude Code session starts. Refused, nothing written, while `--edit-script` left unsaved edits (as Enter is in the game) |
+| `--submit "text"` | With `--shot`: run the real submit path (bundle + queue + **real coordinator terminal** if none runs). For tests, point `MONOLITH_REQUESTS_DIR` at a scratch folder and `MONOLITH_TERMINAL` at `build/tools/stub-terminal`, so no real Claude Code session starts. Refused, nothing written, while `--edit-script` left unsaved edits (as Enter is in the game) |
 | `--submit-wait <s>` / `--close-submitted` | Keep polling the request (state changes are logged) / then close it like Ctrl+K n (coordinator mode: cancel) and report when the terminal process is gone |
 | `--type "text"` | Open the prompt box with this text |
 | `--classify "text"` | No window: print the model tier the launcher would pick (context: map, `--select`, `--region`, `--volume`, hit; `--classify-kind edit\|import\|new-map`) |
@@ -100,7 +102,7 @@ How the game starts Claude Code:
 |---|---|
 | `MONOLITH_LAUNCH` | `coordinator` (default: one coordinator session takes the requests from a queue, [request-queue.md](request-queue.md)) or `per-request` (a terminal + session per request). Without `flock` (util-linux): per-request |
 | `MONOLITH_COORDINATOR_MODEL` | The coordinator's model (default `sonnet`); each request's subagent runs on the request's tier model |
-| `MONOLITH_TERMINAL` | Terminal program + optional args (`"kitty --single-instance"`); over `TERMINAL`; else the first of `alacritty`, `kitty`, `foot`, `wezterm`, `xterm` in `PATH`. In an AI agent's shell (`CLAUDECODE` / `AI_AGENT` set) no terminal opens unless `MONOLITH_TERMINAL` is set (e.g. `tools/stub-terminal.sh`) or `MONOLITH_ALLOW_WINDOW=1`; the request stays queued |
+| `MONOLITH_TERMINAL` | Terminal program + optional args (`"kitty --single-instance"`); over `TERMINAL`; else the first of `alacritty`, `kitty`, `foot`, `wezterm`, `xterm` in `PATH`. In an AI agent's shell (`CLAUDECODE` / `AI_AGENT` set) no terminal opens unless `MONOLITH_TERMINAL` is set (e.g. `build/tools/stub-terminal`) or `MONOLITH_ALLOW_WINDOW=1`; the request stays queued |
 | `MONOLITH_CLAUDE_ARGS` | Extra Claude Code flags (whitespace-split), after the two permission flags and `--model <name>`, on the coordinator's (per-request: each request's) command line; a `--model` here replaces the chosen one (the coordinator's and every request's) |
 | `MONOLITH_CLAUDE_SAFE` | Non-empty and not `0`: drop the permission flags (they are also dropped when the working folder has no `CLAUDE.md`) |
 | `MONOLITH_ALLOW_WINDOW` | Non-empty and not `0`: open the game window even when `CLAUDECODE` or `AI_AGENT` is set. In such an AI agent's shell the game otherwise refuses, with exit status 1, every run that would show its window; the safe flags listed at the top of this page still work |
@@ -109,16 +111,16 @@ How the game starts Claude Code:
 | `@fast` / `@default` / `@heavy` (also `@haiku` / `@sonnet` / `@opus`) | Prompt prefix picking the tier, stripped from the bundle (`model.override: true`); `MONOLITH_MODEL` and a `--model` in the args still win |
 | `MONOLITH_WORKSPACE` | i3 / sway workspace for the terminal (default `10`, empty = stay). `i3-msg` / `swaymsg` on `[title="^monolith-claude: coordinator$"]` (per-request: `^monolith-claude: <slug> <HHMMSS>$`), retried by a detached helper every 0.1 s for 10 s; also sets the `_monolith_coordinator` (`_monolith_<id>`) mark. An i3 `for_window [title="^monolith-claude: "] …` rule avoids the brief flash. |
 | `MONOLITH_CLOSE_ON_EXIT` | Non-empty and not `0`: when the game quits, close the coordinator if none of this run's requests is open (per-request: finished requests' terminals) |
-| `MONOLITH_CLAUDE` | The claude program (tests: `tools/stub-coordinator.sh`) |
+| `MONOLITH_CLAUDE` | The claude program (tests: `build/tools/stub-coordinator`) |
 | `MONOLITH_REQUESTS_DIR` | Requests folder instead of `<repo>/requests` (tests only: bundles, queue and lock in a scratch folder, away from a real coordinator) |
 | `MONOLITH_CLOSE_METHOD` | `wm` or `signal` only (tests; default both, WM first) |
 
-Other variables: `MONOLITH_CAPTURE` / `MONOLITH_CAPTURE_FRAME` (capture shim output folder / frame, default 3), `MONOLITH_DOWNLOADS` (`fetch_asset.py`, default `~/.cache/monolith/downloads`), `POLY_PIZZA_API_KEY` (or `~/.config/monolith/poly-pizza.key`; never printed), `MONOLITH_STUB_LOG` / `MONOLITH_STUB_OPENED` / `MONOLITH_STUB_RUN` (stub terminal: argv log, one line per "window", run the command; `tools/stub-terminal.sh`), `MONOLITH_STUB_WORK` (stub coordinator's seconds per request), `__GL_SYNC_TO_VBLANK=0` / `vblank_mode=0` (driver vsync off for benches), `__GL_YIELD=USLEEP` (NVIDIA: `glFinish` sleeps instead of spinning; the profiling tool `build/linux-profile/profile` sets it, so the wait doesn't look like work in a CPU profile).
+Other variables: `MONOLITH_CAPTURE` / `MONOLITH_CAPTURE_FRAME` (capture shim output folder / frame, default 3), `MONOLITH_DOWNLOADS` (`fetch_asset.py`, default `~/.cache/monolith/downloads`), `POLY_PIZZA_API_KEY` (or `~/.config/monolith/poly-pizza.key`; never printed), `MONOLITH_STUB_LOG` / `MONOLITH_STUB_OPENED` / `MONOLITH_STUB_RUN` (stub terminal: argv log, one line per "window", run the command; `build/tools/stub-terminal`), `MONOLITH_STUB_WORK` (stub coordinator's seconds per request), `__GL_SYNC_TO_VBLANK=0` / `vblank_mode=0` (driver vsync off for benches), `__GL_YIELD=USLEEP` (NVIDIA: `glFinish` sleeps instead of spinning; the profiling tool `build/linux-profile/profile` sets it, so the wait doesn't look like work in a CPU profile).
 
 
 ## The examples' test build
 
-`examples/build.sh test` (and `lsan`) compiles each example with `tests/examples/harness.h` force-included, which turns it into a test binary that never opens a visible window (`examples/build/linux-test/`). An exported package's `viewer.c` can be compiled the same way (`-include <repo>/tests/examples/harness.h -I<repo>/runtime`).
+`./build.sh examples test` (and `lsan`) compiles each example with `tests/examples/harness.h` force-included, which turns it into a test binary that never opens a visible window (`examples/build/linux-test/`). An exported package's `viewer.c` can be compiled the same way (`-include <repo>/tests/examples/harness.h -I<repo>/runtime`).
 
 | Flag | Meaning |
 |---|---|
@@ -127,7 +129,7 @@ Other variables: `MONOLITH_CAPTURE` / `MONOLITH_CAPTURE_FRAME` (capture shim out
 | `--bench-frames <n>` | Frames per viewpoint (default 600) |
 | `--note "…"` | Stored in the report |
 
-Without `--shot` or `--bench` a test binary refuses to run. `tools/bench-export-ab.sh <base export> <new export> --note "…"` builds both exports' viewers with the harness and runs interleaved A/B pairs (`--pairs`, `--frames`, `--map`, `--summarize <dir>`; the script's header comment), with the paired differences per viewpoint.
+Without `--shot` or `--bench` a test binary refuses to run. `build/tools/bench-export-ab <base export> <new export> --note "…"` builds both exports' viewers with the harness and runs interleaved A/B pairs (`--pairs`, `--frames`, `--map`, `--summarize <dir>`; the script's header comment), with the paired differences per viewpoint.
 
 ## Settings file
 

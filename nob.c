@@ -10,7 +10,7 @@
 //   ./build.sh debug          -> debug build (-g -O0, AddressSanitizer + UBSan, leak check at exit) in
 //                                build/linux-debug/
 //   ./build.sh lsan           -> LeakSanitizer-only build (-O1 -g, fast) in build/linux-lsan/, what
-//                                tools/leakcheck.sh runs
+//                                build/tools/leakcheck runs
 //   ./build.sh profile        -> CPU-profiling build in build/linux-profile/: -O2 -g -fno-omit-frame-pointer,
 //                                with R3D/raylib/assimp as RelWithDebInfo + frame pointers in
 //                                $R3D_DIR/build-linux-profile (so build-linux stays Release), plus the
@@ -23,6 +23,21 @@
 //                                open the view-only build on Linux (from an agent's shell only with --shot or
 //                                --bench --headless, as the Linux build)
 //   ./build.sh --win debug|lsan  -> refused: the sanitizers don't work with MinGW
+//   ./build.sh --tools [name...] -> the small programs that replaced the repo's shell scripts (TOOLS below;
+//                                docs/architecture.md, "Tools"): tools/<name>.c into build/tools/<name>,
+//                                tools/run-sh.c into build/run-sh.o. All of them, or only the ones named;
+//                                only what is missing or older than its source, tools/tool.h or nob.h is
+//                                compiled. The plain build doesn't build them. Each program then rebuilds
+//                                itself when its source changes (tools/tool.h, ToolRebuildSelf).
+//   ./build.sh examples [--win | test | lsan] -> the examples (examples/nob.c, compiled into examples/build/nob
+//                                when missing or older, then run with these arguments; its header comment
+//                                lists what each mode builds)
+//   ./build.sh test [name...] [-- args...] -> the unit tests in tests/unit/ (UNIT_TESTS, region "Build steps"):
+//                                all of them or the ones named, each built with ASan + UBSan into
+//                                build/unit/<name>/ and run; exit 1 when any fails. Arguments after `--` are
+//                                added to the run of every test that runs (use it with one named test:
+//                                `./build.sh test paintunwrap -- <model files>`, `./build.sh test export_strip
+//                                -- <export dir>`)
 // Any other first argument builds like the plain Linux build but writes no compile_commands.json (as the
 // shell script did: only "" and "run" write it).
 //
@@ -54,7 +69,7 @@
 //
 // Output: nob's "[INFO] CMD: ..." echo of each command and the "[TIME]" lines go to stdout, like the
 // script's progress lines ("configuring ...", "built: ...", whose text scripts and people read); warnings and
-// errors go to stderr. So `./build.sh lsan > /dev/null` (tools/leakcheck.sh) stays quiet unless something
+// errors go to stderr. So `./build.sh lsan > /dev/null` (build/tools/leakcheck) stays quiet unless something
 // fails.
 //
 // Adding a mode or a flag: a flag goes into the argument list of the command it belongs to (CFLAGS-like
@@ -983,6 +998,155 @@ static bool WriteCompileCommands(const char *root, const char *r3dDir, const cha
 static const char *gRoot;    // the repo root (absolute, as `cd "$(dirname build.sh)" && pwd` names it)
 static const char *gR3dDir;  // $R3D_DIR, default <root>/submodules/r3d, used as given (not normalised)
 
+// The small programs that replaced the repo's shell scripts (docs/architecture.md, "Tools"). Each is one
+// file, tools/<name>.c, written on nob.h with the shared tools/tool.h, and is built into build/tools/<name>,
+// except run-sh, which goes to build/run-sh.o (the developer's name, like Simple-Todo's todo.o): every shell
+// command a Claude session runs goes through it (.claude/settings.json's hook), and its short fixed path
+// is what the hook names.
+// The list is complete for the round that added it: a program is added here when its tools/<name>.c is
+// written. The plain build doesn't build these (./build.sh is unchanged); after one ./build.sh --tools each
+// program rebuilds itself when its source changed (ToolRebuildSelf in tools/tool.h).
+static const char *TOOLS[] = {
+    "run-sh",            // every shell command of a Claude session goes through it: guard rails (CLAUDE.md)
+    "todo",              // the developer's task list, TODO.md
+    "ai-todo",           // the AI's task list, .claude/TODO.md
+    "stub-terminal",     // MONOLITH_TERMINAL stand-in for launcher tests: no window
+    "request-queue",     // the request queue on disk, run by the coordinator session
+    "stub-coordinator",  // MONOLITH_CLAUDE stand-in: the coordinator's scheduling rules without Claude
+    "test-coordinator",  // end-to-end test of the queue and the coordinator launch
+    "leakcheck",         // every main code path under LeakSanitizer (CLAUDE.md: after every code change)
+    "bench-export-ab",   // interleaved A/B benchmark pairs of two exports
+    "old-monolith",      // builds monolith as it was at an older commit (the migrate-map skill)
+};
+
+// The unit tests in tests/unit/ (region "Unit tests" below runs them): one list for every test's sources and
+// flags, here at the top because the compile_commands.json writer in BuildLinux builds its entries for the
+// tests from the same list, so there is exactly one place for a test's compile flags. They replaced one
+// shell script per test (then tests/unit/*_test.sh).
+//
+// Every test is compiled with UNIT_FLAGS (C11, every warning, ASan + UBSan with no recovery: a sanitizer
+// report fails the test) and run with ASAN_OPTIONS=detect_leaks=1 (a leak fails it too). An entry adds:
+//   name      what `./build.sh test <name>` takes; the binary is build/unit/<name>/<name>_test
+//   sources   NULL-terminated; the first is the test's own file (the one compile_commands.json lists).
+//             Relative to the repo root, or an absolute path ("{out}/xatlas.o": an object the prepare step made)
+//   defines   NULL-terminated extra -D flags ("-DMONOLITH_EDITOR": the runtime as the editor has it)
+//   includes  NULL-terminated -I folders, relative to the repo root ("runtime", "src")
+//   r3d       links R3D, raylib and assimp from $R3D_DIR/build-linux (needs ./build.sh first) and adds
+//             -DMS_PATCHED_R3D and their include folders, as the game does
+//   game      needs build/linux/monolith (the prepare step runs it); both r3d and game print "run ./build.sh
+//             first" when what they need is missing
+//   env       NULL-terminated "NAME=value" set for the run (after ASAN_OPTIONS; "{root}" is replaced)
+//   each      optional, NULL-terminated: the test runs once per item (printing "== <item>" before each),
+//             "{each}" in args is replaced by the item; the first failing run ends the test
+//   args      NULL-terminated arguments of the run ("{root}", "{out}" and "{each}" are replaced)
+//   prepare   optional: runs before the compile (build helpers, copy data) and may append run arguments
+//             (they come first, before args); returns false when it failed (it prints why)
+// The flags are written in the order the old scripts gave them to the compiler: UNIT_FLAGS, then
+// -DMS_PATCHED_R3D (r3d), defines, R3D's and raylib's -I (r3d), includes, sources, -o, libraries (r3d).
+// To add a test: write tests/unit/<name>_test.c and add an entry below.
+typedef struct UnitTest UnitTest;
+struct UnitTest {
+    const char *name;
+    const char **sources;
+    const char **defines;
+    const char **includes;
+    bool r3d;
+    bool game;
+    const char **env;
+    const char **each;
+    const char **args;
+    bool (*prepare)(const UnitTest *t, const char *out, Nob_Cmd *run);
+};
+
+// The flags of every test (the tests' scripts all used this list): -g -O1 with frame pointers for readable
+// sanitizer stacks, -fno-sanitize-recover=all so UBSan's first report ends the test with an error.
+static const char *UNIT_FLAGS[] = {
+    "-std=c11", "-Wall", "-Wextra", "-Wno-missing-field-initializers", "-g", "-O1", "-fno-omit-frame-pointer",
+    "-fsanitize=address,undefined", "-fno-sanitize-recover=all", "-D_GNU_SOURCE",
+};
+
+// The prepare steps (defined in region "Unit tests").
+static bool PrepareRunSh(const UnitTest *t, const char *out, Nob_Cmd *run);
+static bool PrepareCompiled(const UnitTest *t, const char *out, Nob_Cmd *run);
+static bool PreparePaintunwrap(const UnitTest *t, const char *out, Nob_Cmd *run);
+
+// The tests. All but run_sh are the old scripts' (collision, compiled, export_strip, msg, paintunwrap,
+// parse_error), each with its script's flags, sources and run.
+static const UnitTest UNIT_TESTS[] = {
+    {
+        // corruption test of the compiled-map reader (tests/unit/compiled_test.c): three packages, copied
+        // into build/unit/compiled/ and compiled there with monolith --compile (PrepareCompiled), each run
+        // through the test; the runtime as a game has it (no MONOLITH_EDITOR)
+        .name = "compiled",
+        .sources = (const char *[]){"tests/unit/compiled_test.c", "runtime/monolith_scene.c", NULL},
+        .includes = (const char *[]){"runtime", NULL},
+        .r3d = true,
+        .game = true,
+        .each = (const char *[]){"models", "rotated", "longname", NULL},
+        .args = (const char *[]){"{out}/{each}", NULL},
+        .prepare = PrepareCompiled,
+    },
+    {
+        // error messages of the map-text parser (tests/unit/parse_error_test.c), against the runtime as the
+        // editor has it (MONOLITH_EDITOR: the parser); the folder it may write in is build/unit/parse_error/
+        .name = "parse_error",
+        .sources = (const char *[]){"tests/unit/parse_error_test.c", "runtime/monolith_scene.c", NULL},
+        .defines = (const char *[]){"-DMONOLITH_EDITOR", NULL},
+        .includes = (const char *[]){"runtime", NULL},
+        .r3d = true,
+        .args = (const char *[]){"{out}", NULL},
+    },
+    {
+        // the walking physics against turned boxes (tests/unit/collision_test.c): src/player.c's PlayerStep
+        // on a noGpu load of tests/rotated, with the editor's runtime (it parses the map text)
+        .name = "collision",
+        .sources = (const char *[]){"tests/unit/collision_test.c", "src/player.c", "runtime/monolith_scene.c", NULL},
+        .defines = (const char *[]){"-DMONOLITH_EDITOR", NULL},
+        .includes = (const char *[]){"runtime", "src", NULL},
+        .r3d = true,
+        .args = (const char *[]){"{root}/tests/rotated", NULL},
+    },
+    {
+        // the paint unwrap (tests/unit/paintunwrap_test.c: src/paintunwrap.c + the vendored xatlas, built with
+        // the sanitizers by PreparePaintunwrap) on the synthetic meshes and every model of maps/*/models/;
+        // extra arguments (other model files) go to the test. The GPU driver's own allocations at context
+        // creation are suppressed by tools/lsan.supp (any-frame rule).
+        .name = "paintunwrap",
+        .sources = (const char *[]){"tests/unit/paintunwrap_test.c", "src/paintunwrap.c", "runtime/monolith_scene.c",
+                                    "{out}/xatlas.o", NULL},
+        .defines = (const char *[]){"-DMONOLITH_EDITOR", NULL},
+        .includes = (const char *[]){"runtime", "src", NULL},
+        .r3d = true,
+        .env = (const char *[]){"LSAN_OPTIONS=suppressions={root}/tools/lsan.supp", NULL},
+        .prepare = PreparePaintunwrap,
+    },
+    {
+        // the editor's message text (src/msg.c, tests/unit/msg_test.c): static vs heap texts, replace,
+        // append, long strings, out of memory. Plain C + libc: needs no ./build.sh first.
+        .name = "msg",
+        .sources = (const char *[]){"tests/unit/msg_test.c", NULL},
+        .includes = (const char *[]){"src", NULL},
+    },
+    {
+        // the runtime an export ships has no map-text parser (tests/unit/export_strip_test.c: a grep for
+        // the parser's names in an export's monolith_scene.c / .h). Without an extra argument the test
+        // exports tests/models with build/linux/monolith into build/unit/export_strip/ itself (and checks
+        // that the game is built); with one (`./build.sh test export_strip -- <export dir>`) it checks
+        // that export folder. Plain C + libc.
+        .name = "export_strip",
+        .sources = (const char *[]){"tests/unit/export_strip_test.c", NULL},
+        .args = (const char *[]){"{root}", "{out}", NULL},
+    },
+    {
+        // tools/run-sh.c: every rule of its table through --check, -c's exit codes / stdin / signals, the
+        // benchmark lock, the hook's JSON answers
+        .name = "run_sh",
+        .sources = (const char *[]){"tests/unit/run_sh_test.c", NULL},
+        .args = (const char *[]){"{out}", "{root}", NULL},
+        .prepare = PrepareRunSh,
+    },
+};
+
 // BuildR3D: configures R3D in <dir> once, then runs an incremental build; the output goes to
 // <dir>/monolith-build.log. The configure args are remembered in <dir>/monolith-configure.args (one per
 // line); when they differ (or a dir from before that file existed is found), cmake is re-run on the existing
@@ -1343,7 +1507,7 @@ static int BuildLinux(int argc, char **argv)
     // newer than other distros' and would fail to load there. -lgcc_s stays shared (every distro has it; the
     // static unwinder would need glibc 2.35). -lGL (the GPU driver's), -lm, -lpthread, -ldl.
     // -Wl,--wrap=<symbol>,...: route symbols whose newest glibc version is newer than 2.34 to older versions,
-    // see src/glibc_compat.c. The result runs on glibc >= 2.34. (examples/build.sh has the same list.)
+    // see src/glibc_compat.c. The result runs on glibc >= 2.34. (examples/nob.c has the same list.)
     const char *glibcWrap[] = {"acosf", "asinf", "atan2f", "sqrtf", "fmod", "fmodf", "hypot", "hypotf",
                                "__isoc23_strtoul", "__isoc23_strtol", "arc4random"};
     Nob_String_Builder wrap = {0};
@@ -1369,9 +1533,9 @@ static int BuildLinux(int argc, char **argv)
 
     // clangd's compilation database, from the lists above (the plain build only: the sanitizer and profile
     // builds and --win leave it alone). The game's files with the game's flags; tools/profile.c, xatlas, the
-    // examples and tests/unit with the flags their own scripts use (examples/build.sh, tests/unit/*.sh: keep
-    // these lines in step when those change). One entry per file: 04_import_source is listed as the plain
-    // program, not its capture-shim build.
+    // examples with the flags examples/nob.c uses (keep these lines in step when it changes), tests/unit
+    // with the flags of UNIT_TESTS (generated from that list below). One entry per file: 04_import_source
+    // is listed as the plain program, not its capture-shim build.
     if (strcmp(mode, "") == 0 || strcmp(mode, "run") == 0) {
         Entries entries = {0};
         Nob_Cmd e = {0};
@@ -1395,7 +1559,7 @@ static int BuildLinux(int argc, char **argv)
         nob_cmd_append(&e, cc, "-std=c11", "-Wall", "-Wextra", "-Wno-missing-field-initializers", "-O2", "-g",
                        nob_temp_sprintf("%s/tools/profile.c", gRoot));
         ENTRY_END();
-        // the examples (examples/build.sh): the game's flags, R3D's and raylib's headers, the runtime
+        // the examples (examples/nob.c): the game's flags, R3D's and raylib's headers, the runtime
         Nob_Cmd ex = {0};
         nob_cmd_append(&ex, cc);
         nob_da_append_many(&ex, cflags.items, cflags.count);
@@ -1417,27 +1581,33 @@ static int BuildLinux(int argc, char **argv)
             nob_cmd_append(&e, nob_temp_sprintf("%s/%s", gRoot, examples[i].file));
             ENTRY_END();
         }
-        // tests/unit (their .sh scripts): ASan + UBSan, stop at the first error
-        Nob_Cmd unit = {0};
-        nob_cmd_append(&unit, cc, "-std=c11", "-Wall", "-Wextra", "-Wno-missing-field-initializers", "-g", "-O1",
-                       "-fno-omit-frame-pointer", "-fsanitize=address,undefined", "-fno-sanitize-recover=all",
-                       "-D_GNU_SOURCE", "-DMS_PATCHED_R3D", nob_temp_sprintf("-I%s/include", gR3dDir),
-                       nob_temp_sprintf("-I%s/external/raylib/raylib/include", r3dLinux),
-                       nob_temp_sprintf("-I%s/runtime", gRoot));
-        const char *srcInclude = nob_temp_sprintf("-I%s/src", gRoot);
-        struct { const char *a, *b, *file; } units[] = {
-            {NULL, NULL, "tests/unit/compiled_test.c"},
-            {"-DMONOLITH_EDITOR", NULL, "tests/unit/parse_error_test.c"},
-            {"-DMONOLITH_EDITOR", srcInclude, "tests/unit/collision_test.c"},
-            {"-DMONOLITH_EDITOR", srcInclude, "tests/unit/paintunwrap_test.c"},
-            {srcInclude, NULL, "tests/unit/msg_test.c"},
-        };
-        for (size_t i = 0; i < NOB_ARRAY_LEN(units); i++) {
+        // tests/unit: one entry per test of UNIT_TESTS (the one list of the tests' flags), ASan + UBSan, stop
+        // at the first error. clangd gets the editor-style view of every test: UNIT_FLAGS, R3D's and
+        // raylib's headers (even for a test that links neither: harmless), the runtime, then the entry's
+        // defines and its other -I folders, then the test's own file.
+        for (size_t i = 0; i < NOB_ARRAY_LEN(UNIT_TESTS); i++) {
+            const UnitTest *t = &UNIT_TESTS[i];
             ENTRY_BEGIN();
-            nob_da_append_many(&e, unit.items, unit.count);
-            if (units[i].a) nob_cmd_append(&e, units[i].a);
-            if (units[i].b) nob_cmd_append(&e, units[i].b);
-            nob_cmd_append(&e, nob_temp_sprintf("%s/%s", gRoot, units[i].file));
+            nob_cmd_append(&e, cc);
+            nob_da_append_many(&e, UNIT_FLAGS, NOB_ARRAY_LEN(UNIT_FLAGS));
+            nob_cmd_append(&e, "-DMS_PATCHED_R3D", nob_temp_sprintf("-I%s/include", gR3dDir),
+                           nob_temp_sprintf("-I%s/external/raylib/raylib/include", r3dLinux),
+                           nob_temp_sprintf("-I%s/runtime", gRoot));
+            for (const char **d = t->defines; d && *d; d++) nob_cmd_append(&e, *d);
+            for (const char **inc = t->includes; inc && *inc; inc++) {
+                if (strcmp(*inc, "runtime") != 0) nob_cmd_append(&e, nob_temp_sprintf("-I%s/%s", gRoot, *inc));
+            }
+            nob_cmd_append(&e, nob_temp_sprintf("%s/%s", gRoot, t->sources[0]));
+            ENTRY_END();
+        }
+        // the tools (./build.sh --tools): their own flags (ToolCommand), one entry per tools/<name>.c that
+        // exists
+        for (size_t i = 0; i < NOB_ARRAY_LEN(TOOLS); i++) {
+            const char *source = nob_temp_sprintf("%s/tools/%s.c", gRoot, TOOLS[i]);
+            if (!IsRegularFile(source)) continue;
+            ENTRY_BEGIN();
+            nob_cmd_append(&e, Env("CC", "clang"), "-std=c11", "-Wall", "-Wextra",
+                           "-Wno-missing-field-initializers", "-O1", source);
             ENTRY_END();
         }
 #undef ENTRY_BEGIN
@@ -1467,6 +1637,478 @@ static int BuildLinux(int argc, char **argv)
     }
     PrintSummary();
     return 0;
+}
+
+// #endregion
+
+// #region Tools (./build.sh --tools [name...])
+
+// (TOOLS, the list of programs, is at the top of region "Build steps": the compile_commands.json writer
+// needs it too.)
+
+
+// Where a tool's binary goes: build/run-sh.o for run-sh, else build/tools/<name>.
+static const char *ToolBinary(const char *name)
+{
+    if (strcmp(name, "run-sh") == 0) return nob_temp_sprintf("%s/build/run-sh.o", gRoot);
+    return nob_temp_sprintf("%s/build/tools/%s", gRoot, name);
+}
+
+// The compile of one tool: ${CC:-clang}, C11, every warning (zero warnings, as everywhere),
+// -Wno-missing-field-initializers (designated initialisers that leave fields zero are intended, as in the
+// game), -O1 (the programs do little work of their own). One source file, no libraries beyond libc.
+// tools/tool.h's ToolCompileCommand has the same list for a program's rebuild of itself: keep the two in
+// step, so both give the same binary.
+static void ToolCommand(Nob_Cmd *cmd, const char *source, const char *binary)
+{
+    nob_cmd_append(cmd, Env("CC", "clang"), "-std=c11", "-Wall", "-Wextra", "-Wno-missing-field-initializers",
+                   "-O1", "-o", binary, source);
+}
+
+// ./build.sh --tools [name...]: builds every program in TOOLS (or only the ones named) that is missing or
+// older than its source, tools/tool.h or nob.h; a second run compiles nothing. Each compile goes through
+// RunTimed into a temporary file that is then renamed over the binary, so a program started at the same
+// moment (the hook runs build/run-sh.o for every shell command) never sees a half-written file.
+static int BuildTools(int argc, char **argv)
+{
+    // which programs: the named ones (each must be in TOOLS), or all of them
+    Nob_File_Paths names = {0};
+    for (int i = 0; i < argc; i++) {
+        bool known = false;
+        for (size_t k = 0; k < NOB_ARRAY_LEN(TOOLS); k++) known = known || strcmp(argv[i], TOOLS[k]) == 0;
+        if (!known) {
+            SayErr("build.sh: --tools: no tool named '%s'. The tools:", argv[i]);
+            for (size_t k = 0; k < NOB_ARRAY_LEN(TOOLS); k++) SayErr("  %s", TOOLS[k]);
+            return 1;
+        }
+        nob_da_append(&names, argv[i]);
+    }
+    if (names.count == 0) nob_da_append_many(&names, TOOLS, NOB_ARRAY_LEN(TOOLS));
+
+    // mkdir -p build/tools: the binaries' folder (build/ is gitignored)
+    if (!MkdirP(nob_temp_sprintf("%s/build/tools", gRoot))) return 1;
+    const char *header = nob_temp_sprintf("%s/tools/tool.h", gRoot);
+    const char *nobH = nob_temp_sprintf("%s/src/vendor/nob/nob.h", gRoot);
+    size_t built = 0;
+    for (size_t i = 0; i < names.count; i++) {
+        const char *source = nob_temp_sprintf("%s/tools/%s.c", gRoot, names.items[i]);
+        const char *binary = ToolBinary(names.items[i]);
+        if (!IsRegularFile(source)) {
+            SayErr("build.sh: --tools: %s is missing", RelativeToRoot(source));
+            Fail(1);
+        }
+        // up to date: the binary exists and nothing it is built from is newer
+        if (IsRegularFile(binary) && !NewerThan(source, binary) && !NewerThan(header, binary) &&
+            !NewerThan(nobH, binary)) {
+            continue;
+        }
+        // the compile, into <binary>.tmp.<pid>, then renamed into place
+        const char *tmp = nob_temp_sprintf("%s.tmp.%ld", binary, (long)getpid());
+        Nob_Cmd cmd = {0};
+        ToolCommand(&cmd, source, tmp);
+        if (!RunTimed(&cmd, nob_temp_sprintf("compile %s", RelativeToRoot(source)), (Output){0})) Fail(1);
+        nob_cmd_free(cmd);
+        if (rename(tmp, binary) != 0) {
+            SayErr("build.sh: could not move %s into place: %s", RelativeToRoot(binary), strerror(errno));
+            Fail(1);
+        }
+        Say("built: %s", RelativeToRoot(binary));
+        built++;
+    }
+    if (built == 0) Say("tools: up to date");
+    nob_da_free(names);
+    PrintSummary();
+    return 0;
+}
+
+// ./build.sh examples [--win | test | lsan]: the examples' build program, examples/nob.c (what
+// examples/build.sh did, docs/architecture.md §4.3), compiled into examples/build/nob when that is missing or
+// older than examples/nob.c or nob.h (with the flags build.sh compiles nob.c with), then run in place of
+// this process with the remaining arguments, so its output and exit status are the caller's.
+static int BuildExamples(int argc, char **argv)
+{
+    const char *source = nob_temp_sprintf("%s/examples/nob.c", gRoot);
+    const char *binary = nob_temp_sprintf("%s/examples/build/nob", gRoot);
+    const char *nobH = nob_temp_sprintf("%s/src/vendor/nob/nob.h", gRoot);
+    if (!IsRegularFile(source)) {
+        SayErr("build.sh: examples: %s is missing", RelativeToRoot(source));
+        return 1;
+    }
+    if (!IsRegularFile(binary) || NewerThan(source, binary) || NewerThan(nobH, binary)) {
+        // mkdir -p examples/build (gitignored by build/)
+        if (!MkdirP(nob_temp_sprintf("%s/examples/build", gRoot))) return 1;
+        // the compile, into a temporary file renamed into place (two builds at once never run half a file):
+        // ${CC:-clang}, C11, every warning, -O1, as build.sh compiles nob.c
+        const char *tmp = nob_temp_sprintf("%s.tmp.%ld", binary, (long)getpid());
+        Nob_Cmd cmd = {0};
+        nob_cmd_append(&cmd, Env("CC", "clang"), "-std=c11", "-Wall", "-Wextra", "-O1", "-o", tmp, source);
+        if (!RunTimed(&cmd, "compile examples/nob.c", (Output){0})) Fail(1);
+        nob_cmd_free(cmd);
+        if (rename(tmp, binary) != 0) {
+            SayErr("build.sh: could not move %s into place: %s", RelativeToRoot(binary), strerror(errno));
+            Fail(1);
+        }
+    }
+    Nob_Cmd run = {0};
+    nob_cmd_append(&run, binary);
+    nob_da_append_many(&run, (const char **)argv, (size_t)argc);
+    Exec(binary, &run, false);
+    return 1;
+}
+
+// #endregion
+
+// #region Unit tests (./build.sh test [name...] [-- args...])
+
+// What `./build.sh test` does with the list UNIT_TESTS (at the top of "Build steps": the tests' sources,
+// flags and runs, with the meaning of every field). `./build.sh test` builds and runs all of them, in table
+// order; `./build.sh test <name>...` the ones named; everything after a `--` is appended to the run's
+// arguments of every test that runs (meant for one named test, e.g.
+// `./build.sh test paintunwrap -- <model files>` or `./build.sh test export_strip -- <export dir>`).
+// Each test builds into build/unit/<name>/ and runs there; the mode exits 1 when any test fails to build or
+// run (after trying all of them) and prints which. A "run ./build.sh first" refusal counts as a failure.
+
+// run_sh: builds tools/run-sh.c twice into the test's folder (the program run-sh.o with the flags
+// `./build.sh --tools` uses, and run-sh-san.o with ASan + UBSan, so the test's runs of it are leak-checked
+// too) and passes both to the test.
+static bool PrepareRunSh(const UnitTest *t, const char *out, Nob_Cmd *run)
+{
+    (void)t;
+    const char *source = nob_temp_sprintf("%s/tools/run-sh.c", gRoot);
+    const char *plain = nob_temp_sprintf("%s/run-sh.o", out);
+    const char *san = nob_temp_sprintf("%s/run-sh-san.o", out);
+    Nob_Cmd cmd = {0};
+    ToolCommand(&cmd, source, plain);
+    bool ok = RunTimed(&cmd, "compile tools/run-sh.c (for run_sh_test)", (Output){0});
+    if (ok) {
+        nob_cmd_append(&cmd, Env("CC", "clang"));
+        nob_da_append_many(&cmd, UNIT_FLAGS, NOB_ARRAY_LEN(UNIT_FLAGS));
+        nob_cmd_append(&cmd, "-o", san, source);
+        ok = RunTimed(&cmd, "compile tools/run-sh.c with ASan + UBSan (for run_sh_test)", (Output){0});
+    }
+    nob_cmd_free(cmd);
+    nob_cmd_append(run, plain, san);
+    return ok;
+}
+
+// `cp -r src/. dst/`: the contents of the folder src into dst (created when missing), overwriting files that
+// are already there and removing nothing, so a second call refreshes a copy. Prints why and returns false on
+// failure.
+static bool CopyInto(const char *src, const char *dst)
+{
+    if (!MkdirP(dst)) return false;
+    Nob_File_Paths children = {0};
+    if (!nob_read_entire_dir(src, &children)) return false;
+    bool ok = true;
+    for (size_t i = 0; i < children.count && ok; i++) {
+        const char *name = children.items[i];
+        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
+        size_t mark = nob_temp_save();
+        const char *from = nob_temp_sprintf("%s/%s", src, name);
+        const char *to = nob_temp_sprintf("%s/%s", dst, name);
+        struct stat st;
+        if (stat(from, &st) != 0) {
+            SayErr("cp: cannot stat '%s': %s", from, strerror(errno));
+            ok = false;
+        } else if (S_ISDIR(st.st_mode)) {
+            ok = CopyInto(from, to);
+        } else {
+            ok = CopyFile(from, to);
+        }
+        nob_temp_rewind(mark);
+    }
+    nob_da_free(children);
+    return ok;
+}
+
+// Compiles the package at `dir` into dir/<name>.mapb with `monolith --compile` (hidden: no window). Its
+// output goes to <out>/compile.log, and is copied to stderr when the compile fails.
+static bool CompilePackage(const char *out, const char *dir, const char *name)
+{
+    const char *game = nob_temp_sprintf("%s/build/linux/monolith", gRoot);
+    const char *log = nob_temp_sprintf("%s/compile.log", out);
+    Nob_Cmd cmd = {0};
+    nob_cmd_append(&cmd, game, "--map", dir, "--compile", nob_temp_sprintf("%s/%s.mapb", dir, name));
+    bool ok = RunTimed(&cmd, nob_temp_sprintf("compile package %s (for compiled test)", name), (Output){.log = log});
+    nob_cmd_free(cmd);
+    if (!ok) {
+        Nob_String_Builder text = {0};
+        if (nob_read_entire_file(log, &text)) fwrite(text.items, 1, text.count, stderr);
+        nob_sb_free(text);
+    }
+    return ok;
+}
+
+// compiled: the three packages the test reads, as compiled maps in build/unit/compiled/.
+//   models, rotated  copies of tests/models and tests/rotated (turned boxes), compiled where they are
+//   longname         made here: a texture three folders of 120 'e acute' deep, so the error-message cases
+//                    have messages longer than any fixed buffer (compiled_test.c, MessageCases)
+// All three are compiled with monolith --compile (build/linux/monolith, which RunUnitTest has already
+// checked for).
+static bool PrepareCompiled(const UnitTest *t, const char *out, Nob_Cmd *run)
+{
+    (void)t;
+    (void)run;
+    // the 120 'é' (UTF-8: 0xC3 0xA9, 240 bytes)
+    Nob_String_Builder e = {0};
+    for (int i = 0; i < 120; i++) nob_sb_append_cstr(&e, "\xc3\xa9");
+    nob_sb_append_null(&e);
+
+    // longname: the folders' path and the map that uses the texture (the strings are built first, so the
+    // 'é' text can be freed before anything can fail)
+    const char *longDir = nob_temp_sprintf("%s/longname", out);
+    const char *deep = nob_temp_sprintf("%s/textures/%s/%s/%s", longDir, e.items, e.items, e.items);
+    const char *mapText = nob_temp_sprintf(
+        "monolith 3\nmaterial \"long\" albedo_map \"textures/%s/%s/%s/tile.png\"\nuse \"long\"\nbox 0 0 0 1 1 1\nspawn 0 0 3 0",
+        e.items, e.items, e.items);
+    nob_sb_free(e);
+
+    // longname: the folders, the texture (a copy of tests/models' tiles.png) and the map
+    if (!MkdirP(deep)) return false;
+    if (!CopyFile(nob_temp_sprintf("%s/tests/models/textures/tiles.png", gRoot), nob_temp_sprintf("%s/tile.png", deep))) {
+        return false;
+    }
+    if (!WriteLine(nob_temp_sprintf("%s/longname.map", longDir), mapText)) return false;
+
+    // models and rotated: refresh the copies (nothing is removed from them)
+    const char *copied[] = {"models", "rotated"};
+    for (size_t i = 0; i < NOB_ARRAY_LEN(copied); i++) {
+        const char *dir = nob_temp_sprintf("%s/%s", out, copied[i]);
+        if (!CopyInto(nob_temp_sprintf("%s/tests/%s", gRoot, copied[i]), dir)) return false;
+    }
+
+    // the compile of all three, in the order the test runs them
+    return CompilePackage(out, nob_temp_sprintf("%s/models", out), "models") &&
+           CompilePackage(out, nob_temp_sprintf("%s/rotated", out), "rotated") &&
+           CompilePackage(out, longDir, "longname");
+}
+
+// Appends the files `pattern` matches to `files`, in the order bash's glob gives them (sorted by the locale's
+// collation); no match appends nothing (the script tested each name with [[ -f ]]).
+static void GlobFiles(const char *pattern, Nob_File_Paths *files)
+{
+    glob_t g;
+    if (glob(pattern, 0, NULL, &g) != 0) return;
+    for (size_t i = 0; i < g.gl_pathc; i++) {
+        if (IsRegularFile(g.gl_pathv[i])) nob_da_append(files, nob_temp_strdup(g.gl_pathv[i]));
+    }
+    globfree(&g);
+}
+
+// paintunwrap, in three parts:
+//   1. xatlas (the vendored paint-unwrap library) built with the sanitizers into <out>/xatlas.o, with the
+//      script's flags: -fno-sanitize=function too, because its OpenNL part calls matrix destructors
+//      through a pointer of the base struct type (UB by the letter, ABI-compatible). The compiler is
+//      ${CXX:-clang++}; it is rebuilt when xatlas or nob.c changed or the flags did (Xatlas above).
+//   2. the scratch folder the test writes in (--scratch <out>/scratch).
+//   3. the models it unwraps: every .glb, .gltf and .obj in maps/*/models/ (read by R3D in a hidden
+//      window), and --scene on the package with the most of them (the first one on a tie).
+static bool PreparePaintunwrap(const UnitTest *t, const char *out, Nob_Cmd *run)
+{
+    (void)t;
+    // 1. xatlas with the sanitizers
+    Nob_Cmd san = {0};
+    nob_cmd_append(&san, "-g", "-O1", "-fno-omit-frame-pointer", "-fsanitize=address,undefined",
+                   "-fno-sanitize-recover=all", "-fno-sanitize=function");
+    Xatlas(Env("CXX", "clang++"), nob_temp_sprintf("%s/xatlas.o", out), &san);
+    nob_cmd_free(san);
+
+    // 2. the scratch folder
+    const char *scratch = nob_temp_sprintf("%s/scratch", out);
+    if (!MkdirP(scratch)) return false;
+    nob_cmd_append(run, "--scratch", scratch);
+
+    // 3. the models of every package, and the package with the most
+    const char *mapsDir = nob_temp_sprintf("%s/maps", gRoot);
+    glob_t packages;
+    Nob_File_Paths models = {0};
+    const char *scene = NULL;
+    size_t most = 0;
+    if (glob(nob_temp_sprintf("%s/*/", mapsDir), 0, NULL, &packages) == 0) {
+        for (size_t i = 0; i < packages.gl_pathc; i++) {
+            const char *pkg = packages.gl_pathv[i];  // ends with '/'
+            size_t before = models.count;
+            GlobFiles(nob_temp_sprintf("%smodels/*.glb", pkg), &models);
+            GlobFiles(nob_temp_sprintf("%smodels/*.gltf", pkg), &models);
+            GlobFiles(nob_temp_sprintf("%smodels/*.obj", pkg), &models);
+            if (models.count - before > most) {
+                most = models.count - before;
+                scene = nob_temp_strndup(pkg, strlen(pkg) - 1);  // without the trailing '/'
+            }
+        }
+        globfree(&packages);
+    }
+    if (scene) nob_cmd_append(run, "--scene", scene);
+    for (size_t i = 0; i < models.count; i++) nob_cmd_append(run, models.items[i]);
+    nob_da_free(models);
+    return true;
+}
+
+// `s` with every "{root}", "{out}" and "{each}" replaced (a temp string); `each` may be NULL.
+static const char *UnitSubst(const char *s, const char *out, const char *each)
+{
+    const char *r = s;
+    while (strstr(r, "{root}")) r = ReplaceFirst(r, "{root}", gRoot);
+    while (strstr(r, "{out}")) r = ReplaceFirst(r, "{out}", out);
+    while (each && strstr(r, "{each}")) r = ReplaceFirst(r, "{each}", each);
+    return r;
+}
+
+// The compile of one test: UNIT_FLAGS, -DMS_PATCHED_R3D, the entry's defines, R3D's and raylib's -I, the
+// entry's -I folders, the sources, -o <binary>, R3D's libraries (the order the scripts gave them; r3d parts
+// only when the entry links R3D). Returns the command (the caller runs and frees it).
+static Nob_Cmd UnitCompileCommand(const UnitTest *t, const char *out, const char *binary)
+{
+    const char *libDir = nob_temp_sprintf("%s/build-linux", gR3dDir);
+    Nob_Cmd cmd = {0};
+    nob_cmd_append(&cmd, Env("CC", "clang"));
+    nob_da_append_many(&cmd, UNIT_FLAGS, NOB_ARRAY_LEN(UNIT_FLAGS));
+    if (t->r3d) nob_cmd_append(&cmd, "-DMS_PATCHED_R3D");
+    for (const char **d = t->defines; d && *d; d++) nob_cmd_append(&cmd, *d);
+    if (t->r3d) {
+        nob_cmd_append(&cmd, nob_temp_sprintf("-I%s/include", gR3dDir),
+                       nob_temp_sprintf("-I%s/external/raylib/raylib/include", libDir));
+    }
+    for (const char **i = t->includes; i && *i; i++) nob_cmd_append(&cmd, nob_temp_sprintf("-I%s/%s", gRoot, *i));
+    for (const char **s = t->sources; *s; s++) {
+        const char *path = UnitSubst(*s, out, NULL);
+        nob_cmd_append(&cmd, path[0] == '/' ? path : nob_temp_sprintf("%s/%s", gRoot, path));
+    }
+    nob_cmd_append(&cmd, "-o", binary);
+    if (t->r3d) {
+        nob_cmd_append(&cmd, nob_temp_sprintf("-L%s/lib", libDir), "-lr3d", "-lraylib", "-lassimp",
+                       "-lzlibstatic", "-lstdc++", "-lGL", "-lm", "-lpthread", "-ldl");
+    }
+    return cmd;
+}
+
+// Builds and runs one test; false when it failed (the reason is printed). `extra` are the arguments after
+// `--` on the command line, appended to the run's arguments.
+static bool RunUnitTest(const UnitTest *t, const Nob_File_Paths *extra)
+{
+    // Step 1: the test's folder, and what the test needs from an earlier ./build.sh. These are the scripts'
+    // "run ./build.sh first" checks.
+    const char *out = nob_temp_sprintf("%s/build/unit/%s", gRoot, t->name);
+    if (!MkdirP(out)) return false;
+    const char *libDir = nob_temp_sprintf("%s/build-linux", gR3dDir);
+    if (t->r3d && !IsRegularFile(nob_temp_sprintf("%s/lib/libr3d.a", libDir))) {
+        SayErr("build.sh: test %s: R3D's libraries are missing; run ./build.sh first", t->name);
+        return false;
+    }
+    if (t->game && !IsRegularFile(nob_temp_sprintf("%s/build/linux/monolith", gRoot))) {
+        SayErr("build.sh: test %s: build/linux/monolith is missing; run ./build.sh first", t->name);
+        return false;
+    }
+
+    // Step 2: the prepare step (copies data, builds helpers); it appends the run's first arguments.
+    const char *binary = nob_temp_sprintf("%s/%s_test", out, t->name);
+    Nob_Cmd pre = {0};
+    if (t->prepare && !t->prepare(t, out, &pre)) {
+        nob_cmd_free(pre);
+        return false;
+    }
+
+    // Step 3: the compile.
+    Nob_Cmd cmd = UnitCompileCommand(t, out, binary);
+    bool ok = RunTimed(&cmd, nob_temp_sprintf("compile %s test", t->name), (Output){0});
+    nob_cmd_free(cmd);
+
+    // Step 4: the run(s), with the sanitizers' leak check and the entry's environment (set here, inherited
+    // by the test, put back afterwards).
+    Nob_File_Paths names = {0}, saved = {0};
+    if (ok) {
+        Nob_File_Paths env = {0};
+        nob_da_append(&env, "ASAN_OPTIONS=detect_leaks=1");
+        for (const char **e = t->env; e && *e; e++) nob_da_append(&env, UnitSubst(*e, out, NULL));
+        for (size_t i = 0; i < env.count; i++) {
+            const char *eq = strchr(env.items[i], '=');
+            if (!eq) continue;
+            const char *name = nob_temp_strndup(env.items[i], (size_t)(eq - env.items[i]));
+            const char *old = getenv(name);
+            nob_da_append(&names, name);
+            nob_da_append(&saved, old ? nob_temp_strdup(old) : NULL);
+            setenv(name, eq + 1, 1);
+        }
+        nob_da_free(env);
+
+        // one run, or one per `each` item ("== <item>" first; the first failure ends the test, as the
+        // script's `set -e` did)
+        size_t runs = 0;
+        for (const char **e = t->each; e && *e; e++) runs++;
+        if (runs == 0) runs = 1;
+        for (size_t r = 0; r < runs && ok; r++) {
+            const char *item = t->each ? t->each[r] : NULL;
+            if (item) Say("== %s", item);
+            Nob_Cmd run = {0};
+            nob_cmd_append(&run, binary);
+            nob_da_append_many(&run, pre.items, pre.count);
+            for (const char **a = t->args; a && *a; a++) nob_cmd_append(&run, UnitSubst(*a, out, item));
+            for (size_t i = 0; i < extra->count; i++) nob_cmd_append(&run, extra->items[i]);
+            ok = RunTimed(&run, nob_temp_sprintf("run %s test%s%s", t->name, item ? " " : "", item ? item : ""),
+                          (Output){0});
+            nob_cmd_free(run);
+        }
+        for (size_t i = names.count; i-- > 0;) {
+            if (saved.items[i]) setenv(names.items[i], saved.items[i], 1);
+            else unsetenv(names.items[i]);
+        }
+    }
+    nob_da_free(names);
+    nob_da_free(saved);
+    nob_cmd_free(pre);
+    return ok;
+}
+
+// ./build.sh test [name...] [-- args...]: the named tests (each must be in UNIT_TESTS) or all, in table
+// order; the arguments after `--` go to every test's run.
+static int RunUnitTests(int argc, char **argv)
+{
+    // which tests: the names before `--`, each checked against the list; or all of them
+    Nob_File_Paths names = {0}, extra = {0};
+    bool afterDashes = false;
+    for (int i = 0; i < argc; i++) {
+        if (afterDashes) {
+            nob_da_append(&extra, argv[i]);
+            continue;
+        }
+        if (strcmp(argv[i], "--") == 0) {
+            afterDashes = true;
+            continue;
+        }
+        bool known = false;
+        for (size_t k = 0; k < NOB_ARRAY_LEN(UNIT_TESTS); k++) known = known || strcmp(argv[i], UNIT_TESTS[k].name) == 0;
+        if (!known) {
+            SayErr("build.sh: test: no test named '%s'. The tests:", argv[i]);
+            for (size_t k = 0; k < NOB_ARRAY_LEN(UNIT_TESTS); k++) SayErr("  %s", UNIT_TESTS[k].name);
+            nob_da_free(names);
+            nob_da_free(extra);
+            return 1;
+        }
+        nob_da_append(&names, argv[i]);
+    }
+
+    // each test in table order; a failure doesn't stop the others
+    Nob_File_Paths failed = {0};
+    size_t ran = 0;
+    for (size_t k = 0; k < NOB_ARRAY_LEN(UNIT_TESTS); k++) {
+        bool wanted = names.count == 0;
+        for (size_t i = 0; i < names.count; i++) wanted = wanted || strcmp(names.items[i], UNIT_TESTS[k].name) == 0;
+        if (!wanted) continue;
+        ran++;
+        if (!RunUnitTest(&UNIT_TESTS[k], &extra)) nob_da_append(&failed, UNIT_TESTS[k].name);
+    }
+    PrintSummary();
+    if (failed.count == 0) {
+        Say("tests: %zu passed", ran);
+    } else {
+        SayErr("tests: %zu of %zu failed:", failed.count, ran);
+        for (size_t i = 0; i < failed.count; i++) SayErr("  %s", failed.items[i]);
+    }
+    int code = failed.count == 0 ? 0 : 1;
+    nob_da_free(names);
+    nob_da_free(extra);
+    nob_da_free(failed);
+    return code;
 }
 
 // #endregion
@@ -1509,6 +2151,18 @@ int main(int argc, char **argv)
     if (argc > 0 && strcmp(argv[0], "--win") == 0) {
         nob_shift(argv, argc);
         return BuildWindows(argc, argv);
+    }
+    if (argc > 0 && strcmp(argv[0], "--tools") == 0) {
+        nob_shift(argv, argc);
+        return BuildTools(argc, argv);
+    }
+    if (argc > 0 && strcmp(argv[0], "examples") == 0) {
+        nob_shift(argv, argc);
+        return BuildExamples(argc, argv);
+    }
+    if (argc > 0 && strcmp(argv[0], "test") == 0) {
+        nob_shift(argv, argc);
+        return RunUnitTests(argc, argv);
     }
     return BuildLinux(argc, argv);
 }

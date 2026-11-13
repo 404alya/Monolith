@@ -1,8 +1,8 @@
 // harness.h -- test build of the examples: headless screenshots, no change to their source
 //
-// Not part of the examples: they are plain integration code. examples/build.sh test (and lsan,
-// for tools/leakcheck.sh) compiles each example's main file with `-include harness.h`, which
-// turns the unchanged program into a test run:
+// Not part of the examples: they are plain integration code. `./build.sh examples test` (and
+// lsan, for the leak check; examples/nob.c) compiles each example's main file with
+// `-include harness.h`, which turns the unchanged program into a test run:
 //
 //   <example> --shot <file> [the example's own arguments]
 //
@@ -41,7 +41,7 @@
 // off, so a run costs the same with an R3D built with or without it). The program's own work per
 // frame (input, its 2D text) is part of the frame, as monolith's loop is. Run it like any
 // benchmark: one at a time, __GL_SYNC_TO_VBLANK=0, a note (the benchmarking skill); compare its
-// numbers only with the same harness's. tools/bench-export-ab.sh runs A/B pairs of two exports.
+// numbers only with the same harness's. build/tools/bench-export-ab runs A/B pairs of two exports.
 #ifndef MONOLITH_TEST_HARNESS_H
 #define MONOLITH_TEST_HARNESS_H
 

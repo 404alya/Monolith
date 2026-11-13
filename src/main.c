@@ -410,8 +410,8 @@
 //                  message. This writes a real bundle into requests/ and queues it (and may
 //                  start a real coordinator: terminal + Claude Code): for tests, set
 //                  MONOLITH_REQUESTS_DIR to a scratch folder and MONOLITH_TERMINAL to a stub
-//                  script that only logs its arguments (tools/stub-terminal.sh;
-//                  tools/test-coordinator.sh runs the queue end to end with a stub coordinator).
+//                  script that only logs its arguments (build/tools/stub-terminal;
+//                  build/tools/test-coordinator runs the queue end to end with a stub coordinator).
 //                  Refused (nothing written) while --edit-script left unsaved edits, as ENTER is
 //   --type "text"  open the prompt box with this text (cursor at the end)
 //   --shot-hud     with --shot: draw the HUD, crosshair, selection overlay, regions, volumes and prompt box
@@ -492,7 +492,7 @@
 //   MONOLITH_CLOSE_ON_EXIT=1   close the terminals of finished requests when the game quits
 //                       (coordinator mode: the coordinator, if none of this run's requests
 //                       is still queued or running)
-//   MONOLITH_CLAUDE     the claude program to run (tests: tools/stub-coordinator.sh)
+//   MONOLITH_CLAUDE     the claude program to run (tests: build/tools/stub-coordinator)
 //   MONOLITH_REQUESTS_DIR   requests folder instead of <repo>/requests (tests only: bundles,
 //                       queue and coordinator lock in a scratch folder)
 //   MONOLITH_CLOSE_METHOD   wm / signal: close terminals only through i3/sway or only by

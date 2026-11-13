@@ -23,7 +23,7 @@ submodules/r3d/external/raylib/examples/
 
 # Map exports written by F9 (src/export.c); examples/build/ is covered by build/ above
 export/
-# ... but runtime/export/ holds the export's templates (viewer.c, build.sh): source
+# ... but runtime/export/ holds the export's templates (viewer.c, build.sh, nob.c): source
 !runtime/export/
 
 # Compiled maps (monolith --compile, docs/compiled-map.md): build output of exports and examples

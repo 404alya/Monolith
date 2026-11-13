@@ -1,4 +1,4 @@
-# The AI's list: bugs and deferred work found by Claude sessions (tools/ai-todo.sh)
+# The AI's list: bugs and deferred work found by Claude sessions (build/tools/ai-todo)
 6472901156218498333 - bug: R3D contrast clips dark values to black Linear contrast after tonemap (output.frag Adjustments). docs/known-issues.md, Open decisions 1
 13271338723792542802 - bug: R3D texture path join can overflow a 256-byte buffer r3d_importer_texture.c, unpatched; the loader guards it. docs/known-issues.md, Open decisions 2
 16697682306116340562 - bug: assimp leaks ~1.4 KB on a short glTF buffer file In assimp's own glTF code, unpatched. docs/known-issues.md, Open decisions 3

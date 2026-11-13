@@ -3,7 +3,7 @@
 // bad offsets, bad indices, floats, strings and paths. Every damaged file must be refused with a
 // "file: message" error or load as a valid scene; nothing may crash. Built like a game (the
 // runtime without MONOLITH_EDITOR) with ASan + UBSan, which also report leaks:
-//   tests/unit/compiled_test.sh          (builds it, compiles tests/models and tests/rotated, runs it on both)
+//   ./build.sh test compiled           (builds it, compiles tests/models and tests/rotated, runs it on both)
 //   compiled_test <package folder>       (a copy of a package with its <name>.mapb in it)
 // A package with turned boxes (box turns, section 17) gets the box-turn cases; one without them
 // the cases that need tests/models' uniforms, lights and model paths.
@@ -99,7 +99,7 @@ static bool WholeUtf8(const char *s)
     return true;
 }
 
-// Messages longer than any fixed buffer (tests/unit/compiled_test.sh makes the package "longname": a
+// Messages longer than any fixed buffer (./build.sh test compiled makes the package "longname": a
 // material whose texture lies three folders of 120 'é' deep). With the texture renamed away the load
 // fails with "<file>: file not found: \"<~740 bytes>\" (…)", built in the runtime's last error: whole
 // (no length limit, never cut, valid UTF-8), the same on a second failing load (nothing stale or

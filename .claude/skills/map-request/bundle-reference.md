@@ -12,7 +12,7 @@ What the game writes into `requests/<YYYY-MM-DD_HHMMSS>_<slug>/` for each reques
 | `view-marked.png` | The same frame with the **selected objects** tinted and outlined in orange (models: their rotated bounds), the **crosshair hit** shown as a small cyan square with a normal tick, the crosshair drawn at the centre, each **screen region** outlined in magenta with its number, and each **volume** as a green wireframe box (fainter where hidden behind geometry) labelled V1, V2, ... at the middle of its top face. |
 | `region-<n>.png` | One per screen region: the crop of `view.png` inside region *n*. |
 | `result.md` | **Written by the session**, last (the `map-request` skill, "result.md"). |
-| `state` | The queue state, one line `<state> <time> <writer>`: `queued` (written by the game), `claimed`, `question`, `done`, `failed`, `cancelled` (written by the coordinator through `tools/request-queue.sh`; the game writes `cancelled` itself for a queued request when no coordinator runs). Not in per-request mode. Never write it yourself. |
+| `state` | The queue state, one line `<state> <time> <writer>`: `queued` (written by the game), `claimed`, `question`, `done`, `failed`, `cancelled` (written by the coordinator through `build/tools/request-queue`; the game writes `cancelled` itself for a queued request when no coordinator runs). Not in per-request mode. Never write it yourself. |
 | `claim.txt` | The coordinator's fingerprint of the map package and the code at the claim (for recovery after a crash). |
 | `cancel` | Written by the game when the developer cancels the request. |
 | `question.md` | The session's question for the developer, if it has one (the `map-request` skill, "Working under the coordinator"). |

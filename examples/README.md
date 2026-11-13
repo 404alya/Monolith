@@ -15,10 +15,10 @@ own project. Each one has its own README.
 
 ```sh
 ./build.sh                  # once, in the repo root: builds R3D (submodules/r3d) and monolith
-examples/build.sh           # -> examples/build/linux/<example>/
-examples/build.sh --win     # -> examples/build/win/<example>/ (MinGW-w64; run ./build.sh --win first)
-examples/build.sh test      # -> examples/build/linux-test/<example>/ (test build: --shot, no window)
-examples/build.sh lsan      # -> examples/build/linux-lsan/<example>/ (test build + LeakSanitizer; tools/leakcheck.sh runs them)
+./build.sh examples           # -> examples/build/linux/<example>/
+./build.sh examples --win     # -> examples/build/win/<example>/ (MinGW-w64; run ./build.sh --win first)
+./build.sh examples test      # -> examples/build/linux-test/<example>/ (test build: --shot, no window)
+./build.sh examples lsan      # -> examples/build/linux-lsan/<example>/ (test build + LeakSanitizer; build/tools/leakcheck runs them)
 ```
 
 The examples compile against monolith's R3D copy with `-DMS_PATCHED_R3D`, with the game's
@@ -28,7 +28,7 @@ loads (`scene/` or `assets/`), so it runs from any working directory. `examples/
 committed.
 
 A game build of the runtime reads only compiled maps (`<name>.mapb`, [docs/compiled-map.md](../docs/compiled-map.md)):
-it has no text parser. So `examples/build.sh` copies `01_minimal/scene/` next to each game-style
+it has no text parser. So `./build.sh examples` copies `01_minimal/scene/` next to each game-style
 program and compiles its `courtyard.map` there with `build/linux/monolith --compile` (which is why
 `./build.sh` comes first, also before `--win`). `03_live_editing` is an editor build and loads
 the text, which it hot-reloads. To open another package with a game-style example, compile it
@@ -41,8 +41,8 @@ before it exits, which frees the message.
 ## The test build: screenshots without a window
 
 The examples are plain integration code: they open a window and run until it is closed. Tests
-use a separate build of the same sources, `examples/build.sh test` (and `lsan` for
-`tools/leakcheck.sh`), which compiles each example's main file with
+use a separate build of the same sources, `./build.sh examples test` (and `lsan` for
+`build/tools/leakcheck`), which compiles each example's main file with
 `-include tests/examples/harness.h`. That build needs `--shot <file>`: it renders 30 frames
 into a texture in a hidden window (never mapped, titled `monolith-shot`, so an i3 rule such as
 `for_window [title="^monolith-(bench|shot)$"] move container to workspace number 10` routes it),

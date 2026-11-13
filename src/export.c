@@ -6,8 +6,12 @@
 //
 //   <dir>/README.md            build steps, how to use the scene in another raylib + R3D
 //                              program (bundled or own R3D), quality presets, licences
-//   <dir>/build.sh             one-step build of the viewer: Linux, --win for MinGW-w64
-//                              (= runtime/export/build.sh with the map's name filled in)
+//   <dir>/build.sh             one-step build of the viewer: Linux, --win for MinGW-w64; only a
+//                              launcher (= runtime/export/build.sh): it compiles nob.c into
+//                              build/nob and runs it
+//   <dir>/nob.c                the viewer's build program (= runtime/export/nob.c with the map's
+//                              name filled in), written on nob.h
+//   <dir>/nob.h                nob.h (= src/vendor/nob/nob.h), its licence in LICENSES/nob.txt
 //   <dir>/viewer.c             a plain example program: window, fly camera, the map's
 //                              viewpoints (= runtime/export/viewer.c with the map's name)
 //   <dir>/monolith_scene.h/.c  the scene runtime without the editor parts (below)
@@ -27,7 +31,8 @@
 //                              monolith's build.sh made them from that tree (AddPrebuilt: only
 //                              current static Release builds; a target without them builds from source)
 //   <dir>/cmake/mingw-w64-x86_64.cmake   the toolchain file build.sh --win uses
-//   <dir>/LICENSES/            the licence texts of monolith (MIT), R3D, raylib, assimp and uthash
+//   <dir>/LICENSES/            the licence texts of monolith (MIT), R3D, raylib, assimp, uthash and
+//                              nob.h (nob.txt: the licence block at the end of nob.h, NobLicence)
 //
 // The runtime is copied without its editor parts: every `#ifdef MONOLITH_EDITOR` block is
 // dropped and every `#ifndef MONOLITH_EDITOR` block kept without its directives (StripEditor),
@@ -514,6 +519,38 @@ static char *StripEditor(const char *text, const char *what)
     return out;
 }
 
+// nob.h's licence as LICENSES/nob.txt (malloc'd; NULL when nob.h can't be read or has no licence
+// block): nob.h has no licence file of its own, its text sits in the comment at the end of the
+// header ("This software is available under 2 licenses": MIT or public domain), indented by three
+// spaces. That block, unindented, under a line naming the library.
+static char *NobLicence(const char *nobPath)
+{
+    char *t = FileExists(nobPath) ? LoadFileText(nobPath) : NULL;
+    if (!t) return NULL;
+    const char *from = strstr(t, "This software is available under 2 licenses");
+    const char *to = from ? strstr(from, "*/") : NULL;
+    // back from the marker to the start of its line (the indentation is dropped below)
+    while (from && from > t && from[-1] != '\n') from--;
+    static const char head[] = "nob.h by Alexey Kutepov (https://github.com/tsoding/nob.h), used by nob.c:\n\n";
+    char *out = from && to ? malloc(sizeof(head) + (size_t)(to - from) + 1) : NULL;
+    if (out) {
+        char *o = out + sizeof(head) - 1;
+        memcpy(out, head, sizeof(head) - 1);
+        for (const char *line = from; line < to; ) {
+            const char *end = memchr(line, '\n', (size_t)(to - line));
+            end = end ? end + 1 : to;
+            const char *p = line;
+            for (int k = 0; k < 3 && p < end && *p == ' '; k++) p++;    // the comment's indentation
+            memcpy(o, p, (size_t)(end - p));
+            o += end - p;
+            line = end;
+        }
+        *o = 0;
+    }
+    UnloadFileText(t);
+    return out;
+}
+
 // A text file with every "@MAP@" replaced by the map's name (malloc'd)
 static char *LoadTemplate(const char *path, const char *name)
 {
@@ -588,12 +625,14 @@ static char *MakeReadme(const MS_Scene *s, const char *name, const char *assetsP
         "| `viewer.c` | A plain example program: opens a window, loads the package, flies the camera and switches "
         "between the map's viewpoints. |\n"
         "| `build.sh` | Builds the viewer with the bundled R3D in one step (Linux; `--win` for Windows). |\n"
+        "| `nob.c`, `nob.h` | The build itself: `build.sh` compiles `nob.c` (a C program written on the single-header "
+        "library `nob.h`) into `build/nob` and runs it. |\n"
         "| `r3d/` | The R3D renderer monolith uses, with its local patches (`r3d/patches.md`) and the raylib and "
         "assimp it is built with (`r3d/external/`). Only what a build needs. |\n"
         "| `prebuilt/` | R3D, raylib and assimp as static libraries, built by monolith from `r3d/` "
         "(`prebuilt/<linux|win>/lib/`; the targets are listed under \"Build and run\"). |\n"
         "| `cmake/` | The MinGW-w64 toolchain file for `./build.sh --win`. |\n"
-        "| `LICENSES/` | Licence texts of monolith, R3D, raylib, assimp and uthash. |\n\n",
+        "| `LICENSES/` | Licence texts of monolith, R3D, raylib, assimp, uthash and nob.h. |\n\n",
         name, name, name);
 
     fprintf(f,
@@ -776,7 +815,8 @@ static char *MakeReadme(const MS_Scene *s, const char *name, const char *assetsP
         "(zlib, pugixml, rapidjson, ...) carry theirs under `r3d/external/assimp/contrib/`\n"
         "- uthash: BSD licence, `LICENSES/uthash.txt`; tinycthread (zlib licence) and the glad loader carry theirs in "
         "their sources under `r3d/external/`\n"
-        "- The scene runtime (`monolith_scene.h/.c`), `viewer.c` and `build.sh` are part of monolith: MIT licence, `LICENSES/monolith.txt`\n\n"
+        "- nob.h: MIT licence or public domain (Unlicense), `LICENSES/nob.txt` (the licence text at the end of `nob.h`)\n"
+        "- The scene runtime (`monolith_scene.h/.c`), `viewer.c`, `build.sh` and `nob.c` are part of monolith: MIT licence, `LICENSES/monolith.txt`\n\n"
         "The map's own files, from `%s/ASSETS.md` (the package's record of every external file; keep it with the "
         "package and credit CC-BY assets as listed):\n\n", name);
     WriteAssets(f, assetsPath);
@@ -1045,7 +1085,8 @@ static unsigned char Export(const MS_Scene *s, const char *outDirIn)
         if (FileExistsf("%s%s", root, DOCS[i])) AddPkg(&P, root, name, DOCS[i], NULL);
     int pkgFiles = P.count + 1;         // (+ the compiled map, made after writing the package)
 
-    // --- Plan: the runtime without its editor parts, viewer.c + build.sh from the templates
+    // --- Plan: the runtime without its editor parts; viewer.c, build.sh (the launcher) and nob.c (the build
+    // program) from the templates, and nob.h, which nob.c is written on
     bool failed = false;        // the first reason not to write anything is in MS_LastError()
     static const char *const RT[] = { "monolith_scene.h", "monolith_scene.c" };
     for (int i = 0; i < 2 && !failed; i++) {
@@ -1059,16 +1100,27 @@ static unsigned char Export(const MS_Scene *s, const char *outDirIn)
         if (clean) AddData(&P, RT[i], clean, false);
     }
     char *viewerPath = MonoStrf("%sruntime/export/viewer.c", rt), *buildPath = MonoStrf("%sruntime/export/build.sh", rt);
+    char *nobPath = MonoStrf("%sruntime/export/nob.c", rt), *nobHPath = MonoStrf("%ssrc/vendor/nob/nob.h", rt);
     char *viewer = viewerPath ? LoadTemplate(viewerPath, name) : NULL;
     char *build = buildPath ? LoadTemplate(buildPath, name) : NULL;
+    char *nob = nobPath ? LoadTemplate(nobPath, name) : NULL;
+    char *nobLicence = nobHPath ? NobLicence(nobHPath) : NULL;
     free(viewerPath);
     free(buildPath);
-    if (!failed && (!viewer || !build)) {
-        MS_SetError("cannot read %sruntime/export/viewer.c / build.sh", rt);
+    free(nobPath);
+    free(nobHPath);
+    if (!failed && (!viewer || !build || !nob)) {
+        MS_SetError("cannot read %sruntime/export/viewer.c / build.sh / nob.c", rt);
+        failed = true;
+    }
+    if (!failed && !nobLicence) {
+        MS_SetError("cannot read the licence at the end of %ssrc/vendor/nob/nob.h", rt);
         failed = true;
     }
     AddData(&P, "viewer.c", viewer, false);
     AddData(&P, "build.sh", build, true);
+    AddData(&P, "nob.c", nob, false);
+    AddCopyf(&P, "nob.h", "%ssrc/vendor/nob/nob.h", rt);
     AddCopyf(&P, "cmake/mingw-w64-x86_64.cmake", "%scmake/mingw-w64-x86_64.cmake", rt);
 
     // --- Plan: R3D and its dependencies, their licences
@@ -1083,7 +1135,8 @@ static unsigned char Export(const MS_Scene *s, const char *outDirIn)
         { "external/assimp/LICENSE", "LICENSES/assimp.txt" }, { "external/uthash/LICENSE", "LICENSES/uthash.txt" },
     };
     for (int i = 0; i < 4; i++) AddCopyf(&P, LIC[i][1], "%s%s", r3d, LIC[i][0]);
-    AddCopyf(&P, "LICENSES/monolith.txt", "%sLICENSE", rt);    // the runtime, viewer.c, build.sh
+    AddCopyf(&P, "LICENSES/monolith.txt", "%sLICENSE", rt);    // the runtime, viewer.c, build.sh, nob.c
+    AddData(&P, "LICENSES/nob.txt", nobLicence, false);
     // Prebuilt R3D, raylib and assimp for each target monolith has built
     static const char *const TARGETS[][3] = { { "build-linux", "linux", "Linux" }, { "build-mingw", "win", "Windows" } };
     bool prebuilt[2];

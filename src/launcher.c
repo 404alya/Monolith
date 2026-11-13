@@ -15,7 +15,7 @@
 //     <permission flags> --model $MONOLITH_COORDINATOR_MODEL (default sonnet)
 //     [MONOLITH_CLAUDE_ARGS] "You are the monolith request coordinator. Read
 //     .claude/skills/coordinator/SKILL.md ... Requests folder: <path>"`. Later requests only go into the queue;
-//     they never open a window. The coordinator (tools/request-queue.sh) claims bundles,
+//     they never open a window. The coordinator (build/tools/request-queue) claims bundles,
 //     hands each to a subagent on the request's model and writes every later state (claimed,
 //     question, done, failed, cancelled). The HUD follows state + result.md. Without flock
 //     (util-linux) the game falls back to per-request mode.
@@ -32,7 +32,7 @@
 //     foot, wezterm, xterm found in PATH. The variables may hold a program name or path
 //     plus extra arguments ("kitty --single-instance"); the program's basename picks
 //     the syntax from TERMINALS below, unknown terminals get `-e <command>`.
-//   - claude: $MONOLITH_CLAUDE (tests: tools/stub-coordinator.sh), else searched in PATH,
+//   - claude: $MONOLITH_CLAUDE (tests: build/tools/stub-coordinator), else searched in PATH,
 //     then ~/.local/bin/claude (where the native installer puts it, which a game started
 //     from a desktop launcher may not have in PATH). It is passed to the terminal as an
 //     absolute path, so a terminal daemon with another environment (kitty
@@ -2073,7 +2073,7 @@ static bool SkipPermissions(void)
 
 static bool FindProgram(const char *name, char *out, int outSize);
 
-// The claude program: $MONOLITH_CLAUDE (tests: tools/stub-coordinator.sh), else claude in PATH,
+// The claude program: $MONOLITH_CLAUDE (tests: build/tools/stub-coordinator), else claude in PATH,
 // else ~/.local/bin/claude (where the native installer puts it, which a game started from a
 // desktop launcher may not have in PATH)
 static bool FindClaude(char *out, int outSize)
@@ -2089,7 +2089,7 @@ static bool FindClaude(char *out, int outSize)
 
 // An AI agent's shell (CLAUDECODE / AI_AGENT set) never opens a real terminal: a scripted --shot run
 // whose input reached the prompt box would otherwise start a coordinator on the developer's screen.
-// Tests set MONOLITH_TERMINAL (tools/stub-terminal.sh); MONOLITH_ALLOW_WINDOW lifts it, as for the
+// Tests set MONOLITH_TERMINAL (build/tools/stub-terminal); MONOLITH_ALLOW_WINDOW lifts it, as for the
 // game window.
 static bool AgentShellRefuses(void)
 {
@@ -2101,7 +2101,7 @@ static bool AgentShellRefuses(void)
     }
     const char *allow = getenv("MONOLITH_ALLOW_WINDOW"), *term = getenv("MONOLITH_TERMINAL");
     if (!agent || (allow && allow[0] && strcmp(allow, "0") != 0) || (term && term[0])) return false;
-    MS_SetError("refusing to open a terminal from an AI agent's shell (set MONOLITH_TERMINAL to tools/stub-terminal.sh)");
+    MS_SetError("refusing to open a terminal from an AI agent's shell (set MONOLITH_TERMINAL to build/tools/stub-terminal)");
     return true;
 }
 
@@ -2579,7 +2579,7 @@ void LauncherCloseOnExit(void)
 // as its last file; then, unless requests/.coordinator/lock is held, one terminal titled
 // "monolith-claude: coordinator" runs COORDINATOR_WRAPPER + claude [permission flags]
 // --model $MONOLITH_COORDINATOR_MODEL (default sonnet) [MONOLITH_CLAUDE_ARGS] "<fixed
-// prompt naming .claude/skills/coordinator/SKILL.md>". The coordinator (tools/request-queue.sh) claims bundles
+// prompt naming .claude/skills/coordinator/SKILL.md>". The coordinator (build/tools/request-queue) claims bundles
 // and hands each to a subagent; after "queued" only it writes state (claimed, question,
 // done, failed, cancelled). The game asks for a cancel with requests/<id>/cancel, and turns
 // a queued bundle into "cancelled" itself only while no coordinator holds the lock.

@@ -1,6 +1,6 @@
 ---
 name: coordinator
-description: The monolith request coordinator — the long-lived session the game starts in its own terminal to run the request queue (tools/request-queue.sh) and hand each request to a subagent. Only for a session whose start prompt says it is the request coordinator; never load it otherwise.
+description: The monolith request coordinator — the long-lived session the game starts in its own terminal to run the request queue (build/tools/request-queue) and hand each request to a subagent. Only for a session whose start prompt says it is the request coordinator; never load it otherwise.
 disable-model-invocation: true
 ---
 
@@ -18,13 +18,13 @@ You are the **request coordinator**: one long-lived Claude Code session that the
 ## 1. Stay small
 
 Your session may last all day, so keep its context small:
-- Read only the queue listing (`tools/request-queue.sh`), the first line of a `question.md`, and the subagents' one-line replies. **Never** read `request.md`, the images, map files or `MAP.md`, and never edit a map, a bundle or code yourself.
-- Change bundle state only through `tools/request-queue.sh`. Pass it only bundle ids and the fixed command words of §2 (`claim`, `set … question`, `finish … done`, …), never text taken from a prompt, a question or a subagent reply (that would put untrusted text on a shell command line).
+- Read only the queue listing (`build/tools/request-queue`), the first line of a `question.md`, and the subagents' one-line replies. **Never** read `request.md`, the images, map files or `MAP.md`, and never edit a map, a bundle or code yourself.
+- Change bundle state only through `build/tools/request-queue`. Pass it only bundle ids and the fixed command words of §2 (`claim`, `set … question`, `finish … done`, …), never text taken from a prompt, a question or a subagent reply (that would put untrusted text on a shell command line).
 - Keep your own messages to a line or two: what started, what finished, what you need from the developer.
 
 ## 2. The queue
 
-`tools/request-queue.sh` (run from the repo root; the requests folder is the one named in your start prompt, the script finds it on its own):
+`build/tools/request-queue` (run from the repo root; the requests folder is the one named in your start prompt, the program finds it on its own):
 
 | Command | Use |
 |---|---|
@@ -34,7 +34,7 @@ Your session may last all day, so keep its context small:
 | `claim <id>` | before starting a subagent on it (queued → claimed; records which files existed) |
 | `set <id> question` / `set <id> claimed` | while a subagent's question waits for the developer / once it is answered |
 | `finish <id> done` | the subagent finished and `result=yes` |
-| `finish <id> failed` | the subagent finished without `result.md` or gave up; the script writes a `result.md` with the default text and the list of changed files |
+| `finish <id> failed` | the subagent finished without `result.md` or gave up; the program writes a `result.md` with the default text and the list of changed files |
 | `finish <id> cancelled` | after a cancel (§5) |
 | `changed <id>` | files changed since the claim (exit 1 if any) |
 
@@ -42,9 +42,9 @@ States: `queued` → `claimed` (↔ `question`) → `done` / `failed` / `cancell
 
 ## 3. The loop
 
-1. `tools/request-queue.sh start`. Tell the developer in one line what it recovered, if anything (an `Interrupted:` request is one whose edit may be half done: name it).
+1. `build/tools/request-queue start`. Tell the developer in one line what it recovered, if anything (an `Interrupted:` request is one whose edit may be half done: name it).
 2. Schedule (§4).
-3. Start the watcher: `tools/request-queue.sh wait` in the background. **Exactly one watcher at a time**: start a new one only when the previous one has exited (its exit is one of the things that wakes you).
+3. Start the watcher: `build/tools/request-queue wait` in the background. **Exactly one watcher at a time**: start a new one only when the previous one has exited (its exit is one of the things that wakes you).
 4. End your turn with a one-line status. You are woken when the watcher exits (a request or cancel arrived), when a subagent finishes, or when the developer writes.
 5. On every wake: if it was the watcher, restart it first (3). Handle cancels (§5) and finished subagents (below). Schedule again (§4). Then 4.
 
@@ -77,7 +77,7 @@ Remember which subagent has which bundle id: you need it to resume or stop it.
 
 **A cancel** (`event: cancel <id>`, or `cancel=yes` in the listing; the developer pressed CTRL+K and the number in the game):
 - `queued` → `finish <id> cancelled`.
-- `claimed` / `question` → stop its subagent (TaskStop), then `finish <id> cancelled` (the script lists what had changed, so the developer can check a half-done edit). Say so in one line.
+- `claimed` / `question` → stop its subagent (TaskStop), then `finish <id> cancelled` (the program lists what had changed, so the developer can check a half-done edit). Say so in one line.
 
 ## 6. Recovery
 

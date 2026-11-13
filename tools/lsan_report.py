@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""lsan_report.py <lsan.supp> <log dir> -- classifies LeakSanitizer reports (tools/leakcheck.sh).
+"""lsan_report.py <lsan.supp> <log dir> -- classifies LeakSanitizer reports (build/tools/leakcheck).
 
 Reads every LeakSanitizer log in <log dir> (files named <run>.<pid>, written through
 LSAN_OPTIONS=log_path=<log dir>/<run>) and sorts each leak into
@@ -85,7 +85,7 @@ def main():
         if not m or name.endswith(".out"):
             continue
         runs.setdefault(m.group(1), []).extend(parse(os.path.join(logdir, name)))
-    # runs.txt (written by leakcheck.sh): every run, so the clean ones are listed too
+    # runs.txt (written by leakcheck): every run, so the clean ones are listed too
     order = []
     rt = os.path.join(logdir, "runs.txt")
     if os.path.exists(rt):

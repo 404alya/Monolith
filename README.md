@@ -28,7 +28,7 @@ sudo apt install build-essential clang cmake python3 libx11-dev libxrandr-dev li
 ./build.sh              # -> build/linux/monolith + build/linux/maps/
 ./build.sh debug        # with AddressSanitizer + UBSan -> build/linux-debug/
 ./build.sh profile      # for CPU profiles with perf -> build/linux-profile/ (monolith + the profile tool)
-examples/build.sh       # the examples of using a map in your own program (examples/README.md)
+./build.sh examples       # the examples of using a map in your own program (examples/README.md)
 ```
 
 The output folder is self-contained: copy or zip it as it is. You need an OpenGL 3.3 GPU and driver. The editor is made for Linux desktops running the i3 window manager (sway takes the same commands); other systems and window managers are not supported for editing. On other systems the game is a view-only build for benchmarking, viewing and debugging a map ([below](#windows)). Exported maps and the examples also build for Windows.
@@ -57,7 +57,7 @@ The first request opens one terminal, the **coordinator**, which works through e
 
 ## Windows
 
-The editor is not supported on Windows. The Windows build is for the exported code: `./build.sh --win` cross-compiles on Linux with MinGW-w64 (Arch: `mingw-w64-gcc`; Debian / Ubuntu: `gcc-mingw-w64`) and builds the static Windows libraries that every `--export` ships in `prebuilt/win/lib/`, and it compile-checks the runtime for Windows. An export then builds for Windows with its own `./build.sh --win` ([docs/export.md](docs/export.md)), the examples with `examples/build.sh --win` ([examples/README.md](examples/README.md)).
+The editor is not supported on Windows. The Windows build is for the exported code: `./build.sh --win` cross-compiles on Linux with MinGW-w64 (Arch: `mingw-w64-gcc`; Debian / Ubuntu: `gcc-mingw-w64`) and builds the static Windows libraries that every `--export` ships in `prebuilt/win/lib/`, and it compile-checks the runtime for Windows. An export then builds for Windows with its own `./build.sh --win` ([docs/export.md](docs/export.md)), the examples with `./build.sh examples --win` ([examples/README.md](examples/README.md)).
 
 It also writes `build/win/monolith.exe`, the **view-only build**: it opens a map to benchmark it on another GPU, look at it or debug a driver problem, but never edits it or sends requests. Walking, flying, the spectator camera, the effect toggles (1–6), the HUD (F1), graphics settings (F2), the render inspector (F3), buffer views (F4), the id panel (F5, read-only), screenshots (F12), hot reload of a map edited elsewhere and the read-only flags (`--shot`, `--bench`, `--dump-*`, `--tri-report`, `--inspect-model`) work; the edit and draw modes, the request prompt, snip and volume modes, the request list keys, export (F9) and the editing flags say "view-only build: editing and requests need the Linux editor" (the list: [docs/command-line.md](docs/command-line.md#view-only-build)). Copy `build/win/` to a Windows machine and run `monolith.exe --map maps/<name>`, or on Linux run it under wine: `./build.sh --win run --map maps/<name>`. There is no native Windows build script.
 

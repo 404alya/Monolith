@@ -76,7 +76,7 @@ MapEditor
 ## 3. The runtime's live-edit API (editor builds only)
 
 Declared in `runtime/monolith_scene.h` in a `MONOLITH_EDITOR` block ("Live edits"). The game
-build and `--export` don't have it; `tests/unit/export_strip_test.sh` checks that.
+build and `--export` don't have it; `./build.sh test export_strip` checks that.
 
 ```c
 MS_ReloadResult MS_EditSetText(MS_Scene *s, const char *text, int size, MS_EditStats *stats);
@@ -494,8 +494,8 @@ thumbnails) pass their height.
   `--inspector-panel`, with `--shot --shot-hud`.
 - The conflict rule: `--edit-script` with unsaved steps, then `disk <file>` (a changed file),
   then `print`: the rebased selection and the failed list.
-- Leak check with live edits, a preview, thumbnails and a reload (`tools/leakcheck.sh` gains
-  those runs); both builds; `examples/build.sh`; `export_strip_test.sh`.
+- Leak check with live edits, a preview, thumbnails and a reload (`build/tools/leakcheck` gains
+  those runs); both builds; `./build.sh examples`; `./build.sh test export_strip`.
 
 ## 10. Decisions and defaults
 
@@ -788,7 +788,7 @@ the scene, constant screen size):
 As in the round's task prompt: every map's `--dump-boxes` and shots identical; the test map
 `tests/rotated/` (a 30° ramp, a 45° yawed wall, a tumbled crate, a turned `repeat` row, a turned
 block, a turned box under `instanced on`) with shots from three viewpoints, `--select` picks on
-turned faces (the normal in the bundle), the collision unit test (`tests/unit/collision_test.sh`:
+turned faces (the normal in the bundle), the collision unit test (`./build.sh test collision`:
 the player walks up the ramp and stands on it, walks down it without leaving the ground, and
 stops at the yawed wall's true face where its AABB would have stopped it ≥ 0.3 m earlier), the
 compile and export round trips, a `--reload-test`, and `--edit-modal` shots of every control on a
@@ -934,9 +934,9 @@ scratch folder; machine A: RTX 4050 Laptop, driver 615.71.09, Ryzen 7 7435HS):
   turned 1 object by 15 deg (line 40) (entity c68c3e6d:0 is gone)" in red, the saved file equal to
   `--apply-edits` of the three other ops on that file.
 - Edit latency: `.claude/skills/benchmarking/measurements.md` ("Live edits").
-- Builds without warnings (`./build.sh`, `--win`, `examples/build.sh`, `test`, `--win`; the runtime with
-  clang and gcc with and without `MONOLITH_EDITOR` and `MS_PATCHED_R3D`), `export_strip_test.sh`,
-  `compiled_test.sh`, `tools/leakcheck.sh` (with the live-edit runs) and `--asan`: OK.
+- Builds without warnings (`./build.sh`, `--win`, `./build.sh examples`, `test`, `--win`; the runtime with
+  clang and gcc with and without `MONOLITH_EDITOR` and `MS_PATCHED_R3D`), `./build.sh test export_strip`,
+  `./build.sh test compiled`, `build/tools/leakcheck` (with the live-edit runs) and `--asan`: OK.
 
 ### Phase 2: the transform modal, the edit-mode keys, the new ops (§6, §7)
 
@@ -1055,7 +1055,7 @@ commit is refused.
   binary (5 scripts on four maps).
 - HUD shots (`--shot --shot-hud --edit-modal`): grab with a typed value and an axis lock, rotate
   (with a refused box), scale with a plane lock, on `tests/models` and the largest map.
-- Builds without warnings (`./build.sh`, `--win`); `tools/leakcheck.sh` (with the new runs:
+- Builds without warnings (`./build.sh`, `--win`); `build/tools/leakcheck` (with the new runs:
   `apply-xform`, `edit-script-xform`, `edit-modal-hud`, `-commit`, `-cancel`): OK. Mouse, keys,
   RMB flying, the cursor and the hover were not testable without a window: by hand only.
 ### Phase 3b: the model picker (§8.3)
@@ -1128,7 +1128,7 @@ round's scratch folder `phase3b/`):
   byte-identical, `--dump-boxes`, `--dump-entities` and `--dump-scene-diff` identical, and the picker run's
   shot (20 frames after the live edit) = a shot of the applied copy: 0 changed pixels (3 maps).
 - `--shot --shot-hud --model-picker [filter]` images of `pine_forest` and `tests/models` (unfiltered and
-  filtered) and the largest map; builds without warnings (`./build.sh`, `--win`); `tools/leakcheck.sh` with
+  filtered) and the largest map; builds without warnings (`./build.sh`, `--win`); `build/tools/leakcheck` with
   the new runs (`picker-hud`, `-loaded`, `-reload`, `-restart`, `-enter`, `-close`, `-bad-key`): OK. The
   keys, the cursor pick and the look while typing are by hand only.
 
@@ -1215,9 +1215,9 @@ panel passes to the next `UiListKeys` for PGUP / PGDN). Heap arrays that only gr
   a material hidden (also with the fog cache and the AO volume) or one isolated: `--edit-script` (warm
   caches) = `--apply-edits` on a copy + a shot with the same filter, 0 changed pixels at both viewpoints; a
   preview moved twice and ended with the filter on = no edit.
-- Builds without warnings (`./build.sh`, `--win`, `examples/build.sh`, `test`, `--win`; the runtime with
-  clang and gcc with and without `MONOLITH_EDITOR` and `MS_PATCHED_R3D`), `export_strip_test.sh`,
-  `tools/leakcheck.sh` with new runs (each outline mode, labels, the panel, buffer views, a hide, an
+- Builds without warnings (`./build.sh`, `--win`, `./build.sh examples`, `test`, `--win`; the runtime with
+  clang and gcc with and without `MONOLITH_EDITOR` and `MS_PATCHED_R3D`), `./build.sh test export_strip`,
+  `build/tools/leakcheck` with new runs (each outline mode, labels, the panel, buffer views, a hide, an
   isolate, a hide with a live edit + preview + the fog cache, a hide across a reload, a bad `--inspect`).
 
 ### Phase 3a: the id panel and `EDIT_ID_REMOVE` (§8.1, §7.5)
@@ -1280,7 +1280,7 @@ driver 615.71.09, Ryzen 7 7435HS):
   edit mode's number field open beside a filtered panel.
 - Without the panel: every map in `maps/` (every viewpoint and a yaw sweep 0/60/…/300 from viewpoint 1:
   32 shots) pixel-identical to the base binary, `--dump-boxes` identical.
-- Builds without warnings (`./build.sh`, `--win`); `tools/leakcheck.sh` with new runs (`apply-id-remove`
+- Builds without warnings (`./build.sh`, `--win`); `build/tools/leakcheck` with new runs (`apply-id-remove`
   with a failing `id remove`, `id-panel`, `id-panel-filter`, `id-panel-live`: live `id` / `id remove` with the
   panel open and the number field). Keys, the cursor, the flight and the edits from the panel's keys were
   not testable without a window: by hand only.
@@ -1300,7 +1300,7 @@ four findings, fixed by the lead:
   depth, `savedAt = -1` would have re-applied steps the file already has). Now `savedAt` stays
   the depth both texts share and the undone steps move to `MapEditor.lost[]`: they count as
   unsaved, a save clears them, and a rebase reports them as failed ("undone past the save point:
-  the file keeps it"), as in the case without the new edit (`tools/leakcheck.sh`:
+  the file keeps it"), as in the case without the new edit (`build/tools/leakcheck`:
   `edit-script-lost`).
 - **A tiny `scale` / `size` wrote a zero-volume box** (6 written decimals). Refused now: a box or
   block side that would be written thinner than 0.000001 m, a size below it, a model scale that
@@ -1424,7 +1424,7 @@ The keys and the gizmo of §11.10 (`src/transform.c/.h`, `src/editmode.c/.h`, `s
   `rot 30.867478 12.95254 17.63074` (= Rx(15)·R, 7e-9); `r90` on `box -6 2.5 -9 6 2.7 -7` → `box -1
   2.5 -14 1 2.7 -2`. Through `--input-script`: a click on the Y ring, 80 px, a click commits
   (`rot 61.14 0 10`, the rock stays selected); a trackball click + (40, 20) px + ENTER = 22.36°.
-- **For the merge / phase 3**: `tools/leakcheck.sh`'s input scripts press R for the old modal (now a
+- **For the merge / phase 3**: `build/tools/leakcheck`'s input scripts press R for the old modal (now a
   90° step: they still pass, but `input-noop` no longer exercises a no-op drag: use ALT+R there,
   and add gizmo runs); `docs/user-guide.md` / `command-line.md` and §6's table still list the old
   keys; `src/input.c` has no `down` / `up` for mouse buttons, so a scripted ring *drag* (button
@@ -1509,7 +1509,7 @@ local turn of a turned box, a block turn, a whole `repeat` line about a pivot, `
 a box and a model, a split copy moved and turned, scale, size, duplicate: 0 pixels in all three
 viewpoints (the block turn also with `--ao baked`, the occlusion volume's live update); previews vs commits 0 pixels except the pivot turn of a whole
 `repeat` line (6 pixels: the commit writes the turned steps with 6 decimals, the preview places
-each copy exactly). `tests/unit/collision_test.sh`: up the ramp onto the platform with the feet on
+each copy exactly). `./build.sh test collision`: up the ramp onto the platform with the feet on
 the slope (max error 0.5 mm, the gap), down without a frame off the ground, standing still on the
 slope, stopped 1.67 m before the wall's AABB would have stopped it, at its true face; the raycast
 normal of the yawed wall (0.707, 0, 0.707).
@@ -1562,12 +1562,12 @@ likewise. Nothing a game build needs for turned boxes is in an editor block.
   `rot` / `center` / `size` equal); every viewpoint's shot 0 changed pixels.
 - Version 2: the base build's `.mapb` of the three maps (version 2, 16 sections) loads in the new
   build: the four dumps equal the text's, every viewpoint 0 pixels.
-- `tests/unit/compiled_test.sh` now runs on `tests/models` and `tests/rotated` (PASSED, 18 377 and
+- `./build.sh test compiled` now runs on `tests/models` and `tests/rotated` (PASSED, 18 377 and
   16 703 loads); the turned cases (box out of range, 0xFFFFFFFF, unsorted, twice, NaN / ±inf angles,
   `0 0 0`, `-0 0 -0`, a written box whose turned centre overflows) are refused, a changed finite
   angle loads; versions 1 and "2 with a version 3 section table" are refused. The models-specific
   cases (uniforms, lights, model path) run only on a package without turns.
-- `tests/unit/export_strip_test.sh`: OK. The collision test also passes built as a game (no
+- `./build.sh test export_strip`: OK. The collision test also passes built as a game (no
   `MONOLITH_EDITOR`) on a compiled `tests/rotated` with its `.map` moved away.
 - Export of `tests/rotated` and `maps/pine_forest` into scratch, copied to fresh folders, `./build.sh`
   and `./build.sh --win` built; every viewpoint rendered by `examples/01_minimal` + the test harness
@@ -1578,7 +1578,7 @@ likewise. Nothing a game build needs for turned boxes is in an editor block.
   submit on `tests/models` with the base and the new build: only the format number (3 → 4) and the
   binary's path differ.
 - Both targets, the examples and their test build without warnings; the runtime with and without
-  `MONOLITH_EDITOR` / `MS_PATCHED_R3D`: 0 warnings; `tools/leakcheck.sh`: OK.
+  `MONOLITH_EDITOR` / `MS_PATCHED_R3D`: 0 warnings; `build/tools/leakcheck`: OK.
 
 **Open:** `src/main.c`'s header comment and `docs/command-line.md` don't yet mention the turned-box
 suffix of `--dump-boxes` / `--dump-scene` (both outside this step's files). The exported runtime has

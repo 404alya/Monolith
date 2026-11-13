@@ -1,7 +1,7 @@
 # rotated: test package
 
 Not a level: a small package of turned boxes (`box` / `block` lines with `rot`, format 2) for the
-engine's tests (docs/live-editing.md 11.12). `tests/unit/collision_test.sh` walks the player
+engine's tests (docs/live-editing.md 11.12). `./build.sh test collision` walks the player
 over it (noGpu); shots, picks and edit scripts check drawing, picking and manual edits of turned
 boxes. Keep it small and self-contained (no external assets); the collision test reads the
 coordinates below, so change them only together with `tests/unit/collision_test.c`.

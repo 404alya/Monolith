@@ -1,4 +1,4 @@
-# LeakSanitizer suppressions for monolith (tools/leakcheck.sh; build: ./build.sh lsan)
+# LeakSanitizer suppressions for monolith (build/tools/leakcheck; build: ./build.sh lsan)
 #
 # Only leaks ALLOCATED BY driver or system library code are listed here: the GPU driver
 # (NVIDIA libnvidia-* / libGLX_nvidia, Mesa), the GL / GLX / EGL dispatch libraries, X11 / xcb
@@ -9,7 +9,7 @@
 # into the monolith binary, so a pattern for them would have to name that binary and would
 # hide real leaks.
 #
-# How tools/leakcheck.sh applies this file (stricter than LeakSanitizer itself, which
+# How build/tools/leakcheck applies this file (stricter than LeakSanitizer itself, which
 # suppresses a leak when ANY frame of its stack matches): the programs run without
 # suppressions, and tools/lsan_report.py looks only at the frame that allocated the memory,
 # i.e. the first frame after the allocator (malloc/calloc/realloc/strdup/operator new and

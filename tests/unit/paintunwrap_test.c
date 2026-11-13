@@ -4,7 +4,7 @@
 // an empty mesh, a non-indexed mesh, a degenerate triangle) and model files read with R3D's
 // importer exactly as the runtime reads them (R3D_LoadModelEx with R3D_IMPORT_RETAIN_MESH_DATA,
 // in a hidden window: R3D's model loader needs a GL context). Built and run under ASan + UBSan by
-// tests/unit/paintunwrap_test.sh:
+// ./build.sh test paintunwrap:
 //
 //   paintunwrap_test [--scene <package>] [--scratch <dir>] <model file>...
 //

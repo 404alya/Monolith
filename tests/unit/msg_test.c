@@ -1,6 +1,6 @@
 // Unit check of the editor's message text (src/msg.c): static, heap, replace, append, a very long
 // string with nothing cut off, and the out-of-memory fallback (an injected allocator). Runs under
-// ASan + UBSan (leaks too) through tests/unit/msg_test.sh.
+// ASan + UBSan (leaks too) through ./build.sh test msg.
 #include <stddef.h>
 #include <stdlib.h>
 

@@ -2,7 +2,7 @@
 
 A map's source is its text file, `<name>.map` ([map-format.md](map-format.md)). The editor, hot reload, requests and manual edits all work on that text. Programs that only play a map (an export, the game-style examples) load a **compiled map** instead: `<name>.mapb`, a binary file with the scene already parsed. monolith writes it (`monolith --compile <out> --map <path>`, and `--export` does it for you). The scene runtime of a game build has no text parser at all: it reads fixed-size records into the scene's arrays, checks them, and continues with the same load steps as a text load (models, colliders, entities, GPU upload), so the scene renders the same pixels.
 
-Code: `runtime/monolith_scene.c`, region "Compiled maps" (records, `ReadCompiled`, `WriteCompiled`) and `MS_Compile`; `--compile` in `src/main.c`. Tests: `tests/unit/compiled_test.sh`, `tests/unit/export_strip_test.sh`. Sizes for scale: the default map's 2.0 MB of text compiles to 2.7 MB (52,244 boxes once its `repeat` lines are expanded, 291 lights), `pine_forest`'s 133 kB to 108 kB.
+Code: `runtime/monolith_scene.c`, region "Compiled maps" (records, `ReadCompiled`, `WriteCompiled`) and `MS_Compile`; `--compile` in `src/main.c`. Tests: `./build.sh test compiled`, `./build.sh test export_strip`. Sizes for scale: the default map's 2.0 MB of text compiles to 2.7 MB (52,244 boxes once its `repeat` lines are expanded, 291 lights), `pine_forest`'s 133 kB to 108 kB.
 
 ## 1. What is stored, what is computed at load
 
@@ -112,7 +112,7 @@ A file that fails any check is rejected with `<file>: <message>` (for example `f
 - In editor builds a compiled scene has no map text (`MS_GetLine` / `MS_LineText` return nothing), its `hash` is the compiled file's, and its dependencies are the compiled file plus the stored list, so hot reload watches the right files. Manual edits and requests need the text and refuse a compiled map.
 - `MS_SetInitHints` and `noGpu` peek loads work on compiled files as on text.
 
-`--export` writes `<name>/<name>.mapb` next to the copied `<name>.map` and checks that it loads; the exported `viewer.c` opens the package folder and so the compiled map. `examples/build.sh` compiles the scene of each game-style example (`01_minimal`, `02_existing_project`, `05_entities`) with `build/linux/monolith`.
+`--export` writes `<name>/<name>.mapb` next to the copied `<name>.map` and checks that it loads; the exported `viewer.c` opens the package folder and so the compiled map. `./build.sh examples` compiles the scene of each game-style example (`01_minimal`, `02_existing_project`, `05_entities`) with `build/linux/monolith`.
 
 ## 5. The two builds
 
@@ -130,15 +130,15 @@ The model-file reference check (glTF URIs, OBJ material libraries and their text
 ## 6. Tests
 
 - Round trip: every map in `maps/`, `tests/models` and `tests/rotated` (turned boxes) compiled into a copy of its package (twice: byte-identical; the Windows build writes the same bytes), then `--dump-boxes`, `--dump-scene`, `--dump-entities` (all but the `map "<path>"` line) and every viewpoint's `--shot` from the `.mapb` equal the text's, 0 pixels different; a `--reload-test` of a compiled map equals its plain shot.
-- `tests/unit/compiled_test.sh`: builds the reader as a game has it with ASan + UBSan and loads ~18,000 damaged copies of the compiled `tests/models` and ~17,000 of `tests/rotated` (box turns out of range, unsorted, twice, not finite, 0 0 0, a centre that overflows): every truncation, every single-byte flip, 2000 random damages, and targeted header, section-table, index, float, string and path damage, each refused with a message or loaded as a valid scene; no crash, no leak.
-- `tests/unit/compiled_test.sh` also makes the package `longname` (a texture path of ~740 bytes in 'é' folders) and loads it without its texture: the message arrives whole in a large buffer, and in every buffer of 1 byte up to its length it is cut at its end, NUL-terminated, never inside a UTF-8 character and never past the buffer. `tests/unit/parse_error_test.sh` does the same for the text parser (bad tokens of 1000 bytes) and checks that short messages keep their text.
-- `tests/unit/export_strip_test.sh`: the exported `monolith_scene.c/.h` contain no tokenizer, statement parser, model-file scan, compiler, number parsing (`strto*`, `ato*`, `sscanf`), `".map"` lookup or `MONOLITH_EDITOR`.
-- `tools/leakcheck.sh` compiles a map and loads it (dumps, a shot with a reload, a damaged and a stale file).
+- `./build.sh test compiled`: builds the reader as a game has it with ASan + UBSan and loads ~18,000 damaged copies of the compiled `tests/models` and ~17,000 of `tests/rotated` (box turns out of range, unsorted, twice, not finite, 0 0 0, a centre that overflows): every truncation, every single-byte flip, 2000 random damages, and targeted header, section-table, index, float, string and path damage, each refused with a message or loaded as a valid scene; no crash, no leak.
+- `./build.sh test compiled` also makes the package `longname` (a texture path of ~740 bytes in 'é' folders) and loads it without its texture: the message arrives whole in a large buffer, and in every buffer of 1 byte up to its length it is cut at its end, NUL-terminated, never inside a UTF-8 character and never past the buffer. `./build.sh test parse_error` does the same for the text parser (bad tokens of 1000 bytes) and checks that short messages keep their text.
+- `./build.sh test export_strip`: the exported `monolith_scene.c/.h` contain no tokenizer, statement parser, model-file scan, compiler, number parsing (`strto*`, `ato*`, `sscanf`), `".map"` lookup or `MONOLITH_EDITOR`.
+- `build/tools/leakcheck` compiles a map and loads it (dumps, a shot with a reload, a damaged and a stale file).
 
 ## 7. Defaults chosen
 
 - Extension `.mapb`, flag `--compile <out> [--map <path>]`.
-- Compiled files are build output (exports, `examples/build.sh`), not committed: `.gitignore` lists `*.mapb`.
+- Compiled files are build output (exports, `./build.sh examples`), not committed: `.gitignore` lists `*.mapb`.
 - A game build's `MS_Load` on a package folder looks for `<name>.mapb`, with a clear error when only the `.map` is there.
 - No derived data (hidden faces, cell meshes, colliders) in this round.
 - Little-endian only; a big-endian host is refused.

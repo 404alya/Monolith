@@ -8,10 +8,10 @@ Every request goes through a queue on disk, worked through by one long-lived Cla
 |---|---|---|
 | Game (submit, `--import`) | `src/launcher.c` | writes the bundle, then `state` = `queued` as its last file; starts the coordinator terminal if none holds the lock; shows the queue in the HUD |
 | Coordinator lock wrapper | `src/launcher.c` (an `/bin/sh -c` script) | holds `requests/.coordinator/lock` while the coordinator's `claude` runs |
-| Queue tool | `tools/request-queue.sh` | every state change the coordinator makes (claim, finish, requeue, recover), the watcher (`wait`), the queue listing (`list`) |
+| Queue tool | `build/tools/request-queue` | every state change the coordinator makes (claim, finish, requeue, recover), the watcher (`wait`), the queue listing (`list`) |
 | Coordinator | `claude` started by the game with `.claude/skills/coordinator/SKILL.md` | schedules, starts subagents, relays questions, finishes bundles. Reads only the queue listing (built from `request.json` metadata), line 1 of a `question.md` and the subagents' one-line replies; never `request.md`, the images or the maps, never edits anything |
 | Subagent | Agent tool inside the coordinator | does one request under `.claude/skills/map-request/SKILL.md`, returns a one-line status |
-| Test doubles | `tools/stub-terminal.sh` (`MONOLITH_STUB_RUN`), `tools/stub-coordinator.sh`, `tools/test-coordinator.sh` | the same scheduling rules in shell, no Claude session |
+| Test doubles | `build/tools/stub-terminal` (`MONOLITH_STUB_RUN`), `build/tools/stub-coordinator`, `build/tools/test-coordinator` | the same scheduling rules in C, no Claude session |
 
 ## 2. Files on disk
 
@@ -20,9 +20,9 @@ Every request goes through a queue on disk, worked through by one long-lived Cla
 | State | Written by | Meaning |
 |---|---|---|
 | `queued` | game / `--import` | the bundle is complete and waits for the coordinator. **A bundle without `state` is never picked up** (per-request mode, a bundle still being written) |
-| `claimed` | `request-queue.sh claim` | a subagent has it. `claim.txt` next to it holds the fingerprint taken at the claim (§4) |
-| `question` | `request-queue.sh set <id> question` | the subagent asked something (`question.md`, line 1 = the question); the coordinator asks the developer in its terminal. Back to `claimed` when answered |
-| `done` | `request-queue.sh finish <id> done` | the subagent finished; `result.md` exists (required) |
+| `claimed` | `build/tools/request-queue claim` | a subagent has it. `claim.txt` next to it holds the fingerprint taken at the claim (§4) |
+| `question` | `build/tools/request-queue set <id> question` | the subagent asked something (`question.md`, line 1 = the question); the coordinator asks the developer in its terminal. Back to `claimed` when answered |
+| `done` | `build/tools/request-queue finish <id> done` | the subagent finished; `result.md` exists (required) |
 | `failed` | `finish <id> failed` / `recover` | not done; `result.md` says why (written by the tool when the subagent left none) |
 | `cancelled` | `finish <id> cancelled`; the game, only when no coordinator holds the lock | the developer cancelled it; `result.md` says whether anything had changed |
 
@@ -38,13 +38,13 @@ Transitions: `queued → claimed → (question ↔ claimed) → done | failed | 
 The game can't type into a running session, so the handoff is the file system:
 1. The game writes the bundle, then `state` (`queued`).
 2. If the lock is free (and no coordinator was started by this game in the last 20 s), it opens **one** terminal titled `monolith-claude: coordinator` running `claude [permission flags] --model <coordinator model> [MONOLITH_CLAUDE_ARGS] "<fixed prompt>"`, wrapped so the wrapper holds the lock; a second wrapper that finds the lock taken (two quick submits) waits 2 s for it, says so and exits. The fixed prompt names `.claude/skills/coordinator/SKILL.md` and the requests folder, never user text.
-3. The coordinator keeps **`tools/request-queue.sh wait`** running in the background (Bash `run_in_background`). It polls the folder once a second in shell (no tokens) and **exits** when a `queued` bundle or a `cancel` file appears that it has not reported yet; it prints the events and the queue listing. The exit wakes the coordinator through the harness. Subagent completions wake it the same way. An idle queue costs nothing.
+3. The coordinator keeps **`build/tools/request-queue wait`** running in the background (Bash `run_in_background`). It polls the folder once a second (no tokens) and **exits** when a `queued` bundle or a `cancel` file appears that it has not reported yet; it prints the events and the queue listing. The exit wakes the coordinator through the harness. Subagent completions wake it the same way. An idle queue costs nothing.
 4. On every wake the coordinator first re-arms the watcher, then acts. Because `seen` records what was reported, a bundle queued between the watcher's exit and its restart still fires the new watcher.
 
 ## 4. Recovery
 
 - A dead coordinator releases the lock; the next submit starts a new one.
-- On startup the coordinator runs `request-queue.sh start`: empties `seen`, **recovers**, prints the queue. Only one coordinator can hold the lock, so every `claimed` / `question` bundle belongs to a dead one. One that already has a `result.md` is finished as `done`.
+- On startup the coordinator runs `build/tools/request-queue start`: empties `seen`, **recovers**, prints the queue. Only one coordinator can hold the lock, so every `claimed` / `question` bundle belongs to a dead one. One that already has a `result.md` is finished as `done`.
 - **Fingerprint** (`claim.txt`, taken at the claim): `sha1sum` of every file in the request's map package, and one hash of the repo's code state (`git status --porcelain`, `git diff HEAD` and the sha1 of untracked files, outside `maps/` and `requests/`).
   - Nothing changed since the claim: back to `queued` (it runs again from the start).
   - Something changed: `failed`, with `result.md` = `Interrupted: the coordinator stopped mid-run; files changed, check them` plus the list of changed files. It is **reported, not re-run**: a half-applied edit run a second time would apply twice. The coordinator also tells the developer in its terminal.
@@ -56,7 +56,7 @@ A queued request starts (oldest first) only when no other running request uses t
 
 ### Models
 
-- The game chooses the tier per request (`LauncherChooseModel`) and records it in `request.json` `model` (`tier`, `name`). The coordinator passes it as the subagent's `model`: a name containing `haiku` / `sonnet` / `opus` / `fable` maps to that alias; anything else means "omit `model`" (the subagent inherits the coordinator's). `request-queue.sh list` prints the mapped value (`agent-model=`).
+- The game chooses the tier per request (`LauncherChooseModel`) and records it in `request.json` `model` (`tier`, `name`). The coordinator passes it as the subagent's `model`: a name containing `haiku` / `sonnet` / `opus` / `fable` maps to that alias; anything else means "omit `model`" (the subagent inherits the coordinator's). `build/tools/request-queue list` prints the mapped value (`agent-model=`).
 - `@fast` / `@default` / `@heavy` (and `@haiku` / `@sonnet` / `@opus`), `MONOLITH_MODEL` and `MONOLITH_MODEL_FAST/_DEFAULT/_HEAVY` decide `model.name`.
 - The coordinator runs on one fixed model: **`MONOLITH_COORDINATOR_MODEL`**, default `sonnet` (scheduling and relaying need little). `MONOLITH_CLAUDE_ARGS` go on the coordinator's command line; a `--model` in them sets the coordinator's model and, every request's `model.name`.
 
@@ -70,6 +70,6 @@ A cancel writes `requests/<id>/cancel`; the coordinator stops the subagent and t
 ## 7. Tests
 
 - `MONOLITH_REQUESTS_DIR` (tests only) moves `requests/` (bundles, queue, lock) elsewhere, so tests never meet a real coordinator and the leak check never touches real bundles.
-- `MONOLITH_CLAUDE` replaces the `claude` program (tests: `tools/stub-coordinator.sh`).
-- `tools/stub-terminal.sh` with `MONOLITH_STUB_RUN=<log>` runs the command after `-e` like a terminal would (no window) and appends one line per "window" to `$MONOLITH_STUB_OPENED`.
-- `tools/test-coordinator.sh` proves: three submits open one terminal; same-package requests never overlap, different packages overlap; a code request runs alone; killing the coordinator mid-run requeues untouched requests and reports touched ones on the next start.
+- `MONOLITH_CLAUDE` replaces the `claude` program (tests: `build/tools/stub-coordinator`).
+- `build/tools/stub-terminal` with `MONOLITH_STUB_RUN=<log>` runs the command after `-e` like a terminal would (no window) and appends one line per "window" to `$MONOLITH_STUB_OPENED`.
+- `build/tools/test-coordinator` proves: three submits open one terminal; same-package requests never overlap, different packages overlap; a code request runs alone; killing the coordinator mid-run requeues untouched requests and reports touched ones on the next start.

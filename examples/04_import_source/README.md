@@ -30,7 +30,7 @@ the cubes, models, materials, lights, sky, fog and post-processing into the map,
 ## Route 2: the capture shim (records what R3D draws)
 
 `import_source_capture` is the same `main.c`, compiled with `runtime/monolith_capture.h`
-put in front of it (`-include`, see `examples/build.sh`); the source is unchanged:
+put in front of it (`-include`, see `./build.sh examples`); the source is unchanged:
 
 ```sh
 MONOLITH_CAPTURE=/tmp/cap/forest examples/build/linux/04_import_source/import_source_capture
@@ -59,10 +59,10 @@ and the Kenney models' colours if their materials were overridden with `inherit 
 override's `albedo` defaults to white and replaces the file's colour factor: copy the colours
 `--inspect-model` lists into the override, or override only roughness / metalness per slot).
 
-The program builds through `examples/build.sh` (it links monolith's R3D copy and the static
-libraries `../build.sh` builds); `main.c` itself includes nothing from outside this folder, so a
+The program builds through `./build.sh examples` (it links monolith's R3D copy and the static
+libraries the root build made); `main.c` itself includes nothing from outside this folder, so a
 scratch copy of `examples/04_import_source/` builds on its own with the same compiler line. The
-test build (`examples/build.sh test`) adds `-include tests/examples/harness.h` for `--shot`.
+test build (`./build.sh examples test`) adds `-include tests/examples/harness.h` for `--shot`.
 
 ## Assets
 

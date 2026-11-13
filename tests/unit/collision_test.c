@@ -4,7 +4,7 @@
 // without leaving the ground, and stops at the 45 degree yawed wall's true face (its AABB would
 // stop it more than 0.3 m earlier). Also MS_ColliderTop / MS_ColliderBottom on axis-aligned
 // colliders (exactly max.y / min.y) and MS_Raycast's turned face normal.
-//   tests/unit/collision_test.sh           (builds it with ASan + UBSan and runs it)
+//   ./build.sh test collision          (builds it with ASan + UBSan and runs it)
 //   collision_test <tests/rotated>
 #include "player.h"
 #include <math.h>

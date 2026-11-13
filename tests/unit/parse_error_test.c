@@ -3,7 +3,7 @@
 // between and no length limit. A bad token of any length (here up to 100 000 bytes) arrives whole and
 // valid UTF-8; a successful load after a failure clears the message. Short messages keep their exact
 // text. Built like the editor (the runtime with MONOLITH_EDITOR) with ASan + UBSan:
-//   tests/unit/parse_error_test.sh       (builds it and runs it in build/parse-error-test/)
+//   ./build.sh test parse_error          (builds it and runs it in build/parse-error-test/)
 //   parse_error_test <scratch folder>
 #include "monolith_scene.h"
 #include <stdio.h>

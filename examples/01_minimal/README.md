@@ -28,7 +28,7 @@ external assets.
 
 ## Same image as the editor
 
-The test build (`examples/build.sh test`, [../README.md](../README.md)) renders it without a window:
+The test build (`./build.sh examples test`, [../README.md](../README.md)) renders it without a window:
 `examples/build/linux-test/01_minimal/minimal --shot x.png --view n` and
 `monolith --shot y.png --view n --map examples/01_minimal/scene` are pixel-identical (same
 1600 x 900 default, the same viewpoint-to-camera math as monolith's spectator, FXAA,

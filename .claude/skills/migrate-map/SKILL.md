@@ -36,11 +36,11 @@ Monolith reads exactly one map format (`MS_FORMAT_VERSION` in `runtime/monolith_
 
 3. **Build every reader first.** The steps are the `versions.md` entries N → N+1 … M−1 → M. Build each distinct `last-reader:` commit, one at a time, then the current monolith:
    ```bash
-   OLD_2="$(tools/old-monolith.sh <last-reader of 1 -> 2>)"; echo "exit $?"
+   OLD_2="$(build/tools/old-monolith <last-reader of 1 -> 2>)"; echo "exit $?"
    ./build.sh
    CUR="$ROOT/build/linux/monolith"
    ```
-   `tools/old-monolith.sh` prints only the binary's path on stdout (exit 0), reuses a finished build instantly, and on failure (exit 2–4) prints `FAILED`, the log's last lines and `left behind:` on stderr. Any failure here: refuse, `last-reader build failed`, with that stderr as evidence. Keep every `left behind:` line for the report.
+   `build/tools/old-monolith` prints only the binary's path on stdout (exit 0), reuses a finished build instantly, and on failure (exit 2–4) prints `FAILED`, the log's last lines and `left behind:` on stderr. Any failure here: refuse, `last-reader build failed`, with that stderr as evidence. Keep every `left behind:` line for the report.
 
 4. **Rewrite, one copy per step.** A fresh scratch folder, then a whole-package copy per version, with the map renamed `step-<K>.map` (K = the format it holds), so assets resolve and shots render:
    ```bash
@@ -69,12 +69,12 @@ Monolith reads exactly one map format (`MS_FORMAT_VERSION` in `runtime/monolith_
    reason: <one of: last-reader build failed | proof failed: <boxes|scene|shot <view>> | rule not covered: line L | newer than this monolith | outside the repo | not a map>
    step: N -> N+1 (last-reader <commit>)
    evidence:
-     <for a build failure: old-monolith.sh's FAILED line, the exit code, and the log path and last log lines when it made a log (exit 2 makes none)>
+     <for a build failure: old-monolith's FAILED line, the exit code, and the log path and last log lines when it made a log (exit 2 makes none)>
      <for a proof failure: the first 20 lines of the dump diff, or the image pair's paths and the changed-pixel count>
      <for rule not covered: the line, quoted>
    map: unchanged (sha256 <hash> before and after); nothing written next to it
    scratch: <scratch folder (kept for inspection), or: none (refused before step 4)>
-   left in /tmp: <what old-monolith.sh listed as left behind, or: reused <folder>, or: nothing>
+   left in /tmp: <what old-monolith listed as left behind, or: reused <folder>, or: nothing>
    ```
 
 7. **Success only: write.**
@@ -94,7 +94,7 @@ Monolith reads exactly one map format (`MS_FORMAT_VERSION` in `runtime/monolith_
      original kept: <name>.map.v<N> (remove it when you no longer need it)
      MAP.md: <updated lines | unchanged>
      ```
-     Then list the scratch folder and what `tools/old-monolith.sh` left in `/tmp`.
+     Then list the scratch folder and what `build/tools/old-monolith` left in `/tmp`.
 
 ## The proof script
 

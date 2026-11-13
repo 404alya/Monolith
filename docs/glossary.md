@@ -56,7 +56,7 @@ Terms used across these pages, in alphabetical order.
 
 **Subagent:** a helper Claude Code agent the coordinator starts for one request. It edits the map, checks the result with screenshots and writes `result.md`.
 
-**Task lists:** the repo's two lists of open bugs and future work, one entry per line, titles starting `bug:`, `task:` or `idea:`: the maintainer's `TODO.md` (`tools/todo.sh`) and the AI's `.claude/TODO.md` (`tools/ai-todo.sh`), where Claude Code sessions note what they found or deferred ([CONTRIBUTING.md](../CONTRIBUTING.md#bugs-and-tasks)).
+**Task lists:** the repo's two lists of open bugs and future work, one entry per line, titles starting `bug:`, `task:` or `idea:`: the maintainer's `TODO.md` (`build/tools/todo`) and the AI's `.claude/TODO.md` (`build/tools/ai-todo`), where Claude Code sessions note what they found or deferred ([CONTRIBUTING.md](../CONTRIBUTING.md#bugs-and-tasks)).
 
 **Tier:** the size of Claude model a request gets (fast, default, heavy), chosen from its wording; `@fast` / `@default` / `@heavy` at the start of a prompt overrides it.
 

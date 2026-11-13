@@ -10,7 +10,7 @@ Every entry has these parts, in this order:
 - **Changes:** what format N+1 changed, in a sentence or two.
 - **Rewrite rules:** numbered, applied in order, one per kind of affected line. Each one has a *before* and an *after* example line. A line no rule names is copied unchanged, byte for byte (comments, blank lines and trailing comments included). On a line a rule changes, everything after the last number it rewrites stays as it was, including the spaces before a trailing `#` comment. If a line is affected but no rule covers its case, the migration is refused (the skill's refusal report: `rule not covered`).
 - **Lossless:** `yes` (every dump and shot of the result equals the original's), or `no` with exactly what differs and how the proof allows for it.
-- **last-reader:** the full commit hash of the newest commit that still reads format N. `tools/old-monolith.sh` must be able to build it.
+- **last-reader:** the full commit hash of the newest commit that still reads format N. `build/tools/old-monolith` must be able to build it.
 - **Proof:** what the three checks (box dump, scene dump, shots) must show for this step, including any allowed difference.
 
 Number formats in the *after* lines: write a computed number as the shortest decimal that parses back to the same `float`. For example, `40 + 8.4` is written `48.4`, never `48.400001`. Python gives the float sum and its shortest decimal (pass the two numbers):
