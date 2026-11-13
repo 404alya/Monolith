@@ -135,10 +135,11 @@ typedef struct {
 // A model file (glTF/GLB, OBJ, FBX, DAE through R3D's importer), loaded once per map load
 typedef struct {
     const char *path;           // package-relative
-    R3D_Model model;            // GPU loads only (zero in noGpu scenes)
+    R3D_Model model;            // GPU loads only (zero in noGpu scenes); its meshCount and materialCount
+                                // are the file's mesh and material (slot) counts, so 0 in noGpu scenes
     bool loaded;                // false in noGpu scenes: the file was not read, bounds are a zero box
     BoundingBox bounds;         // model space (R3D's aabb: node transforms applied, no unit scale)
-    int meshCount, triangleCount, materialCount;
+    int triangleCount;          // summed over the meshes (R3D doesn't store it), 0 in noGpu scenes
     int line;                   // first map line that uses it
 } MS_ModelFile;
 

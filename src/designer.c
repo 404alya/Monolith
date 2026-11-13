@@ -114,7 +114,7 @@ const char *DesignerMaterialLabel(MS_ObjRef o)
     const MS_ModelInstance *mi = &scene->models[o.index];
     if (mi->slotCount <= 0) return "(own)";
     const MS_SlotMaterial *slots = &scene->modelSlots[mi->slotFirst];
-    int fileSlots = scene->modelFiles[mi->file].materialCount;
+    int fileSlots = scene->modelFiles[mi->file].model.materialCount;
     bool all = fileSlots > 0;
     for (int s = 0; s < fileSlots && all; s++) {
         bool found = false;

@@ -6745,12 +6745,10 @@ static bool LoadModelFile(SceneData *d, int i)
     }
     F->loaded = true;
     F->bounds = F->model.aabb;
-    F->meshCount = F->model.meshCount;
-    F->materialCount = F->model.materialCount;
     BuildModelPick(F, &d->modelPick[i], d->filePaint && d->filePaint[i].keepData);
     if (d->filePaint) PaintLoadUnwrap(d, i);
     TraceLog(LOG_INFO, "monolith_scene: model %s: %d meshes, %d triangles, %d materials, size %.3f x %.3f x %.3f",
-             F->path, F->meshCount, F->triangleCount, F->materialCount, F->bounds.max.x - F->bounds.min.x,
+             F->path, F->model.meshCount, F->triangleCount, F->model.materialCount, F->bounds.max.x - F->bounds.min.x,
              F->bounds.max.y - F->bounds.min.y, F->bounds.max.z - F->bounds.min.z);
     return true;
 }
@@ -7013,7 +7011,7 @@ static bool BuildModelGroups(SceneData *d)
     if (d->modelCount == 0) return true;
     int maxSlots = 1;
     for (int f = 0; f < d->modelFileCount; f++)
-        if (d->modelFiles[f].materialCount > maxSlots) maxSlots = d->modelFiles[f].materialCount;
+        if (d->modelFiles[f].model.materialCount > maxSlots) maxSlots = d->modelFiles[f].model.materialCount;
     d->modelGroups = calloc(d->modelCount, sizeof(ModelGroup));
     int *groupOf = malloc(sizeof(int) * d->modelCount);
     int *tmp = malloc(sizeof(int) * maxSlots);
@@ -7025,12 +7023,12 @@ static bool BuildModelGroups(SceneData *d)
     for (int i = 0; i < d->modelCount; i++) {
         const MS_ModelInstance *M = &d->models[i];
         const MS_ModelFile *F = &d->modelFiles[M->file];
-        int slots = F->materialCount;
+        int slots = F->model.materialCount;
         for (int k = 0; k < M->slotCount; k++)
-            if (d->modelSlots[M->slotFirst + k].slot >= F->materialCount && (i == 0 || d->models[i - 1].ref.line != M->ref.line))
+            if (d->modelSlots[M->slotFirst + k].slot >= F->model.materialCount && (i == 0 || d->models[i - 1].ref.line != M->ref.line))
                 TraceLog(LOG_WARNING, "monolith_scene: %s:%d: material.%d: \"%s\" has %d material slot%s (0..%d); ignored",
-                         d->srcPath, M->ref.line, d->modelSlots[M->slotFirst + k].slot, F->path, F->materialCount,
-                         F->materialCount == 1 ? "" : "s", F->materialCount - 1);
+                         d->srcPath, M->ref.line, d->modelSlots[M->slotFirst + k].slot, F->path, F->model.materialCount,
+                         F->model.materialCount == 1 ? "" : "s", F->model.materialCount - 1);
         for (int s = 0; s < slots; s++) tmp[s] = SlotMaterial(d, M, s);
         int g = 0;
         for (; g < d->modelGroupCount; g++) {
@@ -7069,7 +7067,7 @@ static bool BuildModelGroups(SceneData *d)
         ModelGroup *G = &d->modelGroups[g];
         const MS_ModelFile *F = &d->modelFiles[G->file];
         G->model = F->model;
-        G->model.materials = malloc(sizeof(R3D_Material) * (F->materialCount > 0 ? F->materialCount : 1));
+        G->model.materials = malloc(sizeof(R3D_Material) * (F->model.materialCount > 0 ? F->model.materialCount : 1));
         if (!G->slotMat || !G->model.materials) { ok = false; break; }
         // Paint (docs/painting.md 4.4): a group with a slot drawn with a paint shader carries its
         // instances' first paint key (x; 0: none) and the draw kind 2 (y); a painted file is drawn
@@ -7077,7 +7075,7 @@ static bool BuildModelGroups(SceneData *d)
         const FilePaint *FP = d->filePaint ? &d->filePaint[G->file] : NULL;
         if (FP && FP->meshes) G->model.meshes = FP->meshes;
         bool painted = false;
-        for (int s = 0; s < F->materialCount; s++) {
+        for (int s = 0; s < F->model.materialCount; s++) {
             const R3D_Material *own = &F->model.materials[s];
             int mi = G->slotMat[s];
             if (mi >= 0) painted = painted || d->matDefs[mi].painted;
@@ -8059,11 +8057,11 @@ static int FileUvKind(SceneData *d, int file, int slot)
     if (!FP || !F->loaded) return PUV_NEEDS_UNWRAP;
     if (F->model.skeleton.boneCount > 0) return PUV_SKINNED;
     if (FP->hasUnwrap) return PUV_UNWRAP;
-    if (slot < 0 || slot >= F->materialCount || !F->model.meshData) return PUV_NEEDS_UNWRAP;
+    if (slot < 0 || slot >= F->model.materialCount || !F->model.meshData) return PUV_NEEDS_UNWRAP;
     if (!FP->uvKind) {
-        if (!(FP->uvKind = malloc((size_t)F->materialCount))) return PUV_NEEDS_UNWRAP;
-        memset(FP->uvKind, -1, (size_t)F->materialCount);
-        FP->uvKindCount = F->materialCount;
+        if (!(FP->uvKind = malloc((size_t)F->model.materialCount))) return PUV_NEEDS_UNWRAP;
+        memset(FP->uvKind, -1, (size_t)F->model.materialCount);
+        FP->uvKindCount = F->model.materialCount;
     }
     if (FP->uvKind[slot] < 0) FP->uvKind[slot] = (signed char)OwnUvKind(&F->model, slot);
     return FP->uvKind[slot];
@@ -8139,7 +8137,7 @@ static void PaintResolve(SceneData *d)
             const MS_ModelInstance *M = &d->models[e->object];
             const MS_ModelFile *F = &d->modelFiles[M->file];
             int uv = F->loaded ? FileUvKind(d, M->file, e->slot) : PUV_OWN;
-            if ((F->loaded && e->slot >= F->materialCount) || e->slot > 255 || SlotMaterial(d, M, e->slot) != e->material)
+            if ((F->loaded && e->slot >= F->model.materialCount) || e->slot > 255 || SlotMaterial(d, M, e->slot) != e->material)
                 why = PAINT_NOT_DRAWN;
             else if (uv == PUV_SKINNED) why = PAINT_SKINNED;
             else if (uv == PUV_NEEDS_UNWRAP) why = PAINT_NEEDS_UNWRAP;
@@ -8295,7 +8293,7 @@ static bool PaintKeys(SceneData *d, const SceneData *old, const int *boxFrom, co
     for (int i = 0; i < d->modelCount; i++) {
         if (d->modelPaintKey[i] >= 0) continue;
         int o = old && modelFrom && old->modelPaintKey ? modelFrom[i] : -1;
-        int slots = d->modelFiles[d->models[i].file].materialCount;
+        int slots = d->modelFiles[d->models[i].file].model.materialCount;
         if (o >= 0 && old->modelPaintKey[o] > 0) d->modelPaintKey[i] = old->modelPaintKey[o];
         else { d->modelPaintKey[i] = next; next += slots > 0 ? slots : 1; }
     }
@@ -9679,9 +9677,9 @@ static void PaintLiveUnwrap(const MS_Private *p, SceneData *d, int i, const Scen
         FP->hasUnwrap = UnwrapCopy(&FP->unwrap, &OP->unwrap);
         FP->unwrapGen = OP->unwrapGen;
     }
-    if (OP && OP->uvKind && F->materialCount > 0 && (FP->uvKind = malloc((size_t)F->materialCount))) {
-        memcpy(FP->uvKind, OP->uvKind, (size_t)F->materialCount);
-        FP->uvKindCount = F->materialCount;
+    if (OP && OP->uvKind && F->model.materialCount > 0 && (FP->uvKind = malloc((size_t)F->model.materialCount))) {
+        memcpy(FP->uvKind, OP->uvKind, (size_t)F->model.materialCount);
+        FP->uvKindCount = F->model.materialCount;
     }
 }
 
@@ -10098,9 +10096,7 @@ MS_ReloadResult MS_EditSetText(MS_Scene *s, const char *text, int size, MS_EditS
                 F->model = O->model;
                 F->loaded = true;
                 F->bounds = O->bounds;
-                F->meshCount = O->meshCount;
                 F->triangleCount = O->triangleCount;
-                F->materialCount = O->materialCount;
                 d->modelPick[i] = old->modelPick[B.fileFrom[i]];
                 if (d->filePaint) PaintLiveUnwrap(p, d, i, old, B.fileFrom[i]);
             } else ok = LoadModelFile(d, i);
@@ -10152,7 +10148,7 @@ MS_ReloadResult MS_EditSetText(MS_Scene *s, const char *text, int size, MS_EditS
         for (int j = 0; ok && j < d->modelCount; j++) if (modelFrom[j] < 0) DirtyAdd(p, d->models[j].bounds);
         for (int j = 0; ok && matRebuild && j < d->modelCount; j++) {
             bool uses = false;
-            for (int sl = 0; modelFrom[j] >= 0 && sl < d->modelFiles[d->models[j].file].materialCount && !uses; sl++) {
+            for (int sl = 0; modelFrom[j] >= 0 && sl < d->modelFiles[d->models[j].file].model.materialCount && !uses; sl++) {
                 int m = SlotMaterial(d, &d->models[j], sl);
                 uses = m >= 0 && (matRebuild[m] & PLAN_MATERIAL);
             }
@@ -10955,7 +10951,7 @@ bool MS_GetDrawRange(const MS_Scene *s, int range, MS_DrawRangeInfo *out)
     out->kind = MS_DRAW_MODELS;
     out->modelFile = G->file;
     out->slotMaterials = G->slotMat;
-    out->slotCount = F->materialCount;
+    out->slotCount = F->model.materialCount;
     out->bounds = R->bounds;
     out->triangles = (long long)F->triangleCount * R->count;
     out->castShadow = G->castShadow;
@@ -11329,7 +11325,7 @@ static void TextureShadowsInvalidate(MS_Private *p, const char *full)
         for (int i = 0; i < d->modelCount; i++) {
             const MS_ModelInstance *I = &d->models[i];
             bool uses = false;
-            for (int sl = 0; sl < d->modelFiles[I->file].materialCount && !uses; sl++) uses = SlotMaterial(d, I, sl) == m;
+            for (int sl = 0; sl < d->modelFiles[I->file].model.materialCount && !uses; sl++) uses = SlotMaterial(d, I, sl) == m;
             if (uses) u = BoundsUnion(u, I->bounds);
         }
         if (u.min.x <= u.max.x) DirtyAdd(p, u);

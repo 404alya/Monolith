@@ -90,7 +90,7 @@ bool DumpScene(const MS_Scene *s, const char *path, bool diff)
         fprintf(f, "modelfile");
         Index(f, diff, i);
         fprintf(f, " \"%s\" loaded %s meshes %d triangles %d materials %d bounds", F->path,
-                F->loaded ? "yes" : "no", F->meshCount, F->triangleCount, F->materialCount);
+                F->loaded ? "yes" : "no", F->model.meshCount, F->triangleCount, F->model.materialCount);
         HexBox(f, F->bounds);
         fprintf(f, "  # size %.4f %.4f %.4f\n", F->bounds.max.x - F->bounds.min.x, F->bounds.max.y - F->bounds.min.y,
                 F->bounds.max.z - F->bounds.min.z);
