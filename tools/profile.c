@@ -19,10 +19,10 @@
 //      lowers that limit by itself after slow sampling interrupts (dwarf stacks are slow: e.g. to
 //      2000/s); above about half of it perf is throttled, drops samples in bursts and biases every
 //      share (measured on machine A: 80% of it throttles, 45% doesn't). --period overrides.
-//   3. Record: `perf record -e cycles:u -c <period> --call-graph dwarf,16384` of the game, run in the
+//   3. Record: `perf record -e cycles:u -c <period> --call-graph dwarf,16384` of monolith, run in the
 //      repo root (it resolves relative paths such as --shot files against the repo, like a plain
 //      run) with __GL_SYNC_TO_VBLANK=0 and __GL_YIELD=USLEEP (--spin: the driver's default
-//      spin-wait in glFinish). The game's output goes to run.log. perf.data (~16 KB per sample)
+//      spin-wait in glFinish). monolith's output goes to run.log. perf.data (~16 KB per sample)
 //      goes into a temporary folder under /tmp, deleted at the end (--keep-data moves it to --out).
 //   4. Convert: `perf script` writes perf.txt, the text the report reads.
 //   5. perf-stats.txt: the period and perf's sample, throttle and lost counts; a warning when perf
@@ -824,12 +824,12 @@ static void PrintTail(const char *path, int n)
     free(text);
 }
 
-// Step 3. perf record of the game. The game's output goes to run.log.
+// Step 3. perf record of monolith. Its output goes to run.log.
 static void Record(const Options *o, const char *root, const char *outDir, long long period, const char *perfData)
 {
     char *periodText = Format("%lld", period);
     char *runLog = Format("%s/run.log", outDir);
-    // the argv: perf record ... -- <bin> <game args...>
+    // the argv: perf record ... -- <bin> <monolith args...>
     char **argv = Alloc(sizeof(char *) * (size_t)(o->nGameArgs + 16));
     int n = 0;
     char *perfArgs[] = { "perf", "record", "-q", "-e", "cycles:u", "-c", periodText,

@@ -250,7 +250,7 @@ The setting lives in the editor's settings (`settings.c`: file key `edit_save`, 
 **Editor** group of the F2 panel, `GfxSettings.editSave`); `--edit-save <manual|auto>` overrides
 it for one run. It is not part of `MS_Quality` or the runtime, so the export never sees it.
 
-### 4.2 Closing the game with unsaved edits
+### 4.2 Closing the editor with unsaved edits
 
 raylib can't cancel a window close, so the working text is written to
 `<settings folder>/unsaved/<map name>-<YYYYMMDD-HHMMSS>.map` (the settings file's folder:
@@ -866,7 +866,7 @@ box and a model with the line before and after.
   `triedHash` as a load from disk would.
 
 **Working copy** (`src/mapedit.c`): the working copy exists from `MapEditBegin` on (the first
-edit / undo in the game, `--edit-script`); without it (`--apply-edits`) the old file path runs
+edit / undo in the editor, `--edit-script`); without it (`--apply-edits`) the old file path runs
 unchanged (the same output and bytes). `MapEditor` gained `workHash` (so the per-frame unsaved
 count never hashes the text), `loadVersion` (a reload from disk is seen without a hash) and
 `lastStats`; `EditStep` gained `anchorId` (the entity an added model stands on, for a rebase).

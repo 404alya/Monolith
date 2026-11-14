@@ -78,7 +78,7 @@ const char *LauncherEventNote(bool *warning);
 
 // Removes MONOLITH_ALLOW_WINDOW from this process's environment, so the Claude Code sessions
 // the launcher starts (agents, whose shells set CLAUDECODE) never inherit the override of the
-// game's window guard. Call once, after main() has read it and before any launch.
+// editor's window guard. Call once, after main() has read it and before any launch.
 void LauncherScrubEnv(void);
 
 // Polls the running classifiers (every call, without waiting) and the open requests for
@@ -115,13 +115,13 @@ unsigned char LauncherCloseNumber(int number);
 unsigned char LauncherCloseCoordinator(void);
 // Number of the newest listed request (0 if none)
 int LauncherNewestNumber(void);
-// Requests of this game run that are queued or running on the map file mapPath (absolute or
+// Requests of this editor run that are queued or running on the map file mapPath (absolute or
 // relative): how many, and the HUD number of the newest one (*newest, 0 = none)
 int LauncherOpenOnMap(const char *mapPath, int *newest);
 // A closed request's terminal process is still running (being shut down)
 bool LauncherClosing(void);
 // When quitting: kills the classifiers still running and queues (sends) their bundles on the
-// default tier ("game quit while classifying"); then MONOLITH_CLOSE_ON_EXIT=1 closes every
+// default tier ("editor quit while classifying"); then MONOLITH_CLOSE_ON_EXIT=1 closes every
 // finished request's terminal, or the coordinator if none of this run's requests is still open
 void LauncherCloseOnExit(void);
 

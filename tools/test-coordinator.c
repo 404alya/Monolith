@@ -16,7 +16,7 @@
 //   MONOLITH_CLASSIFIER=off                       no AI classifier: every request on the default tier at once
 //                                                 (scheduling doesn't depend on the tier; the classifier's own
 //                                                 cases run with build/tools/stub-classifier in the leak check)
-// The game runs only with --shot (a hidden window), --new-map and --submit.
+// monolith runs only with --shot (a hidden window), --new-map and --submit.
 // It also sets MONOLITH_LAUNCH=coordinator and MONOLITH_STUB_WORK=6 (each stub "subagent" works 6 s, long
 // enough to see overlaps in the queue log), and unsets MONOLITH_STUB_LOG, MONOLITH_CLAUDE_ARGS and
 // MONOLITH_MODEL so the developer's settings don't leak in.
@@ -25,7 +25,7 @@
 // requests on two packages run in parallel; a code request runs alone; the HUD side follows the state file;
 // CTRL+K n (--close-submitted) cancels a running request; killing the coordinator mid-run requeues untouched
 // requests and reports touched ones on the next start; without a coordinator a queued request is cancelled
-// by the game itself; per-request mode still opens one terminal per request without a state file.
+// by the editor itself; per-request mode still opens one terminal per request without a state file.
 // Overlaps are read from the queue log's timestamps (the claim and the end of each request).
 //
 // Output: one line per step ("  ok: ..." / "  FAIL: ..."), ending "test-coordinator: OK" (exit 0) or
@@ -248,10 +248,10 @@ static void Sleep(double s)
 
 // #region Submits and waiting
 
-// Submit <package> <text> [extra game flags...]: the game with --shot (hidden window), the package and the
+// Submit <package> <text> [extra monolith flags...]: monolith with --shot (hidden window), the package and the
 // text as a submitted request, its output in submit-<n>.out. Prints "  submit <n> (<package name>): <id>
-// (<the game's first submit: line, cut to 160 bytes>)". Returns the new bundle's id (heap string), or NULL
-// when the game reported none (then the test fails).
+// (<the editor's first submit: line, cut to 160 bytes>)". Returns the new bundle's id (heap string), or NULL
+// when the editor reported none (then the test fails).
 static char *Submit(const char *map, const char *text, const char **extra, size_t extraCount)
 {
     gN++;
@@ -507,11 +507,11 @@ static const char *Terminals(void)
 int main(int argc, char **argv)
 {
     ToolInit(argv, "test-coordinator", "test-coordinator");
-    // cd "$ROOT": the game, the bundles' paths and the messages are relative to the repo root
+    // cd "$ROOT": monolith, the bundles' paths and the messages are relative to the repo root
     if (chdir(gToolRoot) != 0) ToolDie(1, "cd %s: %s", gToolRoot, strerror(errno));
     bool keep = argc > 1 && strcmp(argv[1], "--keep") == 0;
 
-    // what the test needs: the game, flock (the game's lock wrapper uses it), the three programs
+    // what the test needs: monolith, flock (the editor's lock wrapper uses it), the three programs
     gGame = strdup(nob_temp_sprintf("%s/build/linux/monolith", gToolRoot));
     if (access(gGame, X_OK) != 0) ToolDie(1, "%s missing (./build.sh)", gGame);
     if (!InPath("flock")) ToolDie(1, "flock (util-linux) missing");
@@ -530,7 +530,7 @@ int main(int argc, char **argv)
     gLog = strdup(nob_temp_sprintf("%s/.coordinator/log", gR));
     if (!ToolMkdirP(gR)) return 1;
 
-    // the environment every game run and its children see
+    // the environment every monolith run and its children see
     setenv("MONOLITH_REQUESTS_DIR", gR, 1);
     setenv("MONOLITH_TERMINAL", terminal, 1);
     setenv("MONOLITH_STUB_RUN", nob_temp_sprintf("%s/coordinator.out", gT), 1);
@@ -583,8 +583,8 @@ int main(int argc, char **argv)
     if (Opened() == 1) Ok("still one terminal");
     else Bad("%s terminals", Terminals());
 
-    // 2. a code request runs alone; the game's HUD follows the state file
-    Echo("2. a code request runs alone; the game's HUD side follows the state");
+    // 2. a code request runs alone; the editor's HUD follows the state file
+    Echo("2. a code request runs alone; the editor's HUD side follows the state");
     char *C1 = Submit(A, "[code] test engine change", NULL, 0);
     const char *waitLong[] = {"--submit-wait", "20"};
     char *B2 = Submit(B, "test two on map b", waitLong, 2);
@@ -594,14 +594,14 @@ int main(int argc, char **argv)
     st = Overlap(C1, B2);
     if (st == 1) Ok("the code request ran alone");
     else Bad("the code request overlapped (status %d)", st);
-    // (the game counts a request done as soon as result.md has a line, so it may never see "claimed -> done":
+    // (the editor counts a request done as soon as result.md has a line, so it may never see "claimed -> done":
     // the stub writes result.md a moment before finishing the state)
     const char *out2 = strdup(nob_temp_sprintf("%s/submit-%d.out", gT, gN));
     if (FileHas(out2, Contains, nob_temp_sprintf("request %s: queued -> claimed", B2 ? B2 : "")) &&
         FileHas(out2, Contains, nob_temp_sprintf("request %s done: Stub coordinator", B2 ? B2 : ""))) {
-        Ok("the game saw queued -> claimed, then done with result.md line 1");
+        Ok("the editor saw queued -> claimed, then done with result.md line 1");
     } else {
-        Bad("the game's log lacks the state changes of %s (see %s)", B2 ? B2 : "", out2);
+        Bad("the editor's log lacks the state changes of %s (see %s)", B2 ? B2 : "", out2);
     }
 
     // 3. CTRL+K n cancels a running request
@@ -635,7 +635,7 @@ int main(int argc, char **argv)
             line = nl ? nl + 1 : line + len;
         }
         free(text);
-        Ok("the game asked for the cancel (%s)", msg ? msg : "");
+        Ok("the editor asked for the cancel (%s)", msg ? msg : "");
         free(msg);
     } else {
         Bad("no cancel message (see %s)", out3);
@@ -702,8 +702,8 @@ int main(int argc, char **argv)
     if (st == 1) Ok("after the restart map_b's requests still ran in sequence");
     else Bad("overlap %s / %s (status %d)", B3 ? B3 : "", B4 ? B4 : "", st);
 
-    // 5. no coordinator: the game cancels a queued request itself
-    Echo("5. no coordinator: a queued request is cancelled by the game itself");
+    // 5. no coordinator: the editor cancels a queued request itself
+    Echo("5. no coordinator: a queued request is cancelled by the editor itself");
     pg = LastGroup();
     KillGroup(pg);
     free(pg);
@@ -719,7 +719,7 @@ int main(int argc, char **argv)
     }
     if (StateIs(Y1 ? Y1 : "", "cancelled")) {
         char *h = Head1(nob_temp_sprintf("%s/%s/result.md", gR, Y1));
-        Ok("the game cancelled it: %s", h);
+        Ok("the editor cancelled it: %s", h);
         free(h);
     } else {
         char *s = StateOf(Y1 ? Y1 : "");

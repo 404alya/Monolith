@@ -6,13 +6,13 @@ Terms used across these pages, in alphabetical order.
 
 **Brief, design brief:** a map's `MAP.md`: its style, scale, materials, lighting, rules for new content and named groups. Every request on the map is carried out in its style ([map-format.md](map-format.md) §1.2).
 
-**Bundle:** the folder the game writes for one request, `requests/<date>_<slug>/`: the prompt, screenshots, the camera, what the crosshair hit, the selection, the regions and the volumes, and later the result.
+**Bundle:** the folder the editor writes for one request, `requests/<date>_<slug>/`: the prompt, screenshots, the camera, what the crosshair hit, the selection, the regions and the volumes, and later the result.
 
 **Compiled map** (`<name>.mapb`): a map's text compiled by `monolith --compile` (and by `--export`) into fixed-size binary records. Games and the game-style examples load it; their runtime has no text parser. The `.map` text stays the source: edit it and compile again ([compiled-map.md](compiled-map.md)).
 
-**Classifier, AI classifier:** a small one-shot Claude run (`claude -p` on Fable, Opus as fallback, no tools) the game starts for each request without an override, before it queues the bundle: it reads the request and its context and picks the tier ([request-queue.md](request-queue.md) "Models"). Not the coordinator and not one of its subagents.
+**Classifier, AI classifier:** a small one-shot Claude run (`claude -p` on Fable, Opus as fallback, no tools) the editor starts for each request without an override, before it queues the bundle: it reads the request and its context and picks the tier ([request-queue.md](request-queue.md) "Models"). Not the coordinator and not one of its subagents.
 
-**Coordinator:** the one Claude Code session the game opens in its own terminal. It takes requests from the queue and hands each to a subagent ([request-queue.md](request-queue.md)).
+**Coordinator:** the one Claude Code session the editor opens in its own terminal. It takes requests from the queue and hands each to a subagent ([request-queue.md](request-queue.md)).
 
 **Draw mode:** key B in spectator mode: paint on boxes and models with a brush, the colour picker and the draw panel. The first stroke on a face or model part gives it a rectangle in its material's paint atlas; strokes are undoable with the edits and saved with Ctrl+S ([painting.md](painting.md), [user-guide.md](user-guide.md)).
 
@@ -24,11 +24,11 @@ Terms used across these pages, in alphabetical order.
 
 **Fog cache** (`--fog-cache`): the volumetric fog's sun visibility baked once per load into a 3D texture, so the fog doesn't sample the shadow map every frame. A quality trade-off used by the high, medium and low presets.
 
-**Frame reuse:** when the camera and everything else that affects the image stand still, the game shows the last rendered frame again instead of rendering a new one.
+**Frame reuse:** when the camera and everything else that affects the image stand still, the editor shows the last rendered frame again instead of rendering a new one.
 
 **Group:** a named set of boxes, models and lights in a map (`group "clearing: camp"`). Requests and the HUD refer to things by group; Ctrl+click selects one.
 
-**Hot reload:** the game watches the map package's files and reloads the map when one changes, keeping the old version loaded while a new one has errors.
+**Hot reload:** the editor watches the map package's files and reloads the map when one changes, keeping the old version loaded while a new one has errors.
 
 **IBL, ambient map:** image-based lighting: the soft light from the sky that reaches every surface, computed from a (procedural) sky image.
 

@@ -4,7 +4,7 @@
 // else to close shows a single "See keybindings" button (ENTER or a click opens the panel, ESC
 // dismisses it). In the panel LEFT / RIGHT (or a click on a section tab) change the section,
 // typing searches every section at once, UP / DOWN / PGUP / PGDN / HOME / END scroll, ESC or F1
-// closes. While the menu or the panel is open the camera and the game keys are frozen and the
+// closes. While the menu or the panel is open the camera and the editor keys are frozen and the
 // cursor is free (like the settings panel). Keep the table in step with src/main.c's header
 // comment and docs/user-guide.md. The view-only build (MONOLITH_EDITING 0, common.h) lists only
 // the keys that work there: no editing sections, no rows marked EDITING, its own VIEWING rows.

@@ -38,7 +38,7 @@
 //   M / ESC                leave the mode (V and C leave it too); with unsaved edits the first
 //                          press only says so (again within 3 s leaves; the edits stay live)
 // CTRL+Z / CTRL+SHIFT+Z (or CTRL+Y) undo / redo manual edits anywhere in spectator mode, CTRL+S
-// saves. When a request of this game run is queued or running on the map, the first edit after
+// saves. When a request of this editor run is queued or running on the map, the first edit after
 // the last save (and a save) first warns; the same key again within 3 s goes ahead (until
 // another request is sent).
 #include "editmode.h"

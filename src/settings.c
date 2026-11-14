@@ -463,7 +463,7 @@ bool GfxSave(const GfxSettings *s, const char *path)
     FILE *f = fopen(path, "w");
     if (!f) return false;
     MS_QualityLevel p = GfxPreset(s);
-    fprintf(f, "# monolith graphics settings: written by the game (F2 opens the settings panel).\n"
+    fprintf(f, "# monolith graphics settings: written by the editor (F2 opens the settings panel).\n"
                "# preset low|medium|high|ultra sets every scene setting; keys after it override single\n"
                "# ones (custom = only the keys). Command-line flags override these for one run.\n");
     fprintf(f, "preset = %s\n", MS_QualityName(p));

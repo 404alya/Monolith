@@ -1,6 +1,6 @@
 // Graphics settings of the editor: the runtime's MS_Quality (presets, what the scene renders)
 // plus the window-only parts (vsync, fps cap, frame reuse, window MSAA) and the editor's own
-// settings (the edit save mode), the settings file and the row table the in-game panel
+// settings (the edit save mode), the settings file and the row table the editor's panel
 // (settingspanel.c) and the file share.
 #ifndef MONOLITH_SETTINGS_H
 #define MONOLITH_SETTINGS_H
@@ -31,7 +31,7 @@ const char *GfxDefaultPath(void);
 // rest still loads; *ignored = how many lines were ignored.
 bool GfxLoad(GfxSettings *s, const char *path, int *ignored);
 bool GfxSave(const GfxSettings *s, const char *path);       // creates the folder
-// Where the working copy of map `mapPath` goes when the game closes with unsaved edits: the
+// Where the working copy of map `mapPath` goes when the editor closes with unsaved edits: the
 // settings file's folder (GfxDefaultPath), unsaved/<map name>-<YYYYMMDD-HHMMSS>.map (the folder is
 // created). False when it can't be made.
 bool GfxUnsavedPath(const char *mapPath, char *out, int outSize);

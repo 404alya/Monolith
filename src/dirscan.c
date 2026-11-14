@@ -2,7 +2,7 @@
 //
 // Replaces raylib's LoadDirectoryFilesEx for those two (QA2 F8/F9/F10): raylib joins paths
 // into a fixed 4096-byte stack buffer with sprintf (a symlink to "." with a long name
-// overflowed it: stack smashing, the game crashed on F9), follows symlinked folders (two
+// overflowed it: stack smashing, the editor crashed on F9), follows symlinked folders (two
 // links to "." doubled the walk per level: a hang), and stops silently at 8192 files (a
 // listing's counts were wrong). This walker builds paths on the heap, doesn't
 // follow symlinked folders (Windows: reparse points such as junctions), and stops after

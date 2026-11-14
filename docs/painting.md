@@ -1,7 +1,7 @@
 # Painting
 
 Draw mode (**B**) lets the developer paint on any box or model in the editor without a request and
-without leaving the game. This is the design the development rounds work from, written in the same
+without leaving it. This is the design the development rounds work from, written in the same
 way as `docs/live-editing.md` (the working copy, live edits, undo, panels and verification flags that
 painting builds on). Implementation notes follow at the end, one per stream as it merges.
 
@@ -655,7 +655,7 @@ Unsaved state, auto save (`edit_save = auto`) and the HUD's count as in the firs
   monolith", the model's row's author, licence and attribution. A model without an `ASSETS.md` row
   is refused at the first stroke that would make its unwrap ("models/x.glb has no licence row").
 
-### 11.3 Closing the game with unsaved paint
+### 11.3 Closing the editor with unsaved paint
 
 As in the first round, with atlases and sidecars under `<settings folder>/unsaved/<map>-<time>/`.
 
@@ -1024,7 +1024,7 @@ and where it differs from §1–§14 (which now say what was settled).
   (`MS_ModelSlotPaintTriangle` with the hit's barycentrics). Interactively the click only says
   "unwrapping x.glb for paint ...", the HUD shows it for a frame, and the next `DrawModeUpdate` unwraps
   (synchronously) and begins the stroke where LMB went down (a released button: one dab). No worker
-  thread: `rock_face_01.glb` freezes the game for 3.2 s on that frame (machine A). A provided unwrap stays
+  thread: `rock_face_01.glb` freezes the editor for 3.2 s on that frame (machine A). A provided unwrap stays
   for the session (undo doesn't take it back: the file looks the same either way); its sidecar is written
   only while the text paints an instance of the file. `--paint-script`'s `uv` on such a slot unwraps first
   and makes a live edit of the same text so its paint UVs exist before the first hit.
@@ -1054,7 +1054,7 @@ and where it differs from §1–§14 (which now say what was settled).
   round 4 px #C83232 a255 | ground's atlas 2048×2048, face +y | 2 unsaved edits`, before a first stroke
   `face +z: a new 96×64 in concrete's atlas` (`(unwrap first)`). The keys panel lost H.
 - **`--paint-script`** (§14): `faces`, `resize`, `clear`, `pixel` act on the surface of the last stroke's
-  LMB down (the panel's target in the game); `uv` coordinates are paint coordinates; `print` lists atlases
+  LMB down (the panel's target in the editor); `uv` coordinates are paint coordinates; `print` lists atlases
   (size, owner, unsaved, pixel hash, refs, provided), entries (line, material, entity, faces / slot,
   rectangle, active) and unwraps.
 - **Leak check**: `paint-bake*`, `draw-panel-canvas` and shared mode are gone; new or rewritten:
@@ -1287,7 +1287,7 @@ What phase 1 built, and where it differs from the sections above.
   the surface at the middle of the view as the target (the phase-0 runtime gives no face: the
   normal picks it). With `--input-script` the cursor is free and the clicks go to the panel; the
   designer's input is skipped in such a run (otherwise an ENTER that applies a field also opens
-  and submits the prompt box: a real request bundle and a coordinator start), and the game keys
+  and submits the prompt box: a real request bundle and a coordinator start), and the editor keys
   wait while a field is open. Phase 3b replaces this with the draw mode's own wiring and must keep
   both guards (`drawPanel.typing` for the keys, the panel's mouse for LMB / ENTER).
 
@@ -1483,7 +1483,7 @@ wiring in `src/main.c`, `build/tools/leakcheck`), and where it differs from the 
   script's input, even after B leaves the mode (`drawShotLocked` in `main.c`: only B, to open the
   mode again). The leak check's old panel clicks missed the hex field on the new layout, typed "C"
   into the draw mode (snip mode) and then ENTER: the lock kept that from reaching the prompt box (no
-  request). A panel field that has the keyboard still blocks every draw-mode and game key.
+  request). A panel field that has the keyboard still blocks every draw-mode and editor key.
 - **Verification**: every map in `maps/` at every viewpoint pixel-identical to the base without
   `--shot-hud`; with it only the fps text of the status line differs; `--dump-boxes` identical.
   `build/tools/leakcheck` gained `draw-cursor-fill`, `draw-cursor-model` and `draw-panel-canvas`, and the
@@ -1522,7 +1522,7 @@ What the shader bake built (`src/surfacebake.c/.h` new, `src/drawmode.c/.h`, one
 
 - **Where the render lives**: `src/surfacebake.c`, not `bake.c`. `--bake-surface` is a tool of its own
   (its own window and R3D context, the map loaded again with `MS_BAKE` defines); this one renders the
-  loaded scene's own material between two game frames. `SurfaceBakeBox(scene, box, cells, W, H, out)`
+  loaded scene's own material between two editor frames. `SurfaceBakeBox(scene, box, cells, W, H, out)`
   gives three images of the canvas's size and layout.
 - **Runtime** (`runtime/monolith_scene.c/.h`, editor block "Painting"): `MS_BoxDrawOf(scene, box,
   &MS_BoxDraw)`: the box's material, the unit cube its boxes are drawn with (R3D's or the face layout's
@@ -1586,7 +1586,7 @@ What the shader bake built (`src/surfacebake.c/.h` new, `src/drawmode.c/.h`, one
 - **The ORM and normal maps** live in the `Canvas` (`orm`, `normal`, `ormRel`, `normalRel`): provided
   with the canvas (`Provide` / `Unprovide`, so a first stroke, an undo, a redo, a rebase and a renderer
   restart load them live), written once on the save that writes the canvas (`extrasWritten`; they are
-  not painted), written with the canvas when the game closes with unsaved paint. Undo of the first
+  not painted), written with the canvas when the editor closes with unsaved paint. Undo of the first
   stroke takes all three out of the scene; nothing is on disk before a save.
 - **Licence records** (`RecordBaked`): a row and a sidecar for each of the three PNGs: Source "baked in
   monolith from `shaders/x.glsl` (made in monolith) and `textures/y.jpg`", Author the package plus each

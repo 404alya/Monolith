@@ -1,7 +1,7 @@
 // Export: one map as a self-contained folder that builds and runs on its own (docs/export.md,
 // docs/architecture.md "Export, examples")
 //
-// --export <dir> [--map <path>] (no window) and the in-game key F9 (the open map, into
+// --export <dir> [--map <path>] (no window) and the editor key F9 (the open map, into
 // export/<map>-<stamp>/) write:
 //
 //   <dir>/README.md            build steps, how to use the scene in another raylib + R3D

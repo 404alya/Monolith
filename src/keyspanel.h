@@ -1,4 +1,4 @@
-// The keybindings panel: every key of the game, one section per mode (walking, spectator and
+// The keybindings panel: every key of the editor, one section per mode (walking, spectator and
 // selection, requests, snip and volumes, edit mode, grab / rotate / scale, panels), reached
 // through the ESC menu (keyspanel.c). The HUD lists no keys itself.
 #ifndef MONOLITH_KEYSPANEL_H
@@ -12,7 +12,7 @@ typedef struct {
     bool open;                  // the panel
     bool interactive;           // a real window: frees / captures the cursor
     int section;                // shown while nothing is typed
-    int freezeFrames;           // game keys and camera stay frozen this many frames after closing
+    int freezeFrames;           // editor keys and camera stay frozen this many frames after closing
     UiList list;
     int visibleRows;            // the panel's rows (UiListDraw), for PGUP / PGDN
     Rectangle button;           // the menu's button (last draw), for the mouse

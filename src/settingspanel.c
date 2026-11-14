@@ -1,8 +1,8 @@
-// In-game graphics settings panel: two columns of grouped rows (Display, Shadows, Ambient
+// The editor's graphics settings panel: two columns of grouped rows (Display, Shadows, Ambient
 // occlusion | Fog, Post, Performance), each "label   < value >". Keyboard: UP/DOWN select,
 // LEFT/RIGHT change, ENTER presses a button, ESC / F2 close. Mouse: hover selects, click the
 // arrows (or the left / right half of the value), wheel changes. While open the camera and the
-// game keys are frozen and the cursor is free (like the prompt box).
+// editor keys are frozen and the cursor is free (like the prompt box).
 #include "settingspanel.h"
 #include "ui.h"
 #include <r3d/r3d_profiler.h>

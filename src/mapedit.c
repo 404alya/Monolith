@@ -2,7 +2,7 @@
 //
 // The map text stays the only source of truth: every edit changes the numbers on a line,
 // deletes a line, splits a `repeat` line or adds lines, and leaves every other byte as it
-// was (comments, spacing, groups, line endings). In the game (edit mode, --edit-script) the
+// was (comments, spacing, groups, line endings). In the editor (edit mode, --edit-script) the
 // edits change the working copy (MapEditor.work: the file's bytes plus the hunks of the unsaved
 // steps), which goes live with MS_EditSetText (nothing written, no reload); MapEditSave writes it
 // to the file (CTRL+S, or after every edit in auto save mode) and MS_EditMarkSaved tells the hot
@@ -3603,7 +3603,7 @@ static int RunScript(MapEditor *E, const char *scriptPath, bool live)
             ok = r != 2;        // (1, nothing to save, is no failure)
             MsgSetf(&msg, "%s", r == 2 ? MS_LastError() : MapEditNote(E));
         } else if (live && strcmp(w[0], "disk") == 0 && n == 2) {
-            // The outside-change path: the map file becomes that file's bytes, the game's hot
+            // The outside-change path: the map file becomes that file's bytes, the editor's hot
             // reload loads it (MS_Reload, as MS_Poll would), and the unsaved edits are rebased
             int dsize;
             char *bytes = ReadFileBytes(w[1], &dsize);

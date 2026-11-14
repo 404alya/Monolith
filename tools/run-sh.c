@@ -51,16 +51,16 @@
 //   no lost work               ("Never delete"; the work in the tree is the developer's)
 //       git reset --hard; git checkout with -- . -f --force; git restore without --staged; git stash drop|clear.
 //   no visible window          ("Never open a visible window")
-//       the game (monolith, monolith.exe, also as wine's program; build.sh [--win] run; nob run) without
+//       monolith (monolith, monolith.exe, also as wine's program; build.sh [--win] run; nob run) without
 //       --shot, --dump-boxes, --dump-scene, --dump-scene-diff, --dump-entities, --apply-edits,
 //       --inspect-model, --new-map, --export, --compile, --classify, --bake-surface or --bench --headless
-//       (old-monolith builds lack the game's own guard); the plain examples (examples/build/linux/, win/;
+//       (old-monolith builds lack monolith's own guard); the plain examples (examples/build/linux/, win/;
 //       their test builds linux-test/, linux-lsan/ are fine); a word starting MONOLITH_ALLOW_WINDOW=, or
 //       export / declare / typeset / readonly / local MONOLITH_ALLOW_WINDOW….
 //   never touch the screen     ("Never switch the developer's workspace, desktop or window focus")
 //       i3-msg / swaymsg other than `-t get_*` without a payload; xdotool; wmctrl.
 //   benchmarks                 ("only --bench --headless, one at a time ... __GL_SYNC_TO_VBLANK=0 and --note")
-//       the game's --bench without --headless, vsync off (Environment) or --note "<text>"; an example test
+//       monolith's --bench without --headless, vsync off (Environment) or --note "<text>"; an example test
 //       build's --bench without vsync off; a second benchmark while one runs: -c takes an exclusive flock on
 //       <RUN_SH_DIR>/bench.lock through an fd without O_CLOEXEC before it execs bash, so bash and every child
 //       hold it until the run ends (also bench-export-ab). --check doesn't look at the lock.
@@ -81,7 +81,7 @@
 //   - destroying a file's content: `> file`, truncate, `cp /dev/null file`, sed -i;
 //   - two-step deletions: `mv <repo file> /tmp/x` then `rm /tmp/x`, or a link made and deleted through;
 //   - a cd that fails, or runs in a pipeline, after || or in the background (it still counts);
-//   - windows of other programs (xdg-open, image viewers), or the game copied and run under another name.
+//   - windows of other programs (xdg-open, image viewers), or monolith copied and run under another name.
 //
 // The hook (--hook): reads {"tool_name", "tool_input", "cwd", "permission_mode", ...}.
 //   - Bash or Monitor with a "command": checked with the JSON's "cwd". Refused: {"hookSpecificOutput":
@@ -262,7 +262,7 @@ static char *Adopt(char *heap)
 #define HINT_UNSEEN "run-sh.o can't check this path (a variable, $( ), a glob, braces, names from stdin, or a " \
                     "relative path after a cd it can't follow); write each path out literally under /tmp/, or " \
                     "use `gio trash <path>`"
-#define HINT_GAME "run the game only with --shot <file>, --dump-boxes, --dump-scene, --dump-scene-diff, " \
+#define HINT_GAME "run monolith only with --shot <file>, --dump-boxes, --dump-scene, --dump-scene-diff, " \
                   "--dump-entities, --apply-edits, --inspect-model, --new-map, --export, --compile, " \
                   "--classify, --bake-surface or --bench --headless (CLAUDE.md)"
 #define HINT_STAY "write only inside the repo or under /tmp/ (your scratchpad)"
@@ -273,7 +273,7 @@ static char *Adopt(char *heap)
 
 // The first refusal found ("run-sh: refused: <rule>: <word>; <hint>"), or NULL while the command passes.
 static const char *gRefusal;
-// True when the command runs a benchmark (the game's --bench, an example's --bench, bench-export-ab): -c
+// True when the command runs a benchmark (monolith's --bench, an example's --bench, bench-export-ab): -c
 // takes the benchmark lock.
 static bool gBench;
 // True once `export __GL_SYNC_TO_VBLANK=0` (or vblank_mode=0) appeared earlier in the line.
@@ -795,7 +795,7 @@ static void RuleGit(const char *cwd, const Command *c)
     }
 }
 
-// The game's arguments (after `monolith`, `build.sh run`, ...): it must not open a window, and a benchmark
+// monolith's arguments (after `monolith`, `build.sh run`, ...): it must not open a window, and a benchmark
 // must be headless, vsync-off, with a note. `word` names it in the message.
 static void CheckGame(const char *word, const char **a, size_t n, bool vsync)
 {
@@ -825,7 +825,7 @@ static void CheckGame(const char *word, const char **a, size_t n, bool vsync)
     Refuse(RULE_WINDOW, word, HINT_GAME);
 }
 
-// Rules "no visible window" and "benchmarks" for the game (also under wine, `build.sh run`, `nob run`) and
+// Rules "no visible window" and "benchmarks" for monolith (also under wine, `build.sh run`, `nob run`) and
 // the examples.
 static void RuleWindow(const char *cwd, const Command *c, bool vsync)
 {
@@ -919,7 +919,7 @@ static void CheckSegment(const char **cwd, const Segment *seg)
     for (size_t i = 0; i < seg->words.count; i++) {
         if (strncmp(seg->words.items[i], "MONOLITH_ALLOW_WINDOW=", 22) == 0) {
             Refuse(RULE_WINDOW, "MONOLITH_ALLOW_WINDOW",
-                   "never set it: a session must not open a window (CLAUDE.md); run the game with --shot <file> "
+                   "never set it: a session must not open a window (CLAUDE.md); run monolith with --shot <file> "
                    "or another windowless flag");
         }
     }

@@ -1,4 +1,4 @@
-// The in-game graphics settings panel (F2, both modes): raylib immediate-mode widgets over
+// The editor's graphics settings panel (F2, both modes): raylib immediate-mode widgets over
 // settings.c's rows. main.c applies what changes (live; a shadow map size restarts the renderer)
 #ifndef MONOLITH_SETTINGSPANEL_H
 #define MONOLITH_SETTINGSPANEL_H
@@ -11,7 +11,7 @@ typedef struct {
     bool open;
     bool interactive;           // a real window: the panel frees / captures the cursor
     int sel;                    // selected item: a row, then Reset, Close
-    int freezeFrames;           // game keys and camera stay frozen this many frames after closing
+    int freezeFrames;           // editor keys and camera stay frozen this many frames after closing
     bool ownProfiler;           // the panel switched R3D's GPU profiler on (and switches it off)
     float gpuMs;                // last GPU frame time from the profiler, < 0 = none yet
     float msAvg;                // smoothed CPU frame time

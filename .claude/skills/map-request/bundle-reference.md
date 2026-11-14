@@ -1,6 +1,6 @@
 # Request bundles
 
-What the game writes into `requests/<YYYY-MM-DD_HHMMSS>_<slug>/` for each request, field by field. The workflow that uses it is the `map-request` skill (`.claude/skills/map-request/SKILL.md`); the code that writes it is `src/launcher.c` (`BuildBundle`, `WriteRequestMd`, `WriteRequestJson`) and `src/import.c`. Edit and import bundles share one format number, 5, the only one described here; when the bundle changes, bump `"format"` (in both writers) and describe the new format.
+What the editor writes into `requests/<YYYY-MM-DD_HHMMSS>_<slug>/` for each request, field by field. The workflow that uses it is the `map-request` skill (`.claude/skills/map-request/SKILL.md`); the code that writes it is `src/launcher.c` (`BuildBundle`, `WriteRequestMd`, `WriteRequestJson`) and `src/import.c`. Edit and import bundles share one format number, 5, the only one described here; when the bundle changes, bump `"format"` (in both writers) and describe the new format.
 
 ## Bundle files
 
@@ -12,9 +12,9 @@ What the game writes into `requests/<YYYY-MM-DD_HHMMSS>_<slug>/` for each reques
 | `view-marked.png` | The same frame with the **selected objects** tinted and outlined in orange (models: their rotated bounds), the **crosshair hit** shown as a small cyan square with a normal tick, the crosshair drawn at the centre, each **screen region** outlined in magenta with its number, and each **volume** as a green wireframe box (fainter where hidden behind geometry) labelled V1, V2, ... at the middle of its top face. |
 | `region-<n>.png` | One per screen region: the crop of `view.png` inside region *n*. |
 | `result.md` | **Written by the session**, last (the `map-request` skill, "result.md"). |
-| `state` | The queue state, one line `<state> <time> <writer>`: `queued` (written by the game), `claimed`, `question`, `done`, `failed`, `cancelled` (written by the coordinator through `build/tools/request-queue`; the game writes `cancelled` itself for a queued request when no coordinator runs). Not in per-request mode. Never write it yourself. |
+| `state` | The queue state, one line `<state> <time> <writer>`: `queued` (written by the editor), `claimed`, `question`, `done`, `failed`, `cancelled` (written by the coordinator through `build/tools/request-queue`; the editor writes `cancelled` itself for a queued request when no coordinator runs). Not in per-request mode. Never write it yourself. |
 | `claim.txt` | The coordinator's fingerprint of the map package and the code at the claim (for recovery after a crash). |
-| `cancel` | Written by the game when the developer cancels the request. |
+| `cancel` | Written by the editor when the developer cancels the request. |
 | `classifier-input.txt`, `classifier.json`, `classifier.log` | The AI classifier's input (the request's context and its text), its answer and its messages, when the classifier ran (docs/request-queue.md, "Models"). Nothing to do for the session. |
 | `question.md` | The session's question for the developer, if it has one (the `map-request` skill, "Working under the coordinator"). |
 

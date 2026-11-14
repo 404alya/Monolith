@@ -1,7 +1,7 @@
 // input -- the editor's keyboard / mouse shim (input.h)
 //
 // Every src/ module reads input through these functions (common.h maps raylib's calls onto
-// them). Without --input-script they only call raylib, so the interactive game is unchanged.
+// them). Without --input-script they only call raylib, so the interactive editor is unchanged.
 // With a script (a hidden --shot run) the keys, buttons, characters and the mouse come from it,
 // frame by frame, and the cursor calls behave as raylib 5.5's GLFW platform does
 // (rcore_desktop_glfw.c): DisableCursor and EnableCursor both put the cursor in the middle of

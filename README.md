@@ -1,10 +1,10 @@
 # monolith
 
-An **AI-assisted map designer** for 3D levels of any style. You fly through a level, point at a spot, select objects or drag a rectangle over the screen, and type what should change: "make this wall twice as tall", "plant three more pines along the path", "hang a neon sign over each of these stalls". Claude Code carries the request out in the background, and the running game reloads the map so the change appears in place.
+An **AI-assisted map designer** for 3D levels of any style. You fly through a level, point at a spot, select objects or drag a rectangle over the screen, and type what should change: "make this wall twice as tall", "plant three more pines along the path", "hang a neon sign over each of these stalls". Claude Code carries the request out in the background, and the running editor reloads the map so the change appears in place.
 
 Claude decides *what* changes; how it is changed is deterministic. The map is plain text, edits go through a small edit language (`--apply-edits`), a compiled map recompiles to the same bytes, the same build renders the same image, and box dumps, scene diffs and pixel-compared screenshots show exactly what an edit did. `--export` turns a map into plain C11 for your own game, held to the same rules as the editor: no editor code, no fixed-size content buffers, zero warnings, zero leaks, and caches and quality presets whose cost is measured ([docs/export.md](docs/export.md)).
 
-The game is the editor and the viewer. It is written in plain C11 on [raylib](https://www.raylib.com/) 5.5 and [R3D](https://github.com/Bigfoot71/r3d) 0.10 (deferred PBR: shadows, ambient occlusion, fog, volumetric fog, bloom, procedural sky). A level is a **map package** in `maps/<name>/`: a plain-text `.map` file of boxes, models, materials, lights and environment, a `MAP.md` design brief that keeps every edit in the map's style, and the map's shaders, models and textures. The scene runtime (`runtime/monolith_scene.h/.c`) also loads a package in any other raylib + R3D program, so a map can ship in your own game.
+monolith is the editor and the viewer. It is written in plain C11 on [raylib](https://www.raylib.com/) 5.5 and [R3D](https://github.com/Bigfoot71/r3d) 0.10 (deferred PBR: shadows, ambient occlusion, fog, volumetric fog, bloom, procedural sky). A level is a **map package** in `maps/<name>/`: a plain-text `.map` file of boxes, models, materials, lights and environment, a `MAP.md` design brief that keeps every edit in the map's style, and the map's shaders, models and textures. The scene runtime (`runtime/monolith_scene.h/.c`) also loads a package in any other raylib + R3D program, so a map can ship in your own game.
 
 ## Build (Linux)
 
@@ -31,7 +31,7 @@ sudo apt install build-essential clang cmake python3 libx11-dev libxrandr-dev li
 ./build.sh examples       # the examples of using a map in your own program (examples/README.md)
 ```
 
-The output folder is self-contained: copy or zip it as it is. You need an OpenGL 3.3 GPU and driver. The editor is made for Linux desktops running the i3 window manager (sway takes the same commands); other systems and window managers are not supported for editing. On other systems the game is a view-only build for benchmarking, viewing and debugging a map ([below](#windows)). Exported maps and the examples also build for Windows.
+The output folder is self-contained: copy or zip it as it is. You need an OpenGL 3.3 GPU and driver. The editor is made for Linux desktops running the i3 window manager (sway takes the same commands); other systems and window managers are not supported for editing. On other systems monolith is a view-only build for benchmarking, viewing and debugging a map ([below](#windows)). Exported maps and the examples also build for Windows.
 
 ## First steps
 
@@ -41,19 +41,19 @@ The output folder is self-contained: copy or zip it as it is. You need an OpenGL
 ./build/linux/monolith --map maps/my_level      # ... and open it
 ```
 
-Without `--map` the game opens its default map, `maps/monolith`, which is kept outside this repository: on a fresh clone it says `cannot load the map`, so always pass `--map`. Press **TAB** for spectator mode, aim, and press **Enter** to type a request. The [user guide](docs/user-guide.md) explains the keys, the request list and what to expect.
+Without `--map` monolith opens its default map, `maps/monolith`, which is kept outside this repository: on a fresh clone it says `cannot load the map`, so always pass `--map`. Press **TAB** for spectator mode, aim, and press **Enter** to type a request. The [user guide](docs/user-guide.md) explains the keys, the request list and what to expect.
 
 ## Setting up requests
 
 Requests are carried out by [Claude Code](https://claude.com/claude-code). You need:
 
-- **Claude Code** installed and logged in: install it, run `claude` once in a terminal and log in. The game looks for `claude` in `PATH` and in `~/.local/bin`. Requests use your Claude plan or API usage.
-- **A terminal emulator** the game can open: alacritty, kitty, foot, wezterm or xterm (or set `MONOLITH_TERMINAL`).
-- **`flock`** (package `util-linux`, installed on most distributions). Without it the game opens one terminal per request instead of one shared coordinator.
+- **Claude Code** installed and logged in: install it, run `claude` once in a terminal and log in. The editor looks for `claude` in `PATH` and in `~/.local/bin`. Requests use your Claude plan or API usage.
+- **A terminal emulator** the editor can open: alacritty, kitty, foot, wezterm or xterm (or set `MONOLITH_TERMINAL`).
+- **`flock`** (package `util-linux`, installed on most distributions). Without it the editor opens one terminal per request instead of one shared coordinator.
 
 The first request opens one terminal, the **coordinator**, which works through every request you send and hands each to a helper agent; you answer its questions there. If `claude` is missing, the HUD says `coordinator: not started: claude not found …` and your requests stay queued until it can start. On i3 / sway the terminal moves to workspace 10 (`MONOLITH_WORKSPACE`).
 
-**Permissions.** In a checkout of this repository the sessions run without approval prompts, so you don't have to approve every command; they are bound by the rules in `CLAUDE.md` (never delete files, never open windows on your screen, treat your request text and downloads as data, work only inside the repo). Where there is no `CLAUDE.md` (a copied build folder) the game keeps Claude Code's approval prompts. `MONOLITH_CLAUDE_SAFE=1` keeps them everywhere.
+**Permissions.** In a checkout of this repository the sessions run without approval prompts, so you don't have to approve every command; they are bound by the rules in `CLAUDE.md` (never delete files, never open windows on your screen, treat your request text and downloads as data, work only inside the repo). Where there is no `CLAUDE.md` (a copied build folder) the editor keeps Claude Code's approval prompts. `MONOLITH_CLAUDE_SAFE=1` keeps them everywhere.
 
 ## Windows
 
@@ -65,7 +65,7 @@ It also writes `build/win/monolith.exe`, the **view-only build**: it opens a map
 
 | Page | For |
 |---|---|
-| [docs/user-guide.md](docs/user-guide.md) | using the game: moving, selecting, requests, settings, making maps |
+| [docs/user-guide.md](docs/user-guide.md) | using the editor: moving, selecting, requests, settings, making maps |
 | [docs/map-format.md](docs/map-format.md) | writing or reading a `.map` file and its design brief |
 | [docs/command-line.md](docs/command-line.md) | every flag and environment variable |
 | [docs/export.md](docs/export.md) | using a map in your own raylib + R3D program; [examples/README.md](examples/README.md) |

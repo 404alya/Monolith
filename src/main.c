@@ -3,11 +3,11 @@
 // The level is a map package (maps/<name>/: a plain-text <name>.map of boxes, models,
 // materials, lights and environment, plus its design brief MAP.md, shaders, models, textures
 // and ASSETS.md; format: the header comment of runtime/monolith_scene.c), loaded, drawn and
-// hot-reloaded by the scene runtime (runtime/monolith_scene.h) while the game runs. The
+// hot-reloaded by the scene runtime (runtime/monolith_scene.h) while the editor runs. The
 // default map is maps/monolith/. In spectator mode you point at things, select boxes and
-// models or drag out screen regions, and type a request; the game writes requests/<id>/ and
+// models or drag out screen regions, and type a request; the editor writes requests/<id>/ and
 // queues it for the request coordinator, one Claude Code session in its own terminal that the
-// game starts when none runs (.claude/skills/coordinator) and that hands each request to a subagent
+// editor starts when none runs (.claude/skills/coordinator) and that hands each request to a subagent
 // (.claude/skills/map-request). Engine reference: docs/architecture.md.
 //
 // View-only build: the editor edits and reaches the AI only on Linux (+ i3 / sway). Built for any
@@ -39,7 +39,7 @@
 //                  then Display, Shadows, Ambient occlusion, Fog, Post, Performance rows.
 //                  UP/DOWN select, LEFT/RIGHT (or the mouse: arrows, wheel) change, changes
 //                  apply at once (a shadow map size restarts the renderer, ~1 s), ESC / F2
-//                  close; saved to the settings file on close. Camera and game keys are frozen
+//                  close; saved to the settings file on close. Camera and editor keys are frozen
 //                  and the cursor is free while it is open
 //   "(cached)" after the fps: nothing changed, the frame reused the last R3D image
 //   F3             render inspector (spectator mode; inspector.c): outlines of what is drawn, off ->
@@ -83,7 +83,7 @@
 //   ENTER          open the request prompt box. In the box: type, BACKSPACE/DELETE
 //                  (CTRL+BACKSPACE: word), LEFT/RIGHT/UP/DOWN, HOME/END (CTRL: whole
 //                  text), CTRL+V paste, SHIFT+ENTER new line, ENTER send to Claude Code,
-//                  ESC cancel (discards the text). While the box is open every game key
+//                  ESC cancel (discards the text). While the box is open every editor key
 //                  and the camera are frozen and the mouse cursor is free. If sending
 //                  fails, the box stays open with the text.
 //   C              snip mode: the camera freezes and the cursor is free. Drag = a screen
@@ -165,7 +165,7 @@
 //                  row "Save edits" = auto writes every edit, undo and redo at once instead).
 //                  "N unsaved edits" shows in every spectator mode while there are any; ENTER in
 //                  the prompt box then sends nothing (CTRL+S in the box saves and sends). Closing
-//                  the game with unsaved edits writes the working copy to the settings folder's
+//                  the editor with unsaved edits writes the working copy to the settings folder's
 //                  unsaved/<map>-<YYYYMMDD-HHMMSS>.map (the map file is not touched)
 //   CTRL+Z / CTRL+SHIFT+Z (CTRL+Y)   undo / redo manual edits (spectator mode; live, like edits).
 //                  When the map changes on disk (a request, another editor), unsaved edits are
@@ -226,7 +226,7 @@
 //   --settings <file>   graphics settings file to read (and, from the panel, write) instead of
 //                  ~/.config/monolith/settings.ini ($XDG_CONFIG_HOME; Windows:
 //                  %APPDATA%\monolith\settings.ini; else next to the executable). Only the
-//                  interactive game reads the default file: --shot, --bench, --dump-*, --export
+//                  interactive editor reads the default file: --shot, --bench, --dump-*, --export
 //                  and --classify never read settings unless --settings names a file, so their
 //                  images and numbers stay deterministic
 //   --no-settings  neither read nor save a settings file
@@ -491,10 +491,10 @@
 //                       failure or timeout gives the default tier
 //   MONOLITH_CLAUDE_SAFE=1   drop those two permission flags (also dropped when the working
 //                       folder has no CLAUDE.md)
-//   MONOLITH_ALLOW_WINDOW=1   open the game window even in an AI agent's shell (CLAUDECODE or
+//   MONOLITH_ALLOW_WINDOW=1   open the editor window even in an AI agent's shell (CLAUDECODE or
 //                       AI_AGENT set), where it otherwise refuses every mode that would show it
 //   MONOLITH_WORKSPACE  i3/sway workspace for the terminal (default 10, empty = don't move)
-//   MONOLITH_CLOSE_ON_EXIT=1   close the terminals of finished requests when the game quits
+//   MONOLITH_CLOSE_ON_EXIT=1   close the terminals of finished requests when the editor quits
 //                       (coordinator mode: the coordinator, if none of this run's requests
 //                       is still queued or running)
 //   MONOLITH_CLAUDE     the claude program to run (tests: build/tools/stub-coordinator)
@@ -647,7 +647,7 @@ static void ApplyEnvironment(const EffectState *fx)
 // Shadow map size is an R3D init hint: a new size closes and re-initialises R3D and loads the
 // map again (~1 s). Returns 0: restarted; 1: not restarted, nothing changed (the map on disk
 // doesn't load: why in MS_LastError()); 2: R3D was closed but the map then failed to load (why in
-// MS_LastError(); the game has to quit). The caller reports it (its log and the settings panel).
+// MS_LastError(); the editor has to quit). The caller reports it (its log and the settings panel).
 static unsigned char RestartRenderer(MS_LoadOptions *opt, int shadowSize)
 {
     char path[MS_PATH_MAX];
@@ -896,7 +896,7 @@ static void FreeMainHeap(void)
 static int Run(int argc, char **argv);
 
 // True when this process runs in an AI agent's shell: Claude Code sets CLAUDECODE=1 in the
-// shells it starts, other agents AI_AGENT. Such runs must never open the game window on the
+// shells it starts, other agents AI_AGENT. Such runs must never open the editor window on the
 // developer's screen (CLAUDE.md guard rail); MONOLITH_ALLOW_WINDOW lets a person override it.
 static bool EnvSet(const char *name)
 {
@@ -1080,7 +1080,7 @@ static int Run(int argc, char **argv)
     // Every flag is checked here, before anything else happens: an unknown flag, a missing
     // value, a value that is another flag (`--pos 1 --shot x.png` must not eat --shot) or a
     // number that doesn't parse stops the program with a message and status 1. Safety rule:
-    // a mistyped automated run must never fall through to the interactive (visible) game.
+    // a mistyped automated run must never fall through to the interactive (visible) editor.
 #define NEED(n) do { if (!ArgValues(argc, argv, i, (n))) return 1; } while (0)
 #define NUM(k, lo, hi, dst) do { double v_; if (!ArgNumber(argv[i], argv[i + (k)], (lo), (hi), &v_)) return 1; (dst) = v_; } while (0)
 #define INT(k, dst) do { long v_; if (!ArgInt(argv[i], argv[i + (k)], &v_)) return 1; (dst) = (int)v_; } while (0)
@@ -1409,8 +1409,8 @@ static int Run(int argc, char **argv)
 
     if (newMapName) return NewMap(mapsDir, newMapName) ? 0 : 1;
 
-    // Every mode below that isn't one of these opens the visible game window. An agent's shell
-    // may not (a mistyped or forgotten flag would put the game on the developer's screen).
+    // Every mode below that isn't one of these opens the visible editor window. An agent's shell
+    // may not (a mistyped or forgotten flag would put the editor on the developer's screen).
     // (--edit-script is no mode of its own: it runs before --shot or a --dump-* flag, see below)
     bool windowless = shotPath || (bench && headless) || dumpPath || dumpScenePath || dumpEntitiesPath || applyEditsPath ||
                       exportDir || compilePath || classifyText || bake.material || triReportPath;
@@ -1449,15 +1449,15 @@ static int Run(int argc, char **argv)
     }
     if (inputScriptPath && !InputScriptLoad(inputScriptPath, 10, shotW, shotH)) return 1;
     if (!windowless && AgentShell()) {
-        fprintf(stderr, "monolith: refusing to open the game window from an AI agent's shell (CLAUDECODE / AI_AGENT is set).\n"
+        fprintf(stderr, "monolith: refusing to open the editor window from an AI agent's shell (CLAUDECODE / AI_AGENT is set).\n"
                         "  Use --shot, --dump-boxes, --dump-scene(-diff), --dump-entities (each also with --edit-script), --apply-edits, --inspect-model, --new-map,\n"
                         "  --export, --compile, --classify, --bake-surface or --bench --headless; a person who wants the window from this shell sets\n"
                         "  MONOLITH_ALLOW_WINDOW=1.\n");
         return 1;
     }
-    LauncherScrubEnv();     // the sessions this game starts must not inherit the override
+    LauncherScrubEnv();     // the sessions this editor starts must not inherit the override
 
-    // --- Graphics settings (settings.c). The interactive game reads the user's settings file
+    // --- Graphics settings (settings.c). The interactive editor reads the user's settings file
     // (and the panel saves it); automated runs (--shot, --bench, --dump-*, --export,
     // --classify) never read it unless --settings names a file, so their images and numbers
     // don't depend on what the developer last chose. --no-settings: no file at all. Then
@@ -1553,7 +1553,7 @@ static int Run(int argc, char **argv)
         }
         if (applyEditsPath) {
             // The edits work on the text and the parsed lines only: a noGpu scene, reloaded
-            // after every edit like the game's
+            // after every edit like the editor's
             scene = peek;
             signed char status = (signed char)MapEditRunScript(applyEditsPath);
             scene = NULL;
@@ -1946,12 +1946,12 @@ static int Run(int argc, char **argv)
         if (IsWindowResized()) MS_ApplyRenderResolution(scene, GetScreenWidth(), GetScreenHeight());
 
         // While the prompt box is open (and a couple of frames after it closed) every
-        // game key and the camera are frozen: the keys are text now
+        // editor key and the camera are frozen: the keys are text now
         bool typing = DesignerCapturesInput(&designer) || EditModeCapturesInput(&edit) || EditModeModalRunning(&edit) ||
                       InspectorCapturesInput(&inspector) || IdPanelCapturesInput(&idPanel) || ModelPickerCapturesInput(&picker) ||
                       (drawMode.active && drawPanel.typing);     // (the draw panel: a field has the keys)
         // ESC with nothing else to close: the menu with the keybindings button (keyspanel.c);
-        // while it or the panel is open every game key and the camera are frozen
+        // while it or the panel is open every editor key and the camera are frozen
         if ((!shotPath || scripted) && !bench) {
             bool escFree = !typing && !PanelCapturesInput(&panel) && !(spec.active && (edit.active || drawMode.active)) && !designer.snipping &&
                            !designer.volumeMode && closePickTime <= 0.0f;
