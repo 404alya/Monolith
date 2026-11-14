@@ -23,12 +23,11 @@
 //             DELETE, CTRL+I), B, ENTER, C, V / SHIFT+V, CTRL+S, CTRL+Z / CTRL+Y, F9, K / SHIFT+K /
 //             CTRL+K / CTRL+SHIFT+K, R, and DELETE / SHIFT+DELETE / CTRL+I in the id panel: the HUD
 //             says "view-only build: editing and requests need the Linux editor" (MSG_VIEW_ONLY,
-//             src/msg.h); the flags --apply-edits, --edit-script, --paint-script, --new-map, --import,
-//             --submit, --submit-wait, --close-submitted, --type, --classify, --classify-kind,
-//             --edit-mode, --edit-id, --edit-modal, --edit-save, --model-picker, --model-picker-key,
-//             --draw-mode, --draw-panel, --cursor, --region, --volume, --bake-surface (and its
+//             src/msg.h); the flags --apply-edits, --edit-script, --paint-script, --new-map, --submit,
+//             --submit-wait, --close-submitted, --type, --classify, --edit-mode, --edit-id,
+//             --edit-modal, --edit-save, --model-picker, --model-picker-key, --draw-mode, --draw-panel, --cursor, --region, --volume, --bake-surface (and its
 //             --bake-* options), --export and --compile print it and exit 1 before anything is
-//             written. The launcher and --import (launcher.c, import.c) are not in that build.
+//             written. The launcher (launcher.c) is not in that build.
 //
 // Controls:
 //   WASD / mouse   walk & look          SHIFT  walk faster
@@ -344,11 +343,6 @@
 //                  viewer.c, build.sh, the bundled R3D (+ raylib, assimp), licences and a
 //                  README.md (export.c). Refuses a non-empty <dir>; writes nothing when a
 //                  referenced file is missing. Needs the repo (not a copied build folder)
-//   --import <project dir> <name|path>   create maps/<name>/ or the package folder a path
-//                  names (as --new-map) and queue a Claude Code import request (a bundle
-//                  requests/<stamp>_import-<name>/, like a submit) that translates
-//                  the raylib + R3D project's scene into it (import.c, the import-request
-//                  skill); no window. Same queue / coordinator as edit requests
 //
 //   --bake-surface <material> <out-prefix>   bake a material of the map (--map or the default) into
 //                  a tile and exit (hidden window; src/bake.c): one square quad of it rendered with an
@@ -456,11 +450,13 @@
 //                  if it is still running; coordinator mode: cancels it) and wait up to 10 s
 //                  for its terminal process to go; prints "close [n]: ..." and "close:
 //                  terminal process gone after X s"
-//   --classify "text"   print the model the launcher would choose for this prompt (tier,
-//                  model, reason; launcher.c "Model choice") and exit without opening a
-//                  window. Context: the loaded map (empty? MAP.md?), the --select lines, the
-//                  --region and --volume counts and a crosshair hit. --classify-kind edit|import|new-map
-//                  sets the request kind (default edit)
+//   --classify "text"   run the launcher's model choice for this prompt and print it (tier,
+//                  model, classifier, classifier model, reason, seconds, source), then exit
+//                  without opening a window: the overrides, else the AI classifier (one
+//                  `claude -p` on Fable, Opus as fallback; launcher.c "Model choice",
+//                  classifier.c), run to its end. Context: the loaded map (its objects,
+//                  MAP.md), the --select lines, the --region and --volume counts and a
+//                  crosshair hit
 //   In --submit, --type and --classify text, a literal \n becomes a new line.
 //
 // Environment (launcher.c):
@@ -479,11 +475,20 @@
 //                       --model <name>, on the coordinator's (per-request: the request's)
 //                       command line; a --model in them replaces the chosen model (both the
 //                       coordinator's and the one recorded for each request)
-//   MONOLITH_MODEL      one model for every request (turns the per-request choice off)
+//   MONOLITH_MODEL      one model for every request (an override: no classifier runs)
 //   MONOLITH_MODEL_FAST / _DEFAULT / _HEAVY   model of each tier (default haiku / sonnet /
-//                       opus). The tier is chosen per request from the prompt and its
-//                       context; a leading @fast / @default / @heavy (or @haiku / @sonnet /
-//                       @opus) in the prompt picks it and is stripped from the bundle's prompt
+//                       opus). Without an override the AI classifier picks the tier per
+//                       request (one `claude -p`, docs/request-queue.md "Models"); a leading
+//                       @fast / @default / @heavy (or @haiku / @sonnet / @opus) in the prompt
+//                       picks it instead and is stripped from the bundle's prompt
+//   MONOLITH_CLASSIFIER   the classifier program (default: the claude program below), or off
+//                       (every request without an override runs on the default tier). In an
+//                       AI agent's shell it is off unless this names a program (tests:
+//                       build/tools/stub-classifier)
+//   MONOLITH_CLASSIFIER_MODEL / _FALLBACK   its model and the fallback when that one is
+//                       overloaded or not available (default fable / opus)
+//   MONOLITH_CLASSIFIER_TIMEOUT   seconds before the classifier is stopped (default 30); its
+//                       failure or timeout gives the default tier
 //   MONOLITH_CLAUDE_SAFE=1   drop those two permission flags (also dropped when the working
 //                       folder has no CLAUDE.md)
 //   MONOLITH_ALLOW_WINDOW=1   open the game window even in an AI agent's shell (CLAUDECODE or
@@ -508,7 +513,6 @@
 #include "launcher.h"
 #include "newmap.h"
 #include "export.h"
-#include "import.h"
 #include "inspect.h"
 #include "bake.h"
 #include "dumpscene.h"
@@ -1015,7 +1019,6 @@ static int Run(int argc, char **argv)
     const char *newMapName = NULL;
     const char *exportDir = NULL;               // --export
     const char *compilePath = NULL;             // --compile
-    const char *importDir = NULL, *importName = NULL;   // --import
     float fogCacheVoxel = -1.0f;    // --fog-cache
     int fogCacheSub = 2;
     const char *benchNote = NULL;
@@ -1049,7 +1052,7 @@ static int Run(int argc, char **argv)
     const char *submitText = NULL, *typeText = NULL;
     float submitWait = -1.0f;       // --submit-wait: keep polling the request this long
     bool closeSubmitted = false;    // --close-submitted
-    const char *classifyText = NULL, *classifyKind = "edit";
+    const char *classifyText = NULL;
     const char *aoMode = NULL, *bloomMode = NULL;
     // Repeatable arguments: at most argc of each
     mainHeap.fx = malloc(sizeof(const char *) * argc);
@@ -1154,7 +1157,6 @@ static int Run(int argc, char **argv)
         else if (strcmp(a, "--new-map") == 0) { NEED(1); newMapName = argv[++i]; }
         else if (strcmp(a, "--export") == 0) { NEED(1); exportDir = argv[++i]; }
         else if (strcmp(a, "--compile") == 0) { NEED(1); compilePath = argv[++i]; }
-        else if (strcmp(a, "--import") == 0) { NEED(2); importDir = argv[i + 1]; importName = argv[i + 2]; i += 2; }
         else if (strcmp(a, "--fog-cache") == 0) {
             // Clamped: 0.25 m is already 228 MB over the default region; 0 or less turns it off
             NEED(2);
@@ -1281,7 +1283,6 @@ static int Run(int argc, char **argv)
         else if (strcmp(a, "--close-submitted") == 0) closeSubmitted = true;
         else if (strcmp(a, "--type") == 0) { NEED(1); typeText = argv[++i]; }
         else if (strcmp(a, "--classify") == 0) { NEED(1); classifyText = argv[++i]; }
-        else if (strcmp(a, "--classify-kind") == 0) { NEED(1); classifyKind = argv[++i]; }
         else if (strcmp(a, "--select") == 0) { NEED(1); INT(1, selectLines[selectLineCount]); selectLineCount++; i++; }
         else if (strcmp(a, "--region") == 0) {
             // (finite and bounded: the region frame is drawn with integer pixel coordinates)
@@ -1358,8 +1359,8 @@ static int Run(int argc, char **argv)
     // here, before any file is written (no value starts with "--": NEED refuses that)
     if (!MONOLITH_EDITING) {
         static const char *const REFUSED[] = {
-            "--apply-edits", "--edit-script", "--paint-script", "--new-map", "--import", "--submit", "--submit-wait",
-            "--close-submitted", "--type", "--classify", "--classify-kind", "--edit-mode", "--edit-id", "--edit-modal",
+            "--apply-edits", "--edit-script", "--paint-script", "--new-map", "--submit", "--submit-wait",
+            "--close-submitted", "--type", "--classify", "--edit-mode", "--edit-id", "--edit-modal",
             "--edit-save", "--model-picker", "--model-picker-key", "--draw-mode", "--draw-panel", "--cursor", "--region",
             "--volume", "--bake-surface", "--bake-face", "--bake-size", "--bake-texels", "--bake-levels", "--export",
             "--compile",
@@ -1407,7 +1408,6 @@ static int Run(int argc, char **argv)
     }
 
     if (newMapName) return NewMap(mapsDir, newMapName) ? 0 : 1;
-    if (importDir) return ImportProject(mapsDir, importDir, importName) ? 0 : 1;
 
     // Every mode below that isn't one of these opens the visible game window. An agent's shell
     // may not (a mistyped or forgotten flag would put the game on the developer's screen).
@@ -1579,12 +1579,19 @@ static int Run(int argc, char **argv)
                 for (int k = 0; k < selectLineCount; k++) if (peek->models[m].ref.line == selectLines[k]) { selected++; break; }
             char *text = Unescape(classifyText);
             if (!text) { MS_Unload(peek); return 1; }
-            ModelQuery q = { .prompt = text, .kind = classifyKind, .selected = selected, .regions = regionArgCount, .volumes = volumeArgCount,
-                             .hit = true, .emptyMap = peek->boxCount + peek->modelCount <= 2, .noBrief = !peek->brief[0] };
+            char *package = MonoStrf("%s", GetFileName(GetDirectoryPath(peek->path)));
+            ModelQuery q = { .prompt = text, .package = package, .boxes = peek->boxCount, .models = peek->modelCount,
+                             .brief = peek->brief[0] != 0, .selected = selected, .regions = regionArgCount, .volumes = volumeArgCount,
+                             .hit = true };
             ModelChoice c;
-            LauncherChooseModel(&q, &c);
-            printf("tier: %s\nmodel: %s%s\nreason: %s\nsource: %s\nprompt: %s\n", ModelTierName(c.tier), c.name,
-                   c.addFlag ? "" : " (from MONOLITH_CLAUDE_ARGS, no --model added)", MsgText(&c.reason), c.source, text + c.promptSkip);
+            LauncherClassify(&q, &c);       // (the AI classifier runs to its end here: no window to keep alive)
+            printf("tier: %s\nmodel: %s%s\nclassifier: %s\nclassifier model: %s\nreason: %s\n", ModelTierName(c.tier), c.name,
+                   c.addFlag ? "" : " (from MONOLITH_CLAUDE_ARGS, no --model added)", c.classifier ? c.classifier : "?",
+                   c.classifierModel[0] ? c.classifierModel : "-", MsgText(&c.reason));
+            if (c.seconds >= 0.0) printf("seconds: %.2f\n", c.seconds);
+            else printf("seconds: -\n");
+            printf("source: %s\nprompt: %s\n", c.source, text + c.promptSkip);
+            free(package);
             ModelChoiceFree(&c);
             free(text);
             MS_Unload(peek);
@@ -2181,7 +2188,12 @@ static int Run(int argc, char **argv)
                 TraceLog(LOG_WARNING, "monolith: map reload failed: %s", MS_Error(scene));
             }
             if (mapMessageTime > 0.0f) mapMessageTime -= GetFrameTime();
-            if (!shotPath) LauncherUpdate(GetFrameTime());   // unclamped: its HUD timers sum these
+            if (!shotPath) {
+                LauncherUpdate(GetFrameTime());     // unclamped: its HUD timers sum these
+                // A classified request was just queued / sent (or failed to be): say so once
+                const char *event = LauncherEventNote(NULL);
+                if (event) SpectatorMessagef(&spec, "%s", event);
+            }
         }
         // --edit-script with --shot: after 10 frames (every cache drawn), the edits go live like
         // the edit mode's, so the shot shows what the caches make of a live edit
@@ -2598,7 +2610,13 @@ static int Run(int argc, char **argv)
                 // --submit-wait / --close-submitted: poll the request (result.md, the
                 // terminal process) for a while, then close it the way CTRL+K n does
                 if (ok && (submitWait > 0.0f || closeSubmitted)) {
-                    for (double t0 = GetTime(); GetTime() - t0 < submitWait; ) { WaitTime(0.1); LauncherUpdate(0.1f); }
+                    for (double t0 = GetTime(); GetTime() - t0 < submitWait; ) {
+                        WaitTime(0.1);
+                        LauncherUpdate(0.1f);
+                        bool failed = false;
+                        const char *event = LauncherEventNote(&failed);    // a classified request queued / sent
+                        if (event) { printf("submit: classified: %s: %s\n", failed ? "failed" : "ok", event); fflush(stdout); }
+                    }
                     if (closeSubmitted) {
                         int n = LauncherNewestNumber();
                         for (int tries = 0; tries < 2; tries++) {   // a running request asks twice

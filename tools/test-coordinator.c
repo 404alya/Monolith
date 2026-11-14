@@ -13,6 +13,9 @@
 //                                                 (build/coordinator-test/<stamp>/), so the developer's own
 //                                                 coordinator and requests/ are never touched
 //   MONOLITH_WORKSPACE=                           (empty) no i3 workspace switch
+//   MONOLITH_CLASSIFIER=off                       no AI classifier: every request on the default tier at once
+//                                                 (scheduling doesn't depend on the tier; the classifier's own
+//                                                 cases run with build/tools/stub-classifier in the leak check)
 // The game runs only with --shot (a hidden window), --new-map and --submit.
 // It also sets MONOLITH_LAUNCH=coordinator and MONOLITH_STUB_WORK=6 (each stub "subagent" works 6 s, long
 // enough to see overlaps in the queue log), and unsets MONOLITH_STUB_LOG, MONOLITH_CLAUDE_ARGS and
@@ -536,6 +539,7 @@ int main(int argc, char **argv)
     setenv("MONOLITH_WORKSPACE", "", 1);
     setenv("MONOLITH_LAUNCH", "coordinator", 1);
     setenv("MONOLITH_STUB_WORK", "6", 1);
+    setenv("MONOLITH_CLASSIFIER", "off", 1);
     unsetenv("MONOLITH_STUB_LOG");
     unsetenv("MONOLITH_CLAUDE_ARGS");
     unsetenv("MONOLITH_MODEL");

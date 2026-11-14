@@ -1,4 +1,4 @@
-// Folder listing for --import's inventory and --export's unused-file list (dirscan.c)
+// Folder listing for the edit mode's model list and --export's unused-file list (dirscan.c)
 #ifndef MONOLITH_DIRSCAN_H
 #define MONOLITH_DIRSCAN_H
 

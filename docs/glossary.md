@@ -10,6 +10,8 @@ Terms used across these pages, in alphabetical order.
 
 **Compiled map** (`<name>.mapb`): a map's text compiled by `monolith --compile` (and by `--export`) into fixed-size binary records. Games and the game-style examples load it; their runtime has no text parser. The `.map` text stays the source: edit it and compile again ([compiled-map.md](compiled-map.md)).
 
+**Classifier, AI classifier:** a small one-shot Claude run (`claude -p` on Fable, Opus as fallback, no tools) the game starts for each request without an override, before it queues the bundle: it reads the request and its context and picks the tier ([request-queue.md](request-queue.md) "Models"). Not the coordinator and not one of its subagents.
+
 **Coordinator:** the one Claude Code session the game opens in its own terminal. It takes requests from the queue and hands each to a subagent ([request-queue.md](request-queue.md)).
 
 **Draw mode:** key B in spectator mode: paint on boxes and models with a brush, the colour picker and the draw panel. The first stroke on a face or model part gives it a rectangle in its material's paint atlas; strokes are undoable with the edits and saved with Ctrl+S ([painting.md](painting.md), [user-guide.md](user-guide.md)).
@@ -58,7 +60,7 @@ Terms used across these pages, in alphabetical order.
 
 **Task lists:** the repo's two lists of open bugs and future work, one entry per line, titles starting `bug:`, `task:` or `idea:`: the maintainer's `TODO.md` (`build/tools/todo`) and the AI's `.claude/TODO.md` (`build/tools/ai-todo`), where Claude Code sessions note what they found or deferred ([CONTRIBUTING.md](../CONTRIBUTING.md#bugs-and-tasks)).
 
-**Tier:** the size of Claude model a request gets (fast, default, heavy), chosen from its wording; `@fast` / `@default` / `@heavy` at the start of a prompt overrides it.
+**Tier:** the size of Claude model a request gets (fast, default, heavy), chosen by the AI classifier; `@fast` / `@default` / `@heavy` at the start of a prompt overrides it.
 
 **Turned box:** a `box` or `block` line with `rot yaw pitch roll`: the box turned about its own centre. It draws, collides and is picked as its turned shape; the runtime keeps its world AABB in `boxes[]` and the shape in `turnedBoxes` ([map-format.md](map-format.md) §2).
 

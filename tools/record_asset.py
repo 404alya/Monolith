@@ -8,11 +8,11 @@
 #       [--normalize-report <json from tools/normalize_model.py --report>] \
 #       [--change "text"]... [--ai-generated yes|no|unknown] [--note "text"]
 #
-# Without a provenance.json (a file copied from an imported project, or a local file the
+# Without a provenance.json (a file copied from another project, or a local file the
 # developer supplied), describe the source by hand instead of --provenance:
 #
 #   python3 -I tools/record_asset.py --package maps/<name> --file models/x.glb \
-#       --source-note "copied from <project>/assets/x.glb (the imported project)" \
+#       --source-note "copied from <project>/assets/x.glb (another project)" \
 #       --licence "CC0 1.0" [--licence-url URL] [--author NAME]... [--attribution TEXT] \
 #       [--source-url URL] [--original-file <path of the original, hashed>]... [other options]
 #

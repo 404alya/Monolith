@@ -58,10 +58,12 @@
 // (--model-picker: thumbnails of the scene's files and of one loaded for the render, a filter, freed and
 // rendered again across a reload and a renderer restart, ENTER and ESC), --submit (build/tools/stub-terminal
 // instead of a terminal, MONOLITH_WORKSPACE=) on both maps, in coordinator mode (queue + coordinator start, a
-// cancel with no coordinator) and per-request mode, --export, --compile and compiled maps (dumps, a shot with
-// a reload, a damaged file, a stale one and its refused export), --inspect-model, --new-map, --import (stub
-// terminal), --classify, and every example's --shot (plus the capture shim; the game-style ones load compiled
-// maps), the profiling tool (tools/profile.c) on the fixtures in tests/profile/ (--report-only, no perf run),
+// cancel with no coordinator) and per-request mode, with the AI classifier (MONOLITH_CLASSIFIER = the sanitizer
+// copy of build/tools/stub-classifier for every run, never a real `claude -p`: an answer, a quit and a cancel
+// while classifying, a failure), --export, --compile and compiled maps (dumps, a shot with a reload, a damaged
+// file, a stale one and its refused export), --inspect-model, --new-map, --classify (an answer, garbage, a
+// timeout, off, an override), and every example's --shot (the game-style ones load compiled maps), the
+// profiling tool (tools/profile.c) on the fixtures in tests/profile/ (--report-only, no perf run),
 // the paint unwrap test (tests/unit/paintunwrap_test.c: xatlas on synthetic meshes and every model file in
 // maps/*/models/), run-sh.o (tools/run-sh.c, built with the sanitizer into the build folder: --check on
 // allowed, refused and unterminated lines, -c, --hook on Bash / Monitor / bad JSON) and its unit test
@@ -339,7 +341,7 @@ static bool CompileSanitized(const char *source, const char *binary, const char 
 // ToolRebuildSelf only rebuilds a binary at its own place, so these copies stay sanitizer builds.
 static const char *SAN_TOOLS[] = {
     "stub-terminal", "request-queue", "todo", "ai-todo", "stub-coordinator", "test-coordinator",
-    "bench-export-ab", "old-monolith",
+    "bench-export-ab", "old-monolith", "stub-classifier",
 };
 
 // #endregion
@@ -566,7 +568,7 @@ int main(int argc, char **argv)
             nob_cmd_free(cmd);
             if (status != 0) ToolDie(1, "building tests/unit/paintunwrap_test.c failed");
         }
-        // the stub terminal the --submit and --import runs start instead of a terminal: the real program
+        // the stub terminal the --submit runs start instead of a terminal: the real program
         // (it keeps itself current once built), built when missing
         if (access(nob_temp_sprintf("%s/build/tools/stub-terminal", root), X_OK) != 0) {
             Nob_Cmd cmd = {0};
@@ -619,6 +621,14 @@ int main(int argc, char **argv)
     // Section 3: the runs
     const char *REQ = strdup(T("requests"));   // the bundles' folder (inside tmp/: trashed with it)
     MkdirP(REQ);
+    // Every run's AI classifier is the sanitizer copy of the stub (never a real `claude -p`; its own leaks are
+    // reported with the run that started it), logging into tmp/; the developer's classifier settings stay out
+    setenv("MONOLITH_CLASSIFIER", nob_temp_sprintf("%s/stub-classifier", toolDir), 1);
+    setenv("MONOLITH_STUB_CLASSIFIER_LOG", T("stub-classifier.log"), 1);
+    unsetenv("MONOLITH_STUB_CLASSIFIER");
+    unsetenv("MONOLITH_CLASSIFIER_MODEL");
+    unsetenv("MONOLITH_CLASSIFIER_FALLBACK");
+    unsetenv("MONOLITH_CLASSIFIER_TIMEOUT");
 
     ToolSay("running monolith (%s build) ...", gMode);
     RUN("dump-boxes", 0, M, "--dump-boxes", T("boxes.txt"));
@@ -999,13 +1009,15 @@ int main(int argc, char **argv)
         "--pick-at", "10", "10", "--pick-at", "1590", "890");
 
     // --submit with the stub terminal (no window; MONOLITH_WORKSPACE empty: no workspace switch) into our own
-    // requests folder: coordinator mode on the default map, per-request mode on tests/models, and a cancel with
-    // no coordinator (MONOLITH_CLAUDE that doesn't exist). `env` sets the variables for the game only, as the
+    // requests folder: coordinator mode on the default map (its classifier still running when the game quits:
+    // queued on the default tier), per-request mode on tests/models (@heavy: no classifier), a cancel with no
+    // coordinator (MONOLITH_CLAUDE that doesn't exist), a classified one queued, a cancel while classifying and
+    // a classifier that fails before a per-request launch. `env` sets the variables for the game only, as the
     // script did.
     const char *reqEnv = nob_temp_sprintf("MONOLITH_REQUESTS_DIR=%s", REQ);
     const char *termEnv = nob_temp_sprintf("MONOLITH_TERMINAL=%s", STUB);
     RUN("submit-default", 0, "env", reqEnv, termEnv, nob_temp_sprintf("MONOLITH_STUB_LOG=%s", T("stub1.txt")),
-        "MONOLITH_WORKSPACE=", M, "--shot", T("s1.png"), "--view", "2", "--select", "192", "--select", "193", "--region",
+        "MONOLITH_WORKSPACE=", "MONOLITH_STUB_CLASSIFIER=slow", M, "--shot", T("s1.png"), "--view", "2", "--select", "192", "--select", "193", "--region",
         "100", "100", "300", "200", "--region", "800", "300", "200", "200", "--volume", "-11", "0", "-34", "-7", "20",
         "34", "--volume", "-4", "0", "4", "3", "4", "12", "--submit", "leakcheck: make these taller");
     RUN("submit-models", 0, "env", reqEnv, termEnv, nob_temp_sprintf("MONOLITH_STUB_LOG=%s", T("stub2.txt")),
@@ -1015,6 +1027,14 @@ int main(int argc, char **argv)
     RUN("submit-cancel", 0, "env", reqEnv, termEnv, "MONOLITH_CLAUDE=/nonexistent/claude", "MONOLITH_WORKSPACE=", M,
         "--shot", T("s3.png"), "--view", "2", "--submit", "leakcheck: cancel me", "--submit-wait", "1",
         "--close-submitted");
+    RUN("submit-classified", 0, "env", reqEnv, termEnv, "MONOLITH_STUB_CLASSIFIER=heavy", "MONOLITH_WORKSPACE=", M,
+        "--shot", T("s4.png"), "--view", "2", "--select", "192", "--submit", "leakcheck: classified", "--submit-wait", "1");
+    RUN("submit-cancel-classifying", 0, "env", reqEnv, termEnv, "MONOLITH_STUB_CLASSIFIER=slow", "MONOLITH_WORKSPACE=",
+        M, "--shot", T("s5.png"), "--view", "2", "--submit", "leakcheck: cancel while classifying", "--submit-wait",
+        "0.5", "--close-submitted");
+    RUN("submit-classifier-fail", 0, "env", reqEnv, termEnv, nob_temp_sprintf("MONOLITH_STUB_LOG=%s", T("stub3.txt")),
+        "MONOLITH_STUB_CLASSIFIER=fail", "MONOLITH_LAUNCH=per-request", "MONOLITH_WORKSPACE=", M, "--shot", T("s6.png"),
+        "--view", "2", "--submit", "leakcheck: classifier fails", "--submit-wait", "1");
     RUN("export-default", 0, M, "--export", T("export-default"));
     RUN("export-models", 0, M, "--export", T("export-models"), "--map", "tests/models");
 
@@ -1039,11 +1059,13 @@ int main(int argc, char **argv)
     const char *newMap = strdup(nob_temp_sprintf("_leakcheck_%s", stamp));
     RUN("new-map", 0, M, "--new-map", newMap);
     RUN("new-map-path", 0, M, "--new-map", T("newmap_path"));
+    // --classify: the AI path with the stub (an answer, garbage, a timeout), off, and an override
     RUN("classify", 0, M, "--classify", "make the pillar taller", "--select", "192");
-    // --import with the stub terminal: a new package in maps/ (trashed at the end) and a bundle in our folder
-    const char *importMap = strdup(nob_temp_sprintf("_leakcheck_import_%s", stamp));
-    RUN("import", 0, "env", reqEnv, termEnv, nob_temp_sprintf("MONOLITH_STUB_LOG=%s", T("stub3.txt")),
-        "MONOLITH_WORKSPACE=", M, "--import", "examples/04_import_source", importMap);
+    RUN("classify-garbage", 0, "env", "MONOLITH_STUB_CLASSIFIER=garbage", M, "--classify", "leakcheck: garbage");
+    RUN("classify-timeout", 0, "env", "MONOLITH_STUB_CLASSIFIER=slow", "MONOLITH_CLASSIFIER_TIMEOUT=1", M, "--classify",
+        "leakcheck: too slow");
+    RUN("classify-off", 0, "env", "MONOLITH_CLASSIFIER=off", M, "--classify", "leakcheck: off");
+    RUN("classify-override", 0, M, "--classify", "@fast leakcheck: override");
 
     // The profiling tool: its report on a cut-down real profile and bench report (tests/profile/), a missing
     // file, and a run it must refuse (it would open a window) before perf starts
@@ -1128,7 +1150,7 @@ int main(int argc, char **argv)
         for (size_t i = 0; i < NOB_ARRAY_LEN(SAN_TOOLS); i++) {
             tool[i] = strdup(nob_temp_sprintf("%s/%s", toolDir, SAN_TOOLS[i]));
         }
-        enum { STUBT, RQ, TODO, AITODO, STUBC, TESTC, BENCHAB, OLDM };
+        enum { STUBT, RQ, TODO, AITODO, STUBC, TESTC, BENCHAB, OLDM, STUBCL };
 
         // stub-terminal: its argv into a log and a "window" counted; then MONOLITH_STUB_RUN, which hands the
         // process over to the command after -e (a plain echo)
@@ -1149,13 +1171,16 @@ int main(int argc, char **argv)
         MkdirP(nob_temp_sprintf("%s/20261113-120100-done", rqDir));
         WriteText(nob_temp_sprintf("%s/20261113-120000-queued/state", rqDir), "queued 2026-11-13T12:00:00 game\n", false);
         WriteText(nob_temp_sprintf("%s/20261113-120000-queued/request.json", rqDir),
-                  "{\n  \"kind\": \"edit\",\n  \"package\": \"maps/nonexistent\",\n"
-                  "  \"model\": \"default\",\n  \"prompt\": \"leakcheck: make it \\\"taller\\\"\\nand wider\"\n}\n",
+                  "{\n  \"format\": 6,\n  \"package\": \"maps/nonexistent\",\n"
+                  "  \"prompt\": \"leakcheck: make it \\\"taller\\\"\\nand wider\",\n"
+                  "  \"model\": { \"tier\": \"heavy\", \"name\": \"opus\", \"reason\": \"a \\\"tier\\\": \\\"x\\\" in it\", "
+                  "\"override\": false, \"source\": \"classifier\", \"classifier\": \"ai\", \"classifierModel\": "
+                  "\"claude-fable-5-2\", \"seconds\": 2.50 }\n}\n",
                   false);
         WriteText(nob_temp_sprintf("%s/20261113-120100-done/state", rqDir), "done 2026-11-13T12:01:00 coordinator\n",
                   false);
         WriteText(nob_temp_sprintf("%s/20261113-120100-done/request.json", rqDir),
-                  "{\n  \"kind\": \"edit\",\n  \"package\": \"maps/nonexistent\",\n  \"prompt\": \"finished\"\n}\n",
+                  "{\n  \"format\": 6,\n  \"package\": \"maps/nonexistent\",\n  \"prompt\": \"finished\"\n}\n",
                   false);
         RUN("tool-request-queue-usage", 2, "env", rqEnv, tool[RQ]);
         RUN("tool-request-queue-list-empty", 0, "env", rqEmpty, tool[RQ], "list");
@@ -1240,8 +1265,7 @@ int main(int argc, char **argv)
         RUN("tool-old-monolith-rm-shim", 0, rmShim, "-rf", nob_temp_sprintf("%s/nothing-here", td));
     }
 
-    // The examples (LSan mode only: they have no ASan build), each with --shot; 05 finds an entity by id, 04's
-    // capture build writes its capture into tmp/
+    // The examples (LSan mode only: they have no ASan build), each with --shot; 05 finds an entity by id
     if (lsan) {
         ToolSay("running the examples ...");
         RUN("ex-01-minimal", 0, nob_temp_sprintf("%s/01_minimal/minimal", exDir), "--shot", T("e1.png"));
@@ -1254,17 +1278,12 @@ int main(int argc, char **argv)
         RUN("ex-03-live-editing", 0, nob_temp_sprintf("%s/03_live_editing/live_editing", exDir), "--shot", T("e3.png"));
         RUN("ex-05-entities", 0, nob_temp_sprintf("%s/05_entities/entities", exDir), "--shot", T("e5.png"), "--find",
             "a7d95ba7:0");
-        RUN("ex-04-import-source", 0, nob_temp_sprintf("%s/04_import_source/import_source", exDir), "--shot",
-            T("e4.png"));
-        RUN("ex-04-capture", 0, "env", nob_temp_sprintf("MONOLITH_CAPTURE=%s", T("capture")),
-            nob_temp_sprintf("%s/04_import_source/import_source_capture", exDir), "--shot", T("e4c.png"));
     }
 
     // ---------------------------------------------------------------------------------------------------------
-    // Section 4: clean up what the runs created (to the trash, never rm): the two packages made in maps/, and
+    // Section 4: clean up what the runs created (to the trash, never rm): the package made in maps/, and
     // tmp/ with everything else
     Trash(nob_temp_sprintf("%s/maps/%s", root, newMap));
-    Trash(nob_temp_sprintf("%s/maps/%s", root, importMap));
     Trash(gTmp);
 
     // ---------------------------------------------------------------------------------------------------------

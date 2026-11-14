@@ -25,10 +25,9 @@
 // Builds against monolith's R3D copy (submodules/r3d, with -DMS_PATCHED_R3D) and its static libraries, which
 // the repo's ./build.sh builds (run it once first, or ./build.sh --win for --win). Same compiler flags as the
 // game (zero warnings), same static linking and glibc compatibility shim (src/glibc_compat.c) on Linux. The
-// runtime is built like an exported game (no -DMONOLITH_EDITOR), except for 03_live_editing (MS_Poll) and the
-// capture shim (MS_WriteR3DEnvironment). A game build reads only compiled maps, so the game-style examples get
-// their scene compiled next to the copied text (<name>.mapb, through build/linux/monolith --compile, also for
-// --win); 03_live_editing loads the text.
+// runtime is built like an exported game (no -DMONOLITH_EDITOR), except for 03_live_editing (MS_Poll). A game
+// build reads only compiled maps, so the game-style examples get their scene compiled next to the copied text
+// (<name>.mapb, through build/linux/monolith --compile, also for --win); 03_live_editing loads the text.
 //
 // Environment:
 //   R3D_DIR   another R3D tree (default: submodules/r3d); its build-linux/ (or build-mingw/ for --win) must
@@ -660,18 +659,6 @@ int main(int argc, char **argv)
     Example("05_entities", "entities", nob_temp_sprintf("%s/05_entities/main.c", gHere), none, true);
     Data("05_entities", "01_minimal/scene", "scene");
     Compiled("05_entities", "scene");
-
-    Example("04_import_source", "import_source", nob_temp_sprintf("%s/04_import_source/main.c", gHere), noArgs,
-            false);
-    Data("04_import_source", "04_import_source/assets", "assets");
-
-    // The same program with the capture shim compiled in (runtime/monolith_capture.h), unchanged source:
-    // -include puts the shim in front of main.c (in the test builds before the harness, which then wraps its
-    // recorders), and only main.c gets its implementation. Run as MONOLITH_CAPTURE=<dir> ./import_source_capture
-    const char *capture[] = {"-DHARNESS_MAIN_NO_ARGS", "-DMONOLITH_EDITOR", "-include", "monolith_capture.h",
-                             "-DMONOLITH_CAPTURE_IMPLEMENTATION", NULL};
-    Example("04_import_source", "import_source_capture", nob_temp_sprintf("%s/04_import_source/main.c", gHere),
-            capture, true);
 
     PrintSummary();
     return 0;

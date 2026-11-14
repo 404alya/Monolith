@@ -1013,6 +1013,7 @@ static const char *TOOLS[] = {
     "stub-terminal",     // MONOLITH_TERMINAL stand-in for launcher tests: no window
     "request-queue",     // the request queue on disk, run by the coordinator session
     "stub-coordinator",  // MONOLITH_CLAUDE stand-in: the coordinator's scheduling rules without Claude
+    "stub-classifier",   // MONOLITH_CLASSIFIER stand-in: the AI classifier's answers without Claude
     "test-coordinator",  // end-to-end test of the queue and the coordinator launch
     "leakcheck",         // every main code path under LeakSanitizer (CLAUDE.md: after every code change)
     "bench-export-ab",   // interleaved A/B benchmark pairs of two exports
@@ -1337,7 +1338,7 @@ static int BuildWindows(int argc, char **argv)
     // generated config; --inspect-model reads models through assimp, src/inspect.c), assimp's zlib (the PNG
     // writer, src/png.c). R3D_BUILD_TYPE_NAME: shown in bench reports. -I runtime: the scene runtime's header;
     // MS_PATCHED_R3D: the runtime may use monolith's R3D patches; MONOLITH_EDITOR: the editor build of the
-    // runtime. Then the sources (src/*.c but launcher.c and import.c, runtime/*.c in glob order) and the xatlas
+    // runtime. Then the sources (src/*.c but launcher.c and classifier.c, runtime/*.c in glob order) and the xatlas
     // object.
     // -s: strip the symbols (a smaller .exe). -static: libgcc, libstdc++ (assimp) and winpthread are linked
     // in as well, leaving only system DLLs (opengl32, gdi32, winmm, kernel32, ...) as imports. -lstdc++:
@@ -1353,14 +1354,14 @@ static int BuildWindows(int argc, char **argv)
                    nob_temp_sprintf("-I%s/external/assimp/contrib/zlib", r3dWin),
                    "-DR3D_BUILD_TYPE_NAME=\"Release\"",
                    nob_temp_sprintf("-I%s/runtime", gRoot), "-DMS_PATCHED_R3D", "-DMONOLITH_EDITOR");
-    // The Windows build is the view-only editor (MONOLITH_EDITING 0, src/common.h): the launcher and
-    // --import (POSIX, Linux only) are left out; their headers give the stubs it links against.
+    // The Windows build is the view-only editor (MONOLITH_EDITING 0, src/common.h): the launcher and its AI
+    // classifier (POSIX, Linux only) are left out; launcher.h gives the stubs it links against.
     size_t first = cmd.count, kept = first;
     AppendGlob(&cmd, nob_temp_sprintf("%s/src/*.c", gRoot));
     for (size_t k = first; k < cmd.count; k++) {
         const char *base = strrchr(cmd.items[k], '/');
         base = base ? base + 1 : cmd.items[k];
-        if (strcmp(base, "launcher.c") != 0 && strcmp(base, "import.c") != 0) cmd.items[kept++] = cmd.items[k];
+        if (strcmp(base, "launcher.c") != 0 && strcmp(base, "classifier.c") != 0) cmd.items[kept++] = cmd.items[k];
     }
     cmd.count = kept;
     AppendGlob(&cmd, nob_temp_sprintf("%s/runtime/*.c", gRoot));
@@ -1534,8 +1535,7 @@ static int BuildLinux(int argc, char **argv)
     // clangd's compilation database, from the lists above (the plain build only: the sanitizer and profile
     // builds and --win leave it alone). The game's files with the game's flags; tools/profile.c, xatlas, the
     // examples with the flags examples/nob.c uses (keep these lines in step when it changes), tests/unit
-    // with the flags of UNIT_TESTS (generated from that list below). One entry per file: 04_import_source
-    // is listed as the plain program, not its capture-shim build.
+    // with the flags of UNIT_TESTS (generated from that list below).
     if (strcmp(mode, "") == 0 || strcmp(mode, "run") == 0) {
         Entries entries = {0};
         Nob_Cmd e = {0};
@@ -1571,7 +1571,6 @@ static int BuildLinux(int argc, char **argv)
             {"-DHARNESS_MAIN_NO_ARGS", "examples/02_existing_project/before.c"},
             {NULL, "examples/02_existing_project/after.c"},
             {"-DMONOLITH_EDITOR", "examples/03_live_editing/main.c"},
-            {"-DHARNESS_MAIN_NO_ARGS", "examples/04_import_source/main.c"},
             {NULL, "examples/05_entities/main.c"},
         };
         for (size_t i = 0; i < NOB_ARRAY_LEN(examples); i++) {

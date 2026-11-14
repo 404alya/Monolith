@@ -6,26 +6,32 @@
 #include "common.h"
 #include "designer.h"
 
-// Model choice per request (rules: the "Model choice" comment in launcher.c)
+// Model choice per request (the "Model choice" comment in launcher.c; docs/request-queue.md "Models")
 typedef enum { MODEL_TIER_FAST, MODEL_TIER_DEFAULT, MODEL_TIER_HEAVY } ModelTier;
 
+// What the model choice knows about a request: the prompt for the @token, the rest for the AI
+// classifier's input (src/classifier.h, ClassifierQuery)
 typedef struct {
     const char *prompt;     // as typed; may start with an @tier token
-    const char *kind;       // "edit", "import" or "new-map"
+    const char *package;    // the map package folder's name
+    int boxes, models;      // objects in the map
+    bool brief;             // the package has a MAP.md
     int selected;           // selected objects
     int regions;            // screen regions
     int volumes;            // volumes (world-space boxes)
     bool hit;               // the crosshair hit something
-    bool emptyMap;          // the map has (almost) nothing in it (<= 2 objects)
-    bool noBrief;           // the map package has no MAP.md
 } ModelQuery;
 
+// The model a request runs on, who chose it and why (request.md's Model line, request.json "model")
 typedef struct {
     ModelTier tier;
     char name[128];         // value of --model ("" never: falls back to the tier's default)
     MonoMsg reason;         // one line, plain ASCII (freed with ModelChoiceFree)
     bool override;          // an @tier token in the prompt chose the tier
     const char *source;     // "classifier", "prompt", "MONOLITH_MODEL" or "MONOLITH_CLAUDE_ARGS"
+    const char *classifier; // "ai", "failed", "off" or "override" (NULL while the classifier runs)
+    char classifierModel[72];   // the model that answered (classifier "ai"), else ""
+    double seconds;         // the classifier's time from start to answer; < 0: none
     bool addFlag;           // false: MONOLITH_CLAUDE_ARGS already has --model, don't add one
     int promptSkip;         // bytes at the start of the prompt taken by the @token (+ blanks)
     bool droppedModelArg;   // MONOLITH_CLAUDE_ARGS had a --model without a name (ignored)
@@ -36,49 +42,47 @@ typedef struct {
 #if MONOLITH_EDITING
 
 const char *ModelTierName(ModelTier tier);
-// Pure classifier (no environment): tier + reason (set in *reason: a literal for fixed
-// reasons, a heap text otherwise; MsgFree it); strips nothing
-ModelTier ClassifyRequest(const ModelQuery *q, MonoMsg *reason);
-// Classifier + @token + MONOLITH_MODEL* / MONOLITH_CLAUDE_ARGS: what the launcher runs.
-// *out is overwritten (not freed first): free it with ModelChoiceFree
-void LauncherChooseModel(const ModelQuery *q, ModelChoice *out);
-// Frees what LauncherChooseModel allocated in *c (its reason)
+// The overrides: an @token in the prompt, MONOLITH_MODEL, a --model in MONOLITH_CLAUDE_ARGS
+// (MONOLITH_MODEL_* name the tiers). *out is overwritten (not freed first): free it with
+// ModelChoiceFree. Returns
+//   0: an override decided (classifier "override"); *out is final
+//   1: no override: the AI classifier decides (*out holds the default tier until then)
+unsigned char LauncherChooseModel(const ModelQuery *q, ModelChoice *out);
+// Frees what the model choice allocated in *c (its reason)
 void ModelChoiceFree(ModelChoice *c);
+// The whole choice, synchronously (--classify, no window, no bundle): the overrides, else the AI
+// classifier run to its end in a temporary folder (removed afterwards), MONOLITH_CLASSIFIER=off
+// or its failure giving the default tier. *out as for LauncherChooseModel.
+void LauncherClassify(const ModelQuery *q, ModelChoice *out);
 
-// The launcher's note: the text of the last LauncherSubmit / LauncherStartBundle /
-// LauncherClose* outcome that is not a failure (failures are in MS_LastError()). "" before
-// any. Valid until the next of those calls; freed by LauncherShutdown.
+// The launcher's note: the text of the last LauncherSubmit / LauncherClose* outcome that is
+// not a failure (failures are in MS_LastError()). "" before any. Valid until the next of those calls; freed by LauncherShutdown.
 const char *LauncherNote(void);
 
-// Writes requests/<stamp>_<slug>/ (view.png, view-marked.png, request.md, request.json) and
-// queues it for the coordinator, starting one if none runs (MONOLITH_LAUNCH=per-request:
-// launches Claude Code on it in a new terminal). Never blocks on the child. Returns
-//   0: queued / sent (a queued bundle counts even if the coordinator couldn't start); the
-//      one-line HUD text in LauncherNote() ("request queued [n] ..." / "request sent (...) ...")
+// Writes requests/<stamp>_<slug>/ (view.png, view-marked.png, region-<n>.png) and computes the
+// rest of the bundle. With an override (LauncherChooseModel) it then writes request.md and
+// request.json and queues the bundle for the coordinator, starting one if none runs
+// (MONOLITH_LAUNCH=per-request: launches Claude Code on it in a new terminal). Without one it
+// starts the AI classifier instead and returns: LauncherUpdate writes and queues the bundle once
+// the classifier has answered (or failed). Never blocks on a child. Returns
+//   0: queued / sent / classifying (a queued bundle counts even if the coordinator couldn't
+//      start); the one-line HUD text in LauncherNote() ("request queued [n] ...", "request sent
+//      (...) ...", "request classifying [n] ...")
 //   1: not sent; why in MS_LastError() (it names the bundle path if one was written, so the
 //      developer can run it by hand)
 unsigned char LauncherSubmit(const DesignRequest *req, Image view, Image marked);
 
-// Hands a bundle someone else wrote into requests/<id>/ (e.g. an import, src/import.c) on
-// like LauncherSubmit: queued for the coordinator, or (per-request mode) Claude Code in a new
-// terminal with the same flags and workspace handling, and tracks it in the HUD. claudePrompt
-// is the one-line instruction on the command line in per-request mode (never user text).
-// slug: [a-z0-9-] only (it goes into the window title). model: value of --model (NULL =
-// none), e.g. from LauncherChooseModel; coordinator mode only names it in the note.
-// Returns 0: queued / sent (the text in LauncherNote()); 1: not sent (MS_LastError())
-unsigned char LauncherStartBundle(const char *id, const char *slug, const char *claudePrompt, const char *model);
-
-// requests/ (the repo's while it exists, else next to the executable) and the folder Claude
-// Code starts in; both with a trailing slash
-const char *LauncherRequestsDir(void);
-const char *LauncherRootDir(void);
+// The HUD text of a classified request that LauncherUpdate has just queued or sent (or failed to:
+// *warning true), once: NULL until the next one. Valid until the next launcher call.
+const char *LauncherEventNote(bool *warning);
 
 // Removes MONOLITH_ALLOW_WINDOW from this process's environment, so the Claude Code sessions
 // the launcher starts (agents, whose shells set CLAUDECODE) never inherit the override of the
 // game's window guard. Call once, after main() has read it and before any launch.
 void LauncherScrubEnv(void);
 
-// Polls the open requests for result.md (cheap; call every frame, it rate-limits itself)
+// Polls the running classifiers (every call, without waiting) and the open requests for
+// result.md (cheap; call every frame, it rate-limits itself)
 void LauncherUpdate(float dt);
 
 // Draws the open/finished request list at (x, y); returns the height used in pixels
@@ -96,7 +100,8 @@ unsigned char LauncherCloseLatestDone(void);
 int LauncherCloseAllDone(void);
 // Request [number] of the HUD list, running ones too: a request without result.md needs a
 // second call within 3 s (the first asks for it). Coordinator mode: cancels a queued request
-// at once, a running one on the second call. Returns
+// at once, a running one on the second call. A request still classifying is cancelled at once
+// in both modes (its classifier killed, the bundle written as cancelled). Returns
 //   0: closed / cancelled / cancel already asked (note)
 //   1: waiting for the number again (note: "press %d again ...")
 //   2: no request [number] in the list (MS_LastError())
@@ -115,24 +120,26 @@ int LauncherNewestNumber(void);
 int LauncherOpenOnMap(const char *mapPath, int *newest);
 // A closed request's terminal process is still running (being shut down)
 bool LauncherClosing(void);
-// MONOLITH_CLOSE_ON_EXIT=1: close every finished request's terminal, or the coordinator if
-// none of this run's requests is still open (call when quitting)
+// When quitting: kills the classifiers still running and queues (sends) their bundles on the
+// default tier ("game quit while classifying"); then MONOLITH_CLOSE_ON_EXIT=1 closes every
+// finished request's terminal, or the coordinator if none of this run's requests is still open
 void LauncherCloseOnExit(void);
 
 // Camera of the most recently finished request, for "fly back" (false if none)
 bool LauncherLastDone(Vector3 *eye, float *yaw, float *pitch);
 
-// Frees the request list and the launcher's texts (call once at exit; requests started later
-// are tracked anew)
+// Queues any request still classifying (as LauncherCloseOnExit), then frees the request list and
+// the launcher's texts (call once at exit; requests started later are tracked anew)
 void LauncherShutdown(void);
 
 
 #else   // !MONOLITH_EDITING: no requests; the callers refuse before they get here (main.c)
 static inline const char *ModelTierName(ModelTier tier) { (void)tier; return "none"; }
-static inline void LauncherChooseModel(const ModelQuery *q, ModelChoice *out)
+static inline void LauncherClassify(const ModelQuery *q, ModelChoice *out)
 {
     (void)q;
-    *out = (ModelChoice){ .tier = MODEL_TIER_DEFAULT, .reason = { .text = MSG_VIEW_ONLY }, .source = "none" };
+    *out = (ModelChoice){ .tier = MODEL_TIER_DEFAULT, .reason = { .text = MSG_VIEW_ONLY }, .source = "none",
+                          .classifier = "off", .seconds = -1.0 };
 }
 static inline void ModelChoiceFree(ModelChoice *c) { MsgFree(&c->reason); }
 static inline const char *LauncherNote(void) { return MSG_VIEW_ONLY; }
@@ -142,6 +149,7 @@ static inline unsigned char LauncherSubmit(const DesignRequest *req, Image view,
     MS_SetError(MSG_VIEW_ONLY);
     return 1;
 }
+static inline const char *LauncherEventNote(bool *warning) { (void)warning; return NULL; }
 static inline void LauncherScrubEnv(void) { }
 static inline void LauncherUpdate(float dt) { (void)dt; }
 static inline int LauncherDrawHud(int x, int y) { (void)x; (void)y; return 0; }

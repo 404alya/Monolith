@@ -104,7 +104,7 @@ Editing one copy of a `repeat` row (a single pillar of a row of eight) splits th
 
 **Undo** (Ctrl+Z) puts the old text back, byte for byte; redo (Ctrl+Shift+Z or Ctrl+Y) applies the edit again; both are live like an edit, and saving doesn't end the history (undo past the save point and the count of unsaved edits goes up again). **When the map changes on disk** while you have unsaved edits (a request finishes, you save it in a text editor), the game loads the new file and applies your unsaved edits again on top of it, each to the same objects (found by their entity ids, so lines that moved don't matter). An edit whose objects are gone, or that no longer fits the line, is listed in red in the HUD ("could not re-apply: …") until you clear the list with **Ctrl+Shift+Delete**; the history before your last save is dropped. Without unsaved edits such a change just clears the history, so an undo never takes back a change you didn't make here. If a request of yours is queued or running on the same map, the first edit after your last save (and a save) only warns you (the request's session may be changing the same lines); press the key again within 3 seconds to go ahead.
 
-**Picking the model.** The game chooses a fast, default or heavy Claude model per request from its wording and context. Start the prompt with `@fast`, `@default` or `@heavy` to choose yourself.
+**Picking the model.** Each request runs on a fast, default or heavy Claude model. A small separate Claude run (the AI classifier, on Fable; Opus when Fable is busy) reads the request and its context and picks the tier before the request is queued; that takes a few seconds and never holds up the game. Start the prompt with `@fast`, `@default` or `@heavy` to choose yourself (no classifier then). If the classifier fails or takes longer than 30 seconds, the request runs on the default tier. `MONOLITH_CLASSIFIER=off` turns it off ([command-line.md](command-line.md)).
 
 ### Painting (B)
 
@@ -133,13 +133,13 @@ In the panel, drag a slider or click a number to type it (Enter or a click elsew
 
 The game saves the request with screenshots and everything it knows about the spot into `requests/<date>_<slug>/` and puts it in a queue. The first request opens the **coordinator**: one Claude Code terminal that stays open, takes the requests from the queue one by one (several at once when they are on different maps) and hands each to a helper agent. You don't have to do anything in that terminal; the edit appears in the running game when it is saved.
 
-The HUD lists the requests, numbered: `queued`, `running`, `[?]` (a question is waiting for you), and for 20 seconds after it finishes `[done]`, `[failed]` or `[cancelled]` with a one-line summary.
+The HUD lists the requests, numbered: `classifying` (the AI classifier is picking its model; then the HUD says `request queued [n] (<model>): … (AI: <its reason>)`), `queued`, `running`, `[?]` (a question is waiting for you), and for 20 seconds after it finishes `[done]`, `[failed]` or `[cancelled]` with a one-line summary.
 
 | Key | Action |
 |---|---|
 | R | fly back to where the most recently finished request was made |
 | K / Shift+K | take the latest / all finished requests off the list |
-| Ctrl+K, then a number | that request: finished → off the list; queued → cancel; running → press the number again within 3 s to cancel |
+| Ctrl+K, then a number | that request: finished → off the list; classifying or queued → cancel; running → press the number again within 3 s to cancel |
 | Ctrl+Shift+K | close the coordinator's terminal (press again within 3 s if requests are still open; the next coordinator picks them up) |
 
 **Questions.** When a request is ambiguous (for example "this" with nothing under the crosshair), it shows `[?]` and the question appears in the coordinator's terminal. Answer there; the request continues. You can also type in that terminal: `status`, `pause` / `resume`, `cancel <name>`, or `stop` (finish what is running, start nothing new).
@@ -203,7 +203,6 @@ monolith reads one map format, the current one (3, the `monolith 3` line at the 
 
 - **New map:** `./build/linux/monolith --new-map <name>` creates `maps/<name>/` with a ground slab, daylight and a brief template, then `--map maps/<name>` opens it. Describe the map in your first request ("a foggy pine forest at dusk"): Claude writes the brief and builds to it.
 - **Edit by hand:** open the `.map` file in any editor while the game runs; it reloads on save.
-- **Import a scene** from an existing raylib + R3D project: `./build/linux/monolith --import <project folder> <name>` creates the map and queues an import request. Claude reads the project's source (as data, never running it except as a build in a scratch copy), copies and records its assets, translates boxes, models, materials, lights, environment and camera into the new map, fills in the brief, compares screenshots, and lists in `result.md` what it could not translate (custom render passes, gameplay, animation, …).
 - **Use a map in your own program:** F9 or `--export` ([export.md](export.md)).
 
 Models and textures in a map always come with a recorded licence (CC0 / public domain, or CC-BY with the attribution): the package's `ASSETS.md` lists each file's source, author and licence.

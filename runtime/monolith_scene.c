@@ -12504,7 +12504,7 @@ bool MS_WriteEnvironment(const MS_Scene *s, FILE *f)
 // #endregion
 
 // ======================================================================================
-// #region Public API: package files, R3D environment export (editor: --export, capture shim)
+// #region Public API: package files (editor: --export, hot reload)
 // ======================================================================================
 
 int MS_DependencyCount(const MS_Scene *s)
@@ -12516,13 +12516,6 @@ const char *MS_Dependency(const MS_Scene *s, int index)
 {
     if (index < 0 || index >= MS_DependencyCount(s)) return NULL;
     return s->priv->d->deps[index];
-}
-
-bool MS_WriteR3DEnvironment(const R3D_Environment *env, FILE *f)
-{
-    for (int i = 0; i < COUNT(ENV_KEYS); i++)
-        WriteKey(f, "", ENV_KEYS[i].key, ENV_KEYS[i].type, (const char *)env + ENV_KEYS[i].off);
-    return !ferror(f);
 }
 
 // #endregion

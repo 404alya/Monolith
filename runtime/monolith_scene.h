@@ -816,7 +816,7 @@ void MS_PaintUnwrapFree(MS_PaintUnwrap *u);
 
 #ifdef MONOLITH_EDITOR
 // ======================================================================================
-// Package files and environment writers (editor: --export, --new-map, the capture shim)
+// Package files and environment writers (editor: --export, --new-map)
 // ======================================================================================
 
 // Writes the scene's environment as format-2 `env` lines: every R3D_Environment field,
@@ -831,11 +831,6 @@ bool MS_WriteEnvironment(const MS_Scene *scene, FILE *f);
 // Files a model file pulls in by itself (a .gltf's .bin and textures) are not listed.
 int MS_DependencyCount(const MS_Scene *scene);
 const char *MS_Dependency(const MS_Scene *scene, int index);   // NULL when out of range
-
-// Writes every R3D_Environment field of `env` as a format-2 `env` line (the same table and
-// number formatting as MS_WriteEnvironment; no sky.*, ambientSky.*, sun.* or cache keys,
-// which are not part of R3D_Environment). For tools that translate a running R3D program.
-bool MS_WriteR3DEnvironment(const R3D_Environment *env, FILE *f);
 
 // Checks the files a model file refers to (glTF buffers and images, OBJ material libraries
 // and their texture maps) without importing it: each must stay inside `root` (a folder path

@@ -2,10 +2,12 @@
 //
 // A submitted request becomes a self-contained folder requests/<YYYY-MM-DD_HHMMSS>_<slug>/
 // (view.png, view-marked.png, region-<n>.png per screen region, request.md, request.json;
-// bundle format 5, .claude/skills/map-request/bundle-reference.md). The model is chosen per request (fast /
-// default / heavy tier, see "Model choice" below) and recorded in request.md / request.json.
-// The user's prompt never goes on a command line: it only lives in the bundle, and every
-// process is started from an argv array (no shell).
+// bundle format 6, .claude/skills/map-request/bundle-reference.md). The model is chosen per
+// request (fast / default / heavy tier): by an override, else by the AI classifier, one
+// `claude -p` per request run in the background (regions "Model choice" and "Classifying",
+// src/classifier.c); request.md, request.json and state are written once it has answered.
+// The user's prompt never goes on a command line: it only lives in the bundle (and on the
+// classifier's stdin), and every process is started from an argv array (no shell).
 //
 // Two ways to hand the bundle to Claude Code (MONOLITH_LAUNCH):
 //   - coordinator (default; region "Coordinator and queue", docs/request-queue.md): the
@@ -43,8 +45,9 @@
 //     skills (.claude/skills/) instead. MONOLITH_CLAUDE_SAFE=1 (any value but empty or "0") drops the two flags.
 //     So does a working directory without CLAUDE.md (a copied build folder): with no
 //     guard rails to read, the session keeps Claude Code's approval prompts.
-//   - model: per request MONOLITH_MODEL, MONOLITH_MODEL_FAST / _DEFAULT / _HEAVY and an @tier
-//     prompt prefix steer it (region "Model choice"); the coordinator passes it to the
+//   - model: per request the AI classifier (MONOLITH_CLASSIFIER*, docs/request-queue.md
+//     "Models"), or the overrides MONOLITH_MODEL and an @tier prompt prefix; MONOLITH_MODEL_FAST /
+//     _DEFAULT / _HEAVY name the tiers (region "Model choice"); the coordinator passes it to the
 //     request's subagent. The coordinator's own model: MONOLITH_COORDINATOR_MODEL.
 //   - extra Claude Code flags: $MONOLITH_CLAUDE_ARGS, split on whitespace (no quoting),
 //     after --model, on the coordinator's (or the request's) command line. Default none.
@@ -77,6 +80,7 @@
 #define _DEFAULT_SOURCE             // flock (the coordinator's lock)
 
 #include "launcher.h"
+#include "classifier.h"
 #include "ui.h"
 #include "png.h"
 #include <ctype.h>
@@ -404,28 +408,18 @@ static const char *const COLLIDE_NAMES[] = { "aabb", "none", "box" };
 //
 // Each request runs on one of three tiers: fast (default model `haiku`), default (`sonnet`),
 // heavy (`opus`); Claude Code's aliases, so they follow the latest model of each family.
-// ClassifyRequest() is pure and deterministic. Words are runs of ASCII letters, compared
-// case-insensitively as whole words; a keyword also matches its plural (+s, +es, y->ies).
-// First rule that applies wins:
-//   heavy   1. kind "import" or "new-map"
-//           2. the map is (nearly) empty (<= 2 objects) or has no MAP.md: the session must
-//              write or extend the design brief
-//           3. an asset word (model, asset, download, tree, car, statue, lamp, ...): it means
-//              finding / importing models
-//           4. a look / engine word (shader, material, texture, light, fog, sky, sun, ...)
-//           5. a large-design word (build, design, create, district, city, building, ...)
-//           6. long text: > 280 bytes or 3+ sentences; or more than 2 screen regions +
-//              volumes together
-//   fast    7. at most 120 bytes, one sentence, a target (crosshair hit, a selection of at
-//              most 100 objects, or exactly one region or volume and not both), a local edit word (move, raise,
-//              taller, delete, rename, mirror, ..., or "make"/"set" + a number), and no
-//              creation word (add, put, place, insert, open, replace, row, ...)
-//   default 8. everything else
-// Overrides, strongest first: --model in MONOLITH_CLAUDE_ARGS (no second --model is added);
-// MONOLITH_MODEL=<name> (one model for every request); a leading @fast / @default / @heavy
-// (or @haiku / @sonnet / @opus) in the prompt picks the tier and is stripped from the
-// prompt written to the bundle. MONOLITH_MODEL_FAST / _DEFAULT / _HEAVY rename the tiers.
-// --classify "text" (main.c) prints the decision without opening a window.
+// MONOLITH_MODEL_FAST / _DEFAULT / _HEAVY rename the tiers. docs/request-queue.md, "Models".
+// Overrides, strongest first, skip the classifier: --model in MONOLITH_CLAUDE_ARGS (no second
+// --model is added); MONOLITH_MODEL=<name> (one model for every request); a leading @fast /
+// @default / @heavy (or @haiku / @sonnet / @opus) in the prompt picks the tier and is stripped
+// from the prompt written to the bundle.
+// Without an override a separate AI classifier decides: one `claude -p` per request (Fable,
+// Opus as its fallback; src/classifier.c), started by LauncherSubmit and polled from
+// LauncherUpdate (region "Classifying"), never waited for. Its failure, its timeout,
+// MONOLITH_CLASSIFIER=off, cancel and quit all give the default tier. There are no word-list
+// rules, not even as a fallback: words alone misjudge requests ("make this simple chair" is a
+// modelling job, "the far wall feels cramped" a design job).
+// --classify "text" (main.c, LauncherClassify) runs the same path synchronously.
 
 static const char *const TIER_NAMES[] = { "fast", "default", "heavy" };
 static const char *const TIER_MODELS[] = { "haiku", "sonnet", "opus" };
@@ -433,171 +427,30 @@ static const char *const TIER_ENV[] = { "MONOLITH_MODEL_FAST", "MONOLITH_MODEL_D
 
 const char *ModelTierName(ModelTier tier) { return TIER_NAMES[tier]; }
 
-#define FAST_MAX_BYTES      120
-#define HEAVY_MIN_BYTES     280
-#define FAST_MAX_SELECTION  100
-
-static const char *const KW_ASSET[] = {
-    "model", "asset", "download", "tree", "car", "statue", "lamp", "furniture", "prop", "vehicle",
-    "plant", "character", "sculpture", "sketchfab", "poly pizza", "polypizza", "mesh", "glb", "gltf",
-    "fbx", "person", "people", "human", "animal", "bush", "chair", "table", NULL };
-static const char *const KW_LOOK[] = {
-    "shader", "material", "texture", "light", "lighting", "fog", "sky", "sun", "mood", "atmosphere",
-    "render", "rendering", "engine", "code", "performance", "shadow", "color", "colour", "bloom",
-    "exposure", "glow", "emissive", "neon", "night", "weather", "rain", "snow", "fps", "dark", "darker",
-    "bright", "brighter", "lighter", "moody", "moodier", NULL };
-static const char *const KW_DESIGN[] = {
-    "build", "design", "create", "generate", "redesign", "district", "city", "building", "level",
-    "layout", "maze", "labyrinth", "interior", "town", "village", "street", "neighborhood",
-    "neighbourhood", "quarter", "campus", "park", "garden", "castle", "temple", "house", NULL };
-static const char *const KW_EDIT[] = {
-    "move", "raise", "lower", "tall", "taller", "short", "shorter", "high", "higher", "wide", "wider",
-    "narrow", "narrower", "thick", "thicker", "thin", "thinner", "long", "longer", "deep", "deeper",
-    "delete", "remove", "rename", "shift", "align", "copy", "duplicate", "mirror", "scale", "resize",
-    "flip", "hide", "rotate", "twice", "double", "half", "extend", "shrink", "stretch", "nudge",
-    "lift", "drop", "flatten", "trim", "widen", "lengthen", "shorten", "heighten", "smaller",
-    "bigger", "larger", "push", "pull", NULL };
-static const char *const KW_CREATE[] = {
-    "add", "put", "place", "insert", "new", "open", "opening", "connect", "attach", "fill",
-    "replace", "convert", "turn", "row", "grid", "array", "pattern", NULL };
-
-typedef char Word[24];      // lowercase; letters, or a number ("2.5"); longer words are cut
-                            // (no keyword is that long, so a cut word never matches by accident)
-typedef struct {
-    Word *w;                // heap: every word of the prompt
-    int n, cap;
-} Words;
-
-// False when out of memory (W then holds the words found so far)
-static bool SplitPromptWords(const char *s, Words *W)
-{
-    W->n = 0;
-    const unsigned char *p = (const unsigned char *)s;
-    while (*p) {
-        bool alpha = *p < 128 && isalpha(*p), digit = *p < 128 && isdigit(*p);
-        if (!alpha && !digit) { p++; continue; }
-        int len = 0;
-        if (!MS_RESERVE(W->w, W->cap, W->n + 1)) return false;
-        char *w = W->w[W->n++];
-        while (*p < 128 && (alpha ? isalpha(*p) : (isdigit(*p) || (*p == '.' && isdigit(p[1]))))) {
-            if (len < 23) w[len++] = (char)tolower(*p);
-            p++;
-        }
-        w[len] = 0;
-    }
-    return true;
-}
-
-static bool WordIs(const char *w, const char *k)
-{
-    size_t n = strlen(k);
-    if (strncmp(w, k, n) == 0) return !w[n] || strcmp(w + n, "s") == 0 || strcmp(w + n, "es") == 0;
-    return n > 1 && k[n - 1] == 'y' && strncmp(w, k, n - 1) == 0 && strcmp(w + n - 1, "ies") == 0;
-}
-
-// First keyword of the list found in the words (a "two words" keyword matches a word pair)
-static const char *FindKeyword(const Words *W, const char *const *list)
-{
-    for (int i = 0; i < W->n; i++)
-        for (const char *const *k = list; *k; k++) {
-            const char *sp = strchr(*k, ' ');
-            if (!sp) { if (WordIs(W->w[i], *k)) return *k; continue; }
-            char first[24];
-            snprintf(first, sizeof(first), "%.*s", (int)(sp - *k), *k);
-            if (i + 1 < W->n && strcmp(W->w[i], first) == 0 && WordIs(W->w[i + 1], sp + 1)) return *k;
-        }
-    return NULL;
-}
-
-static bool IsNumber(const char *w) { return isdigit((unsigned char)w[0]); }
-
-// Sentences: text runs separated by . ! ? (followed by a blank) or line breaks
-static int CountSentences(const char *s)
-{
-    int count = 0;
-    bool inText = false;
-    for (const char *p = s; *p; p++) {
-        bool end = *p == '\n' || ((*p == '.' || *p == '!' || *p == '?') && (p[1] == 0 || isspace((unsigned char)p[1])));
-        if (end) inText = false;
-        else if (!isspace((unsigned char)*p) && !inText) { inText = true; count++; }
-    }
-    return count;
-}
-
-static ModelTier Classify(const ModelQuery *q, const Words *wordsIn, MonoMsg *reason);
-
-// The tier, and why in *reason (a literal for fixed reasons, else a heap text: MsgFree it)
-ModelTier ClassifyRequest(const ModelQuery *q, MonoMsg *reason)
-{
-    Words W = { 0 };
-    SplitPromptWords(q->prompt ? q->prompt : "", &W);
-    ModelTier t = Classify(q, &W, reason);
-    free(W.w);
-    return t;
-}
-
-static ModelTier Classify(const ModelQuery *q, const Words *wordsIn, MonoMsg *reason)
-{
-    const Words W = *wordsIn;
-    const char *prompt = q->prompt ? q->prompt : "";
-    int bytes = (int)strlen(prompt), sentences = CountSentences(prompt);
-    const char *k;
-
-    if (q->kind && (strcmp(q->kind, "import") == 0 || strcmp(q->kind, "new-map") == 0)) {
-        MsgSetf(reason, "%s request", q->kind);
-        return MODEL_TIER_HEAVY;
-    }
-    if (q->emptyMap || q->noBrief) {
-        MsgSetf(reason, "%s: the session writes the design brief", q->emptyMap ? "empty map" : "no MAP.md");
-        return MODEL_TIER_HEAVY;
-    }
-    if ((k = FindKeyword(&W, KW_ASSET))) { MsgSetf(reason, "asset word \"%s\"", k); return MODEL_TIER_HEAVY; }
-    if ((k = FindKeyword(&W, KW_LOOK))) { MsgSetf(reason, "look/engine word \"%s\"", k); return MODEL_TIER_HEAVY; }
-    if ((k = FindKeyword(&W, KW_DESIGN))) { MsgSetf(reason, "design word \"%s\"", k); return MODEL_TIER_HEAVY; }
-    if (bytes > HEAVY_MIN_BYTES) { MsgSetf(reason, "long prompt (%d bytes)", bytes); return MODEL_TIER_HEAVY; }
-    if (sentences >= 3) { MsgSetf(reason, "%d sentences", sentences); return MODEL_TIER_HEAVY; }
-    if (q->regions + q->volumes > 2) {
-        if (q->volumes == 0) MsgSetf(reason, "%d screen regions", q->regions);
-        else if (q->regions == 0) MsgSetf(reason, "%d volumes", q->volumes);
-        else MsgSetf(reason, "%d screen regions + %d volumes", q->regions, q->volumes);
-        return MODEL_TIER_HEAVY;
-    }
-
-    const char *edit = FindKeyword(&W, KW_EDIT);
-    for (int i = 0; !edit && i + 1 < W.n; i++)
-        if ((strcmp(W.w[i], "make") == 0 || strcmp(W.w[i], "set") == 0))
-            for (int j = i + 1; j < W.n && j <= i + 4 && !edit; j++) if (IsNumber(W.w[j])) edit = "make/set + number";
-    const char *create = FindKeyword(&W, KW_CREATE);
-    bool target = q->hit || (q->selected > 0 && q->selected <= FAST_MAX_SELECTION) || q->regions + q->volumes == 1;
-    if (q->selected > FAST_MAX_SELECTION) target = false;
-
-    if (!edit) MsgSetStatic(reason, "no local edit word");
-    else if (create) MsgSetf(reason, "creation word \"%s\"", create);
-    else if (bytes > FAST_MAX_BYTES) MsgSetf(reason, "edit \"%s\" but %d bytes", edit, bytes);
-    else if (sentences > 1) MsgSetf(reason, "edit \"%s\" but %d sentences", edit, sentences);
-    else if (!target) MsgSetf(reason, "edit \"%s\" but no small target (hit/selection/1 region or volume)", edit);
-    else {
-        MsgSetf(reason, "short local edit \"%s\" with a target", edit);
-        return MODEL_TIER_FAST;
-    }
-    return MODEL_TIER_DEFAULT;
-}
-
 static const char *EnvOr(const char *name, const char *fallback)
 {
     const char *v = getenv(name);
     return v && *v ? v : fallback;
 }
 
-void LauncherChooseModel(const ModelQuery *q, ModelChoice *out)
+// The tier and its model name (MONOLITH_MODEL_<TIER> or the alias)
+static void SetTier(ModelChoice *m, ModelTier tier)
+{
+    m->tier = tier;
+    snprintf(m->name, sizeof(m->name), "%s", EnvOr(TIER_ENV[tier], TIER_MODELS[tier]));
+}
+
+// 0: an override decided (classifier "override"); 1: the classifier must decide (*out holds the
+// default tier until then, and everything the overrides found: addFlag, promptSkip, droppedModelArg)
+unsigned char LauncherChooseModel(const ModelQuery *q, ModelChoice *out)
 {
     memset(out, 0, sizeof(*out));
     out->source = "classifier";
     out->addFlag = true;
+    out->seconds = -1.0;
     const char *prompt = q->prompt ? q->prompt : "";
 
     // Leading @token: only when some text follows it
-    MonoMsg why = { 0 };
     const char *p = prompt;
     while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
     int tier = -1;
@@ -609,52 +462,112 @@ void LauncherChooseModel(const ModelQuery *q, ModelChoice *out)
             if (i == n && (p[1 + n] == 0 || isspace((unsigned char)p[1 + n]))) {
                 const char *rest = p + 1 + n;
                 while (*rest && isspace((unsigned char)*rest)) rest++;
-                if (*rest) { tier = t % 3; out->promptSkip = (int)(rest - prompt); MsgSetf(&why, "@%s in the prompt", TOKENS[t]); }
+                if (*rest) { tier = t % 3; out->promptSkip = (int)(rest - prompt); MsgSetf(&out->reason, "@%s in the prompt", TOKENS[t]); }
             }
         }
     }
+    SetTier(out, tier >= 0 ? (ModelTier)tier : MODEL_TIER_DEFAULT);
     if (tier >= 0) {
-        out->tier = (ModelTier)tier;
         out->override = true;
         out->source = "prompt";
-    } else {
-        ModelQuery stripped = *q;
-        stripped.prompt = prompt + out->promptSkip;
-        out->tier = ClassifyRequest(&stripped, &why);
     }
-    snprintf(out->name, sizeof(out->name), "%s", EnvOr(TIER_ENV[out->tier], TIER_MODELS[out->tier]));
-
     const char *fixed = EnvOr("MONOLITH_MODEL", NULL);
     if (fixed) {
         snprintf(out->name, sizeof(out->name), "%s", fixed);
-        MsgSetf(&out->reason, "MONOLITH_MODEL fixes the model (would be %s: %s)", TIER_NAMES[out->tier], MsgText(&why));
+        if (tier >= 0) MsgSetf(&out->reason, "MONOLITH_MODEL fixes the model (%s tier: %s)", TIER_NAMES[tier], MsgText(&out->reason));
+        else MsgSetStatic(&out->reason, "MONOLITH_MODEL fixes the model");
         out->source = "MONOLITH_MODEL";
     }
     // A --model (or --model=x) in MONOLITH_CLAUDE_ARGS wins; no second --model then
     ArgList args;
     ClaudeArgs(&args, &out->droppedModelArg, true);
-    char **tok = args.tok;
-    int n = args.count;
-    for (int i = 0; i < n; i++) {
+    for (int i = 0; i < args.count; i++) {
         const char *m = NULL;
-        if (strcmp(tok[i], "--model") == 0 && i + 1 < n) m = tok[i + 1];
-        else if (strncmp(tok[i], "--model=", 8) == 0) m = tok[i] + 8;
+        if (strcmp(args.tok[i], "--model") == 0 && i + 1 < args.count) m = args.tok[i + 1];
+        else if (strncmp(args.tok[i], "--model=", 8) == 0) m = args.tok[i] + 8;
         if (!m) continue;
         snprintf(out->name, sizeof(out->name), "%s", m);
-        MsgSetf(&out->reason, "--model in MONOLITH_CLAUDE_ARGS (would be %s: %s)", TIER_NAMES[out->tier], MsgText(&why));
+        if (tier >= 0) MsgSetf(&out->reason, "--model in MONOLITH_CLAUDE_ARGS (%s tier: %s)", TIER_NAMES[tier], MsgText(&out->reason));
+        else MsgSetStatic(&out->reason, "--model in MONOLITH_CLAUDE_ARGS");
         out->source = "MONOLITH_CLAUDE_ARGS";
         out->addFlag = false;
         break;
     }
     FreeArgs(&args);
-    // No override: the classifier's (or the @token's) reason is the reason; hand it over
-    if (out->reason.text) MsgFree(&why);
-    else out->reason = why;
+    if (tier >= 0 || fixed || !out->addFlag) {
+        out->classifier = "override";
+        return 0;
+    }
+    return 1;
 }
 
 void ModelChoiceFree(ModelChoice *c)
 {
     MsgFree(&c->reason);
+}
+
+// No classifier: the default tier with `why` as the reason (classifier "off" or "failed")
+static void ModelWithout(ModelChoice *m, const char *classifier, const char *why)
+{
+    SetTier(m, MODEL_TIER_DEFAULT);
+    m->classifier = classifier;
+    MsgSetf(&m->reason, "%s", why);
+    TraceLog(strcmp(classifier, "off") == 0 ? LOG_INFO : LOG_WARNING, "monolith: model %s (default tier: %s)", m->name, why);
+}
+
+// A finished classifier run into the choice: its tier (default when it failed) and reason
+static void ModelFromClassifier(ModelChoice *m, const Classifier *c)
+{
+    SetTier(m, c->ok ? (ModelTier)c->tier : MODEL_TIER_DEFAULT);
+    m->classifier = c->ok ? "ai" : "failed";
+    snprintf(m->classifierModel, sizeof(m->classifierModel), "%s", c->model ? c->model : "");
+    m->seconds = c->seconds;
+    MsgSetf(&m->reason, "%s", MsgText(&c->reason));
+}
+
+static bool FindProgram(const char *name, char *out, int outSize);
+static bool FindClaude(char *out, int outSize);
+static bool AgentShell(void);
+
+// Which classifier program runs, if any. 0: run `out`; 1: off (*why: a literal); 2: not found
+// (*why: a literal; logged with the name)
+static unsigned char ClassifierProgram(char *out, int outSize, const char **why)
+{
+    const char *env = getenv("MONOLITH_CLASSIFIER");
+    if (env && strcmp(env, "off") == 0) { *why = "classifier off (MONOLITH_CLASSIFIER=off)"; return 1; }
+    if (env && *env) {
+        if (FindProgram(env, out, outSize)) return 0;
+        TraceLog(LOG_WARNING, "monolith: MONOLITH_CLASSIFIER '%s' not found", env);
+        *why = "AI classifier failed (MONOLITH_CLASSIFIER not found)";
+        return 2;
+    }
+    // An AI agent's shell never starts a real Claude run by accident (tests name the stub)
+    if (AgentShell()) { *why = "classifier off (an AI agent's shell: set MONOLITH_CLASSIFIER)"; return 1; }
+    if (FindClaude(out, outSize)) return 0;
+    *why = "AI classifier failed (claude not found in PATH or ~/.local/bin)";
+    return 2;
+}
+
+// Starts the classifier for one request: 0 = running (poll c); 1 = decided at once (m is final:
+// off, not found, or the start failed)
+static unsigned char StartClassifier(Classifier *c, ModelChoice *m, const ModelQuery *q, const char *dir)
+{
+    char program[4096];
+    const char *why = NULL;
+    if (ClassifierProgram(program, sizeof(program), &why) != 0) {
+        ModelWithout(m, strncmp(why, "classifier off", 14) == 0 ? "off" : "failed", why);
+        return 1;
+    }
+    char *promptFile = MonoStrf("%stools/classifier-prompt.md", rootDir);
+    ClassifierQuery cq = {
+        .prompt = (q->prompt ? q->prompt : "") + m->promptSkip, .package = q->package,
+        .boxes = q->boxes, .models = q->models, .brief = q->brief,
+        .selected = q->selected, .regions = q->regions, .volumes = q->volumes, .hit = q->hit,
+    };
+    unsigned char r = ClassifierStart(c, &cq, dir, program, promptFile);
+    free(promptFile);
+    if (r != 0) ModelFromClassifier(m, c);      // 1: failed to start (c is done)
+    return r;
 }
 
 // #endregion
@@ -692,13 +605,12 @@ typedef struct {
     Nearby *nearby;                     // per group + one for objects without a group
     int nearbyCount;
     Vector3 nearbyCenter;
-    char binary[1024], mapPath[1024], prompt[256];
+    char binary[1024], mapPath[1024];
     char package[1024];                 // folder of the map file
     char brief[1100];                   // <package>/MAP.md if it exists, else ""
     char binaryQ[2100], mapPathQ[2100];     // shell-quoted
     char shotCmd[6144];
     bool stale;                         // world changed between the snapshot and now
-    ModelChoice model;                  // which Claude model runs it, and why
     const char *userPrompt;             // req->prompt without a leading @tier token
 } Bundle;
 
@@ -714,7 +626,6 @@ static void FreeBundle(Bundle *B)
     free(B->selLines);
     free(B->selOrder);
     free(B->nearby);
-    ModelChoiceFree(&B->model);
     free(B);
 }
 
@@ -785,7 +696,6 @@ static bool BuildBundle(Bundle *B, const DesignRequest *req)
     ShellQuote(B->mapPath, B->mapPathQ, sizeof(B->mapPathQ));
     snprintf(B->shotCmd, sizeof(B->shotCmd), "%s --shot requests/%s/before.png --shot-size %d %d --eye %.6f %.6f %.6f --look %.6f %.6f --map %s",
              B->binaryQ, B->id, req->width, req->height, req->eye.x, req->eye.y, req->eye.z, B->yawDeg, B->pitchDeg, B->mapPathQ);
-    snprintf(B->prompt, sizeof(B->prompt), "Map edit request: read requests/%s/request.md and carry it out.", B->id);
     return true;
 }
 
@@ -1170,15 +1080,12 @@ static void WriteVolumesMd(FILE *f, const Bundle *B)
     }
 }
 
-static bool WriteRequestMd(const char *path, const Bundle *B)
+// request.md after its title and Model line (WriteBundleFiles writes those two once the model is
+// known)
+static void WriteRequestMdBody(FILE *f, const Bundle *B)
 {
     const DesignRequest *r = B->req;
-    FILE *f = fopen(path, "wb");
-    if (!f) return false;
-
-    fprintf(f, "# Map edit request: %s\n\n", B->slug);
-    fprintf(f, "Model: %s (%s tier: %s)\n\n", B->model.name, ModelTierName(B->model.tier), MsgText(&B->model.reason));
-    fprintf(f, "Request `%s`, submitted %s from the monolith map designer. Bundle format 5: besides the "
+    fprintf(f, "Request `%s`, submitted %s from the monolith map designer. Bundle format 6: besides the "
                "crosshair hit and the selected objects it may contain **screen regions** the developer "
                "dragged over the frame and **volumes**, boxes marked in world space (see *Screen regions* and "
                "*Volumes* below and `.claude/skills/map-request/bundle-reference.md`).\n\n", B->id, B->created);
@@ -1329,8 +1236,6 @@ static bool WriteRequestMd(const char *path, const Bundle *B)
     snprintf(hashCmd, sizeof(hashCmd), "python3 -c \"import sys,functools as f;print('%%016x'%%f.reduce(lambda h,b:((h^b)"
              "*0x100000001b3)&(2**64-1),open(sys.argv[1],'rb').read(),0xcbf29ce484222325))\" %s", B->mapPathQ);
     MdFence(f, hashCmd, "sh");
-
-    return fclose(f) == 0;
 }
 
 // #endregion
@@ -1489,24 +1394,20 @@ static void WriteVolumesJson(FILE *f, const DesignRequest *r)
     fprintf(f, "%s]", r->volumeCount ? "\n  " : "");
 }
 
-static bool WriteRequestJson(const char *path, const Bundle *B)
+// request.json without its "model" object: the keys before it into head, the rest into f
+// (WriteBundleFiles puts the model between them once it is known)
+static void WriteRequestJsonParts(FILE *head, FILE *f, const Bundle *B)
 {
     const DesignRequest *r = B->req;
-    FILE *f = fopen(path, "wb");
-    if (!f) return false;
-
-    fprintf(f, "{\n  \"format\": 5,\n  \"kind\": \"edit\",\n  \"id\": "); JsonStr(f, B->id);
-    fprintf(f, ",\n  \"slug\": "); JsonStr(f, B->slug);
-    fprintf(f, ",\n  \"created\": "); JsonStr(f, B->created);
-    fprintf(f, ",\n  \"instructions\": ");
-    JsonStr(f, TextFormat("Read CLAUDE.md and .claude/skills/map-request/SKILL.md in the repository root first, then carry out the "
-                          "prompt. When done, write requests/%s/result.md; its first line is a one-line summary.", B->id));
-    fprintf(f, ",\n  \"resultFile\": "); JsonStr(f, TextFormat("requests/%s/result.md", B->id));
-    fprintf(f, ",\n  \"mapReloadedSinceSnapshot\": %s", B->stale ? "true" : "false");
-    fprintf(f, ",\n  \"prompt\": "); JsonStr(f, B->userPrompt);
-    fprintf(f, ",\n  \"model\": { \"tier\": \"%s\", \"name\": ", ModelTierName(B->model.tier)); JsonStr(f, B->model.name);
-    fprintf(f, ", \"reason\": "); JsonStr(f, MsgText(&B->model.reason));
-    fprintf(f, ", \"override\": %s, \"source\": \"%s\" }", B->model.override ? "true" : "false", B->model.source);
+    fprintf(head, "{\n  \"format\": 6,\n  \"id\": "); JsonStr(head, B->id);
+    fprintf(head, ",\n  \"slug\": "); JsonStr(head, B->slug);
+    fprintf(head, ",\n  \"created\": "); JsonStr(head, B->created);
+    fprintf(head, ",\n  \"instructions\": ");
+    JsonStr(head, TextFormat("Read CLAUDE.md and .claude/skills/map-request/SKILL.md in the repository root first, then carry out the "
+                             "prompt. When done, write requests/%s/result.md; its first line is a one-line summary.", B->id));
+    fprintf(head, ",\n  \"resultFile\": "); JsonStr(head, TextFormat("requests/%s/result.md", B->id));
+    fprintf(head, ",\n  \"mapReloadedSinceSnapshot\": %s", B->stale ? "true" : "false");
+    fprintf(head, ",\n  \"prompt\": "); JsonStr(head, B->userPrompt);
 
     fprintf(f, ",\n  \"camera\": {\n    \"eye\": "); JsonVec(f, r->eye);
     fprintf(f, ",\n    \"yawDeg\": "); JsonNum(f, B->yawDeg);
@@ -1672,8 +1573,86 @@ static bool WriteRequestJson(const char *path, const Bundle *B)
     fprintf(f, ",\n    \"hash\": \"%016llx\",\n    \"hashAlgorithm\": \"FNV-1a 64 of the file bytes\"", scene->hash);
     fprintf(f, ",\n    \"mtime\": %ld,\n    \"version\": %u,\n    \"boxes\": %d,\n    \"models\": %d,\n    \"groups\": %d,\n    \"materials\": %d\n  }\n}\n",
             scene->mtime, scene->version, scene->boxCount, scene->modelCount, scene->groupCount, MAP_MATERIALS);
+}
 
-    return fclose(f) == 0;
+// The bundle's text without its model (request.md after the Model line; request.json before and
+// after "model"), rendered at submit time into heap strings: the scene, the selection and the
+// request itself may have changed or be gone by the time the classifier answers
+typedef struct {
+    char *md, *jsonHead, *jsonTail;
+} BundleText;
+
+static void FreeBundleText(BundleText *t)
+{
+    free(t->md);
+    free(t->jsonHead);
+    free(t->jsonTail);
+    memset(t, 0, sizeof(*t));
+}
+
+// False when out of memory (t is empty then)
+static bool RenderBundleText(const Bundle *B, BundleText *t)
+{
+    memset(t, 0, sizeof(*t));
+    size_t n1 = 0, n2 = 0, n3 = 0;
+    FILE *md = open_memstream(&t->md, &n1);
+    FILE *head = open_memstream(&t->jsonHead, &n2);
+    FILE *tail = open_memstream(&t->jsonTail, &n3);
+    bool ok = md && head && tail;
+    if (ok) {
+        WriteRequestMdBody(md, B);
+        WriteRequestJsonParts(head, tail, B);
+    }
+    if (md) ok &= fclose(md) == 0;
+    if (head) ok &= fclose(head) == 0;
+    if (tail) ok &= fclose(tail) == 0;
+    if (!ok || !t->md || !t->jsonHead || !t->jsonTail) { FreeBundleText(t); return false; }
+    return true;
+}
+
+// The Model line's words after the model name: "(heavy tier, chosen by the AI classifier
+// claude-fable-5-2 in 2.4 s: <reason>)", "(default tier: <reason>)"
+static void MdModelChoice(FILE *f, const ModelChoice *m)
+{
+    if (m->classifier && strcmp(m->classifier, "ai") == 0)
+        fprintf(f, "(%s tier, chosen by the AI classifier %s in %.1f s: %s)", ModelTierName(m->tier),
+                m->classifierModel[0] ? m->classifierModel : "(model unknown)", m->seconds, MsgText(&m->reason));
+    else fprintf(f, "(%s tier: %s)", ModelTierName(m->tier), MsgText(&m->reason));
+}
+
+static void JsonModelChoice(FILE *f, const ModelChoice *m)
+{
+    fprintf(f, ",\n  \"model\": { \"tier\": \"%s\", \"name\": ", ModelTierName(m->tier)); JsonStr(f, m->name);
+    fprintf(f, ", \"reason\": "); JsonStr(f, MsgText(&m->reason));
+    fprintf(f, ", \"override\": %s, \"source\": \"%s\"", m->override ? "true" : "false", m->source);
+    fprintf(f, ", \"classifier\": \"%s\", \"classifierModel\": ", m->classifier ? m->classifier : "failed");
+    if (m->classifierModel[0]) JsonStr(f, m->classifierModel); else fputs("null", f);
+    fprintf(f, ", \"seconds\": ");
+    if (m->seconds >= 0.0) fprintf(f, "%.2f", m->seconds); else fputs("null", f);
+    fprintf(f, " }");
+}
+
+// request.md and request.json of the bundle in dir (trailing slash), from its text and its model.
+// False when a file could not be written.
+static bool WriteBundleFiles(const char *dir, const char *slug, const BundleText *t, const ModelChoice *m)
+{
+    char path[1400];
+    snprintf(path, sizeof(path), "%srequest.md", dir);
+    FILE *f = fopen(path, "wb");
+    if (!f) return false;
+    fprintf(f, "# Map edit request: %s\n\nModel: %s ", slug, m->name);
+    MdModelChoice(f, m);
+    fprintf(f, "\n\n%s", t->md);
+    bool ok = !ferror(f);
+    ok &= fclose(f) == 0;
+    snprintf(path, sizeof(path), "%srequest.json", dir);
+    if (!(f = fopen(path, "wb"))) return false;
+    fputs(t->jsonHead, f);
+    JsonModelChoice(f, m);
+    fputs(t->jsonTail, f);
+    ok &= !ferror(f);
+    ok &= fclose(f) == 0;
+    return ok;
 }
 
 // #endregion
@@ -1697,8 +1676,9 @@ typedef struct {
     long seq;                   // submit order, for "most recent first"
     char id[128], slug[SLUG_MAX + 1];
     char dir[1300];             // bundle folder, trailing slash
-    char map[1024];             // absolute path of the map file it edits ("" = imports)
+    char map[1024];             // absolute path of the map file it edits
     double submitTime, doneTime;
+    bool classifying;           // its AI classifier runs (region "Classifying"): no request.md / state yet
     bool queue;                 // coordinator mode: tracked through requests/<id>/state
     char state[16];             // queue: first word of the state file ("" = not read yet)
     bool cancelAsked;           // queue: the developer asked to cancel it (cancel file written)
@@ -1709,7 +1689,6 @@ typedef struct {
     char summary[160];          // first line of result.md (queue: of question.md while asking)
     Vector3 eye;
     float yaw, pitch;
-    bool hasCamera;             // eye / yaw / pitch are set (not for imports)
     TermWindow term;            // per-request mode: its terminal
 } OpenRequest;
 
@@ -1799,6 +1778,12 @@ static OpenRequest *NewSlot(void)
 // The launcher's note (LauncherNote): the text of the last submit / close outcome that is not
 // a failure. Set only by those calls (events), never per frame.
 static MonoMsg note;
+// The event note (LauncherEventNote): the HUD text of a classified request just queued or sent
+// (region "Classifying"), handed out once
+static MonoMsg eventNote;
+static bool eventFresh, eventWarn;
+
+static void FlushPending(void);
 
 const char *LauncherNote(void)
 {
@@ -1807,8 +1792,10 @@ const char *LauncherNote(void)
 
 void LauncherShutdown(void)
 {
+    FlushPending();             // (when LauncherCloseOnExit didn't run: a --shot --submit without a wait)
     MsgFree(&coord.failedLine);
     MsgFree(&note);
+    MsgFree(&eventNote);
     free(reqs);
     reqs = NULL;
     reqCount = reqCap = 0;
@@ -1903,9 +1890,12 @@ static bool StateFinal(const char *s)
 static void CoordinatorCheck(void);
 static void ReadState(OpenRequest *q);
 
+static void PollClassifiers(void);
+
 void LauncherUpdate(float dt)
 {
     clockTime += dt;
+    PollClassifiers();          // every call: a classifier's answer is queued without delay
     pollTimer += dt;
     if (pollTimer < POLL_INTERVAL) return;
     pollTimer = 0.0f;
@@ -1918,7 +1908,7 @@ void LauncherUpdate(float dt)
 
     for (int i = 0; i < reqCount; i++) {
         OpenRequest *q = &reqs[i];
-        if (!q->used || q->done) continue;
+        if (!q->used || q->done || q->classifying) continue;
         bool final = false;
         if (q->queue) {
             ReadState(q);
@@ -1932,7 +1922,7 @@ void LauncherUpdate(float dt)
         q->done = true;
         q->doneTime = clockTime;
         // R flies back to requests that ended with a result (not to cancelled ones)
-        if (q->hasCamera && result && strcmp(q->state, "cancelled") != 0) {
+        if (result && strcmp(q->state, "cancelled") != 0) {
             lastDoneSeq = ++doneCounter;
             lastDoneEye = q->eye;
             lastDoneYaw = q->yaw;
@@ -1966,7 +1956,9 @@ int LauncherDrawHud(int x, int y)
         const char *text;
         Color c = UI_TEXT;          // queued, running (a white bar)
         int t = (int)(clockTime - q->submitTime);
-        if (q->queue && q->done) {
+        if (q->classifying)
+            text = TextFormat("[%d] classifying %s (%02d:%02d)", q->number, q->slug, t / 60, t % 60);
+        else if (q->queue && q->done) {
             float age = (float)(clockTime - q->doneTime);
             if (age > DONE_SHOW_TIME) continue;
             bool ok = strcmp(q->state, "failed") != 0 && strcmp(q->state, "cancelled") != 0;
@@ -2087,11 +2079,8 @@ static bool FindClaude(char *out, int outSize)
     return FindProgram(cand, out, outSize);
 }
 
-// An AI agent's shell (CLAUDECODE / AI_AGENT set) never opens a real terminal: a scripted --shot run
-// whose input reached the prompt box would otherwise start a coordinator on the developer's screen.
-// Tests set MONOLITH_TERMINAL (build/tools/stub-terminal); MONOLITH_ALLOW_WINDOW lifts it, as for the
-// game window.
-static bool AgentShellRefuses(void)
+// The game runs in an AI agent's shell (CLAUDECODE / AI_AGENT set, not "0")
+static bool AgentShell(void)
 {
     const char *keys[] = { "CLAUDECODE", "AI_AGENT" };
     bool agent = false;
@@ -2099,6 +2088,16 @@ static bool AgentShellRefuses(void)
         const char *v = getenv(keys[i]);
         if (v && v[0] && strcmp(v, "0") != 0) agent = true;
     }
+    return agent;
+}
+
+// An AI agent's shell never opens a real terminal: a scripted --shot run whose input reached the
+// prompt box would otherwise start a coordinator on the developer's screen. Tests set
+// MONOLITH_TERMINAL (build/tools/stub-terminal); MONOLITH_ALLOW_WINDOW lifts it, as for the game
+// window.
+static bool AgentShellRefuses(void)
+{
+    bool agent = AgentShell();
     const char *allow = getenv("MONOLITH_ALLOW_WINDOW"), *term = getenv("MONOLITH_TERMINAL");
     if (!agent || (allow && allow[0] && strcmp(allow, "0") != 0) || (term && term[0])) return false;
     MS_SetError("refusing to open a terminal from an AI agent's shell (set MONOLITH_TERMINAL to build/tools/stub-terminal)");
@@ -2472,6 +2471,7 @@ static void CloseMessage(const OpenRequest *q, CloseOutcome o)
 }
 
 static unsigned char CancelRequest(OpenRequest *q);
+static unsigned char CancelClassifying(OpenRequest *q);
 
 // 0: closed (note; logged); 1: no finished request (note, a literal)
 unsigned char LauncherCloseLatestDone(void)
@@ -2524,6 +2524,7 @@ unsigned char LauncherCloseNumber(int number)
     OpenRequest *q = NULL;
     for (int i = 0; i < reqCount; i++) if (Listed(&reqs[i]) && reqs[i].number == number) q = &reqs[i];
     if (!q) { MS_SetError("no request [%d] in the list", number); return 2; }
+    if (q->classifying) return CancelClassifying(q);
     if (q->queue && !q->done) return CancelRequest(q);
     // A request without result.md may still be working: ask for a second press first
     if (!q->done && !(confirmSeq == q->seq && clockTime <= confirmUntil)) {
@@ -2557,6 +2558,7 @@ static int OpenQueueRequests(void);
 
 void LauncherCloseOnExit(void)
 {
+    FlushPending();             // (the classifiers still running: their bundles go on the default tier)
     const char *e = getenv("MONOLITH_CLOSE_ON_EXIT");
     if (!e || !*e || strcmp(e, "0") == 0) return;
     // No escalation after this (the game is gone): the WM close, or SIGTERM where the WM
@@ -2864,10 +2866,215 @@ unsigned char LauncherCloseCoordinator(void)
 // #endregion
 
 // ======================================================================================
+// #region Classifying (the AI classifier's runs, docs/request-queue.md "Models")
+// ======================================================================================
+// A request without an override is computed and its images written at submit time, then waits
+// here while its classifier runs: request.md, request.json and state are written only once the
+// classifier has answered (or failed), so the coordinator never sees an unclassified bundle.
+// LauncherUpdate polls every run once per frame (ClassifierPoll: waitpid WNOHANG, never a wait).
+
+// A request whose classifier runs
+typedef struct {
+    long seq;                   // its OpenRequest (seq)
+    Classifier run;
+    ModelChoice model;          // the overrides' findings; the tier once the run is done
+    BundleText text;            // the bundle without its model, rendered at submit time
+} Pending;
+
+static Pending *pending;        // heap; the order doesn't matter (a finished one is swapped out)
+static int pendingCount, pendingCap;
+
+static OpenRequest *RequestBySeq(long seq)
+{
+    for (int i = 0; i < reqCount; i++) if (reqs[i].used && reqs[i].seq == seq) return &reqs[i];
+    return NULL;
+}
+
+static int PendingOf(const OpenRequest *q)
+{
+    for (int i = 0; i < pendingCount; i++) if (pending[i].seq == q->seq) return i;
+    return -1;
+}
+
+// Frees pending entry i and moves the last one into its place
+static void DropPending(int i)
+{
+    ClassifierFree(&pending[i].run);
+    ModelChoiceFree(&pending[i].model);
+    FreeBundleText(&pending[i].text);
+    pending[i] = pending[--pendingCount];
+}
+
+static unsigned char FinishBundle(OpenRequest *q, const BundleText *t, const ModelChoice *m);
+
+// Pending entry i's model is final: write and queue (or send) its bundle, keep the outcome as the
+// event note, drop the entry
+static void FinishPending(int i)
+{
+    Pending *p = &pending[i];
+    OpenRequest *q = RequestBySeq(p->seq);
+    if (q) {
+        q->classifying = false;
+        unsigned char r = FinishBundle(q, &p->text, &p->model);
+        MsgSetf(&eventNote, "%s", r == 0 ? MsgText(&note) : MS_LastError());     // 0: queued / sent
+        eventWarn = r != 0;
+        eventFresh = true;
+    }
+    DropPending(i);
+}
+
+// From LauncherUpdate, every call: the runs that ended since the last one
+static void PollClassifiers(void)
+{
+    for (int i = 0; i < pendingCount; ) {
+        if (ClassifierPoll(&pending[i].run) == 0) { i++; continue; }     // 0: still running
+        ModelFromClassifier(&pending[i].model, &pending[i].run);
+        FinishPending(i);       // (the last entry moves into i)
+    }
+}
+
+// Quitting: every classifier still running is stopped and its bundle queued on the default tier
+static void FlushPending(void)
+{
+    while (pendingCount > 0) {
+        ClassifierKill(&pending[0].run, "game quit while classifying");
+        ModelFromClassifier(&pending[0].model, &pending[0].run);
+        FinishPending(0);
+    }
+    free(pending);
+    pending = NULL;
+    pendingCap = 0;
+}
+
+// CTRL+K n on a request still classifying (LauncherCloseNumber): its classifier is killed and the
+// request dropped like a queued one no coordinator has seen: the bundle is written (default tier,
+// "cancelled while classifying"), then cancel, result.md and state = cancelled. 0: cancelled (note)
+static unsigned char CancelClassifying(OpenRequest *q)
+{
+    int i = PendingOf(q);
+    q->classifying = false;
+    q->queue = true;            // (LauncherUpdate reads its state from now on: "cancelled")
+    q->cancelAsked = true;
+    if (i >= 0) {
+        Pending *p = &pending[i];
+        ClassifierKill(&p->run, "cancelled while classifying");
+        ModelFromClassifier(&p->model, &p->run);
+        if (!WriteBundleFiles(q->dir, q->slug, &p->text, &p->model))
+            TraceLog(LOG_WARNING, "monolith: cannot write the request bundle %s (disk full?)", q->dir);
+        DropPending(i);
+    }
+    // result.md and the final state first, then cancel: a watcher (request-queue wait) never sees a
+    // cancel on a bundle that has no final state yet
+    char path[1400], stamp[32], line[64];
+    snprintf(path, sizeof(path), "%sresult.md", q->dir);
+    WriteText(path, "Cancelled by the developer before it started (while its model was being chosen)\n\nNothing was changed.\n");
+    WriteState(q->dir, "cancelled");
+    Stamp(stamp, sizeof(stamp));
+    snprintf(line, sizeof(line), "%s\n", stamp);
+    snprintf(path, sizeof(path), "%scancel", q->dir);
+    WriteText(path, line);
+    MsgSetf(&note, "cancelled %s (it was still classifying)", q->slug);
+    TraceLog(LOG_INFO, "monolith: %s", MsgText(&note));
+    return 0;
+}
+
+const char *LauncherEventNote(bool *warning)
+{
+    if (!eventFresh) return NULL;
+    eventFresh = false;
+    if (warning) *warning = eventWarn;
+    return MsgText(&eventNote);
+}
+
+void LauncherClassify(const ModelQuery *q, ModelChoice *out)
+{
+    InitPaths();
+    if (LauncherChooseModel(q, out) == 0) return;       // 0: an override decided
+    // The classifier's three files go into a temporary folder, removed afterwards
+    const char *tmp = EnvOr("TMPDIR", "/tmp");
+    char *tmpl = MonoStrf("%s/monolith-classify-XXXXXX", tmp);
+    if (!tmpl || !mkdtemp(tmpl)) {
+        ModelWithout(out, "failed", "AI classifier failed (no temporary folder)");
+        free(tmpl);
+        return;
+    }
+    char *dir = MonoStrf("%s/", tmpl);
+    Classifier c = { 0 };
+    if (dir && StartClassifier(&c, out, q, dir) == 0) {     // 0: running
+        ClassifierWait(&c);
+        ModelFromClassifier(out, &c);
+    } else if (!dir) ModelWithout(out, "failed", "AI classifier failed (out of memory)");
+    ClassifierFree(&c);
+    static const char *const FILES[] = { "classifier-input.txt", "classifier.json", "classifier.log" };
+    for (int k = 0; k < 3; k++) {
+        char *f = MonoStrf("%s/%s", tmpl, FILES[k]);
+        if (f) unlink(f);
+        free(f);
+    }
+    rmdir(tmpl);
+    free(dir);
+    free(tmpl);
+}
+
+// #endregion
+
+// ======================================================================================
 // #region Submit
 // ======================================================================================
 
-// 0: queued / sent (note); 1: not sent (err, logged where the old message was)
+// The prompt on a per-request terminal's command line: a fixed text naming the bundle, never
+// user text
+static void RequestPrompt(const char *id, char *out, int outSize)
+{
+    snprintf(out, outSize, "Map edit request: read requests/%s/request.md and carry it out.", id);
+}
+
+// Who chose the model, after the queued / sent note: " (AI: <reason>)", " (AI classifier failed
+// (...))", " (classifier off ...)"; nothing for an override (the note names the model)
+static void NoteModel(const ModelChoice *m)
+{
+    if (!m->classifier || strcmp(m->classifier, "override") == 0) return;
+    if (strcmp(m->classifier, "ai") == 0) MsgAppendf(&note, " (AI: %s)", MsgText(&m->reason));
+    else MsgAppendf(&note, " (%s)", MsgText(&m->reason));
+}
+
+// The bundle's model is known: writes request.md and request.json, then queues the bundle
+// (coordinator mode) or opens its terminal (per-request mode).
+// 0: queued / sent (note); 1: not (err, logged)
+static unsigned char FinishBundle(OpenRequest *q, const BundleText *t, const ModelChoice *m)
+{
+    TraceLog(LOG_INFO, "monolith: request %s: model %s (%s tier, classifier %s: %s)", q->id, m->name, ModelTierName(m->tier),
+             m->classifier ? m->classifier : "?", MsgText(&m->reason));
+    if (!WriteBundleFiles(q->dir, q->slug, t, m)) {
+        MS_SetError("cannot write the request bundle %s (disk full?)", q->dir);
+        TraceLog(LOG_WARNING, "monolith: %s", MS_LastError());
+        q->closed = true;           // off the list: nothing will ever run it
+        return 1;
+    }
+    // Coordinator mode: queued even when the coordinator can't start (the next one takes
+    // it), so the prompt box closes; a second Enter would only queue it twice
+    if (QueueMode()) {
+        if (QueueBundle(q, "request", m->name) != 0) return 1;     // (err; logged)
+    } else {
+        char title[300], mark[160], prompt[300];
+        RequestTitle(q->id, q->slug, title, sizeof(title));
+        snprintf(mark, sizeof(mark), "_monolith_%s", q->id);
+        RequestPrompt(q->id, prompt, sizeof(prompt));
+        q->term.launched = Launch(title, mark, prompt, m->addFlag ? m->name : NULL, NULL, &q->term);
+        if (!q->term.launched) {
+            MS_SetError("launch failed: %s. Bundle kept: %s", MS_LastError(), q->dir);
+            TraceLog(LOG_WARNING, "monolith: %s", MS_LastError());
+            TraceLog(LOG_WARNING, "monolith: run it by hand: cd '%s' && claude --model %s \"%s\"", rootDir, m->name, prompt);
+            return 1;
+        }
+        MsgSetf(&note, "request sent (%s): %s (Claude Code opens in a new terminal)", m->name, q->id);
+    }
+    NoteModel(m);
+    if (m->droppedModelArg) MsgAppendf(&note, "; a --model without a name in MONOLITH_CLAUDE_ARGS was ignored");
+    return 0;
+}
+
+// 0: queued / sent / classifying (note); 1: not sent (err, logged where the old message was)
 unsigned char LauncherSubmit(const DesignRequest *req, Image view, Image marked)
 {
     if (MS_CompiledSource(scene, NULL) != MS_SOURCE_TEXT) {
@@ -2878,6 +3085,8 @@ unsigned char LauncherSubmit(const DesignRequest *req, Image view, Image marked)
     Bundle *Bp = calloc(1, sizeof(Bundle));
     if (!Bp) { MS_SetError("out of memory"); return 1; }
     unsigned char result = 1;
+    BundleText text = { 0 };
+    Classifier run = { 0 };
 #define B (*Bp)
 
     // Folder name: local time stamp + slug, made unique if a request with the same
@@ -2889,12 +3098,13 @@ unsigned char LauncherSubmit(const DesignRequest *req, Image view, Image marked)
         strftime(stamp, sizeof(stamp), "%Y-%m-%d_%H%M%S", tm);
         strftime(B.created, sizeof(B.created), "%Y-%m-%d %H:%M:%S", tm);
     }
-    ModelQuery mq = { .prompt = req->prompt, .kind = "edit", .selected = req->selectedCount,
-                      .regions = req->regionCount, .volumes = req->volumeCount, .hit = req->hit.obj.kind != MS_OBJ_NONE,
-                      .emptyMap = scene->boxCount + scene->modelCount <= 2, .noBrief = !scene->brief[0] };
-    LauncherChooseModel(&mq, &B.model);
-    B.userPrompt = req->prompt + B.model.promptSkip;
-    TraceLog(LOG_INFO, "monolith: model %s (%s tier: %s)", B.model.name, ModelTierName(B.model.tier), MsgText(&B.model.reason));
+    // The overrides first: they decide the prompt written to the bundle (an @token is stripped)
+    ModelQuery mq = { .prompt = req->prompt, .boxes = scene->boxCount, .models = scene->modelCount, .brief = scene->brief[0] != 0,
+                      .selected = req->selectedCount, .regions = req->regionCount, .volumes = req->volumeCount,
+                      .hit = req->hit.obj.kind != MS_OBJ_NONE };
+    ModelChoice model;
+    unsigned char decided = LauncherChooseModel(&mq, &model);     // 0: an override decided
+    B.userPrompt = req->prompt + model.promptSkip;
     MakeSlug(B.userPrompt, B.slug, sizeof(B.slug));
 
     MakeDirectory(requestsDir);     // raylib: recursive, fine if it exists
@@ -2914,7 +3124,7 @@ unsigned char LauncherSubmit(const DesignRequest *req, Image view, Image marked)
     }
     strcat(dir, "/");
 
-    if (!BuildBundle(&B, req)) {
+    if (!BuildBundle(&B, req) || !RenderBundleText(&B, &text)) {
         MS_SetError("out of memory (bundle %s not written)", dir);
         goto done;
     }
@@ -2936,10 +3146,6 @@ unsigned char LauncherSubmit(const DesignRequest *req, Image view, Image marked)
         ok &= PngWrite(crop, path);
         UnloadImage(crop);
     }
-    snprintf(path, sizeof(path), "%srequest.md", dir);
-    ok &= WriteRequestMd(path, &B);
-    snprintf(path, sizeof(path), "%srequest.json", dir);
-    ok &= WriteRequestJson(path, &B);
     if (!ok) {
         MS_SetError("cannot write the request bundle %s (disk full?)", dir);
         TraceLog(LOG_WARNING, "monolith: %s", MS_LastError());
@@ -2956,58 +3162,33 @@ unsigned char LauncherSubmit(const DesignRequest *req, Image view, Image marked)
     q->eye = req->eye;
     q->yaw = req->yaw;
     q->pitch = req->pitch;
-    q->hasCamera = true;
 
-    // Coordinator mode: queued even when the coordinator can't start (the next one takes
-    // it), so the prompt box closes; a second Enter would only queue it twice
-    if (QueueMode()) {
-        result = QueueBundle(q, "request", B.model.name);
-        if (result == 0 && B.model.droppedModelArg)     // queued
-            MsgAppendf(&note, "; a --model without a name in MONOLITH_CLAUDE_ARGS was ignored");
-        goto done;
+    // No override: the AI classifier decides, and LauncherUpdate finishes the bundle when it has
+    mq.package = BaseName(B.package);
+    if (decided == 1 && StartClassifier(&run, &model, &mq, dir) == 0) {     // 0: running
+        Pending *p = MS_PUSH(pending, pendingCount, pendingCap);
+        if (p) {
+            *p = (Pending){ .seq = q->seq, .run = run, .model = model, .text = text };
+            memset(&run, 0, sizeof(run));       // (now the entry's)
+            memset(&model, 0, sizeof(model));
+            memset(&text, 0, sizeof(text));
+            q->classifying = true;
+            MsgSetf(&note, "request classifying [%d]: %s", q->number, B.id);
+            TraceLog(LOG_INFO, "monolith: request %s classifying", B.id);
+            result = 0;
+            goto done;
+        }
+        ClassifierKill(&run, "AI classifier failed (out of memory)");
+        ModelFromClassifier(&model, &run);
     }
-
-    char title[300], mark[160];
-    RequestTitle(B.id, B.slug, title, sizeof(title));
-    snprintf(mark, sizeof(mark), "_monolith_%s", B.id);
-    q->term.launched = Launch(title, mark, B.prompt, B.model.addFlag ? B.model.name : NULL, NULL, &q->term);
-    if (!q->term.launched) {
-        MS_SetError("launch failed: %s. Bundle kept: %s", MS_LastError(), dir);
-        TraceLog(LOG_WARNING, "monolith: %s", MS_LastError());
-        TraceLog(LOG_WARNING, "monolith: run it by hand: cd '%s' && claude --model %s \"%s\"", rootDir, B.model.name, B.prompt);
-        goto done;
-    }
-    MsgSetf(&note, "request sent (%s): %s (Claude Code opens in a new terminal)%s", B.model.name, B.id,
-            B.model.droppedModelArg ? "; a --model without a name in MONOLITH_CLAUDE_ARGS was ignored" : "");
-    result = 0;
+    result = FinishBundle(q, &text, &model);
 done:
 #undef B
+    ClassifierFree(&run);
+    ModelChoiceFree(&model);
+    FreeBundleText(&text);
     FreeBundle(Bp);
     return result;
-}
-
-// 0: queued / sent (note); 1: not sent (err)
-unsigned char LauncherStartBundle(const char *id, const char *slug, const char *claudePrompt, const char *model)
-{
-    InitPaths();
-    OpenRequest *q = NewSlot();
-    if (!q) { MS_SetError("out of memory"); return 1; }
-    snprintf(q->id, sizeof(q->id), "%s", id);
-    snprintf(q->slug, sizeof(q->slug), "%s", slug);
-    snprintf(q->dir, sizeof(q->dir), "%s%s/", requestsDir, id);
-    q->submitTime = clockTime;
-    if (QueueMode()) return QueueBundle(q, "request", model);
-    char title[300], mark[160];
-    RequestTitle(id, slug, title, sizeof(title));
-    snprintf(mark, sizeof(mark), "_monolith_%s", id);
-    q->term.launched = Launch(title, mark, claudePrompt, model, NULL, &q->term);
-    if (!q->term.launched) {
-        MS_SetError("launch failed: %s. Bundle kept: %s", MS_LastError(), q->dir);
-        TraceLog(LOG_WARNING, "monolith: run it by hand: cd '%s' && claude \"%s\"", rootDir, claudePrompt);
-        return 1;
-    }
-    MsgSetf(&note, "request sent: %s (Claude Code opens in a new terminal)", id);
-    return 0;
 }
 
 int LauncherOpenOnMap(const char *mapPath, int *newest)
@@ -3024,18 +3205,6 @@ int LauncherOpenOnMap(const char *mapPath, int *newest)
         if (q->seq > seq) { seq = q->seq; *newest = q->number; }
     }
     return count;
-}
-
-const char *LauncherRequestsDir(void)
-{
-    InitPaths();
-    return requestsDir;
-}
-
-const char *LauncherRootDir(void)
-{
-    InitPaths();
-    return rootDir;
 }
 
 void LauncherScrubEnv(void)

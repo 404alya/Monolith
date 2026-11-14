@@ -116,7 +116,7 @@ A file that fails any check is rejected with `<file>: <message>` (for example `f
 
 ## 5. The two builds
 
-| | editor build (`-DMONOLITH_EDITOR`: monolith, `03_live_editing`, the capture shim) | game build (exports, `01_minimal`, `02_existing_project`, `05_entities`) |
+| | editor build (`-DMONOLITH_EDITOR`: monolith, `03_live_editing`) | game build (exports, `01_minimal`, `02_existing_project`, `05_entities`) |
 |---|---|---|
 | reads | text and compiled | compiled only |
 | text parser (tokenizer, statements, `repeat`, model-file reference scan) | yes | **not compiled in** (`--export` removes it) |

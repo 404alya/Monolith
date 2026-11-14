@@ -893,8 +893,8 @@ statistics per viewpoint and overall (avg ms, avg FPS, 1 % low FPS, worst ms, sh
 the median, p95 and p99 the phase-0 interface asked for; the same table goes to stdout. No per-pass
 GPU table: the harness never enables R3D's profiler (monolith's bench does, so absolute numbers of
 the two tools differ; compare harness runs only with harness runs). `--shot` behaves as before: every
-example's shots (`01_minimal` ×3 incl. `--quality medium`, `02` before / after, `03`, `04` and its
-capture shim, `05`) are byte-identical to the phase-0 harness. `--shot` with `--bench`, and
+example's shots (`01_minimal` ×3 incl. `--quality medium`, `02` before / after, `03`, the import
+example and its capture build (both removed since), `05`) are byte-identical to the phase-0 harness. `--shot` with `--bench`, and
 `--bench-frames` / `--note` without `--bench`, are refused (exit 1).
 
 **`build/tools/bench-export-ab`** `<base export> <new export> --note "…" [--map <name>] [--pairs N ≥ 3]

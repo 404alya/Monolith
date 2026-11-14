@@ -1,10 +1,10 @@
-// Folder listing for --import's inventory and --export's unused-file list.
+// Folder listing for the edit mode's model list and --export's unused-file list.
 //
 // Replaces raylib's LoadDirectoryFilesEx for those two (QA2 F8/F9/F10): raylib joins paths
 // into a fixed 4096-byte stack buffer with sprintf (a symlink to "." with a long name
 // overflowed it: stack smashing, the game crashed on F9), follows symlinked folders (two
-// links to "." doubled the walk per level: a hang), and stops silently at 8192 files (the
-// import inventory's counts were wrong). This walker builds paths on the heap, doesn't
+// links to "." doubled the walk per level: a hang), and stops silently at 8192 files (a
+// listing's counts were wrong). This walker builds paths on the heap, doesn't
 // follow symlinked folders (Windows: reparse points such as junctions), and stops after
 // DIRSCAN_MAX_ENTRIES entries or DIRSCAN_MAX_DEPTH levels with stats->stopped set, so the
 // caller can say the listing is incomplete.

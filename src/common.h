@@ -15,8 +15,8 @@
 // for benchmarking, viewing and debugging a map (the project-history skill, "The stated purpose").
 // 0: the view-only build: the editing and request keys and flags are refused (the list: the
 // header comment of src/main.c, "View-only build"). Checked with `if (!MONOLITH_EDITING)` at the
-// entry points, so both builds compile every module; only launcher.c and import.c (POSIX) are
-// left out of the other platforms' builds (nob.c), their headers give stubs there.
+// entry points, so both builds compile every module; only launcher.c and classifier.c (POSIX) are
+// left out of the other platforms' builds (nob.c); launcher.h gives stubs there.
 #if defined(__linux__)
 #   define MONOLITH_EDITING 1
 #else

@@ -1,6 +1,6 @@
 ---
 name: map-request
-description: Carry out one in-game map request from the monolith map designer — a bundle in requests/<id>/ (request.md, request.json, view.png, view-marked.png, region-<n>.png), usually as a subagent of the request coordinator. Use whenever a prompt mentions requests/<id>/request.md, a map edit request, a request bundle, result.md, question.md, DONE/FAILED/QUESTION/NEEDS-CODE replies, or an old prompt naming AI-MAP-TOOL.md. Import bundles (kind "import") also need the import-request skill.
+description: Carry out one in-game map request from the monolith map designer — a bundle in requests/<id>/ (request.md, request.json, view.png, view-marked.png, region-<n>.png), usually as a subagent of the request coordinator. Use whenever a prompt mentions requests/<id>/request.md, a map edit request, a request bundle, result.md, question.md, DONE/FAILED/QUESTION/NEEDS-CODE replies, or an old prompt naming AI-MAP-TOOL.md.
 ---
 
 # Map request
@@ -22,7 +22,6 @@ The workflow for the session that carries out one request (`requests/<id>/reques
 | `.claude/skills/map-request/bundle-reference.md` | every request: what each file and field of the bundle means |
 | the `map-editing` skill | every edit: coordinates and scale, editing rules, verification, hot reload |
 | the `assets-and-licences` skill | the request needs a model or a texture |
-| the `import-request` skill | `kind: "import"` bundles |
 | the `engine-code` skill (+ `lighting-fog-shadows` for lighting, fog, shadows) | only for engine changes (C, R3D, shaders beyond the package), and under the coordinator only once you run alone (§2a) |
 
 ## 1. What this is
@@ -39,7 +38,7 @@ You are the session doing one request. Your job is to change the map (rarely the
 
 1. In spectator mode the developer aims, selects, optionally drags out screen regions (snip mode, **C**) or marks volumes (world-space boxes, **V**) and presses **Enter**, types the request and presses **Enter** again.
 2. The game writes a bundle folder, **`requests/<YYYY-MM-DD_HHMMSS>_<slug>/`**, in the repo root (`requests/` is gitignored). The slug is made from the prompt's first words.
-3. The game writes `state` (`queued`) as the bundle's last file and, if no coordinator is running, opens one terminal for it (moved to i3/sway workspace 10, `MONOLITH_WORKSPACE`). The coordinator claims the request when its rules allow (requests on the same map package never run at the same time; code requests run alone) and starts you as its subagent. The user's text is never put on a command line. It is only in the bundle. Everything runs **without approval prompts** (`--allow-dangerously-skip-permissions --dangerously-skip-permissions`, unless `MONOLITH_CLAUDE_SAFE=1`), so the guard rails in `CLAUDE.md` apply. The game also chose **your model** for this request (fast / default / heavy tier, from the prompt and its context; the `Model:` line near the top of `request.md` says which and why). If the task turns out much bigger than your tier suggests, still do it carefully and completely (you can't switch models), and say so in `result.md`. *Per-request mode:* the game opens a terminal running `claude "Map edit request: read requests/<id>/request.md and carry it out."` in the repo root instead.
+3. The game writes `state` (`queued`) as the bundle's last file and, if no coordinator is running, opens one terminal for it (moved to i3/sway workspace 10, `MONOLITH_WORKSPACE`). The coordinator claims the request when its rules allow (requests on the same map package never run at the same time; code requests run alone) and starts you as its subagent. The user's text is never put on a command line. It is only in the bundle. Everything runs **without approval prompts** (`--allow-dangerously-skip-permissions --dangerously-skip-permissions`, unless `MONOLITH_CLAUDE_SAFE=1`), so the guard rails in `CLAUDE.md` apply. The game also chose **your model** for this request (fast / default / heavy tier): a separate AI classifier (one `claude -p` the game runs before it queues the bundle; Fable, Opus as its fallback) read the prompt and its context and picked the tier, unless the developer overrode it (`@fast` / `@default` / `@heavy`, `MONOLITH_MODEL`); the `Model:` line near the top of `request.md` says which, who chose it and why. If the task turns out much bigger than your tier suggests, still do it carefully and completely (you can't switch models), and say so in `result.md`. *Per-request mode:* the game opens a terminal running `claude "Map edit request: read requests/<id>/request.md and carry it out."` in the repo root instead.
 4. You:
    1. read `request.md`, and `.claude/skills/map-request/bundle-reference.md` for what its sections and fields mean (object indices shift, the `Warning` line, copy indices, regions, volumes);
    2. **read the map's `MAP.md`** (the *Design brief* section of `request.md` names it). It decides what new content looks like and how it is built. If it is missing, empty or still the unfilled `--new-map` template (placeholders in parentheses), **write it first** (`docs/map-format.md` §1.2), then build;
@@ -87,6 +86,6 @@ Write it **last**, in one go. The game picks it up as soon as it has a complete 
   - **"restart needed"** if you changed code.
 - If you couldn't do the request, still write `result.md`, with a summary line that says so (e.g. `Not done: the developer chose to skip it` or `Not done: no model with an acceptable licence`). Otherwise the HUD shows the request as running until the coordinator gives up on it.
 
-## 5. Import requests, models and textures
+## 5. Models and textures
 
-An import request (`monolith --import <project dir> <map name or path>`, bundle `kind: "import"`) brings the scene of an existing raylib + R3D project into a new map package: follow the **`import-request`** skill. Before placing any model or texture, load the **`assets-and-licences`** skill. Never place a file whose licence isn't recorded.
+Before placing any model or texture, load the **`assets-and-licences`** skill. Never place a file whose licence isn't recorded.

@@ -9,7 +9,6 @@ own project. Each one has its own README.
 | [`02_existing_project`](02_existing_project/) | A small existing game (own camera, player, objects, lights) before and after integrating a scene, drawn inside the game's own R3D frame, with `MS_Collides` for collision. |
 | [`03_live_editing`](03_live_editing/) | A game that hot-reloads the package monolith is editing, side by side with the editor. |
 | [`05_entities`](05_entities/) | The scene's entities and components (stable ids, transforms, source lines), and a game's own components and systems on top of them; built like an exported game (no hot reload). |
-| [`04_import_source`](04_import_source/) | A hand-written R3D scene (CC0 models, lights, fog, sky): the test input for `monolith --import` and for the capture shim (`runtime/monolith_capture.h`). |
 
 ## Build
 
@@ -23,7 +22,7 @@ own project. Each one has its own README.
 
 The examples compile against monolith's R3D copy with `-DMS_PATCHED_R3D`, with the game's
 flags (zero warnings) and static linking, and the runtime as an export has it (without
-`-DMONOLITH_EDITOR`), except `03_live_editing` and the capture build, which need editor functions. Each output folder holds the program and the data it
+`-DMONOLITH_EDITOR`), except `03_live_editing`, which needs editor functions. Each output folder holds the program and the data it
 loads (`scene/` or `assets/`), so it runs from any working directory. `examples/build/` is not
 committed.
 

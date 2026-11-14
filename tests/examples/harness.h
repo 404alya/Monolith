@@ -18,8 +18,7 @@
 // the Harness* functions below (main included, which becomes HarnessExampleMain), and every
 // frame that would reach the window goes into the harness's texture instead: R3D_Begin /
 // R3D_BeginEx / R3D_BeginPro / MS_Draw without a target get it. R3D itself always writes framebuffer 0 when
-// it has no target, which a hidden window can't read back. With the capture shim in front
-// (`-include monolith_capture.h -include harness.h`), its recorders are wrapped the same way.
+// it has no target, which a hidden window can't read back.
 //
 // Bench mode (docs/painting.md 14): the frame time of a program that draws a scene with MS_Draw
 // (the exported viewer.c, examples/01_minimal), measured like `monolith --bench --headless`:
@@ -91,7 +90,7 @@ static struct {
     bool failed;
 } harnessBench = { .frames = HARNESS_BENCH_FRAMES };
 
-// The calls below use the real functions (or, with the capture shim, its recorders): the
+// The calls below use the real functions: the
 // macros that route the program's calls here are only defined at the end of this file
 static inline void HarnessSetConfigFlags(unsigned int flags)
 {
