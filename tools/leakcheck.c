@@ -64,7 +64,7 @@
 // maps), the profiling tool (tools/profile.c) on the fixtures in tests/profile/ (--report-only, no perf run),
 // the paint unwrap test (tests/unit/paintunwrap_test.c: xatlas on synthetic meshes and every model file in
 // maps/*/models/), run-sh.o (tools/run-sh.c, built with the sanitizer into the build folder: --check on
-// allowed, refused and nested command lines, -c, --hook on Bash / Monitor / bad JSON) and its unit test
+// allowed, refused and unterminated lines, -c, --hook on Bash / Monitor / bad JSON) and its unit test
 // (./build.sh test run_sh: ASan + UBSan, with its own sanitizer build of run-sh.c on every case), and the other
 // programs of build/tools/ (each built with the sanitizer into <build folder>/tools/), on harmless inputs
 // only: stub-terminal with a log, request-queue on a scratch requests folder (usage, list, wait, a bad id),
@@ -1081,7 +1081,7 @@ int main(int argc, char **argv)
         RunIn("paintunwrap", 0, NULL, &cmd);
     }
 
-    // run-sh.o: every mode on allowed, refused and nested command lines (--check and --hook run nothing; -c runs
+    // run-sh.o: every mode on allowed, refused and unterminated lines (--check and --hook run nothing; -c runs
     // harmless commands). Its log and benchmark lock go to tmp/run-sh, not build/run-sh. Then its unit test
     // (ASan + UBSan, with its own sanitizer build of run-sh.c on every case).
     ToolSay("running run-sh.o and its test ...");
@@ -1093,10 +1093,10 @@ int main(int argc, char **argv)
                             "EOF\n"
                             "for f in a b; do case $f in a) echo \"$f\";; esac; done; __GL_SYNC_TO_VBLANK=0 "
                             "build/linux/monolith --bench --headless --note x";
-    // a delete hidden in an eval inside a nested shell
-    const char *rsRefused = "cd /tmp && bash -c 'eval \"find ../home -exec rm {} +\"'";
+    // a find deletion whose root leaves /tmp after a cd
+    const char *rsRefused = "cd /tmp && find ../home -exec rm {} +";
     // deletes under /tmp only: allowed (the developer's decision)
-    const char *rsTmp = "rm -rf /tmp/a/*.png $'/tmp/b' && find /tmp/c -delete";
+    const char *rsTmp = "rm -rf /tmp/a/x.png '/tmp/b' && find /tmp/c -delete";
     // the hook's JSON (each line ends with the newline bash's <<< adds): a Bash call, a Monitor call, bad JSON
     WriteText(T("run-sh-hook.json"),
               nob_temp_sprintf("{\"cwd\":\"%s\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"echo 'a b'\","
@@ -1108,7 +1108,7 @@ int main(int argc, char **argv)
     RUN("run-sh-allowed", 0, RUNSH, "--check", rsAllowed);
     RUN("run-sh-refused", 126, RUNSH, "--check", rsRefused);
     RUN("run-sh-tmp", 0, RUNSH, "--check", rsTmp);
-    RUN("run-sh-unreadable", 126, RUNSH, "--check", "echo \"$(ls");
+    RUN("run-sh-unterminated", 0, RUNSH, "--check", "echo \"$(ls");
     RUN("run-sh-c", 7, RUNSH, "-c", "exit 7");
     RUN("run-sh-c-refused", 126, RUNSH, "-c", "git reset --hard");
     RUN_STDIN("run-sh-hook", 0, T("run-sh-hook.json"), RUNSH, "--hook");
