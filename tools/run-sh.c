@@ -52,8 +52,9 @@
 //       git reset --hard; git checkout with -- . -f --force; git restore without --staged; git stash drop|clear.
 //   no visible window          ("Never open a visible window")
 //       monolith (monolith, monolith.exe, also as wine's program; build.sh [--win] run; nob run) without
-//       --shot, --dump-boxes, --dump-scene, --dump-scene-diff, --dump-entities, --apply-edits,
-//       --inspect-model, --new-map, --export, --compile, --classify, --bake-surface or --bench --headless
+//       --shot, --dump-boxes, --dump-scene, --dump-scene-diff, --dump-entities, --tri-report,
+//       --apply-edits, --inspect-model, --new-map, --export, --compile, --classify, --bake-surface or --bench
+//       --headless
 //       (old-monolith builds lack monolith's own guard); the plain examples (examples/build/linux/, win/;
 //       their test builds linux-test/, linux-lsan/ are fine); a word starting MONOLITH_ALLOW_WINDOW=, or
 //       export / declare / typeset / readonly / local MONOLITH_ALLOW_WINDOW….
@@ -263,7 +264,7 @@ static char *Adopt(char *heap)
                     "relative path after a cd it can't follow); write each path out literally under /tmp/, or " \
                     "use `gio trash <path>`"
 #define HINT_GAME "run monolith only with --shot <file>, --dump-boxes, --dump-scene, --dump-scene-diff, " \
-                  "--dump-entities, --apply-edits, --inspect-model, --new-map, --export, --compile, " \
+                  "--dump-entities, --tri-report, --apply-edits, --inspect-model, --new-map, --export, --compile, " \
                   "--classify, --bake-surface or --bench --headless (CLAUDE.md)"
 #define HINT_STAY "write only inside the repo or under /tmp/ (your scratchpad)"
 
@@ -817,8 +818,9 @@ static void CheckGame(const char *word, const char **a, size_t n, bool vsync)
         if (Has(a, n, "--headless")) return;
     }
     static const char *const windowless[] = {"--shot", "--dump-boxes", "--dump-scene", "--dump-scene-diff",
-                                             "--dump-entities", "--apply-edits", "--inspect-model", "--new-map",
-                                             "--export", "--compile", "--classify", "--bake-surface", NULL};
+                                             "--dump-entities", "--tri-report", "--apply-edits", "--inspect-model",
+                                             "--new-map", "--export", "--compile", "--classify", "--bake-surface",
+                                             NULL};
     for (const char *const *f = windowless; *f; f++) {
         if (Has(a, n, *f)) return;
     }
@@ -1355,7 +1357,7 @@ static int Hook(bool rewriteAll)
 {
     // the tool call's JSON, all of stdin
     Nob_String_Builder in = {0};
-    char buf[65536];
+    char buf[65536]; // TODO:
     for (;;) {
         ssize_t n = read(STDIN_FILENO, buf, sizeof buf);
         if (n < 0 && errno == EINTR) continue;
