@@ -1,6 +1,9 @@
-# monolith
+
+# Monolith
 
 An **AI-assisted map designer** for 3D levels of any style. You fly through a level, point at a spot, select objects or drag a rectangle over the screen, and type what should change: "make this wall twice as tall", "plant three more pines along the path", "hang a neon sign over each of these stalls". Claude Code carries the request out in the background, and the running game reloads the map so the change appears in place.
+
+[![Monolith demo](https://assets.notfound404.dev/2026-11-14%2015-31-33-thumbnail.png)](https://assets.notfound404.dev/2026-11-14%2015-31-33.mp4)
 
 Claude decides *what* changes; how it is changed is deterministic. The map is plain text, edits go through a small edit language (`--apply-edits`), a compiled map recompiles to the same bytes, the same build renders the same image, and box dumps, scene diffs and pixel-compared screenshots show exactly what an edit did. `--export` turns a map into plain C11 for your own game, held to the same rules as the editor: no editor code, no fixed-size content buffers, zero warnings, zero leaks, and caches and quality presets whose cost is measured ([docs/export.md](docs/export.md)).
 
