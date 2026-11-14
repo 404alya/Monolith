@@ -19,14 +19,14 @@
 //   argv[3]  optional: an existing export folder to check instead of making one
 //
 // Without argv[3] it exports tests/models with build/linux/monolith into <argv[2]>/export-<YYYYmmddHHMMSS>/
-// (the game's --export, hidden: no window), checks that, and moves the export to the trash afterwards
+// (monolith's --export, hidden: no window), checks that, and moves the export to the trash afterwards
 // (`gio trash`, the repo's only way to delete). With argv[3] it checks that folder and leaves it alone.
 //
 // Output (the script's, line for line): "ok   no <rule>" per rule that passed, "FAIL <rule>:" and the hits
 // (path:line:text, indented four spaces) per rule that didn't, then "export_strip_test: OK (<dir>)" or
 // "export_strip_test: FAILED (<dir>)".
 //
-// Exit codes: 0 all rules passed; 1 any hit, a missing file, a missing game or a failed export.
+// Exit codes: 0 all rules passed; 1 any hit, a missing file, a missing monolith binary or a failed export.
 //
 // Pattern matching is POSIX extended regular expressions (<regex.h>), as `grep -E` read them. A rule marked
 // "whole word" is `grep -w`: a match counts only when it is not part of a longer word (the characters next to
@@ -183,8 +183,8 @@ int main(int argc, char **argv)
     const char *dir = argc > 3 && argv[3][0] ? argv[3] : NULL;
     char *made = NULL;
 
-    // Step 1: no folder given, so make an export of tests/models with the built game: build/unit/export_strip/
-    // export-<timestamp>. The game is run with --export (hidden window) and its output thrown away; a failure
+    // Step 1: no folder given, so make an export of tests/models with the built monolith: build/unit/export_strip/
+    // export-<timestamp>. monolith is run with --export (hidden window) and its output thrown away; a failure
     // only says "the export failed".
     if (!dir) {
         char *game = Format("%s/build/linux/monolith", root);
@@ -200,7 +200,7 @@ int main(int argc, char **argv)
         fflush(NULL);
         pid_t pid = fork();
         if (pid == 0) {
-            // the child: `>/dev/null 2>&1`, then the game
+            // the child: `>/dev/null 2>&1`, then monolith
             if (!freopen("/dev/null", "w", stdout) || !freopen("/dev/null", "w", stderr)) _exit(126);
             execl(game, game, "--export", made, "--map", models, (char *)NULL);
             _exit(127);

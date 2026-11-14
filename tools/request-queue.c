@@ -4,7 +4,7 @@
 // same subcommands, the same output byte for byte (the coordinator session and people read it), the same
 // files written, the same exit codes.
 //
-// The game writes a bundle's requests/<id>/state = "queued" (and requests/<id>/cancel when the developer
+// The editor writes a bundle's requests/<id>/state = "queued" (and requests/<id>/cancel when the developer
 // cancels); every later state change goes through this program, run by the coordinator only.
 //
 // Subcommands:
@@ -36,7 +36,7 @@
 //   <id>/claim.txt  the fingerprint taken at the claim: "package <path>", one "file <sha1>  ./<path>" line per
 //                   file of the map package (sha1sum's format, `sort -z` order), "code <sha1 of the code state>"
 //   <id>/result.md  written here only by finish failed / cancelled when the subagent left none
-//   .coordinator/   the coordinator's own files: lock (held by the game's wrapper, not touched here), seen (the
+//   .coordinator/   the coordinator's own files: lock (held by the editor's wrapper, not touched here), seen (the
 //                   events `wait` has reported in this coordinator's life), log (one line per event, with ms)
 // Never deletes anything (no rm): every file is written whole into <file>.tmp and renamed over the old one.
 //
@@ -310,7 +310,7 @@ static size_t CharPrefix(const char *s, size_t chars, size_t *count)
     return cut;
 }
 
-// JsonLine <bundle dir> <key>: the first line of request.json that matches `^ *"<key>": ` (the game writes one
+// JsonLine <bundle dir> <key>: the first line of request.json that matches `^ *"<key>": ` (the editor writes one
 // key per line), as `grep -m1 -E` printed it: without its newline; "" when there is none, when the file is
 // missing or holds a NUL byte, or when that line is not valid text (grep then prints nothing and only says
 // "binary file matches" on stderr, which the script sent to /dev/null). Heap string.
@@ -1050,7 +1050,7 @@ static void Wait(int argc, char **argv)
 static void Usage(void)
 {
     fputs("build/tools/request-queue -- the request queue on disk, for the coordinator session\n"
-          "(.claude/skills/coordinator/SKILL.md; design: docs/request-queue.md). The game writes a bundle's\n"
+          "(.claude/skills/coordinator/SKILL.md; design: docs/request-queue.md). The editor writes a bundle's\n"
           "requests/<id>/state = \"queued\" (and requests/<id>/cancel when the developer cancels);\n"
           "every later state change goes through this program, run by the coordinator only.\n"
           "\n"
@@ -1078,7 +1078,7 @@ static void Usage(void)
           "State file: one line \"<state> <YYYY-MM-DDTHH:MM:SS> <writer>\"; readers use the first word.\n"
           "Bundles without a state file (older ones, per-request mode, one still being written) are\n"
           "never touched. Folder: $MONOLITH_REQUESTS_DIR (tests) or <repo>/requests; the coordinator's\n"
-          "own files are in <folder>/.coordinator/ (lock: held by the game's wrapper; seen; log).\n"
+          "own files are in <folder>/.coordinator/ (lock: held by the editor's wrapper; seen; log).\n"
           "Never deletes anything (no rm): files are replaced by rename.\n",
           stdout);
 }

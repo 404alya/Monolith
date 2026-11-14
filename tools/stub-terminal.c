@@ -20,7 +20,7 @@
 // Exit status: 0, or the command's own with MONOLITH_STUB_RUN (127 / 126 when it can't be started; the message
 // then goes into <file>, as the script's `exec` printed it there).
 //
-// Called by: the game (src/launcher.c) in launcher tests and build/tools/test-coordinator; the leak check.
+// Called by: the editor (src/launcher.c) in launcher tests and build/tools/test-coordinator; the leak check.
 
 #include "tool.h"
 

@@ -2,7 +2,7 @@
 // `./build.sh --tools stub-coordinator` into build/tools/stub-coordinator; it replaced
 // tools/stub-coordinator.sh (2026-11-13) and behaves exactly like it.
 //
-// The game starts it in place of claude (MONOLITH_CLAUDE=build/tools/stub-coordinator, with
+// The editor starts it in place of claude (MONOLITH_CLAUDE=build/tools/stub-coordinator, with
 // MONOLITH_TERMINAL=build/tools/stub-terminal and MONOLITH_STUB_RUN=<log>, see build/tools/test-coordinator).
 // It ignores its arguments and applies the scheduling rules of the coordinator skill
 // (.claude/skills/coordinator/SKILL.md, §4) through build/tools/request-queue, so the tests exercise the real

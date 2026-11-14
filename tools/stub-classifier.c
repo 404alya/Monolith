@@ -1,8 +1,8 @@
-// tools/stub-classifier.c: a fake AI classifier for tests of the game's model choice (src/classifier.c,
+// tools/stub-classifier.c: a fake AI classifier for tests of the editor's model choice (src/classifier.c,
 // docs/request-queue.md "Models"). Built by `./build.sh --tools stub-classifier` into
 // build/tools/stub-classifier.
 //
-// Use it as MONOLITH_CLASSIFIER=build/tools/stub-classifier: the game starts it exactly as it starts
+// Use it as MONOLITH_CLASSIFIER=build/tools/stub-classifier: the editor starts it exactly as it starts
 // `claude -p` (the same arguments, the request on stdin, stdout into the bundle's classifier.json), and it
 // answers the way Claude Code's --output-format json does, so no test ever starts a real Claude run.
 //
@@ -10,12 +10,12 @@
 //   MONOLITH_STUB_CLASSIFIER=<mode>   what to answer (default: default):
 //       fast | default | heavy   a valid answer on that tier, from the --model it was given (modelUsage
 //                                names it); the reason has a line break and a non-ASCII letter, which the
-//                                game must turn into plain ASCII
+//                                editor must turn into plain ASCII
 //       fallback                 a valid heavy answer from the --fallback-model (as if Fable was overloaded)
 //       garbage                  text that is not JSON, exit 0
 //       outside                  valid JSON whose tier is "opus" (outside the schema), exit 0
 //       fail                     a message on stderr, exit 1
-//       slow                     sleeps 600 s before answering (the game's timeout must kill it)
+//       slow                     sleeps 600 s before answering (the editor's timeout must kill it)
 //   MONOLITH_STUB_CLASSIFIER_LOG=<file>, else MONOLITH_STUB_LOG=<file>
 //                                appends what it was given to <file>: a line "stub-classifier argv:", one
 //                                argument per line (each prefixed with "  arg: "), then "stub-classifier stdin:"
@@ -25,11 +25,11 @@
 //
 // Exit status: 0 (answers, garbage, outside, slow when it is not killed); 1 (fail, or an unknown mode).
 //
-// Called by: the game (src/classifier.c) in launcher tests, build/tools/leakcheck, build/tools/test-coordinator.
+// Called by: the editor (src/classifier.c) in launcher tests, build/tools/leakcheck, build/tools/test-coordinator.
 
 #include "tool.h"
 
-// The value after `flag` in argv, or "" (the game always passes --model and --fallback-model)
+// The value after `flag` in argv, or "" (the editor always passes --model and --fallback-model)
 static const char *ArgAfter(int argc, char **argv, const char *flag)
 {
     for (int i = 1; i + 1 < argc; i++)
@@ -37,7 +37,7 @@ static const char *ArgAfter(int argc, char **argv, const char *flag)
     return "";
 }
 
-// One answer in the shape of Claude Code's result object (the fields the game reads, plus a few it
+// One answer in the shape of Claude Code's result object (the fields the editor reads, plus a few it
 // skips, so its reader is exercised on the real layout)
 static void Answer(const char *tier, const char *model, const char *reason)
 {
@@ -54,7 +54,7 @@ int main(int argc, char **argv)
 {
     ToolInit(argv, "stub-classifier", "stub-classifier");
 
-    // Read the whole input first (the game's classifier-input.txt), as claude -p does
+    // Read the whole input first (the editor's classifier-input.txt), as claude -p does
     Nob_String_Builder in = {0};
     char buf[4096];
     for (;;) {

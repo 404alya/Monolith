@@ -221,7 +221,7 @@ DesignerHit DesignerPickAt(Camera3D cam, int w, int h, float x, float y);
 DesignerAction DesignerUpdate(Designer *d, float dt);
 
 // True while the prompt box is open, snip mode is on, a volume's height is being set, or
-// the camera is still frozen after one of them: the caller must skip game keys and camera
+// the camera is still frozen after one of them: the caller must skip editor keys and camera
 // movement then
 bool DesignerCapturesInput(const Designer *d);
 // True in volume mode: the arrow keys edit the active volume, so the spectator must not

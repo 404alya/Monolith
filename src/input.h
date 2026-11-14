@@ -1,7 +1,7 @@
 // The keyboard / mouse shim of the editor (input.c): every src/ module reads input through it
 // (common.h maps raylib's input calls here). Without --input-script each call is raylib's own;
 // with it the input of a hidden --shot run comes from a script, frame by frame, through the same
-// code paths the interactive game uses (docs/command-line.md, --input-script)
+// code paths the interactive editor uses (docs/command-line.md, --input-script)
 #ifndef MONOLITH_INPUT_H
 #define MONOLITH_INPUT_H
 

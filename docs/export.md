@@ -4,7 +4,7 @@ How to use a monolith map in your own raylib + R3D program. Code: `src/export.c`
 
 The exported code is what ships in a game, so it is held to the same rules as the editor: plain C11 on raylib + R3D; the runtime without its `#ifdef MONOLITH_EDITOR` blocks (`./build.sh test export_strip` checks that no parser is left); no fixed-size buffers for content; failure as a return value with the reason in `MS_LastError()`, no message buffers; zero compiler warnings (`-Wall -Wextra`); zero leaks (`build/tools/leakcheck` runs the examples, built with the runtime as an export has it); per-frame paths that don't allocate; and caches and quality presets whose cost is measured (`.claude/skills/benchmarking/measurements.md`; an export's own frame time: `build/tools/bench-export-ab`). It builds for Linux and Windows x86_64 (MinGW-w64). Windows builds are compile-checked, not run by any test; other platforms are untested. The editor that writes the export is Linux + i3 only ([architecture.md](architecture.md) §2).
 
-`monolith --export <dir> [--map <path>]`, or **F9** in the game (the open map, into `export/<map>-<stamp>/`), writes one map as a self-contained folder: someone extracts it on a clean machine, runs `./build.sh` (Linux) or `./build.sh --win` (MinGW-w64), and gets a viewer that draws the map exactly as monolith does, with the map's viewpoints. Layout:
+`monolith --export <dir> [--map <path>]`, or **F9** in the editor (the open map, into `export/<map>-<stamp>/`), writes one map as a self-contained folder: someone extracts it on a clean machine, runs `./build.sh` (Linux) or `./build.sh --win` (MinGW-w64), and gets a viewer that draws the map exactly as monolith does, with the map's viewpoints. Layout:
 
 | Path | What |
 |---|---|

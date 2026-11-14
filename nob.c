@@ -6,7 +6,7 @@
 //                                libstdc++ linked statically) + maps/ (map packages); the folder can be
 //                                copied as-is. Also writes compile_commands.json in the repo root for
 //                                clangd (WriteCompileCommands below).
-//   ./build.sh run [args]     -> build, then run the game with args (replaces this process)
+//   ./build.sh run [args]     -> build, then run monolith with args (replaces this process)
 //   ./build.sh debug          -> debug build (-g -O0, AddressSanitizer + UBSan, leak check at exit) in
 //                                build/linux-debug/
 //   ./build.sh lsan           -> LeakSanitizer-only build (-O1 -g, fast) in build/linux-lsan/, what
@@ -242,7 +242,7 @@ static bool RunTimed(Nob_Cmd *cmd, const char *label, Output out)
 
 // The summary table of every timed command and their total, plus the whole run's wall time (which also
 // covers nob's own work: the maps/ copy, compile_commands.json). Printed at the end of a build, before
-// `run` hands over to the game, and before a failed build exits.
+// `run` hands over to monolith, and before a failed build exits.
 static void PrintSummary(void)
 {
     if (gTimings.count == 0) return;
@@ -1033,7 +1033,7 @@ static const char *TOOLS[] = {
 //   defines   NULL-terminated extra -D flags ("-DMONOLITH_EDITOR": the runtime as the editor has it)
 //   includes  NULL-terminated -I folders, relative to the repo root ("runtime", "src")
 //   r3d       links R3D, raylib and assimp from $R3D_DIR/build-linux (needs ./build.sh first) and adds
-//             -DMS_PATCHED_R3D and their include folders, as the game does
+//             -DMS_PATCHED_R3D and their include folders, as monolith does
 //   game      needs build/linux/monolith (the prepare step runs it); both r3d and game print "run ./build.sh
 //             first" when what they need is missing
 //   env       NULL-terminated "NAME=value" set for the run (after ASAN_OPTIONS; "{root}" is replaced)
@@ -1132,7 +1132,7 @@ static const UnitTest UNIT_TESTS[] = {
         // the runtime an export ships has no map-text parser (tests/unit/export_strip_test.c: a grep for
         // the parser's names in an export's monolith_scene.c / .h). Without an extra argument the test
         // exports tests/models with build/linux/monolith into build/unit/export_strip/ itself (and checks
-        // that the game is built); with one (`./build.sh test export_strip -- <export dir>`) it checks
+        // that monolith is built); with one (`./build.sh test export_strip -- <export dir>`) it checks
         // that export folder. Plain C + libc.
         .name = "export_strip",
         .sources = (const char *[]){"tests/unit/export_strip_test.c", NULL},
@@ -1240,7 +1240,7 @@ static void Xatlas(const char *cxx, const char *obj, Nob_Cmd *extra)
         NewerThan(nob_temp_sprintf("%s/nob.c", gRoot), obj) ||
         !previous || strcmp(previous, stampText.items) != 0) {
         Say("compiling xatlas (%s) ...", cxx);
-        // the xatlas compile: C++ to an object file only (-c), linked into the game below
+        // the xatlas compile: C++ to an object file only (-c), linked into monolith below
         Nob_Cmd cmd = {0};
         nob_cmd_append(&cmd, cxx);
         nob_da_append_many(&cmd, flags.items, flags.count);
@@ -1332,7 +1332,7 @@ static int BuildWindows(int argc, char **argv)
     nob_cmd_append(&xatlasFlags, "-O2");
     Xatlas("x86_64-w64-mingw32-g++", xatlasObj, &xatlasFlags);
 
-    // The game: compile and link every C file in one command. -std=c11 -Wall -Wextra with zero warnings
+    // monolith: compile and link every C file in one command. -std=c11 -Wall -Wextra with zero warnings
     // (-Wno-missing-field-initializers: designated initialisers that leave fields zero are intended), -O2.
     // Include paths: R3D's headers, its generated config header (build dir), raylib's, assimp's (source and
     // generated config; --inspect-model reads models through assimp, src/inspect.c), assimp's zlib (the PNG
@@ -1440,7 +1440,7 @@ static int BuildLinux(int argc, char **argv)
                    nob_temp_sprintf("-I%s/external/assimp/contrib/zlib", gR3dDir),
                    nob_temp_sprintf("-I%s/external/assimp/contrib/zlib", r3dLinux));
 
-    // The game's C flags: C11, every warning (zero warnings is a rule; -Wno-missing-field-initializers:
+    // monolith's C flags: C11, every warning (zero warnings is a rule; -Wno-missing-field-initializers:
     // designated initialisers that leave fields zero are intended), -O2.
     // The sanitizer builds go into their own folders, so they never replace the normal binary. R3D, raylib
     // and assimp stay the normal Release static libraries (not instrumented, but their mallocs are
@@ -1475,7 +1475,7 @@ static int BuildLinux(int argc, char **argv)
     if (strstr(cc, "clang")) cxx = Env("CXX", ReplaceFirst(cc, "clang", "clang++"));
     else if (strstr(cc, "gcc")) cxx = Env("CXX", ReplaceFirst(cc, "gcc", "g++"));
     else cxx = Env("CXX", "c++");
-    // xatlas gets the game's flags minus the language level and the warning flags (-std=*, -W*)
+    // xatlas gets monolith's flags minus the language level and the warning flags (-std=*, -W*)
     Nob_Cmd xatlasFlags = {0};
     for (size_t i = 0; i < cflags.count; i++) {
         const char *f = cflags.items[i];
@@ -1501,7 +1501,7 @@ static int BuildLinux(int argc, char **argv)
                    nob_temp_sprintf("-DR3D_BUILD_TYPE_NAME=\"%s\"", buildType),
                    nob_temp_sprintf("-I%s/runtime", gRoot), "-DMS_PATCHED_R3D", "-DMONOLITH_EDITOR");
 
-    // The game: compile and link every C file (src/*.c, runtime/*.c in glob order) and the xatlas object in one
+    // monolith: compile and link every C file (src/*.c, runtime/*.c in glob order) and the xatlas object in one
     // command. Link flags:
     // -L <R3D lib dir> -lr3d -lraylib -lassimp -lzlibstatic: the static libraries built above.
     // -l:libstdc++.a: libstdc++ (needed by assimp) linked statically as well: the host's libstdc++ is usually
@@ -1533,7 +1533,7 @@ static int BuildLinux(int argc, char **argv)
     Say("built: %s/monolith", RelativeToRoot(out));
 
     // clangd's compilation database, from the lists above (the plain build only: the sanitizer and profile
-    // builds and --win leave it alone). The game's files with the game's flags; tools/profile.c, xatlas, the
+    // builds and --win leave it alone). monolith's files with its flags; tools/profile.c, xatlas, the
     // examples with the flags examples/nob.c uses (keep these lines in step when it changes), tests/unit
     // with the flags of UNIT_TESTS (generated from that list below).
     if (strcmp(mode, "") == 0 || strcmp(mode, "run") == 0) {
@@ -1559,7 +1559,7 @@ static int BuildLinux(int argc, char **argv)
         nob_cmd_append(&e, cc, "-std=c11", "-Wall", "-Wextra", "-Wno-missing-field-initializers", "-O2", "-g",
                        nob_temp_sprintf("%s/tools/profile.c", gRoot));
         ENTRY_END();
-        // the examples (examples/nob.c): the game's flags, R3D's and raylib's headers, the runtime
+        // the examples (examples/nob.c): monolith's flags, R3D's and raylib's headers, the runtime
         Nob_Cmd ex = {0};
         nob_cmd_append(&ex, cc);
         nob_da_append_many(&ex, cflags.items, cflags.count);
@@ -1615,7 +1615,7 @@ static int BuildLinux(int argc, char **argv)
         Say("wrote: compile_commands.json");
     }
 
-    // The profiling tool runs perf on the binary next to it. Not a game flag: the game stays as it is. Linux
+    // The profiling tool runs perf on the binary next to it. Not a monolith flag: monolith stays as it is. Linux
     // only (perf is); plain C, links only libc. -O2 -g like the profile build.
     if (profile) {
         Nob_Cmd tool = {0};
@@ -1626,7 +1626,7 @@ static int BuildLinux(int argc, char **argv)
     }
 
     if (strcmp(mode, "run") == 0) {
-        // run: start the game with the remaining arguments, replacing this process (`exec`): not a build
+        // run: start monolith with the remaining arguments, replacing this process (`exec`): not a build
         // step, so not timed
         Nob_Cmd run = {0};
         const char *game = nob_temp_sprintf("%s/monolith", out);
@@ -1654,8 +1654,8 @@ static const char *ToolBinary(const char *name)
 }
 
 // The compile of one tool: ${CC:-clang}, C11, every warning (zero warnings, as everywhere),
-// -Wno-missing-field-initializers (designated initialisers that leave fields zero are intended, as in the
-// game), -O1 (the programs do little work of their own). One source file, no libraries beyond libc.
+// -Wno-missing-field-initializers (designated initialisers that leave fields zero are intended, as in
+// monolith), -O1 (the programs do little work of their own). One source file, no libraries beyond libc.
 // tools/tool.h's ToolCompileCommand has the same list for a program's rebuild of itself: keep the two in
 // step, so both give the same binary.
 static void ToolCommand(Nob_Cmd *cmd, const char *source, const char *binary)

@@ -2,7 +2,7 @@
 // "Models"; the launcher decides when to run it, launcher.c region "Model choice").
 //
 // The run is a plain child process started through nob.h (src/vendor/nob/nob.h, vendored
-// unmodified; this is the only game source that implements it): a Nob_Cmd built with
+// unmodified; this is the only monolith source that implements it): a Nob_Cmd built with
 // nob_cmd_append (an argument list: no shell, nothing quoted by hand) and nob_cmd_run(.async,
 // .stdin_path, .stdout_path, .stderr_path), so the call returns at once. The request text is data:
 // it goes to the child's stdin (classifier-input.txt), never on its command line.
@@ -23,7 +23,7 @@
 #define _XOPEN_SOURCE 700           // POSIX 2008: kill, clock_gettime, nanosleep
 #define _DEFAULT_SOURCE
 
-// nob prints "[INFO] CMD: ..." for every command it starts; the game logs its own line instead
+// nob prints "[INFO] CMD: ..." for every command it starts; monolith logs its own line instead
 #define NOB_NO_ECHO
 #define NOB_IMPLEMENTATION
 #include "vendor/nob/nob.h"
@@ -61,14 +61,14 @@ static const char *EnvOr(const char *name, const char *fallback)
     return v && *v ? v : fallback;
 }
 
-// The game's pid, set by ClassifierStart: NobLog tells the forked child from the game by it
+// The editor's pid, set by ClassifierStart: NobLog tells the forked child from the editor by it
 static pid_t gamePid;
 
 // nob's own messages (a file it couldn't open, a fork that failed, an exec that failed in the
 // child) go to raylib's log as warnings: each of them ends in the default tier, not in a stop.
 // In the forked child (an exec that failed: nob logs, then calls exit(1)) the message goes to the
-// child's stderr (classifier.log) and the child ends here with _exit(1), so the game's atexit
-// handlers never run in a copy of the game's process.
+// child's stderr (classifier.log) and the child ends here with _exit(1), so the editor's atexit
+// handlers never run in a copy of the editor's process.
 static void NobLog(Nob_Log_Level level, const char *fmt, va_list args)
 {
     if (level == NOB_NO_LOGS) return;

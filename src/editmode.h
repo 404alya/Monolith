@@ -44,7 +44,7 @@ typedef enum {
 // (CTRL+Y) undo / redo, CTRL+S saves and CTRL+SHIFT+DELETE clears the list of edits a rebase
 // could not apply, in spectator mode, in the mode or not. Every edit, undo and redo goes live
 // (the working copy, mapedit.c); the map file is written by CTRL+S (or at once in auto save
-// mode). While the id panel is open it takes every key (call it then even though the game is
+// mode). While the id panel is open it takes every key (call it then even though the editor is
 // "typing").
 EditModeResult EditModeUpdate(EditMode *m, Designer *d, Camera3D cam, float dt);
 // The transform modal runs: the camera is frozen, the cursor hidden, every key and click is its
@@ -65,7 +65,7 @@ void EditModeDrawGizmo(EditMode *m, Designer *d, Camera3D cam);
 EditModeResult EditModeFinishModal(EditMode *m, Designer *d, bool commit);
 // The modal's axis guides (3D, after R3D_End, like DesignerDrawOverlay)
 void EditModeDrawGuides(const EditMode *m, Camera3D cam);
-// The id panel is open: every key is its (digits, BACKSPACE, ENTER, ESC); freeze the game keys
+// The id panel is open: every key is its (digits, BACKSPACE, ENTER, ESC); freeze the editor keys
 bool EditModeCapturesInput(const EditMode *m);
 // The id list (F5, idpanel.c) edits through these, as the mode's own keys do (the request warning
 // with `key` as the key to press again, live, undoable, the selection becomes the edited objects):

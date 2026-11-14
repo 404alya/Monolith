@@ -20,7 +20,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NOB="$ROOT/build/nob"
 
 # Compile the build program when it is missing (a fresh checkout) or older than its source or nob.h.
-# The compiler is ${CC:-clang}, the one the game is built with; C11, every warning (nob.c builds with zero),
+# The compiler is ${CC:-clang}, the one monolith is built with; C11, every warning (nob.c builds with zero),
 # -O1 (the build program does little work of its own). It is compiled into a temporary file and moved into
 # place, so two builds started at once never run a half-written build/nob. build/ is gitignored.
 if [[ ! -x "$NOB" || "$ROOT/nob.c" -nt "$NOB" || "$ROOT/src/vendor/nob/nob.h" -nt "$NOB" ]]; then
@@ -30,5 +30,5 @@ if [[ ! -x "$NOB" || "$ROOT/nob.c" -nt "$NOB" || "$ROOT/src/vendor/nob/nob.h" -n
 fi
 
 # Run it by its absolute path (it finds the repo root from that) with this script's arguments; `exec`
-# replaces this shell, so the exit code (and, for run, the game itself) is nob's.
+# replaces this shell, so the exit code (and, for run, monolith itself) is nob's.
 exec "$NOB" "$@"

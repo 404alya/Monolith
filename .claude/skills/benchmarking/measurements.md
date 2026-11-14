@@ -92,7 +92,7 @@ Headless `--bench`, 4 interleaved full pairs per row (notes "P final A/B (round 
 
 All of it is R3D patch 10 (pyramid only as deep as something reads it, bloom composite folded into tonemapping, FXAA writing the final target): bit-identical over 27 shots and the models test map. The honest still gain is ~−0.15 ms.
 
-*The visible window* (`--bench-window`, 3 interleaved triples): plain headless 3.50 ms, single-sampled window 3.78, 4× MSAA window 3.94. The window's own cost is ~0.45 ms in serial terms: 4× MSAA ~0.15 ms GPU (now off by default, `--window-msaa`), HUD text + overlay + pick ~0.15 ms CPU (~1500 glyph quads), and the resolve. ~200 fps visible vs. ~300 headless is explained outside the game: the desktop runs **picom** (glx backend, `vsync = true`, `use-damage = false`, dual-kawase blur), so every frame is also composited on the same GPU. A fullscreen window is unredirected (no compositor cost, but then the driver's vsync caps at 144 Hz unless `__GL_SYNC_TO_VBLANK=0`). Not measured with visible windows.
+*The visible window* (`--bench-window`, 3 interleaved triples): plain headless 3.50 ms, single-sampled window 3.78, 4× MSAA window 3.94. The window's own cost is ~0.45 ms in serial terms: 4× MSAA ~0.15 ms GPU (now off by default, `--window-msaa`), HUD text + overlay + pick ~0.15 ms CPU (~1500 glyph quads), and the resolve. ~200 fps visible vs. ~300 headless is explained outside monolith: the desktop runs **picom** (glx backend, `vsync = true`, `use-damage = false`, dual-kawase blur), so every frame is also composited on the same GPU. A fullscreen window is unredirected (no compositor cost, but then the driver's vsync caps at 144 Hz unless `__GL_SYNC_TO_VBLANK=0`). Not measured with visible windows.
 
 ## Trade-off knobs (machine A)
 

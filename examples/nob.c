@@ -24,7 +24,7 @@
 //
 // Builds against monolith's R3D copy (submodules/r3d, with -DMS_PATCHED_R3D) and its static libraries, which
 // the repo's ./build.sh builds (run it once first, or ./build.sh --win for --win). Same compiler flags as the
-// game (zero warnings), same static linking and glibc compatibility shim (src/glibc_compat.c) on Linux. The
+// monolith binary (zero warnings), same static linking and glibc compatibility shim (src/glibc_compat.c) on Linux. The
 // runtime is built like an exported game (no -DMONOLITH_EDITOR), except for 03_live_editing (MS_Poll). A game
 // build reads only compiled maps, so the game-style examples get their scene compiled next to the copied text
 // (<name>.mapb, through build/linux/monolith --compile, also for --win); 03_live_editing loads the text.
@@ -583,7 +583,7 @@ int main(int argc, char **argv)
     gTest = lsan || strcmp(mode, "test") == 0;
     const char *r3d = Env("R3D_DIR", nob_temp_sprintf("%s/submodules/r3d", gRoot));
 
-    // Compile flags: the game's (C11, every warning, -O2); lsan: -g -O1 with frame pointers and
+    // Compile flags: monolith's (C11, every warning, -O2); lsan: -g -O1 with frame pointers and
     // LeakSanitizer, so the leak check's stacks are readable
     if (lsan) {
         nob_cmd_append(&gCflags, "-std=c11", "-Wall", "-Wextra", "-Wno-missing-field-initializers", "-g", "-O1",
@@ -620,7 +620,7 @@ int main(int argc, char **argv)
                        "-lzlibstatic", "-l:libstdc++.a", "-lgcc_s", "-lGL", "-lm", "-lpthread", "-ldl", wrap.items);
     }
 
-    // What must exist first: the game (it compiles the scenes, also for --win) and R3D's libraries for the
+    // What must exist first: monolith (it compiles the scenes, also for --win) and R3D's libraries for the
     // target, both made by the repo's ./build.sh (--win)
     gMonolith = nob_temp_sprintf("%s/build/linux/monolith", gRoot);
     if (access(gMonolith, X_OK) != 0) {

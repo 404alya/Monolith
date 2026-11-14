@@ -11,7 +11,7 @@
 //
 // Two ways to hand the bundle to Claude Code (MONOLITH_LAUNCH):
 //   - coordinator (default; region "Coordinator and queue", docs/request-queue.md): the
-//     game writes requests/<id>/state = "queued" as the bundle's last file. Unless a
+//     editor writes requests/<id>/state = "queued" as the bundle's last file. Unless a
 //     coordinator holds requests/.coordinator/lock, one terminal titled "monolith-claude:
 //     coordinator" runs a small /bin/sh wrapper that holds the lock (flock) around `claude
 //     <permission flags> --model $MONOLITH_COORDINATOR_MODEL (default sonnet)
@@ -20,7 +20,7 @@
 //     they never open a window. The coordinator (build/tools/request-queue) claims bundles,
 //     hands each to a subagent on the request's model and writes every later state (claimed,
 //     question, done, failed, cancelled). The HUD follows state + result.md. Without flock
-//     (util-linux) the game falls back to per-request mode.
+//     (util-linux) the editor falls back to per-request mode.
 //   - per-request: a new terminal per request runs `claude <permission flags> --model <name>
 //     [MONOLITH_CLAUDE_ARGS] "Map edit request: read requests/<id>/request.md and carry it
 //     out."` in the repo root (no state file); the behaviour before 2026-10-24.
@@ -35,7 +35,7 @@
 //     plus extra arguments ("kitty --single-instance"); the program's basename picks
 //     the syntax from TERMINALS below, unknown terminals get `-e <command>`.
 //   - claude: $MONOLITH_CLAUDE (tests: build/tools/stub-coordinator), else searched in PATH,
-//     then ~/.local/bin/claude (where the native installer puts it, which a game started
+//     then ~/.local/bin/claude (where the native installer puts it, which monolith started
 //     from a desktop launcher may not have in PATH). It is passed to the terminal as an
 //     absolute path, so a terminal daemon with another environment (kitty
 //     --single-instance) still finds it.
@@ -56,7 +56,7 @@
 //     (default 10; empty = leave it where it opens) with `i3-msg` (`swaymsg` when
 //     $SWAYSOCK is set) and the criteria [title="^<its title>$"]. A detached
 //     /bin/sh helper retries every 0.1 s for up to 10 s until the window exists, so the
-//     game never waits. A criteria `move container to workspace` doesn't switch the
+//     editor never waits. A criteria `move container to workspace` doesn't switch the
 //     visible workspace; focus returns to the previously focused window. The window may
 //     still flash up for a moment where it opened: an i3 `for_window` rule on the title
 //     (terminals set it before the window is mapped) avoids that, and the IPC move then
@@ -71,7 +71,7 @@
 //     n close a request's terminal. Closing goes through the mark (`i3-msg [con_mark=...]
 //     kill`), else SIGTERM / SIGKILL to the terminal's process group. MONOLITH_CLOSE_ON_EXIT=1
 //     closes the finished requests' terminals (coordinator mode: the coordinator, if none of
-//     this run's requests is still open) when the game quits.
+//     this run's requests is still open) when the editor quits.
 //
 // Linux only: the other platforms' build is view-only and leaves this file out (nob.c; the
 // stubs in launcher.h; MONOLITH_EDITING in common.h).
@@ -1093,7 +1093,7 @@ static void WriteRequestMdBody(FILE *f, const Bundle *B)
                "are not loaded already); they explain the workflow, the map format and how to verify an edit. "
                "Then carry out the request below.\n\n"
                "**When you are done**, write `requests/%s/result.md`. Its **first line is a one-line "
-               "summary** (the game shows it in its HUD), followed by what changed (map lines before -> "
+               "summary** (the editor shows it in its HUD), followed by what changed (map lines before -> "
                "after), the paths of your after-image(s), and anything left open. If the request is "
                "genuinely ambiguous, ask the developer instead of guessing (the map-request skill, section 3, says how).\n\n", B->id);
     if (B->stale)
@@ -1683,7 +1683,7 @@ typedef struct {
     char state[16];             // queue: first word of the state file ("" = not read yet)
     bool cancelAsked;           // queue: the developer asked to cancel it (cancel file written)
     bool done;
-    bool closed;                // closed from the game: off the list, the bundle stays
+    bool closed;                // closed from the editor: off the list, the bundle stays
     int number;                 // [n] in the HUD list, stable while listed (the lowest free number)
     long resultSize;            // size of result.md at the last poll (wait until it settles)
     char summary[160];          // first line of result.md (queue: of question.md while asking)
@@ -1706,8 +1706,8 @@ static double confirmUntil;     // ... until this clockTime
 
 // The coordinator (coordinator mode, region "Coordinator and queue")
 static struct {
-    TermWindow term;            // its terminal, if this game run started it
-    bool tried;                 // this game run tried to start one
+    TermWindow term;            // its terminal, if this editor run started it
+    bool tried;                 // this editor run tried to start one
     double startTime;           // clockTime of that attempt
     bool failed;                // the last attempt failed ...
     MonoMsg failedLine;         //   ... and its HUD line, set when it failed (not per frame)
@@ -1716,7 +1716,7 @@ static struct {
     double confirmUntil;        // CTRL+SHIFT+K with requests open: second press until then
 } coord = { .alive = -1 };
 
-// Its window's i3 / sway mark: fixed, so a restarted game can still close it through the WM
+// Its window's i3 / sway mark: fixed, so a restarted editor can still close it through the WM
 static void InitCoordinatorMark(void)
 {
     if (requestsHash) snprintf(coord.term.mark, sizeof(coord.term.mark), "_monolith_coordinator_%08x", requestsHash);
@@ -2066,7 +2066,7 @@ static bool SkipPermissions(void)
 static bool FindProgram(const char *name, char *out, int outSize);
 
 // The claude program: $MONOLITH_CLAUDE (tests: build/tools/stub-coordinator), else claude in PATH,
-// else ~/.local/bin/claude (where the native installer puts it, which a game started from a
+// else ~/.local/bin/claude (where the native installer puts it, which monolith started from a
 // desktop launcher may not have in PATH)
 static bool FindClaude(char *out, int outSize)
 {
@@ -2079,7 +2079,7 @@ static bool FindClaude(char *out, int outSize)
     return FindProgram(cand, out, outSize);
 }
 
-// The game runs in an AI agent's shell (CLAUDECODE / AI_AGENT set, not "0")
+// monolith runs in an AI agent's shell (CLAUDECODE / AI_AGENT set, not "0")
 static bool AgentShell(void)
 {
     const char *keys[] = { "CLAUDECODE", "AI_AGENT" };
@@ -2093,7 +2093,7 @@ static bool AgentShell(void)
 
 // An AI agent's shell never opens a real terminal: a scripted --shot run whose input reached the
 // prompt box would otherwise start a coordinator on the developer's screen. Tests set
-// MONOLITH_TERMINAL (build/tools/stub-terminal); MONOLITH_ALLOW_WINDOW lifts it, as for the game
+// MONOLITH_TERMINAL (build/tools/stub-terminal); MONOLITH_ALLOW_WINDOW lifts it, as for the editor window
 // window.
 static bool AgentShellRefuses(void)
 {
@@ -2192,7 +2192,7 @@ static void MarkAndMove(const char *title, const char *mark)
     pid_t pid = fork();
     if (pid < 0) { TraceLog(LOG_WARNING, "monolith: workspace move: fork: %s", strerror(errno)); return; }
     if (pid == 0) {
-        setsid();       // outlives the game (a --shot --submit run exits right away)
+        setsid();       // outlives the editor (a --shot --submit run exits right away)
         int nul = open("/dev/null", O_RDWR);
         if (nul >= 0) { dup2(nul, 0); dup2(nul, 1); dup2(nul, 2); if (nul > 2) close(nul); }
         execve("/bin/sh", argv, environ);
@@ -2306,13 +2306,13 @@ static bool Launch(const char *title, const char *mark, const char *prompt, cons
     }
     if (pid == 0) {
         // Child: only async-signal-safe calls from here on. setsid: own session, so the
-        // terminal survives the game (and Ctrl+C in the game's console doesn't reach it).
+        // terminal survives the editor (and Ctrl+C in the editor's console doesn't reach it).
         close(fds[0]);
         setsid();
         int e = 0;
         if (chdir(dir) != 0) e = errno;
         if (!e) {
-            int nul = open("/dev/null", O_RDONLY);  // don't share the game's stdin
+            int nul = open("/dev/null", O_RDONLY);  // don't share the editor's stdin
             if (nul > 0) { dup2(nul, 0); close(nul); }
             execve(termPath, argv, environ);
             e = errno;
@@ -2561,7 +2561,7 @@ void LauncherCloseOnExit(void)
     FlushPending();             // (the classifiers still running: their bundles go on the default tier)
     const char *e = getenv("MONOLITH_CLOSE_ON_EXIT");
     if (!e || !*e || strcmp(e, "0") == 0) return;
-    // No escalation after this (the game is gone): the WM close, or SIGTERM where the WM
+    // No escalation after this (the editor is gone): the WM close, or SIGTERM where the WM
     // route isn't available, is all there is
     if (QueueMode()) {
         int open = OpenQueueRequests();
@@ -2583,7 +2583,7 @@ void LauncherCloseOnExit(void)
 // --model $MONOLITH_COORDINATOR_MODEL (default sonnet) [MONOLITH_CLAUDE_ARGS] "<fixed
 // prompt naming .claude/skills/coordinator/SKILL.md>". The coordinator (build/tools/request-queue) claims bundles
 // and hands each to a subagent; after "queued" only it writes state (claimed, question,
-// done, failed, cancelled). The game asks for a cancel with requests/<id>/cancel, and turns
+// done, failed, cancelled). The editor asks for a cancel with requests/<id>/cancel, and turns
 // a queued bundle into "cancelled" itself only while no coordinator holds the lock.
 
 #define COORD_CHECK_INTERVAL 2.0f   // seconds between lock tests (only while relevant)
@@ -2856,7 +2856,7 @@ unsigned char LauncherCloseCoordinator(void)
     coord.confirmUntil = 0.0;
     CloseOutcome o = CloseTerm(&coord.term, "the coordinator");
     if (o == CLOSED_WINDOW) MsgSetStatic(&note, "closed the coordinator");
-    else if (alive) MsgSetStatic(&note, "the coordinator runs, but its window can't be closed from here (not started by this game run, or no i3 / sway): close it by hand");
+    else if (alive) MsgSetStatic(&note, "the coordinator runs, but its window can't be closed from here (not started by this editor run, or no i3 / sway): close it by hand");
     else MsgSetStatic(&note, "the coordinator's window is already gone");
     coord.alive = -1;               // test the lock again at the next poll
     TraceLog(LOG_INFO, "monolith: %s", MsgText(&note));
@@ -2937,7 +2937,7 @@ static void PollClassifiers(void)
 static void FlushPending(void)
 {
     while (pendingCount > 0) {
-        ClassifierKill(&pending[0].run, "game quit while classifying");
+        ClassifierKill(&pending[0].run, "editor quit while classifying");
         ModelFromClassifier(&pending[0].model, &pending[0].run);
         FinishPending(0);
     }

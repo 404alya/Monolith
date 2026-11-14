@@ -17,7 +17,7 @@
 //   2. -c passes everything through: `-c 'exit 7'` exits 7, stdin reaches the command, the arguments
 //      after the command are $0 $1, a refused command exits 126 with the refusal on stderr and runs
 //      nothing, `-c 'sleep 30'` stops on SIGTERM and on SIGINT.
-//   3. The benchmark lock: a --bench run (a fake game: <scratch>/fakebin/monolith, a link to `true`)
+//   3. The benchmark lock: a --bench run (a fake monolith: <scratch>/fakebin/monolith, a link to `true`)
 //      holds the lock until its shell ends; a second one at the same time is refused, and runs once the
 //      first has ended.
 //   4. The log: every decision above is in <out>/state/log (RUN_SH_DIR points run-sh.o there, so the real
@@ -637,7 +637,7 @@ static void TestPassThrough(void)
 
 static void TestBenchLock(void)
 {
-    // a fake game: the lock is about the command line, not what runs
+    // a fake monolith: the lock is about the command line, not what runs
     char *fakebin = Sprintf("%s/fakebin", gScratch);
     char *fake = Sprintf("%s/monolith", fakebin);
     MkdirP(fakebin);

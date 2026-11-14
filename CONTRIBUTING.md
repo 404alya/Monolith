@@ -10,7 +10,7 @@ The rules for changing monolith, whether you write the change yourself or with C
 4. **The tests that cover it pass:** `build/tools/test-coordinator` for the launcher and request queue; `--reload-test`, `--shot` and the dump flags for the loader and renderer ([command-line.md](docs/command-line.md)).
 5. **The docs say what the code does:** the header comment of `src/main.c` (controls and flags), the pages in `docs/`, and the skill in `.claude/skills/` whose workflow changed.
 
-Map-only changes (a `.map` file, `MAP.md`, a package's shaders, models, textures) need none of the builds or the leak check: the game reloads the package while it runs.
+Map-only changes (a `.map` file, `MAP.md`, a package's shaders, models, textures) need none of the builds or the leak check: the editor reloads the package while it runs.
 
 ## The build
 
@@ -27,7 +27,7 @@ Map-only changes (a `.map` file, `MAP.md`, a package's shaders, models, textures
 - **One version of each format in the code.** Monolith reads only the current map format, compiled-map version and request-bundle format; any other version is refused with a message that says what to do, never read through an old-version branch. A change that alters or removes anything in the map text bumps `MS_FORMAT_VERSION` and, in the same change, adds the step to `.claude/skills/migrate-map/versions.md` (rewrite rules, lossless or not, the `last-reader:` commit that still reads the old version and must build with `build/tools/old-monolith`), migrates the repo's maps with `/migrate-map` in Claude Code, and adds a rejection test to `tests/unit/parse_error_test.c`. Compiled maps are compiled again; old bundles are not migrated.
 - **The level is data.** Nothing in the engine or the shared docs assumes one map's style; a map's style and rules live in its `MAP.md`.
 - **Performance claims** come with interleaved A/B runs of the old and new binary on the same machine (`--bench --headless`, at least 3 pairs), reported as relative changes together with the machine (the bench report's GPU, driver and CPU). Numbers from another machine are not a baseline.
-- **Automated runs never open a visible window:** use `--shot`, the dump flags, `--inspect-model` or `--bench --headless`. In an AI agent's shell the game enforces this (it refuses and exits 1 unless `MONOLITH_ALLOW_WINDOW=1`); keep new modes that show no window in `src/main.c`'s `windowless` check. The examples are plain programs that always open a window; tests run their test build (`./build.sh examples test`, `tests/examples/harness.h`), which needs `--shot` and never shows one.
+- **Automated runs never open a visible window:** use `--shot`, the dump flags, `--inspect-model` or `--bench --headless`. In an AI agent's shell monolith enforces this (it refuses and exits 1 unless `MONOLITH_ALLOW_WINDOW=1`); keep new modes that show no window in `src/main.c`'s `windowless` check. The examples are plain programs that always open a window; tests run their test build (`./build.sh examples test`, `tests/examples/harness.h`), which needs `--shot` and never shows one.
 - **Don't commit** `build/`, screenshots, `benchmark/`, `requests/`, `export/` or your `.claude/settings.local.json`. Most maps in `maps/` are kept locally and are gitignored; only `maps/pine_forest/` is in the repository.
 
 ## Bugs and tasks

@@ -14,7 +14,7 @@ still follows the `benchmarking` skill; every change still follows its own skill
 
 | Job | Model, effort | Notes |
 |---|---|---|
-| Read the code: how the thing is built, cost per pixel / per draw, which passes draw it | Haiku, high | read-only, no game runs |
+| Read the code: how the thing is built, cost per pixel / per draw, which passes draw it | Haiku, high | read-only, no monolith runs |
 | Distance sweep, on/off, cost floor, A/B | Haiku, medium | the GPU job: **one at a time**, never next to another bench or shot run |
 | Mechanical change (reorder, flag, map key) with a pixel proof | Haiku, high | give the exact edit in the brief |
 | Design-heavy change (a bake, a new code path, R3D) | Sonnet, high (or the main session) | the main session writes the design first |

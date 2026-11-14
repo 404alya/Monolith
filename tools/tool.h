@@ -21,7 +21,7 @@
 //   - ToolRun / ToolCapture / ToolExec: running a command given as an argument list (nob's Nob_Cmd: no shell,
 //     so no quoting or word-splitting surprises) and getting its exit status, its output, or handing the
 //     process over to it. nob's own nob_cmd_run only answers true / false, and the scripts these programs
-//     replace read exit codes (the game's exit 1 for a broken map, request-queue's 3 for a timeout).
+//     replace read exit codes (monolith's exit 1 for a broken map, request-queue's 3 for a timeout).
 //   - ToolTrash: `gio trash <path>`, the repo's only way to delete (CLAUDE.md).
 //   - ToolProgram: the path of another program in build/tools/, with the message that says how to build it.
 //   - small shell equivalents the scripts used everywhere: ${VAR:-x} (ToolEnv), [[ a -nt b ]] (ToolNewer),

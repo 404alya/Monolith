@@ -26,7 +26,7 @@ typedef struct {
 typedef struct {
     bool open;
     bool interactive;               // a real window: the panel frees / captures the cursor
-    int freezeFrames;               // game keys and camera stay frozen this many frames after closing
+    int freezeFrames;               // editor keys and camera stay frozen this many frames after closing
     UiList list;
     IdEntry *items;                 // heap, rebuilt when scene->version (or the scene) changes
     int itemCount, itemCap;

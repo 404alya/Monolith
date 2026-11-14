@@ -20,7 +20,7 @@ own project. Each one has its own README.
 ./build.sh examples lsan      # -> examples/build/linux-lsan/<example>/ (test build + LeakSanitizer; build/tools/leakcheck runs them)
 ```
 
-The examples compile against monolith's R3D copy with `-DMS_PATCHED_R3D`, with the game's
+The examples compile against monolith's R3D copy with `-DMS_PATCHED_R3D`, with monolith's
 flags (zero warnings) and static linking, and the runtime as an export has it (without
 `-DMONOLITH_EDITOR`), except `03_live_editing`, which needs editor functions. Each output folder holds the program and the data it
 loads (`scene/` or `assets/`), so it runs from any working directory. `examples/build/` is not

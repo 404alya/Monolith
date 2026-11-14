@@ -16,7 +16,7 @@
 // the change counts as done. Map-only edits don't need it.
 //
 // Sections, in the order they run (each is marked "Section" in main() below):
-//   1. Build (incremental): the game's sanitizer build (./build.sh lsan or debug) when a source is newer than
+//   1. Build (incremental): monolith's sanitizer build (./build.sh lsan or debug) when a source is newer than
 //      the binary, the examples' (./build.sh examples lsan, LSan mode only), the profiling tool
 //      (tools/profile.c), run-sh.o and every program of build/tools/ with the same sanitizer into the build
 //      folder, the paint unwrap test against the build's own xatlas object, and the real
@@ -73,7 +73,7 @@
 // todo / ai-todo `list` and refused arguments in a scratch copy of the repo root (their lists are copies; only
 // where submodules/simple-todo is checked out),
 // stub-coordinator and test-coordinator in that scratch root (they stop at their first check: no queue
-// program, no game), bench-export-ab --summarize on hand-made reports, old-monolith with bad arguments and as
+// program, no monolith), bench-export-ab --summarize on hand-made reports, old-monolith with bad arguments and as
 // its rm stand-in. Never a real benchmark (beside --bench), never a real old build, never a real coordinator.
 // Bundles go to its own requests folder (MONOLITH_REQUESTS_DIR=<tmp>/requests), never to requests/: a
 // coordinator running meanwhile never sees them, and bundles queued meanwhile are left alone.
@@ -302,7 +302,7 @@ static bool AnyNewer(const char *ref, const char **starts, size_t count, bool fi
     return gWalkFound;
 }
 
-// The script's Newer(): the binary is missing (or not executable), or a source of the game or the examples is
+// The script's Newer(): the binary is missing (or not executable), or a source of monolith or the examples is
 // newer than it: src/, runtime/, build.sh, nob.c, examples/, and R3D's src/, include/ and shaders/ (R3D's
 // sources count too: build.sh then rebuilds the static library incrementally; so do the build program nob.c
 // and its header, src/vendor/nob/nob.h, which is under src/).
@@ -337,7 +337,7 @@ static bool CompileSanitized(const char *source, const char *binary, const char 
 }
 
 // The programs of build/tools/ that get a sanitizer copy in <build folder>/tools/ (run-sh.o is built beside the
-// game as before, leakcheck itself is the one running). The real ones in build/tools/ are never touched:
+// monolith binary as before, leakcheck itself is the one running). The real ones in build/tools/ are never touched:
 // ToolRebuildSelf only rebuilds a binary at its own place, so these copies stay sanitizer builds.
 static const char *SAN_TOOLS[] = {
     "stub-terminal", "request-queue", "todo", "ai-todo", "stub-coordinator", "test-coordinator",
@@ -502,7 +502,7 @@ int main(int argc, char **argv)
     // ---------------------------------------------------------------------------------------------------------
     // Section 1: build (incremental: only when a source is newer than the binary)
     if (build) {
-        // the game's sanitizer build; its progress output is dropped, its errors stay on stderr
+        // monolith's sanitizer build; its progress output is dropped, its errors stay on stderr
         if (SourcesNewer(root, r3d, M)) {
             ToolSay("building (%s) ...", gMode);
             Nob_Cmd cmd = {0};
@@ -1009,10 +1009,10 @@ int main(int argc, char **argv)
         "--pick-at", "10", "10", "--pick-at", "1590", "890");
 
     // --submit with the stub terminal (no window; MONOLITH_WORKSPACE empty: no workspace switch) into our own
-    // requests folder: coordinator mode on the default map (its classifier still running when the game quits:
+    // requests folder: coordinator mode on the default map (its classifier still running when the editor quits:
     // queued on the default tier), per-request mode on tests/models (@heavy: no classifier), a cancel with no
     // coordinator (MONOLITH_CLAUDE that doesn't exist), a classified one queued, a cancel while classifying and
-    // a classifier that fails before a per-request launch. `env` sets the variables for the game only, as the
+    // a classifier that fails before a per-request launch. `env` sets the variables for monolith only, as the
     // script did.
     const char *reqEnv = nob_temp_sprintf("MONOLITH_REQUESTS_DIR=%s", REQ);
     const char *termEnv = nob_temp_sprintf("MONOLITH_TERMINAL=%s", STUB);
@@ -1190,7 +1190,7 @@ int main(int argc, char **argv)
         RUN("tool-request-queue-bad-id", 2, "env", rqEnv, tool[RQ], "claim", "../x");
 
         // A scratch repo root for the programs that act on the repo itself (todo / ai-todo write the lists in the
-        // root; stub-coordinator and test-coordinator start the queue and the game from it): a folder with
+        // root; stub-coordinator and test-coordinator start the queue and the editor from it): a folder with
         // build.sh and nob.c (what ToolInit looks for; placeholders, never run), copies of the two lists, the
         // Simple-Todo program linked in, and links to the sanitizer copies, run by the links' paths so their
         // root is this folder. todo / ai-todo run only `list` and arguments they refuse before todo.o starts.
