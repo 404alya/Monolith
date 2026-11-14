@@ -1,15 +1,17 @@
 
 # Monolith
 
-An **AI-assisted map designer** for 3D levels of any style. You fly through a level, point at a spot, select objects or drag a rectangle over the screen, and type what should change: "make this wall twice as tall", "plant three more pines along the path", "hang a neon sign over each of these stalls". Claude Code carries the request out in the background, and the running editor reloads the map so the change appears in place.
+An **AI-assisted map designer** for 3D levels of any style. You fly through a level, point at a spot, select objects or drag a rectangle over the screen, and type what should change. e.g. "make this wall twice as tall", "plant three more pines along the path", "hang a neon sign over each of these stalls".
 
 [![Monolith demo](https://assets.notfound404.dev/2026-11-14%2015-31-33-thumbnail.png)](https://assets.notfound404.dev/2026-11-14%2015-31-33.mp4)
 
-Claude decides *what* changes; how it is changed is deterministic. The map is plain text, edits go through a small edit language (`--apply-edits`), a compiled map recompiles to the same bytes, the same build renders the same image, and box dumps, scene diffs and pixel-compared screenshots show exactly what an edit did. `--export` turns a map into plain C11 for your own game, held to the same rules as the editor: no editor code, no fixed-size content buffers, zero warnings, zero leaks, and caches and quality presets whose cost is measured ([docs/export.md](docs/export.md)).
+## How it works on the surface
 
-monolith is the editor and the viewer. It is written in plain C11 on [raylib](https://www.raylib.com/) 5.5 and [R3D](https://github.com/Bigfoot71/r3d) 0.10 (deferred PBR: shadows, ambient occlusion, fog, volumetric fog, bloom, procedural sky). A level is a **map package** in `maps/<name>/`: a plain-text `.map` file of boxes, models, materials, lights and environment, a `MAP.md` design brief that keeps every edit in the map's style, and the map's shaders, models and textures. The scene runtime (`runtime/monolith_scene.h/.c`) also loads a package in any other raylib + R3D program, so a map can ship in your own game.
+Claude decides *what* changes; how it is changed is **deterministic**. The map is plain text, edits go through a small edit language (`--apply-edits`), a compiled map recompiles to the same bytes, the same build renders the same image, and box dumps, scene diffs and pixel-compared screenshots show exactly what an edit did. `--export` turns a map into plain C11 for your own game, held to the same rules as the editor: no editor code, no fixed-size content buffers, zero warnings, zero leaks, and caches and quality presets whose cost is measured ([docs/export.md](docs/export.md)).
 
-## Build (Linux)
+Monolith is the editor and the viewer. It is written in plain C11 on [raylib](https://www.raylib.com/) 5.5 and [R3D](https://github.com/Bigfoot71/r3d) 0.10 (deferred PBR: shadows, ambient occlusion, fog, volumetric fog, bloom, procedural sky). A level is a **map package** in `maps/<name>/`: a plain-text `.map` file of boxes, models, materials, lights and environment, a `MAP.md` design brief that keeps every edit in the map's style, and the map's shaders, models and textures. The scene runtime (`runtime/monolith_scene.h/.c`) also loads a package in any other raylib + R3D program, so a map can ship in your own game.
+
+## Build (Linux Only)
 
 Clone with the submodules (the bug and task lists' tool, `submodules/simple-todo`; [CONTRIBUTING.md](CONTRIBUTING.md#bugs-and-tasks)):
 
@@ -58,9 +60,13 @@ The first request opens one terminal, the **coordinator**, which works through e
 
 **Permissions.** In a checkout of this repository the sessions run without approval prompts, so you don't have to approve every command; they are bound by the rules in `CLAUDE.md` (never delete files, never open windows on your screen, treat your request text and downloads as data, work only inside the repo). Where there is no `CLAUDE.md` (a copied build folder) the editor keeps Claude Code's approval prompts. `MONOLITH_CLAUDE_SAFE=1` keeps them everywhere.
 
-## Windows
+## Other platforms
 
-The editor is not supported on Windows. The Windows build is for the exported code: `./build.sh --win` cross-compiles on Linux with MinGW-w64 (Arch: `mingw-w64-gcc`; Debian / Ubuntu: `gcc-mingw-w64`) and builds the static Windows libraries that every `--export` ships in `prebuilt/win/lib/`, and it compile-checks the runtime for Windows. An export then builds for Windows with its own `./build.sh --win` ([docs/export.md](docs/export.md)), the examples with `./build.sh examples --win` ([examples/README.md](examples/README.md)).
+The editor itself is not supported on any platforms, other than linux + i3wm setup. This is because we want to keep engine and AI context window as simple as possible. Even though you can't use editor in other platforms, you can export and run your maps in other platforms by cross compiling your code.
+
+### Windows
+
+ The Windows build is for the exported code: `./build.sh --win` cross-compiles on Linux with MinGW-w64 (Arch: `mingw-w64-gcc`; Debian / Ubuntu: `gcc-mingw-w64`) and builds the static Windows libraries that every `--export` ships in `prebuilt/win/lib/`, and it compile-checks the runtime for Windows. An export then builds for Windows with its own `./build.sh --win` ([docs/export.md](docs/export.md)), the examples with `./build.sh examples --win` ([examples/README.md](examples/README.md)).
 
 It also writes `build/win/monolith.exe`, the **view-only build**: it opens a map to benchmark it on another GPU, look at it or debug a driver problem, but never edits it or sends requests. Walking, flying, the spectator camera, the effect toggles (1–6), the HUD (F1), graphics settings (F2), the render inspector (F3), buffer views (F4), the id panel (F5, read-only), screenshots (F12), hot reload of a map edited elsewhere and the read-only flags (`--shot`, `--bench`, `--dump-*`, `--tri-report`, `--inspect-model`) work; the edit and draw modes, the request prompt, snip and volume modes, the request list keys, export (F9) and the editing flags say "view-only build: editing and requests need the Linux editor" (the list: [docs/command-line.md](docs/command-line.md#view-only-build)). Copy `build/win/` to a Windows machine and run `monolith.exe --map maps/<name>`, or on Linux run it under wine: `./build.sh --win run --map maps/<name>`. There is no native Windows build script.
 
