@@ -3,7 +3,7 @@
 
 An **AI-assisted map designer** for 3D levels of any style. You fly through a level, point at a spot, select objects or drag a rectangle over the screen, and type what should change. e.g. "make this wall twice as tall", "plant three more pines along the path", "hang a neon sign over each of these stalls".
 
-[![Monolith demo](https://assets.notfound404.dev/2026-11-14%2015-31-33-thumbnail.png)](https://assets.notfound404.dev/2026-11-14%2015-31-33.mp4)
+[![Monolith demo](https://assets.notfound404.dev/2026-11-14%2015-31-33-clean-intro-thumbnail.png)](https://assets.notfound404.dev/2026-11-14%2015-31-33-clean-intro.mp4)
 
 ## How it works on the surface
 
