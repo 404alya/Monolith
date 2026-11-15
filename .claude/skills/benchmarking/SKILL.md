@@ -22,6 +22,8 @@ __GL_SYNC_TO_VBLANK=0 ./build/linux/monolith --bench --headless --bench-frames 1
 __GL_SYNC_TO_VBLANK=0 ./build/linux/monolith --bench --headless --note "what changed"                            # full run
 ```
 
+**Quick A/B on a slow laptop (~5–10 minutes):** `--bench-still --bench-views <the heaviest 2–3 viewpoints> --bench-frames 100`, base and change interleaved, 2–3 pairs, a short cool-down before each run, and compare the GPU time of the pass you changed (per-pass timers vary far less than frame time: on machine C the lights pass held ±0.1 ms while frames moved by 1–2 ms). Pixel identity is checked separately with shots; confirm a kept change with full runs once, at the end of the round. Rendering at another size than 1920 × 1006 (below) needs both binaries built that way.
+
 Reports go to `benchmark/<stamp>_shadow-<size>-<range>.md` (gitignored, so they stay on the machine that made them; completed runs only). Their *Setup* table names the GPU, driver, CPU, system and resolution: quote it with any result you report or record. Other flags (`--bench-still`, `--bench-window`, `--no-profile`, `--shadow`, `--map`): `docs/command-line.md`. Window titles of automated runs are `monolith-bench` / `monolith-shot`; keep them.
 
 **At another resolution** (the developer's own display, e.g. 1366 × 768 on an integrated-GPU laptop): `--bench --headless` has no size flag; build a scratch binary with the headless size in `InitWindow` (`src/main.c`) changed, copy it next to the real one (`build/linux/monolith-native…`), restore the source and rebuild. Never use `--render-scale` as a stand-in: it changes what is measured (upscale blit, FXAA path). Quote the size with every number.

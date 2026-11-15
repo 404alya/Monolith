@@ -14,13 +14,20 @@ extern bool benchStill;      // --bench-still: the camera doesn't spin
 extern bool benchFrameReuse; // --frame-reuse: timed frames composite the cached scene image
 extern bool benchProfile;    // per-pass GPU timings (R3D profiler), default on if compiled in
 extern const char *benchQuality;    // quality preset name of the run (settings.c), for the report
+extern const char *benchViewsArg;   // --bench-views: 1-based viewpoints to visit, "1,3,4" (NULL = all)
+
+// The viewpoints the bench visits, in order: indices into scene->viewpoints (BenchInit).
+// Bench view v (tables, profiler tags, report columns) is viewpoint benchViewList[v].
+extern int *benchViewList;
+extern int benchViewCount;
 
 // Profiler tag of a timed bench frame (warmup frames use -1)
 #define BENCH_TAG(view, frame) ((view) * benchFrames + (frame))
 
-// The per-viewpoint profile tables (heap, viewCount entries); false when out of memory.
+// The view list (from benchViewsArg and the loaded scene) and the per-view profile tables
+// (heap). Returns 0, 1 out of memory, 2 a bad --bench-views list (MS_LastError says why).
 // BenchFree releases them.
-bool BenchInit(int viewCount);
+unsigned char BenchInit(void);
 void BenchFree(void);
 
 // Accumulates finished R3D profiler frames of timed bench frames; call once per frame

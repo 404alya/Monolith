@@ -25,7 +25,9 @@ static double *profTotalMs;
 static int *profFrames;
 static double *cpuSeconds;
 static double *r3dEndSeconds;
-static int benchViews;
+const char *benchViewsArg;
+int *benchViewList;
+int benchViewCount;
 
 void BenchFree(void)
 {
@@ -34,24 +36,60 @@ void BenchFree(void)
     free(profFrames);
     free(cpuSeconds);
     free(r3dEndSeconds);
+    free(benchViewList);
     profPassMs = NULL;
     profTotalMs = cpuSeconds = r3dEndSeconds = NULL;
-    profFrames = NULL;
-    benchViews = 0;
+    profFrames = benchViewList = NULL;
+    benchViewCount = 0;
 }
 
-bool BenchInit(int viewCount)
+// The view list: every viewpoint in map order, or the 1-based numbers of --bench-views
+// ("1,3,4") in the order given. Returns 0, 1 out of memory, 2 a bad list (MS_LastError says why).
+static unsigned char BenchParseViews(void)
+{
+    int all = scene->viewpointCount;
+    if (!benchViewsArg) {
+        benchViewList = malloc((size_t)(all > 0 ? all : 1) * sizeof(int));
+        if (!benchViewList) return 1;
+        benchViewList[0] = 0;       // (a map without viewpoints: the bench's view 0 as before)
+        for (int v = 0; v < all; v++) benchViewList[v] = v;
+        benchViewCount = all;
+        return 0;
+    }
+
+    // At most one entry per comma, plus one
+    int cap = 1;
+    for (const char *c = benchViewsArg; *c; c++) cap += *c == ',';
+    benchViewList = malloc((size_t)cap * sizeof(int));
+    if (!benchViewList) return 1;
+    const char *c = benchViewsArg;
+    for (;;) {
+        char *end;
+        long n = strtol(c, &end, 10);
+        if (end == c || n < 1 || n > all || (*end != ',' && *end != '\0')) {
+            MS_SetError("--bench-views: expected viewpoint numbers 1..%d separated by commas, got \"%s\"",
+                        all, benchViewsArg);
+            return 2;
+        }
+        benchViewList[benchViewCount++] = (int)n - 1;
+        if (*end == '\0') return 0;
+        c = end + 1;
+    }
+}
+
+unsigned char BenchInit(void)
 {
     BenchFree();
-    int n = viewCount > 0 ? viewCount : 1;
+    unsigned char st = BenchParseViews();
+    if (st != 0) return st;     // (BenchFree releases a part-built list)
+    int n = benchViewCount > 0 ? benchViewCount : 1;
     profPassMs = calloc(n, sizeof(*profPassMs));
     profTotalMs = calloc(n, sizeof(double));
     profFrames = calloc(n, sizeof(int));
     cpuSeconds = calloc(n, sizeof(double));
     r3dEndSeconds = calloc(n, sizeof(double));
-    if (!profPassMs || !profTotalMs || !profFrames || !cpuSeconds || !r3dEndSeconds) { BenchFree(); return false; }
-    benchViews = viewCount;
-    return true;
+    if (!profPassMs || !profTotalMs || !profFrames || !cpuSeconds || !r3dEndSeconds) { BenchFree(); return 1; }
+    return 0;
 }
 
 void BenchCollectProfile(bool flush)
@@ -61,7 +99,7 @@ void BenchCollectProfile(bool flush)
     while (R3D_PopProfilerFrame(&pf)) {
         if (pf.tag < 0) continue;   // warmup
         int v = pf.tag / benchFrames;
-        if (v >= benchViews) continue;
+        if (v >= benchViewCount) continue;
         for (int p = 0; p < R3D_PROFILER_PASS_COUNT; p++) profPassMs[v][p] += pf.passMs[p];
         profTotalMs[v] += pf.totalMs;
         profFrames[v]++;
@@ -70,7 +108,7 @@ void BenchCollectProfile(bool flush)
 
 void BenchAddCpuTime(int view, double frameSeconds, double r3dEndSecs)
 {
-    if (view < 0 || view >= benchViews) return;
+    if (view < 0 || view >= benchViewCount) return;
     cpuSeconds[view] += frameSeconds;
     r3dEndSeconds[view] += r3dEndSecs;
 }
@@ -80,33 +118,33 @@ void BenchAddCpuTime(int view, double frameSeconds, double r3dEndSecs)
 static void WriteProfileTable(FILE *f, bool md, const double *frameMs, double allFrameMs)
 {
     int totalFrames = 0;
-    for (int v = 0; v < scene->viewpointCount; v++) totalFrames += profFrames[v];
+    for (int v = 0; v < benchViewCount; v++) totalFrames += profFrames[v];
 
     // Header
     if (md) {
         fprintf(f, "| GPU ms per frame |");
-        for (int v = 0; v < scene->viewpointCount; v++) fprintf(f, " %s |", scene->viewpoints[v].name);
+        for (int v = 0; v < benchViewCount; v++) fprintf(f, " %s |", scene->viewpoints[benchViewList[v]].name);
         fprintf(f, " **All** |\n|---|");
-        for (int v = 0; v <= scene->viewpointCount; v++) fprintf(f, "---:|");
+        for (int v = 0; v <= benchViewCount; v++) fprintf(f, "---:|");
         fprintf(f, "\n");
     } else {
         fprintf(f, "%-18s", "GPU ms/frame");
-        for (int v = 0; v < scene->viewpointCount; v++) fprintf(f, " %9.9s", scene->viewpoints[v].name);
+        for (int v = 0; v < benchViewCount; v++) fprintf(f, " %9.9s", scene->viewpoints[benchViewList[v]].name);
         fprintf(f, " %9s\n", "ALL");
     }
 
     // One row: per-view values (already per frame) and their frame-weighted mean
     #define ROW(label, bold, expr) do {                                                     \
         double all_ = 0.0;                                                                  \
-        for (int v = 0; v < scene->viewpointCount; v++) all_ += (expr) * profFrames[v];           \
+        for (int v = 0; v < benchViewCount; v++) all_ += (expr) * profFrames[v];           \
         all_ = totalFrames ? all_ / totalFrames : 0.0;                                      \
         if (md) {                                                                           \
             fprintf(f, bold ? "| **%s** |" : "| %s |", label);                              \
-            for (int v = 0; v < scene->viewpointCount; v++) fprintf(f, " %.3f |", (expr));        \
+            for (int v = 0; v < benchViewCount; v++) fprintf(f, " %.3f |", (expr));        \
             fprintf(f, " **%.3f** |\n", all_);                                              \
         } else {                                                                            \
             fprintf(f, "%-18s", label);                                                     \
-            for (int v = 0; v < scene->viewpointCount; v++) fprintf(f, " %9.3f", (expr));         \
+            for (int v = 0; v < benchViewCount; v++) fprintf(f, " %9.3f", (expr));         \
             fprintf(f, " %9.3f\n", all_);                                                   \
         }                                                                                   \
     } while (0)
@@ -114,12 +152,12 @@ static void WriteProfileTable(FILE *f, bool md, const double *frameMs, double al
 
     for (int p = 0; p < R3D_PROFILER_PASS_COUNT; p++) {
         bool ran = false;   // only passes that ran at all (e.g. no SSGI/SSR/DoF rows)
-        for (int v = 0; v < scene->viewpointCount; v++) ran |= profPassMs[v][p] > 0.0;
+        for (int v = 0; v < benchViewCount; v++) ran |= profPassMs[v][p] > 0.0;
         if (ran) ROW(R3D_GetProfilerPassName((R3D_ProfilerPass)p), false, PER_FRAME(profPassMs[v][p]));
     }
-    double *sum = calloc(scene->viewpointCount > 0 ? scene->viewpointCount : 1, sizeof(double));
+    double *sum = calloc(benchViewCount > 0 ? benchViewCount : 1, sizeof(double));
     if (!sum) return;
-    for (int v = 0; v < scene->viewpointCount; v++) {
+    for (int v = 0; v < benchViewCount; v++) {
         sum[v] = 0.0;
         for (int p = 0; p < R3D_PROFILER_PASS_COUNT; p++) sum[v] += profPassMs[v][p];
     }
@@ -135,11 +173,11 @@ static void WriteProfileTable(FILE *f, bool md, const double *frameMs, double al
     // Frame time: the regular bench average (frame-weighted over the same timed frames)
     if (md) {
         fprintf(f, "| **Frame time** |");
-        for (int v = 0; v < scene->viewpointCount; v++) fprintf(f, " %.3f |", frameMs[v]);
+        for (int v = 0; v < benchViewCount; v++) fprintf(f, " %.3f |", frameMs[v]);
         fprintf(f, " **%.3f** |\n", allFrameMs);
     } else {
         fprintf(f, "%-18s", "frame time");
-        for (int v = 0; v < scene->viewpointCount; v++) fprintf(f, " %9.3f", frameMs[v]);
+        for (int v = 0; v < benchViewCount; v++) fprintf(f, " %9.3f", frameMs[v]);
         fprintf(f, " %9.3f\n", allFrameMs);
     }
 }
@@ -210,7 +248,7 @@ static BenchStats ComputeBenchStats(const double *times, int n)
 void WriteBenchReport(const double *times, const int *shadowUpdates, int shadowSize,
                              float shadowRange, bool shadowReuse, bool headless, const char *note, int argc, char **argv)
 {
-    int views = scene->viewpointCount > 0 ? scene->viewpointCount : 1;
+    int views = benchViewCount > 0 ? benchViewCount : 1;
     BenchStats *stats = calloc(views, sizeof(BenchStats));
     double *viewMs = calloc(views, sizeof(double));
     if (!stats || !viewMs) {
@@ -220,14 +258,14 @@ void WriteBenchReport(const double *times, const int *shadowUpdates, int shadowS
         return;
     }
     double total = 0.0;
-    for (int v = 0; v < scene->viewpointCount; v++) {
+    for (int v = 0; v < benchViewCount; v++) {
         const double *t = times + (size_t)v * benchFrames;
         stats[v] = ComputeBenchStats(t, benchFrames);
         for (int f = 0; f < benchFrames; f++) total += t[f];
     }
-    int frames = scene->viewpointCount * benchFrames;
+    int frames = benchViewCount * benchFrames;
     double allMs = total / frames * 1000.0, allFps = frames / total;
-    for (int v = 0; v < scene->viewpointCount; v++) viewMs[v] = stats[v].avgMs;
+    for (int v = 0; v < benchViewCount; v++) viewMs[v] = stats[v].avgMs;
     bool haveProfile = benchProfile && R3D_IsProfilerAvailable();
 
     // stdout
@@ -236,8 +274,8 @@ void WriteBenchReport(const double *times, const int *shadowUpdates, int shadowS
            benchStill ? "still" : "spinning", R3D_BUILD_TYPE_NAME);
     if (benchFrameReuse) printf("frame reuse ON: unchanged frames composite the cached scene image (no R3D rendering)\n");
     printf("%-16s %9s %9s %9s %9s\n", "view", "avg ms", "avg fps", "1% low", "sh.upd");
-    for (int v = 0; v < scene->viewpointCount; v++)
-        printf("%-16s %9.3f %9.1f %9.1f %9d\n", scene->viewpoints[v].name, stats[v].avgMs, stats[v].avgFps, stats[v].lowFps, shadowUpdates[v]);
+    for (int v = 0; v < benchViewCount; v++)
+        printf("%-16s %9.3f %9.1f %9.1f %9d\n", scene->viewpoints[benchViewList[v]].name, stats[v].avgMs, stats[v].avgFps, stats[v].lowFps, shadowUpdates[v]);
     printf("%-16s %9.3f %9.1f\n", "ALL", allMs, allFps);
     if (haveProfile) {
         printf("\n");
@@ -316,8 +354,8 @@ void WriteBenchReport(const double *times, const int *shadowUpdates, int shadowS
     fprintf(f, "## Results\n\n");
     fprintf(f, "| View | Avg ms | Avg FPS | 1%% low FPS | Worst ms | Shadow updates |\n|---|---:|---:|---:|---:|---:|\n");
     int allUpdates = 0;
-    for (int v = 0; v < scene->viewpointCount; v++) {
-        fprintf(f, "| %s | %.3f | %.1f | %.1f | %.2f | %d / %d |\n", scene->viewpoints[v].name,
+    for (int v = 0; v < benchViewCount; v++) {
+        fprintf(f, "| %s | %.3f | %.1f | %.1f | %.2f | %d / %d |\n", scene->viewpoints[benchViewList[v]].name,
                 stats[v].avgMs, stats[v].avgFps, stats[v].lowFps, stats[v].worstMs, shadowUpdates[v], benchFrames);
         allUpdates += shadowUpdates[v];
     }
