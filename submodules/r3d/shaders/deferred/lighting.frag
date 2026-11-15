@@ -87,20 +87,24 @@ void main()
 
     vec3 Ldelta = uLight.position - P;
     float Ldist = length(Ldelta);
+    vec3 L = (uLight.type == LIGHT_DIR) ? -uLight.direction : Ldelta / max(Ldist, 1e-4);
 
     /* Local patch 31: where Ldist / range >= 1 (the same expression as the attenuation
        below, so the same value) the attenuation is pow(0, falloff) = 0 (falloff > 0) and
        the light adds exactly 0: write nothing, before the normal, albedo and ORM reads.
-       Most of a near light's screen rect lies outside its sphere. */
+       Most of a near light's screen rect lies outside its sphere. Outside a spot's outer
+       cone the cone factor below, smoothstep(0, 1, x) with x <= 0 (the same expression),
+       is exactly 0 too; a NaN x (inner == outer and theta == outer) is not discarded. */
 
 #ifdef LIGHT_DISCARD
     if (uLight.type != LIGHT_DIR && uLight.falloff > 0.0 && Ldist / uLight.range >= 1.0) discard;
+    if (uLight.type == LIGHT_SPOT &&
+        (dot(L, -uLight.direction) - uLight.outerCutOff) / (uLight.innerCutOff - uLight.outerCutOff) <= 0.0) discard;
     vec3 N = V_GetWorldNormal(uNormalTex, pixCoord);
 #endif
 
     /* Compute the dot product of the normal and light direction */
 
-    vec3 L = (uLight.type == LIGHT_DIR) ? -uLight.direction : Ldelta / max(Ldist, 1e-4);
     float NoL = dot(N, L);
 
     if (NoL <= 0.0) UNLIT();

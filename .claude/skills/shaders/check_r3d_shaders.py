@@ -46,6 +46,7 @@ VARIANTS = {
     'scene/depth.frag': [['STAGE_FRAG', 'DEPTH']],
     'scene/depth_cube.frag': [['STAGE_FRAG', 'DEPTH_CUBE']],
     'scene/decal.frag': [['STAGE_FRAG', 'DECAL']],
+    'deferred/lighting.frag': [[], ['LIGHT_DISCARD']],   # local patch 31: plain + discard variant
 }
 
 
