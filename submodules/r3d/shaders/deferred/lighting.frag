@@ -47,7 +47,14 @@ uniform sampler2DArrayShadow uShadowDirTex;
 uniform sampler2DArrayShadow uShadowSpotTex;
 uniform samplerCubeArrayShadow uShadowOmniTex;
 
-uniform bool uDiscard;  // local patch 31: discard unlit pixels (off under a stencil box mark)
+// Local patch 31: the LIGHT_DISCARD variant discards unlit pixels instead of adding 0. The
+// variant without it (a light whose clip box marked the stencil, patch 23) has no discard
+// at all: a discard in the program costs even where it never runs (late stencil test).
+#ifdef LIGHT_DISCARD
+#   define UNLIT() discard
+#else
+#   define UNLIT() { FragRadiance = vec4(0.0); FragSpecular = vec4(0.0); return; }
+#endif
 
 // ================================
 // Helper Includes
@@ -67,17 +74,14 @@ void main()
     /* Get position and normal in world space */
 
     float depth = texelFetch(uDepthTex, pixCoord, 0).r;
+#ifndef LIGHT_DISCARD
+    vec3 N = V_GetWorldNormal(uNormalTex, pixCoord);
+#endif
     vec3 P = V_GetWorldPosition(vTexCoord, depth);
 
     /* Outside the light's clip box: no light (local patch 16, keeps unshadowed lights out of the floor below) */
 
-    if (any(lessThan(P, uLight.clipMin)) || any(greaterThan(P, uLight.clipMax)))
-    {
-        if (uDiscard) discard;
-        FragRadiance = vec4(0.0);
-        FragSpecular = vec4(0.0);
-        return;
-    }
+    if (any(lessThan(P, uLight.clipMin)) || any(greaterThan(P, uLight.clipMax))) UNLIT();
 
     /* Compute light direction */
 
@@ -89,21 +93,17 @@ void main()
        the light adds exactly 0: write nothing, before the normal, albedo and ORM reads.
        Most of a near light's screen rect lies outside its sphere. */
 
-    if (uDiscard && uLight.type != LIGHT_DIR && uLight.falloff > 0.0 && Ldist / uLight.range >= 1.0) discard;
+#ifdef LIGHT_DISCARD
+    if (uLight.type != LIGHT_DIR && uLight.falloff > 0.0 && Ldist / uLight.range >= 1.0) discard;
+    vec3 N = V_GetWorldNormal(uNormalTex, pixCoord);
+#endif
 
     /* Compute the dot product of the normal and light direction */
 
-    vec3 N = V_GetWorldNormal(uNormalTex, pixCoord);
     vec3 L = (uLight.type == LIGHT_DIR) ? -uLight.direction : Ldelta / max(Ldist, 1e-4);
     float NoL = dot(N, L);
 
-    if (NoL <= 0.0)
-    {
-        if (uDiscard) discard;
-        FragRadiance = vec4(0.0);
-        FragSpecular = vec4(0.0);
-        return;
-    }
+    if (NoL <= 0.0) UNLIT();
 
     /* Sample albedo and ORM buffers */
 

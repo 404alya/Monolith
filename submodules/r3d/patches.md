@@ -5116,38 +5116,49 @@ Files: `src/r3d_draw.c`.
 
 **Cause.** `pass_deferred_lights` draws one full-screen quad per light, scissored to the screen rect of its range sphere. Every pixel of the rect runs `lighting.frag` in full (depth, normal, albedo and ORM reads, the BRDF) and blends into two RGB16F targets, also where the surface lies outside the sphere: the attenuation, which is 0 there, came last, and the early-outs (clip box, back-facing) wrote 0, which still blends. A lamp near the camera covers the whole screen, while most of its rect (the facades behind it) is outside its range. Shared-memory GPUs pay for the reads and the blend's read-modify-write per light and pixel.
 
-**Change.** `lighting.frag` computes P from the depth alone, then: outside the clip box, at or beyond the range (`Ldist / range >= 1`, the attenuation's own expression, so exactly the pixels whose attenuation is `pow(0, falloff)` = 0; only with `falloff > 0` and not for directional lights) and back-facing, the fragment is discarded; the normal is read after the range test. Adding 0 and writing nothing give the same RGB16F value, so the image is unchanged. Discard is off (`uDiscard` = 0) for a light whose clip box marked the stencil (patch 23): its quad clears the mark's bit, which a discarded fragment wouldn't, so those still write 0.
+**Change.** `lighting.frag` is compiled twice. The `LIGHT_DISCARD` variant (`deferred.lightingDiscard`) computes P from the depth alone and discards: outside the clip box, at or beyond the range (`Ldist / range >= 1`, the attenuation's own expression, so exactly the pixels whose attenuation is `pow(0, falloff)` = 0; only with `falloff > 0` and not for directional lights) and back-facing, reading the normal only after the range test. Adding 0 and writing nothing give the same RGB16F value, so the image is unchanged. A light whose clip box marked the stencil (patch 23) keeps the plain program (`deferred.lighting`, the shader as before, no `discard` in it): its quad clears the mark's stencil bit, which a discarded fragment wouldn't, and a program that can discard loses the early stencil test (first version, one program with a `uDiscard` uniform: on `maps/monolith`, 290 of 291 lights clip-boxed, the lights pass got +0.65 ms, +32 %, although no fragment discarded there).
 
 Files: `shaders/deferred/lighting.frag`, `src/modules/r3d_shader.h`, `src/modules/r3d_shader.c`, `src/r3d_draw.c`.
 
 ```diff
 --- shaders/deferred/lighting.frag
-+uniform bool uDiscard;  // local patch 31: discard unlit pixels (off under a stencil box mark)
++#ifdef LIGHT_DISCARD
++#   define UNLIT() discard
++#else
++#   define UNLIT() { FragRadiance = vec4(0.0); FragSpecular = vec4(0.0); return; }
++#endif
  ...
      float depth = texelFetch(uDepthTex, pixCoord, 0).r;
--    vec3 N = V_GetWorldNormal(uNormalTex, pixCoord);
++#ifndef LIGHT_DISCARD
+     vec3 N = V_GetWorldNormal(uNormalTex, pixCoord);
++#endif
      vec3 P = V_GetWorldPosition(vTexCoord, depth);
-     if (any(lessThan(P, uLight.clipMin)) || any(greaterThan(P, uLight.clipMax)))
-     {
-+        if (uDiscard) discard;
- ...
+-    if (any(lessThan(P, uLight.clipMin)) || any(greaterThan(P, uLight.clipMax)))
+-    { FragRadiance = vec4(0.0); FragSpecular = vec4(0.0); return; }
++    if (any(lessThan(P, uLight.clipMin)) || any(greaterThan(P, uLight.clipMax))) UNLIT();
+     vec3 Ldelta = uLight.position - P;
      float Ldist = length(Ldelta);
-+    if (uDiscard && uLight.type != LIGHT_DIR && uLight.falloff > 0.0 && Ldist / uLight.range >= 1.0) discard;
++#ifdef LIGHT_DISCARD
++    if (uLight.type != LIGHT_DIR && uLight.falloff > 0.0 && Ldist / uLight.range >= 1.0) discard;
 +    vec3 N = V_GetWorldNormal(uNormalTex, pixCoord);
++#endif
  ...
-     if (NoL <= 0.0)
-     {
-+        if (uDiscard) discard;
---- src/modules/r3d_shader.h   (r3d_shader_deferred_lighting_t)
-+    r3d_shader_uniform_int_t uDiscard;
---- src/modules/r3d_shader.c   (r3d_shader_load_deferred_lighting)
-+    GET_LOCATION(lighting, uDiscard);   // local patch 31
+-    if (NoL <= 0.0) { FragRadiance = vec4(0.0); FragSpecular = vec4(0.0); return; }
++    if (NoL <= 0.0) UNLIT();
+--- src/modules/r3d_shader.h
++        r3d_shader_deferred_lighting_t lightingDiscard;     //< local patch 31: LIGHT_DISCARD variant
++        r3d_shader_loader_func lightingDiscard;   (+ .lightingDiscard = r3d_shader_load_deferred_lighting_discard)
+--- src/modules/r3d_shader.c
++static void lighting_setup(r3d_shader_deferred_lighting_t* lighting)   (the blocks and samplers, shared)
++bool r3d_shader_load_deferred_lighting_discard(...)   (LOAD_SHADER_EX with fsDefines {"LIGHT_DISCARD"})
++    UNLOAD_SHADER(deferred.lightingDiscard);
 --- src/r3d_draw.c   (pass_deferred_lights)
 -        if (!light_volume_mark(light)) r3d_driver_disable(GL_STENCIL_TEST);
-+        bool marked = light_volume_mark(light);
-+        if (!marked) r3d_driver_disable(GL_STENCIL_TEST);
-+        R3D_SHADER_SET_INT(deferred.lighting, uDiscard, marked ? 0 : 1);
++        if (!light_volume_mark(light)) {
++            r3d_driver_disable(GL_STENCIL_TEST);
++            R3D_SHADER_USE(deferred.lightingDiscard);
++        }
          R3D_RENDER_SCREEN();
 ```
 
-**Verification.** Against the build before it: 87 shots pixel-identical (every viewpoint of `maps/monolith`, `maps/pine_forest` and `maps/voxel-test` at ultra, high, medium and low, a yaw sweep 0–300° at two eye heights in `voxel-test`, `tests/models`, a `--reload-test`). Machine C (Intel HD 5500, Mesa 25.2.8, i5-5300U), headless 1366 × 768, `voxel-test` at low (`render_scale = 1`), still camera at viewpoints 1, 3, 4, 100 frames, 3 interleaved pairs: lights 32.99 / 31.79 / 32.22 → 15.09 / 13.94 / 14.33 ms (**−17.9 ms, −55 %**); frame 74.82 / 77.44 → 57.59 / 58.98 ms in pairs 2 and 3 (**−17.8 ms, −23 %**; pair 1's Diner run had a system stall, 131 ms frames with a 55 ms GPU frame). **Rejected:** the same discard on the volumetric fog's per-light early-out (`vfog_radiance.frag`, rays that miss the sphere): pixel-identical but vfog radiance +0.9 ms (2 pairs: +0.86 / +0.95 ms), frame +1.3 ms; not kept. `./build.sh` and `./build.sh examples` without warnings; `./build.sh --win` not run (no mingw-w64 on machine C); `glslangValidator` not installed there (Mesa compiles the shader at load); `build/tools/leakcheck`: OK, zero leaks of ours (160 runs).
+**Verification.** Against the build before it: 91 shots pixel-identical (every viewpoint of `maps/monolith`, `maps/pine_forest` and `maps/voxel-test` at ultra, high, medium and low, yaw sweeps in `voxel-test` and on the `monolith` terrace, `tests/models`, a `--reload-test`). Machine C (Intel HD 5500, Mesa 25.2.8, i5-5300U), headless 1366 × 768, `preset = low` + `render_scale = 1`, 2 interleaved pairs each: `maps/voxel-test` still at viewpoints 1, 3, 4 (100 frames): lights 30.0 → 14.2 ms (**−15.8 ms, −53 %**), frame 77.7 → 62.3 ms (**−15.4 ms, −20 %**); `maps/monolith` spinning, all 7 viewpoints (150 frames): lights 1.81 → 1.88 ms (+0.08 ms; pairs +0.06 / +0.10), GPU total +0.06 ms, frame −0.01 ms: no measurable change. The first version (one program) had cost the developer's GTX 1660 Ti ~3 % on `maps/monolith`; the two-program version is not yet measured there. **Rejected:** the same discard on the volumetric fog's per-light early-out (`vfog_radiance.frag`, rays that miss the sphere): pixel-identical but vfog radiance +0.9 ms (2 pairs), frame +1.3 ms. `./build.sh` and `./build.sh examples` without warnings; `./build.sh --win` not run (no mingw-w64 on machine C); `glslangValidator` not installed there (Mesa compiles both variants at load); `build/tools/leakcheck`: OK, zero leaks of ours (160 runs).

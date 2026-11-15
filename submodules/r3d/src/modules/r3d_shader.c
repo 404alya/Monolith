@@ -1471,13 +1471,9 @@ bool r3d_shader_load_deferred_ambient(r3d_shader_custom_t* custom)
     return true;
 }
 
-bool r3d_shader_load_deferred_lighting(r3d_shader_custom_t* custom)
+// The blocks and samplers of a loaded lights pass program (local patch 31: two variants)
+static void lighting_setup(r3d_shader_deferred_lighting_t* lighting)
 {
-    R3D_UNUSED(custom);
-
-    DECL_SHADER(r3d_shader_deferred_lighting_t, deferred, lighting);
-    LOAD_SHADER(lighting, SCREEN_VERT, LIGHTING_FRAG);
-
     SET_UNIFORM_BUFFER(lighting, LightBlock, R3D_SHADER_BLOCK_SLOT_LIGHT);
     SET_UNIFORM_BUFFER(lighting, ViewBlock, R3D_SHADER_BLOCK_SLOT_VIEW);
 
@@ -1491,8 +1487,35 @@ bool r3d_shader_load_deferred_lighting(r3d_shader_custom_t* custom)
     SET_SAMPLER(lighting, uShadowDirTex, R3D_SHADER_SAMPLER_SHADOW_DIR);
     SET_SAMPLER(lighting, uShadowSpotTex, R3D_SHADER_SAMPLER_SHADOW_SPOT);
     SET_SAMPLER(lighting, uShadowOmniTex, R3D_SHADER_SAMPLER_SHADOW_OMNI);
+}
 
-    GET_LOCATION(lighting, uDiscard);   // local patch 31
+bool r3d_shader_load_deferred_lighting(r3d_shader_custom_t* custom)
+{
+    R3D_UNUSED(custom);
+
+    DECL_SHADER(r3d_shader_deferred_lighting_t, deferred, lighting);
+    LOAD_SHADER(lighting, SCREEN_VERT, LIGHTING_FRAG);
+    lighting_setup(lighting);
+
+    return true;
+}
+
+// Local patch 31: the lights pass program that discards unlit pixels
+bool r3d_shader_load_deferred_lighting_discard(r3d_shader_custom_t* custom)
+{
+    R3D_UNUSED(custom);
+
+    const char* FS_DEFINES[] = {"LIGHT_DISCARD"};
+    shader_source_desc_t desc = {
+        .vsTemplate    = SCREEN_VERT,
+        .fsTemplate    = LIGHTING_FRAG,
+        .fsDefines     = FS_DEFINES,
+        .fsDefineCount = R3D_ARRAY_SIZE(FS_DEFINES),
+    };
+
+    DECL_SHADER(r3d_shader_deferred_lighting_t, deferred, lightingDiscard);
+    LOAD_SHADER_EX(lightingDiscard, desc);
+    lighting_setup(lightingDiscard);
 
     return true;
 }
@@ -1991,6 +2014,7 @@ void r3d_shader_quit(void)
 
     UNLOAD_SHADER(deferred.ambient);
     UNLOAD_SHADER(deferred.lighting);
+    UNLOAD_SHADER(deferred.lightingDiscard);
     UNLOAD_SHADER(deferred.lightVolume);
     UNLOAD_SHADER(deferred.compose);
     UNLOAD_SHADER(deferred.fog);

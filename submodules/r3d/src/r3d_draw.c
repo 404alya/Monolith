@@ -2751,11 +2751,14 @@ void pass_deferred_lights(void)
         upload_light_block(light);   // (local patch 25: shared helper)
 
         // Accumulate this light! (only where its box marked the stencil, local patch 23)
-        // Local patch 31: unlit pixels are discarded instead of adding 0, except under a box
-        // mark: the quad clears the mark's stencil bit, and a discarded fragment wouldn't
-        bool marked = light_volume_mark(light);
-        if (!marked) r3d_driver_disable(GL_STENCIL_TEST);
-        R3D_SHADER_SET_INT(deferred.lighting, uDiscard, marked ? 0 : 1);
+        // Local patch 31: unlit pixels are discarded instead of adding 0 (lightingDiscard),
+        // except under a box mark: its quad clears the mark's stencil bit, which a discarded
+        // fragment wouldn't, and the plain program keeps its early stencil test (no discard)
+        // (light_volume_mark leaves the plain program in use)
+        if (!light_volume_mark(light)) {
+            r3d_driver_disable(GL_STENCIL_TEST);
+            R3D_SHADER_USE(deferred.lightingDiscard);
+        }
         R3D_RENDER_SCREEN();
     }
 
