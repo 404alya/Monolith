@@ -1492,6 +1492,8 @@ bool r3d_shader_load_deferred_lighting(r3d_shader_custom_t* custom)
     SET_SAMPLER(lighting, uShadowSpotTex, R3D_SHADER_SAMPLER_SHADOW_SPOT);
     SET_SAMPLER(lighting, uShadowOmniTex, R3D_SHADER_SAMPLER_SHADOW_OMNI);
 
+    GET_LOCATION(lighting, uDiscard);   // local patch 31
+
     return true;
 }
 

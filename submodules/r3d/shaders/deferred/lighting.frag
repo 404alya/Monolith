@@ -47,6 +47,8 @@ uniform sampler2DArrayShadow uShadowDirTex;
 uniform sampler2DArrayShadow uShadowSpotTex;
 uniform samplerCubeArrayShadow uShadowOmniTex;
 
+uniform bool uDiscard;  // local patch 31: discard unlit pixels (off under a stencil box mark)
+
 // ================================
 // Helper Includes
 // ================================
@@ -65,28 +67,39 @@ void main()
     /* Get position and normal in world space */
 
     float depth = texelFetch(uDepthTex, pixCoord, 0).r;
-    vec3 N = V_GetWorldNormal(uNormalTex, pixCoord);
     vec3 P = V_GetWorldPosition(vTexCoord, depth);
 
     /* Outside the light's clip box: no light (local patch 16, keeps unshadowed lights out of the floor below) */
 
     if (any(lessThan(P, uLight.clipMin)) || any(greaterThan(P, uLight.clipMax)))
     {
+        if (uDiscard) discard;
         FragRadiance = vec4(0.0);
         FragSpecular = vec4(0.0);
         return;
     }
 
-    /* Compute light direction and the dot product of the normal and light direction */
+    /* Compute light direction */
 
     vec3 Ldelta = uLight.position - P;
     float Ldist = length(Ldelta);
 
+    /* Local patch 31: where Ldist / range >= 1 (the same expression as the attenuation
+       below, so the same value) the attenuation is pow(0, falloff) = 0 (falloff > 0) and
+       the light adds exactly 0: write nothing, before the normal, albedo and ORM reads.
+       Most of a near light's screen rect lies outside its sphere. */
+
+    if (uDiscard && uLight.type != LIGHT_DIR && uLight.falloff > 0.0 && Ldist / uLight.range >= 1.0) discard;
+
+    /* Compute the dot product of the normal and light direction */
+
+    vec3 N = V_GetWorldNormal(uNormalTex, pixCoord);
     vec3 L = (uLight.type == LIGHT_DIR) ? -uLight.direction : Ldelta / max(Ldist, 1e-4);
     float NoL = dot(N, L);
 
     if (NoL <= 0.0)
     {
+        if (uDiscard) discard;
         FragRadiance = vec4(0.0);
         FragSpecular = vec4(0.0);
         return;

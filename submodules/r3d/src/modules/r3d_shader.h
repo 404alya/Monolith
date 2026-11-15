@@ -1101,6 +1101,7 @@ typedef struct {
     r3d_shader_uniform_sampler_t uShadowDirTex;
     r3d_shader_uniform_sampler_t uShadowSpotTex;
     r3d_shader_uniform_sampler_t uShadowOmniTex;
+    r3d_shader_uniform_int_t uDiscard;                  //< local patch 31: unlit pixels write nothing
 } r3d_shader_deferred_lighting_t;
 
 typedef struct {
