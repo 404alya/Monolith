@@ -66,7 +66,8 @@ The runtime carries the editor's quality presets (`MS_Quality`, `runtime/monolit
 `MS_ApplyRenderResolution(scene, w, h)` (render scale). The shadow map size `q.shadowSize` is an
 R3D init hint: pass it as `MS_LoadOptions.shadowSizeOverride` to the peek load before
 `R3D_Init` and to the real load. Ultra is the map exactly; lower presets trade SSAO/SSIL for the
-baked occlusion volume, bake the fog's sun visibility, render at 75% / 50% and so on
+baked occlusion volume, bake the fog's sun visibility, march the fog in fewer steps and so on (every
+preset renders at full resolution)
 (docs/user-guide.md "Graphics settings"). `01_minimal --quality medium` shows it:
 
 ```sh

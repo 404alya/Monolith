@@ -54,6 +54,7 @@ An unknown flag, a missing or unparsable value, a value that is itself a `--flag
 | `--bench` | Per viewpoint: 60 warmup + 600 measured frames spinning 360°; table + Markdown report in `benchmark/<stamp>_shadow-<size>-<range>.md` (completed runs only). The report's Setup table names the machine (GPU, driver, CPU, system, resolution): frame times are only comparable between runs on the same machine |
 | `--headless` | With `--bench`: hidden window, offscreen 1920×1006, `glFinish` per frame. **Required for automated runs.** ~10% slower than visible; compare headless only with headless. |
 | `--bench-frames <n>` | Frames per viewpoint (≥ 10, default 600; ~150 is enough for a quick comparison). |
+| `--bench-views <list>` | Only these viewpoints, 1-based and comma-separated, in this order (e.g. `1,3,4`; default every viewpoint); the report's columns follow the list. Exit 1 on a bad list |
 | `--bench-still` | Camera doesn't spin (suffix `_still`) |
 | `--bench-window <samples>` | With `--bench --headless`: offscreen stand-in for the window (`windowemu.c`; 0–16 samples, 4 = `--window-msaa`, 0 = the default single-sampled window) with HUD and overlay, resolved like the swap |
 | `--no-profile` | No per-pass GPU table (the profiler is on only under `--bench`) |

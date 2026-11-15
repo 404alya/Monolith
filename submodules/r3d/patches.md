@@ -5109,3 +5109,60 @@ Files: `src/r3d_draw.c`.
 ```
 
 **Verification.** Nothing in monolith set a shadow-only mode before, so the patch alone changes no image: against the build before it (`detail_distance=0`, the runtime then submits no shadow-only draw), every viewpoint of `maps/monolith` (7) and `maps/pine_forest` (5) 0 pixels of 1600 × 900, `--dump-boxes` and `--dump-scene` identical. With the draw distance on (x1), `maps/monolith` changes 56–1758 pixels per viewpoint (13–227 by more than 2/255, max 36/255): small far objects missing, their shadows in place; `pine_forest` 0 (nothing small enough). A scratch copy of `maps/monolith` with `draw_distance off` on every material: 0 pixels against the build before the patch. With the weeds' `draw_distance` at 0.5 m they vanish from a terrace view and their shadows stay on the facade foot. Frame time on machine C (Intel HD 5500, Mesa 25.2.8, i5-5300U; headless 1920 × 1006, ultra, full runs, 3 interleaved pairs, cool-down before every run): frame median +0.06 ms (noise), geometry pass median −0.34 ms (−2.5 %); `.claude/skills/benchmarking/measurements.md`, "Draw distance of small objects". `./build.sh`, `examples/build.sh` (and `test`) without warnings, the runtime also without `MS_PATCHED_R3D` and without `MONOLITH_EDITOR`; `./build.sh --win` not run (no mingw-w64 on machine C); `tools/leakcheck.sh`: zero leaks of ours.
+
+## Patch 31: the lights pass shades every pixel of a light's screen rect (2026-11-15)
+
+**Symptom.** On an integrated GPU the deferred lights pass dominates maps with many point lights: `maps/voxel-test` (28 point lights, ~20 visible) at low, 1366 × 768, took 20 ms of a 64 ms GPU frame spinning and 32 ms on a still camera (machine C of `.claude/skills/benchmarking/measurements.md`, "voxel-test at low").
+
+**Cause.** `pass_deferred_lights` draws one full-screen quad per light, scissored to the screen rect of its range sphere. Every pixel of the rect runs `lighting.frag` in full (depth, normal, albedo and ORM reads, the BRDF) and blends into two RGB16F targets, also where the surface lies outside the sphere: the attenuation, which is 0 there, came last, and the early-outs (clip box, back-facing) wrote 0, which still blends. A lamp near the camera covers the whole screen, while most of its rect (the facades behind it) is outside its range. Shared-memory GPUs pay for the reads and the blend's read-modify-write per light and pixel.
+
+**Change.** `lighting.frag` is compiled twice. The `LIGHT_DISCARD` variant (`deferred.lightingDiscard`) computes P from the depth alone and discards: outside the clip box, at or beyond the range (`Ldist / range >= 1`, the attenuation's own expression, so exactly the pixels whose attenuation is `pow(0, falloff)` = 0; only with `falloff > 0` and not for directional lights), outside a spot light's outer cone (the cone factor's own argument `(theta − outer) / (inner − outer) <= 0`, where `smoothstep(0, 1, x)` is exactly 0; a NaN argument is not discarded; added 2026-11-16, L is now computed before the normal in both variants) and back-facing, reading the normal only after the range and cone tests. Adding 0 and writing nothing give the same RGB16F value, so the image is unchanged. A light whose clip box marked the stencil (patch 23) keeps the plain program (`deferred.lighting`, the shader as before, no `discard` in it): its quad clears the mark's stencil bit, which a discarded fragment wouldn't, and a program that can discard loses the early stencil test (first version, one program with a `uDiscard` uniform: on `maps/monolith`, 290 of 291 lights clip-boxed, the lights pass got +0.65 ms, +32 %, although no fragment discarded there).
+
+Files: `shaders/deferred/lighting.frag`, `src/modules/r3d_shader.h`, `src/modules/r3d_shader.c`, `src/r3d_draw.c`.
+
+```diff
+--- shaders/deferred/lighting.frag
++#ifdef LIGHT_DISCARD
++#   define UNLIT() discard
++#else
++#   define UNLIT() { FragRadiance = vec4(0.0); FragSpecular = vec4(0.0); return; }
++#endif
+ ...
+     float depth = texelFetch(uDepthTex, pixCoord, 0).r;
++#ifndef LIGHT_DISCARD
+     vec3 N = V_GetWorldNormal(uNormalTex, pixCoord);
++#endif
+     vec3 P = V_GetWorldPosition(vTexCoord, depth);
+-    if (any(lessThan(P, uLight.clipMin)) || any(greaterThan(P, uLight.clipMax)))
+-    { FragRadiance = vec4(0.0); FragSpecular = vec4(0.0); return; }
++    if (any(lessThan(P, uLight.clipMin)) || any(greaterThan(P, uLight.clipMax))) UNLIT();
+     vec3 Ldelta = uLight.position - P;
+     float Ldist = length(Ldelta);
++    vec3 L = (uLight.type == LIGHT_DIR) ? -uLight.direction : Ldelta / max(Ldist, 1e-4);   (moved up)
++#ifdef LIGHT_DISCARD
++    if (uLight.type != LIGHT_DIR && uLight.falloff > 0.0 && Ldist / uLight.range >= 1.0) discard;
++    if (uLight.type == LIGHT_SPOT &&
++        (dot(L, -uLight.direction) - uLight.outerCutOff) / (uLight.innerCutOff - uLight.outerCutOff) <= 0.0) discard;
++    vec3 N = V_GetWorldNormal(uNormalTex, pixCoord);
++#endif
+-    vec3 L = (uLight.type == LIGHT_DIR) ? -uLight.direction : Ldelta / max(Ldist, 1e-4);
+ ...
+-    if (NoL <= 0.0) { FragRadiance = vec4(0.0); FragSpecular = vec4(0.0); return; }
++    if (NoL <= 0.0) UNLIT();
+--- src/modules/r3d_shader.h
++        r3d_shader_deferred_lighting_t lightingDiscard;     //< local patch 31: LIGHT_DISCARD variant
++        r3d_shader_loader_func lightingDiscard;   (+ .lightingDiscard = r3d_shader_load_deferred_lighting_discard)
+--- src/modules/r3d_shader.c
++static void lighting_setup(r3d_shader_deferred_lighting_t* lighting)   (the blocks and samplers, shared)
++bool r3d_shader_load_deferred_lighting_discard(...)   (LOAD_SHADER_EX with fsDefines {"LIGHT_DISCARD"})
++    UNLOAD_SHADER(deferred.lightingDiscard);
+--- src/r3d_draw.c   (pass_deferred_lights)
+-        if (!light_volume_mark(light)) r3d_driver_disable(GL_STENCIL_TEST);
++        if (!light_volume_mark(light)) {
++            r3d_driver_disable(GL_STENCIL_TEST);
++            R3D_SHADER_USE(deferred.lightingDiscard);
++        }
+         R3D_RENDER_SCREEN();
+```
+
+**Verification.** Against the build before it: 91 shots pixel-identical (every viewpoint of `maps/monolith`, `maps/pine_forest` and `maps/voxel-test` at ultra, high, medium and low, yaw sweeps in `voxel-test` and on the `monolith` terrace, `tests/models`, a `--reload-test`). Machine C (Intel HD 5500, Mesa 25.2.8, i5-5300U), headless 1366 × 768, `preset = low` + `render_scale = 1`, 2 interleaved pairs each: `maps/voxel-test` still at viewpoints 1, 3, 4 (100 frames): lights 30.0 → 14.2 ms (**−15.8 ms, −53 %**), frame 77.7 → 62.3 ms (**−15.4 ms, −20 %**); `maps/monolith` spinning, all 7 viewpoints (150 frames): lights 1.81 → 1.88 ms (+0.08 ms; pairs +0.06 / +0.10), GPU total +0.06 ms, frame −0.01 ms: no measurable change. The first version (one program) had cost the developer's GTX 1660 Ti ~3 % on `maps/monolith`. Machine B (GTX 1660 Ti, NVIDIA 615.71.09, i5-10400F), headless 1920 × 1006, ultra, full runs, 3 interleaved pairs each: two programs against the build before patch 31, `maps/monolith` lights 0.091 → 0.090 ms (the regression gone), `maps/voxel-test` lights 0.510 → 0.382 ms (−25 %; frame times too noisy that session to quote). Spot cone test (2026-11-16) against the two-program build: 0 pixels changed on every viewpoint of the three maps and of a scratch copy of `maps/monolith` with the spot lights' `clip` removed (162 unmarked spots, 7 viewpoints + yaw sweeps 0–300° at three positions); on that copy lights 0.112 → 0.096 ms (pairs −0.014 / −0.016 / −0.018, −14 %; Terrace 0.28 → 0.23), on `maps/monolith` unchanged (its spots are all marked and use the plain program). `./build.sh --win` not run on machine B either (no mingw-w64). **Rejected:** the same discard on the volumetric fog's per-light early-out (`vfog_radiance.frag`, rays that miss the sphere): pixel-identical but vfog radiance +0.9 ms (2 pairs), frame +1.3 ms. `./build.sh` and `./build.sh examples` without warnings; `./build.sh --win` not run (no mingw-w64 on machine C); `glslangValidator` not installed there (Mesa compiles both variants at load); `build/tools/leakcheck`: OK, zero leaks of ours (160 runs).

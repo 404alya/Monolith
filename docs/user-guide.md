@@ -186,10 +186,10 @@ The panel has a preset selector, rows for display, shadows, ambient occlusion, f
 |---|---|
 | ultra | nothing: the map exactly |
 | high | baked ambient occlusion instead of SSAO + SSIL, baked fog lighting |
-| medium | high + 75% render scale, half the fog steps, 4096 shadow map |
-| low | 50% render scale, no AO, no bloom, baked fog with half the steps, 2048 shadow map |
+| medium | high + half the fog steps, 4096 shadow map |
+| low | no AO, no bloom, no SSR, baked fog with half the steps, 2048 shadow map |
 
-Roughly, high takes two thirds of ultra's frame time, medium 40% and low a quarter (measured on the default map with an RTX 4050 Laptop GPU; your machine's numbers will differ, the F2 panel shows them live). The settings are saved in `~/.config/monolith/settings.ini` (`%APPDATA%\monolith\` in the view-only Windows build) as `key = value` lines; `--settings`, `--no-settings` and `--quality` change that for one run. Vsync is off and frames are uncapped by default; the panel's performance rows change that.
+Every preset renders at full resolution: **Render scale** is a row you lower by hand, never part of a preset. Roughly, high takes two thirds of ultra's frame time (measured on the default map with an RTX 4050 Laptop GPU; your machine's numbers will differ, the F2 panel shows them live). The settings are saved in `~/.config/monolith/settings.ini` (`%APPDATA%\monolith\` in the view-only Windows build) as `key = value` lines; `--settings`, `--no-settings` and `--quality` change that for one run. Vsync is off and frames are uncapped by default; the panel's performance rows change that.
 
 ## The view-only build
 

@@ -279,6 +279,8 @@
 //                  so nothing appears on screen (compare headless runs only with each other)
 //   --bench-frames <n>   timed frames per viewpoint (at least 10, default 600); fewer = quick
 //                  screening runs (the camera spins faster, so the shadow map updates more)
+//   --bench-views <list>   with --bench: only these viewpoints, 1-based, comma-separated, in
+//                  this order (e.g. 1,3,4; default every viewpoint); exit 1 on a bad list
 //   --bench-still  like --bench, but the camera doesn't spin (the still-camera ideal: no
 //                  shadow-map re-renders); the report gets a _still suffix
 //   --no-frame-reuse   always render with R3D. By default the interactive window reuses the
@@ -1200,6 +1202,7 @@ static int Run(int argc, char **argv)
             i++;
         }
         else if (strcmp(a, "--note") == 0) { NEED(1); benchNote = argv[++i]; }
+        else if (strcmp(a, "--bench-views") == 0) { NEED(1); benchViewsArg = argv[++i]; }
         else if (strcmp(a, "--map") == 0) { NEED(1); mapPath = argv[++i]; }
         else if (strcmp(a, "--dump-boxes") == 0) { NEED(1); dumpPath = argv[++i]; }
         else if (strcmp(a, "--dump-scene") == 0) { NEED(1); dumpScenePath = argv[++i]; dumpSceneDiff = false; }
@@ -1892,17 +1895,25 @@ static int Run(int argc, char **argv)
     int *benchShadowUpdates = NULL;     // per view
     int benchView = 0, benchFrame = -BENCH_WARMUP;
     double benchLast = 0.0;
+    bool benchBadViews = false;         // a bad --bench-views list: exit 1 without a frame
     if (bench) {
-        benchTimes = mainHeap.benchTimes = calloc((size_t)scene->viewpointCount * benchFrames, sizeof(double));
-        benchShadowUpdates = mainHeap.benchShadowUpdates = calloc(scene->viewpointCount, sizeof(int));
-        if (!benchTimes || !benchShadowUpdates || !BenchInit(scene->viewpointCount)) {
+        unsigned char st = BenchInit();
+        if (st == 0) {
+            benchTimes = mainHeap.benchTimes = calloc((size_t)benchViewCount * benchFrames, sizeof(double));
+            benchShadowUpdates = mainHeap.benchShadowUpdates = calloc(benchViewCount, sizeof(int));
+        }
+        if (st == 2) {
+            fprintf(stderr, "monolith: %s\n", MS_LastError());
+            benchBadViews = true;
+            bench = false;
+        } else if (st != 0 || !benchTimes || !benchShadowUpdates) {
             fprintf(stderr, "monolith: out of memory (bench tables)\n");
             bench = false;
         }
     }
     if (bench) {
         spec.active = true;
-        SpectatorJumpTo(&spec, 0);
+        SpectatorJumpTo(&spec, benchViewList[0]);
         hud = emulateWindow;
         // GPU timer queries per R3D pass; results are read back a few frames later
         if (benchProfile) R3D_SetProfilerEnabled(true);
@@ -1934,11 +1945,11 @@ static int Run(int argc, char **argv)
     const char *settingsSaveFile = automated ? (settingsPath && !noSettings ? settingsPath : NULL) : settingsFile;
     bool offApplied = false;  // --off toggles are applied on the first frame only
     float closePickTime = 0.0f; // CTRL+K: seconds left to press a request's number
-    int exitStatus = 0;
+    int exitStatus = benchBadViews ? 1 : 0;
 
     // (a scripted run: the shot waits until 10 frames after the script's last step)
     if (scripted && pickerShotFrame < 10 + InputScriptFrames() + 10) pickerShotFrame = 10 + InputScriptFrames() + 10;
-    while (!WindowShouldClose())
+    while (!benchBadViews && !WindowShouldClose())
     {
         InputFrame(frame);      // (--input-script: this frame's keys and mouse)
         float dt = fminf(GetFrameTime(), 1.0f / 20.0f);
@@ -2245,12 +2256,13 @@ static int Run(int argc, char **argv)
             if (benchFrame >= 0 && benchFrame < benchFrames) benchTimes[(size_t)benchView * benchFrames + benchFrame] = now - benchLast;
             benchLast = now;
             if (++benchFrame == benchFrames) {
-                if (++benchView == scene->viewpointCount) break;
-                SpectatorJumpTo(&spec, benchView);
+                if (++benchView == benchViewCount) break;
+                SpectatorJumpTo(&spec, benchViewList[benchView]);
                 benchFrame = -BENCH_WARMUP;
             }
+            const MS_Viewpoint *vp = &scene->viewpoints[benchViewList[benchView]];
             float baseYaw, basePitch;
-            LookAngles(scene->viewpoints[benchView].eye, scene->viewpoints[benchView].target, &baseYaw, &basePitch);
+            LookAngles(vp->eye, vp->target, &baseYaw, &basePitch);
             spec.yaw = baseYaw;
             if (!benchStill) spec.yaw += 2.0f * PI * (float)(benchFrame > 0 ? benchFrame : 0) / benchFrames;
             R3D_SetProfilerTag(benchFrame >= 0 ? BENCH_TAG(benchView, benchFrame) : -1);
@@ -2635,7 +2647,7 @@ static int Run(int argc, char **argv)
         }
     }
 
-    if (bench && benchView == scene->viewpointCount) {
+    if (bench && benchView == benchViewCount) {
         BenchCollectProfile(true);  // the last frames' results are still in flight
         WriteBenchReport(benchTimes, benchShadowUpdates, shadowSize, shadowRange, gfx.q.shadowMode != MS_SHADOW_ALWAYS, headless, benchNote, argc, argv);
     }
