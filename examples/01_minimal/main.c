@@ -92,8 +92,8 @@ int main(int argc, char **argv)
     MS_Scene *scene = MS_Load(package, &opt);
     if (!scene) { fprintf(stderr, "%s\n", MS_LastError()); MS_ClearError(); R3D_Close(); CloseWindow(); return 1; }
     MS_ApplyEnvironment(scene);
-    // Quality presets scale the cost on top of the map's look (render scale, baked AO, fog
-    // cache, ...): right after every MS_ApplyEnvironment, then R3D's resolution for the scale
+    // Quality presets scale the cost on top of the map's look (baked AO, fog cache, ...; a
+    // render scale set by hand): right after every MS_ApplyEnvironment, then R3D's resolution for the scale
     if (qualitySet) {
         MS_ApplyQuality(scene, &quality);
         MS_ApplyRenderResolution(scene, width, height);
