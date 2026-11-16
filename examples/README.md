@@ -47,7 +47,7 @@ into a texture in a hidden window (never mapped, titled `monolith-shot`, so an i
 `for_window [title="^monolith-(bench|shot)$"] move container to workspace number 10` routes it),
 with a fixed 1/60 s frame time, saves the image and exits; without `--shot` it refuses to run.
 The harness redirects the program's `InitWindow`, `R3D_Begin*`, `MS_Draw` and `EndDrawing` calls
-(see its header comment); nothing in the examples refers to it.
+(see [docs/code/harness.md](../docs/code/harness.md)); nothing in the examples refers to it.
 
 ```sh
 examples/build/linux-test/01_minimal/minimal --shot /tmp/01.png --view 2

@@ -44,7 +44,7 @@ The workflows are project skills in `.claude/skills/<name>/SKILL.md`. They load 
 - **Never delete with `rm`** (or `rmdir`, `find -delete`, `unlink`): every `rm` needs the developer's approval. Move files to the trash instead with `gio trash <path>…` (works for folders too; the developer can restore them). This includes test bundles in `requests/`, scratch shots and temporary files in the repo. Exception: temporary files you created under `/tmp` may be deleted (`rm -rf`, `git worktree remove` for a worktree you added there) after all the work is done.
 - **Don't commit unless asked.** Never commit `build/`, screenshots, `benchmark/`, `requests/` or `export/`.
 
-**`.slop/` is not project content:** it holds markers written by the developer's slop.nvim editor extension (`.slop/<path>.slop` mirrors a repo file). Don't read, search, edit or reason about it; leave its changes out of your own diffs and summaries.
+**`.slop/` is not project content:** it holds markers written by the developer's slop.nvim editor extension (`.slop/<path>.slop` mirrors a repo file). Don't read, search, edit or reason about it; leave its changes out of your own diffs and summaries. Every commit includes them: run `git add .slop` before each commit, without asking.
 
 **Paths written into bundles** (`CLAUDE.md`, `.claude/skills/map-request/SKILL.md` and its section 3, `coordinator`) are named in `src/launcher.c`: change those strings whenever such a file moves.
 

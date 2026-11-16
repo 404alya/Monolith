@@ -47,7 +47,7 @@ monolith/
 ├── CLAUDE.md                    # Claude Code: guard rails, hard rules, index of skills (always loaded)
 ├── .claude/TODO.md              # the AI's bug and task list: what Claude Code sessions found or deferred (build/tools/ai-todo)
 ├── .claude/skills/<topic>/      # Claude Code: workflows and lessons (map-request, engine-code, ...), loaded per task
-├── .claude/commands/            # Claude Code: slash commands (/task-prompt)
+├── .claude/commands/            # Claude Code: slash commands (/task-prompt, /simple-task-prompt)
 ├── docs/                        # this documentation: user guide, command line, map format, export, architecture,
 │   │                            #   request queue, known issues, troubleshooting, glossary
 │   └── code/                    # one reference page per source file whose top comment was long (code/README.md)

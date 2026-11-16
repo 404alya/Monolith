@@ -1,37 +1,7 @@
 // tests/unit/export_strip_test.c: the runtime an export ships has no map-text parser.
-//
-// An export (docs/export.md) carries runtime/monolith_scene.c and .h as a game has them: compiled maps only
-// (docs/compiled-map.md, "The two builds"). So these files must hold none of the editor's parts:
-//   - no tokenizer or statement parser,
-//   - no model-file reference scan,
-//   - no compiler,
-//   - no number parsing (strtod / strtof / strtol / sscanf ...),
-//   - no ".map" file lookup,
-//   - no MONOLITH_EDITOR left.
-// Each is a search of the two files for names or text; any hit fails the test.
-//
-// Replaces tests/unit/export_strip_test.sh (a grep per rule). Built and run by `./build.sh test export_strip`
-// (nob.c, UNIT_TESTS): plain C and libc, with the unit tests' sanitizers.
-//
-// Arguments (nob.c passes the first two; anything after `--` on the command line follows them):
-//   argv[1]  the repo root
-//   argv[2]  the test's own folder (build/unit/export_strip), where it makes its export
-//   argv[3]  optional: an existing export folder to check instead of making one
-//
-// Without argv[3] it exports tests/models with build/linux/monolith into <argv[2]>/export-<YYYYmmddHHMMSS>/
-// (monolith's --export, hidden: no window), checks that, and moves the export to the trash afterwards
-// (`gio trash`, the repo's only way to delete). With argv[3] it checks that folder and leaves it alone.
-//
-// Output (the script's, line for line): "ok   no <rule>" per rule that passed, "FAIL <rule>:" and the hits
-// (path:line:text, indented four spaces) per rule that didn't, then "export_strip_test: OK (<dir>)" or
-// "export_strip_test: FAILED (<dir>)".
-//
-// Exit codes: 0 all rules passed; 1 any hit, a missing file, a missing monolith binary or a failed export.
-//
-// Pattern matching is POSIX extended regular expressions (<regex.h>), as `grep -E` read them. A rule marked
-// "whole word" is `grep -w`: a match counts only when it is not part of a longer word (the characters next to
-// it are not letters, digits or '_'); that is done by wrapping the pattern in a boundary check, which finds
-// the same lines grep -w does (it tries every match, not only the first).
+// `./build.sh test export_strip`: searches an export's monolith_scene.c / .h for the editor's parts
+// (parser, compiler, number parsing, .map lookup, MONOLITH_EDITOR); any hit fails.
+// Reference: docs/code/export_strip_test.md
 
 #include <regex.h>
 #include <stdarg.h>

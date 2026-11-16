@@ -846,9 +846,12 @@ static void RuleGuard(const Segment *seg)
     }
 }
 
-// Rule "leave .slop alone": any word or > / >> target naming a path inside `.slop/`.
+// Rule "leave .slop alone": any word or > / >> target naming a path inside `.slop/`. `git add` is fine
+// (every commit includes `.slop/`, CLAUDE.md).
 static void RuleSlop(const Segment *seg)
 {
+    Command c;
+    if (FindCommand(seg, &c) && strcmp(Base(c.w[0]), "git") == 0 && c.n > 1 && strcmp(c.w[1], "add") == 0) return;
     for (size_t i = 0; i < seg->words.count; i++) {
         if (NamesSlop(seg->words.items[i])) Refuse(RULE_SLOP, seg->words.items[i], HINT_SLOP);
     }

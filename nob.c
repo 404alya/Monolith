@@ -1,82 +1,9 @@
 // nob.c: monolith's build program. ./build.sh compiles it into build/nob and runs it with its arguments;
 // everything the build does is here, written on nob.h (src/vendor/nob/nob.h, vendored unmodified).
 //
-// Modes (the arguments of ./build.sh, unchanged from the shell script this replaces):
-//   ./build.sh                -> Linux x86_64 build in build/linux/: monolith (R3D, raylib, assimp and
-//                                libstdc++ linked statically) + maps/ (map packages); the folder can be
-//                                copied as-is. Also writes compile_commands.json in the repo root for
-//                                clangd (WriteCompileCommands below).
-//   ./build.sh run [args]     -> build, then run monolith with args (replaces this process)
-//   ./build.sh debug          -> debug build (-g -O0, AddressSanitizer + UBSan, leak check at exit) in
-//                                build/linux-debug/
-//   ./build.sh lsan           -> LeakSanitizer-only build (-O1 -g, fast) in build/linux-lsan/, what
-//                                build/tools/leakcheck runs
-//   ./build.sh profile        -> CPU-profiling build in build/linux-profile/: -O2 -g -fno-omit-frame-pointer,
-//                                with R3D/raylib/assimp as RelWithDebInfo + frame pointers in
-//                                $R3D_DIR/build-linux-profile (so build-linux stays Release), plus the
-//                                profiling tool build/linux-profile/profile (tools/profile.c, libc only)
-//   ./build.sh --win          -> Windows x86_64 build in build/win/ (MinGW-w64): monolith.exe (statically
-//                                linked) + maps/ (packages); the folder can be zipped and copied as-is.
-//                                It is the view-only editor (benchmark, view, debug a map; no editing or
-//                                requests: MONOLITH_EDITING in src/common.h, src/main.c "View-only build")
-//   ./build.sh --win run [args]  -> Windows build, then run it under wine (replaces this process): the way to
-//                                open the view-only build on Linux (from an agent's shell only with --shot or
-//                                --bench --headless, as the Linux build)
-//   ./build.sh --win debug|lsan  -> refused: the sanitizers don't work with MinGW
-//   ./build.sh --tools [name...] -> the small programs that replaced the repo's shell scripts (TOOLS below;
-//                                docs/architecture.md, "Tools"): tools/<name>.c into build/tools/<name>,
-//                                tools/run-sh.c into build/run-sh.o. All of them, or only the ones named;
-//                                only what is missing or older than its source, tools/tool.h or nob.h is
-//                                compiled. The plain build doesn't build them. Each program then rebuilds
-//                                itself when its source changes (tools/tool.h, ToolRebuildSelf).
-//   ./build.sh examples [--win | test | lsan] -> the examples (examples/nob.c, compiled into examples/build/nob
-//                                when missing or older, then run with these arguments; docs/code/nob-examples.md
-//                                lists what each mode builds)
-//   ./build.sh test [name...] [-- args...] -> the unit tests in tests/unit/ (UNIT_TESTS, region "Build steps"):
-//                                all of them or the ones named, each built with ASan + UBSan into
-//                                build/unit/<name>/ and run; exit 1 when any fails. Arguments after `--` are
-//                                added to the run of every test that runs (use it with one named test:
-//                                `./build.sh test paintunwrap -- <model files>`, `./build.sh test export_strip
-//                                -- <export dir>`)
-// Any other first argument builds like the plain Linux build but writes no compile_commands.json (as the
-// shell script did: only "" and "run" write it).
-//
-// Environment:
-//   R3D_DIR         another R3D tree (default: submodules/r3d, with local fixes, see its patches.md)
-//   CC, CXX         the Linux compilers (default clang; CXX follows CC: clang -> clang++, gcc -> g++,
-//                   otherwise c++). --win always uses x86_64-w64-mingw32-gcc/g++.
-//   R3D_BUILD_TYPE  (Linux only) CMake build type of R3D/raylib/assimp, default Release.
-//                   R3D_BUILD_TYPE=None ./build.sh -> the old unoptimised build (no CMAKE_BUILD_TYPE), only
-//                   for comparisons with benchmark reports from before 2026-10-10. profile ignores it
-//                   (always RelWithDebInfo, in its own build dir).
-//
-// R3D is built on first use as static libs: into $R3D_DIR/build-linux for Linux and into
-// $R3D_DIR/build-mingw for --win (toolchain: cmake/mingw-w64-x86_64.cmake). Later runs only rebuild what
-// changed; if the configure options changed (e.g. R3D_BUILD_TYPE), the build dir is re-configured in place
-// (a full R3D rebuild). Delete those directories to force a fresh configure.
-// The vendored xatlas (src/vendor/xatlas/, MIT; C++, the paint unwrap) is compiled once per build folder
-// into <build folder>-obj/xatlas.o with its own flags (Xatlas below) and linked in.
-// The runtime (runtime/monolith_scene.c) is built with -DMONOLITH_EDITOR: hot reload, source lines and the
-// writers; --export writes it without them (src/export.c).
-//
-// Timing: every command runs through RunTimed(), which prints after it how long it took (wall time) and
-// how much CPU time it and every process it waited for used (user + sys, from getrusage(RUSAGE_CHILDREN)),
-// and at the end a summary table. nob.h measures neither: its nob_cmd_run() forks and waitpid()s, which
-// returns no resource usage. The commands run one after another (never nob's .async), so the
-// RUSAGE_CHILDREN difference around one command is that command's own: `cmake --build -j` counts all of its
-// compiler processes, because make waits for them and cmake waits for make. No CPU cycle counts: the
-// developer chose time only (2026-11-09).
-//
-// Output: nob's "[INFO] CMD: ..." echo of each command and the "[TIME]" lines go to stdout, like the
-// script's progress lines ("configuring ...", "built: ...", whose text scripts and people read); warnings and
-// errors go to stderr. So `./build.sh lsan > /dev/null` (build/tools/leakcheck) stays quiet unless something
-// fails.
-//
-// Adding a mode or a flag: a flag goes into the argument list of the command it belongs to (CFLAGS-like
-// lists are built in BuildLinux / BuildWindows, in the same order the compiler sees them; keep the
-// compile_commands.json entries in step when a list they copy changes). A mode is a branch in main() or
-// BuildLinux that picks its output folder and flags; run every command through RunTimed() (never
-// nob_cmd_run directly, never .async) so it is timed and stays sequential.
+// Modes: plain Linux build, run, debug, lsan, profile, --win, --tools, examples, test. Every command runs
+// through RunTimed() (timed, sequential; never nob_cmd_run directly or .async).
+// Reference: docs/code/nob.md
 
 // sched_getaffinity / CPU_COUNT (the -j count, like nproc), nftw. Before nob.h, which only sets
 // _POSIX_C_SOURCE when nothing else has picked a feature level.

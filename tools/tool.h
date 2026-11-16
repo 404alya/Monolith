@@ -14,14 +14,13 @@
 
 // nob prints "[INFO] CMD: ..." for every command it runs and "[INFO] created directory ..." for its file
 // helpers; the shell scripts these programs replace printed neither, and their output text must not change.
-#define NOB_NO_ECHO
+// #define NOB_NO_ECHO
 #define NOB_IMPLEMENTATION
 #include "../src/vendor/nob/nob.h"
 
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
-#include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>

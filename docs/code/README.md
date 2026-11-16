@@ -29,6 +29,7 @@ These pages are not part of an export: the exported `monolith_scene.c` / `.h`, `
 |---|---|
 | [monolith_scene.md](monolith_scene.md) | `runtime/monolith_scene.c` and `.h`: overview, minimal use, and the complete `.map` format reference (authoritative) |
 | [nob-export.md](nob-export.md) | `runtime/export/nob.c`: the build program shipped in every export |
+| [nob.md](nob.md) | `nob.c` (repo root): monolith's build program: every `./build.sh` mode, its environment, timing and output |
 | [nob-examples.md](nob-examples.md) | `examples/nob.c`: the examples' build program and its modes |
 
 ## Tools (`tools/`)
@@ -51,3 +52,11 @@ These pages are not part of an export: the exported `monolith_scene.c` / `.h`, `
 | [fetch_asset.md](fetch_asset.md) | `tools/fetch_asset.py`: licence-safe asset downloads |
 | [record_asset.md](record_asset.md) | `tools/record_asset.py`: recording an asset's provenance |
 | [normalize_model.md](normalize_model.md) | `tools/normalize_model.py`: normalising a model in Blender |
+
+## Tests (`tests/`)
+
+| Page | Documents |
+|---|---|
+| [harness.md](harness.md) | `tests/examples/harness.h`: the examples' test build: `--shot` and `--bench` without changing their source |
+| [export_strip_test.md](export_strip_test.md) | `tests/unit/export_strip_test.c`: an export's runtime has no map-text parser |
+| [run_sh_test.md](run_sh_test.md) | `tests/unit/run_sh_test.c`: the test of run-sh: rules, `-c`, lock, log, hook |

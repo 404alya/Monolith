@@ -5,7 +5,7 @@ description: Plan and run larger monolith engine or feature work — a developme
 
 # Large engine work
 
-How the developer wants larger changes to monolith carried out: the engine, the editor, the runtime, R3D, tooling. Distilled from the task prompts of the two development rounds and the QA pass (the `project-history` skill). The hard rules in `CLAUDE.md` apply throughout; the day-to-day rules are the `engine-code` skill, the reference `docs/architecture.md`. Map edit requests follow the `map-request` skill instead. To write the task prompt for a new round: `/task-prompt`.
+How the developer wants larger changes to monolith carried out: the engine, the editor, the runtime, R3D, tooling. Distilled from the task prompts of the two development rounds and the QA pass (the `project-history` skill). The hard rules in `CLAUDE.md` apply throughout; the day-to-day rules are the `engine-code` skill, the reference `docs/architecture.md`. Map edit requests follow the `map-request` skill instead. To write the task prompt for a new round: `/task-prompt` (for a simple task in one place: `/simple-task-prompt`).
 
 ## 1. Before you start
 
