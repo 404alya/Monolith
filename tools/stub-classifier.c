@@ -1,31 +1,7 @@
-// tools/stub-classifier.c: a fake AI classifier for tests of the editor's model choice (src/classifier.c,
-// docs/request-queue.md "Models"). Built by `./build.sh --tools stub-classifier` into
-// build/tools/stub-classifier.
-//
-// Use it as MONOLITH_CLASSIFIER=build/tools/stub-classifier: the editor starts it exactly as it starts
-// `claude -p` (the same arguments, the request on stdin, stdout into the bundle's classifier.json), and it
-// answers the way Claude Code's --output-format json does, so no test ever starts a real Claude run.
-//
-// Environment (each one is optional):
-//   MONOLITH_STUB_CLASSIFIER=<mode>   what to answer (default: default):
-//       fast | default | heavy   a valid answer on that tier, from the --model it was given (modelUsage
-//                                names it); the reason has a line break and a non-ASCII letter, which the
-//                                editor must turn into plain ASCII
-//       fallback                 a valid heavy answer from the --fallback-model (as if Fable was overloaded)
-//       garbage                  text that is not JSON, exit 0
-//       outside                  valid JSON whose tier is "opus" (outside the schema), exit 0
-//       fail                     a message on stderr, exit 1
-//       slow                     sleeps 600 s before answering (the editor's timeout must kill it)
-//   MONOLITH_STUB_CLASSIFIER_LOG=<file>, else MONOLITH_STUB_LOG=<file>
-//                                appends what it was given to <file>: a line "stub-classifier argv:", one
-//                                argument per line (each prefixed with "  arg: "), then "stub-classifier stdin:"
-//                                and the input as it came. Appends, so a stub terminal that replaces
-//                                MONOLITH_STUB_LOG later in the same test doesn't hide it: give the classifier
-//                                its own file with MONOLITH_STUB_CLASSIFIER_LOG when both run.
-//
-// Exit status: 0 (answers, garbage, outside, slow when it is not killed); 1 (fail, or an unknown mode).
-//
-// Called by: the editor (src/classifier.c) in launcher tests, build/tools/leakcheck, build/tools/test-coordinator.
+// tools/stub-classifier.c -> build/tools/stub-classifier: a fake AI classifier for tests of the editor's
+// model choice (src/classifier.c). Used as MONOLITH_CLASSIFIER, it answers like `claude -p --output-format
+// json` (or fails in the way MONOLITH_STUB_CLASSIFIER asks), so no test ever starts a real Claude run.
+// Reference: docs/code/stub-classifier.md
 
 #include "tool.h"
 

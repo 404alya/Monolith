@@ -1,41 +1,7 @@
-// tools/stub-coordinator.c: a fake request coordinator for tests: no Claude, no window. Built by
-// `./build.sh --tools stub-coordinator` into build/tools/stub-coordinator; it replaced
-// tools/stub-coordinator.sh (2026-11-13) and behaves exactly like it.
-//
-// The editor starts it in place of claude (MONOLITH_CLAUDE=build/tools/stub-coordinator, with
-// MONOLITH_TERMINAL=build/tools/stub-terminal and MONOLITH_STUB_RUN=<log>, see build/tools/test-coordinator).
-// It ignores its arguments and applies the scheduling rules of the coordinator skill
-// (.claude/skills/coordinator/SKILL.md, §4) through build/tools/request-queue, so the tests exercise the real
-// queue:
-//   - a queued request starts only if no claimed request uses the same map package, and an older queued one
-//     on that package goes first;
-//   - a code request runs alone: it starts only when nothing else runs, and while it waits or runs nothing
-//     newer starts;
-//   - at most 3 at once.
-// Keep these rules in step with the skill (the large-engine-work skill, §5): when the skill's rules change,
-// this program changes with them.
-//
-// A "subagent" is a child process that sleeps $MONOLITH_STUB_WORK seconds and writes result.md. Markers in
-// the prompt: "[code]" = a code request; "[edit]" = the worker appends to <package>/stub-edit.txt right
-// after the claim (for the recovery test). A cancel file stops the worker and finishes the bundle as
-// cancelled.
-//
-// Output (stdout, which the stub terminal appends to its MONOLITH_STUB_RUN file), one line per event with the
-// time of day in ms:
-//   HH:MM:SS.mmm stub-coordinator: started (pid <pid>), args: <count>
-//   (request-queue start's own output)
-//   HH:MM:SS.mmm start <id> <package>[ [code]]
-//   HH:MM:SS.mmm end <id>
-//   HH:MM:SS.mmm cancelled <id>[ (queued)]
-//   HH:MM:SS.mmm wait <id> (code request: waits until it is alone)
-// request-queue's error messages (stderr) land there too.
-//
-// Environment:
-//   MONOLITH_STUB_WORK      seconds a worker "works" (default 3; fractions allowed, like sleep's)
-//   MONOLITH_REQUESTS_DIR   the requests folder (also read by request-queue); default <repo>/requests
-//
-// It runs until it is killed (the tests send SIGTERM to its process group, which ends its workers too).
-// Exit status: 1 when build/tools/request-queue is not built (with the message saying how to build it).
+// tools/stub-coordinator.c -> build/tools/stub-coordinator: a fake request coordinator for tests (no Claude,
+// no window). It applies the coordinator skill's scheduling rules (§4) through build/tools/request-queue;
+// keep them in step with the skill. Its "subagents" are child processes that sleep and write result.md.
+// Reference: docs/code/stub-coordinator.md
 
 #include "tool.h"
 

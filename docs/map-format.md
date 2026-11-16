@@ -1,6 +1,6 @@
 # Map packages and the map format
 
-Everything inside a map package: the folder layout, the design brief (`MAP.md`) and the `.map` file format. You can write and edit maps by hand with any text editor while monolith runs: it reloads the map on every save. The parser's header comment in `runtime/monolith_scene.c` is authoritative where this page and the code differ. Examples come from the two maps the project was built with: `maps/pine_forest` (in this repository) and the default map `maps/monolith` (kept outside it). "Patch N" refers to a local R3D change ([glossary.md](glossary.md)). Exporting a map to your own program: [export.md](export.md).
+Everything inside a map package: the folder layout, the design brief (`MAP.md`) and the `.map` file format. You can write and edit maps by hand with any text editor while monolith runs: it reloads the map on every save. The complete reference, [code/monolith_scene.md](code/monolith_scene.md#map-format-reference-map) (kept beside the parser, `runtime/monolith_scene.c`), is authoritative where this page and the code differ. Examples come from the two maps the project was built with: `maps/pine_forest` (in this repository) and the default map `maps/monolith` (kept outside it). "Patch N" refers to a local R3D change ([glossary.md](glossary.md)). Exporting a map to your own program: [export.md](export.md).
 
 ## 1. Map packages and the design brief
 
@@ -58,7 +58,7 @@ The `.map` text is the source and stays authoritative: the editor, hot reload, r
 
 ## 2. Map format reference
 
-Each statement takes one line, so a line number identifies an object. The parser is in `runtime/monolith_scene.c`, and the header comment there is authoritative.
+Each statement takes one line, so a line number identifies an object. The parser is in `runtime/monolith_scene.c`; its reference, [code/monolith_scene.md](code/monolith_scene.md#map-format-reference-map), is authoritative.
 
 ```
 # comment                      '#' starts a comment anywhere outside "quotes"

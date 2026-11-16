@@ -1,30 +1,9 @@
 #!/usr/bin/env python3
-# fetch_asset.py -- licence-safe downloads of models and textures for monolith map packages
-#
-# Run with `python3 -I tools/fetch_asset.py <source> <command> ...` (stdlib only; -I keeps the
-# current directory and user site-packages off sys.path). See .claude/skills/assets-and-licences/SKILL.md.
-#
-#   polyhaven search [text] [--category c] [--max-tris n] [--limit n]   CC0 models (API)
-#   polyhaven get <slug> [--res 1k|2k|4k] [--out DIR]   glTF + .bin + textures, md5-verified
-#   ambientcg search <text> [--limit n]                 CC0 materials (API)
-#   ambientcg get <id> [--res 1K|2K] [--out DIR]        texture zip; extracts image files only
-#   kenney list <zip url> [--out DIR]                   download a pack zip, audit, list entries
-#   kenney get <zip url> --pick GLOB [--pick ...] [--out DIR]   extract the picked files + License.txt
-#   polypizza search <keyword> [--license cc0|ccby] [--category n] [--max-tris n] [--limit n]
-#   polypizza info <id>
-#   polypizza get <id> [--out DIR]                      GLB; only CC0 / CC-BY, recorded at download
-#
-# Safety rules built in (they are the project's hard rules for downloads):
-# - every download goes into a NEW, EMPTY directory outside the repo (default:
-#   $MONOLITH_DOWNLOADS or ~/.cache/monolith/downloads, then <source>-<id>-<stamp>/);
-# - https only, redirects only to the source's own hosts, a size cap per file;
-# - archive entries are audited (absolute paths, "..", backslashes, symlinks, sizes) and only
-#   model / texture / licence files are written; nothing from a download is ever executed;
-# - every download writes provenance.json next to the files: source, URLs, author(s),
-#   licence + URL, date, md5 (when the API gives one) and sha256 of every file;
-# - Poly Pizza only through its official API v1.1 (https://api.poly.pizza/v1.1, header
-#   x-auth-token) with the developer's key from $POLY_PIZZA_API_KEY or
-#   ~/.config/monolith/poly-pizza.key. The key is never printed or written anywhere.
+# fetch_asset.py -- licence-safe downloads of models and textures for monolith map packages.
+# Run with `python3 -I tools/fetch_asset.py <source> <command> ...` (stdlib only); sources: polyhaven,
+# ambientcg, kenney, polypizza. Every download goes into a new, empty directory outside the repo, archives
+# are audited, nothing downloaded is ever executed, and provenance.json records source, licence and hashes.
+# Reference: docs/code/fetch_asset.md
 
 import argparse
 import datetime

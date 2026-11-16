@@ -8,7 +8,7 @@ The rules for changing monolith, whether you write the change yourself or with C
 2. **The leak check passes:** `build/tools/leakcheck` ends with `leakcheck: OK: zero leaks of ours` (about 5 minutes, hidden windows only). After larger changes also `build/tools/leakcheck --asan`.
 3. **Every map looks the same**, unless changing the look is the point of the change: identical box lists (`--dump-boxes`) and pixel-identical `--shot` images of each map's viewpoints, before vs. after. A change that alters the look is presented as a trade-off (behind a setting, with before / after images) and needs the maintainer's approval.
 4. **The tests that cover it pass:** `build/tools/test-coordinator` for the launcher and request queue; `--reload-test`, `--shot` and the dump flags for the loader and renderer ([command-line.md](docs/command-line.md)).
-5. **The docs say what the code does:** the header comment of `src/main.c` (controls and flags), the pages in `docs/`, and the skill in `.claude/skills/` whose workflow changed.
+5. **The docs say what the code does:** `docs/code/main.md` (controls and flags) and the `docs/code/` page of each source file you changed, the pages in `docs/`, and the skill in `.claude/skills/` whose workflow changed.
 
 Map-only changes (a `.map` file, `MAP.md`, a package's shaders, models, textures) need none of the builds or the leak check: the editor reloads the package while it runs.
 
@@ -55,7 +55,7 @@ build/tools/todo rm <id> [<id>...]                      # close entries
 
 ## Style
 
-C11, 4-space indent, `static` file-local functions, PascalCase functions, `UPPER_CASE` macros, `// #region` sections, one module per concern with a header comment, short comments that explain *why*. Comment non-obvious engine workarounds with their reason so nobody "cleans them up". English everywhere.
+C11, 4-space indent, `static` file-local functions, PascalCase functions, `UPPER_CASE` macros, `// #region` sections, one module per concern with a short top-of-file comment (what it is, its key invariants, at most ~8 lines, ending `// Reference: docs/code/<name>.md` when the file has a reference page: longer reference text such as key and flag lists, formats and rules goes into `docs/code/<file name>.md`, never back into the comment), short comments that explain *why*. Comment non-obvious engine workarounds with their reason so nobody "cleans them up". English everywhere.
 
 ## Editor setup
 

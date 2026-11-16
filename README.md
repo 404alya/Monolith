@@ -81,6 +81,7 @@ It also writes `build/win/monolith.exe`, the **view-only build**: it opens a map
 | [docs/troubleshooting.md](docs/troubleshooting.md) | when something doesn't start, render or answer |
 | [docs/glossary.md](docs/glossary.md) | the terms used in these pages |
 | [docs/architecture.md](docs/architecture.md), [docs/request-queue.md](docs/request-queue.md), [docs/known-issues.md](docs/known-issues.md) | how the code is organised, how requests travel, what is open |
+| [docs/code/](docs/code/README.md) | one reference page per larger source file: keys, flags, formats, rules |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | the rules for changing monolith |
 
 ## Working on monolith with Claude Code

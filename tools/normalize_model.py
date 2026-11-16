@@ -1,27 +1,10 @@
 # normalize_model.py -- Blender script: normalise a downloaded model into a clean GLB
 #
-# Run headless and locked down (never open a downloaded .blend; this script only imports
-# glTF / GLB / OBJ / FBX through Blender's own importers):
-#
-#   BLENDER=${BLENDER:-blender}   # set BLENDER when Blender is not in PATH (e.g. a Steam install)
 #   "$BLENDER" -b --factory-startup --disable-autoexec --python-exit-code 1 \
 #       --python tools/normalize_model.py -- <in.glb|.gltf|.obj|.fbx> <out.glb> [options]
 #
-# Run it from the repo root (never from a download directory). Options:
-#   --origin bottom|center|keep   move the origin: bottom centre of the bounds (default keep)
-#   --height H                    uniform scale so the model is H metres tall
-#   --scale S                     uniform scale factor (e.g. 0.01 for an FBX in centimetres)
-#   --decimate N                  collapse-decimate meshes to about N triangles in total
-#   --max-texture PX              downscale every image larger than PX on its longer side
-#   --strip-unlit                 rebuild KHR_materials_unlit (emission/background) materials
-#                                 as lit Principled BSDF with the same base colour / texture
-#   --metallic F                  set the metallic factor of every material without a
-#                                 metalness map (e.g. 0 for Kenney kits exported with metallic 1)
-#   --report FILE                 also write the change list as JSON (for tools/record_asset.py)
-#
-# glTF is Y-up; Blender is Z-up internally and its glTF importer / exporter convert both ways,
-# so the output is Y-up metres. Transforms are applied (the output has identity node
-# transforms), animations and cameras / lights are dropped. Prints every change it made.
+# Run headless from the repo root; never open a downloaded .blend. Output: Y-up metres, transforms applied.
+# Reference: docs/code/normalize_model.md
 
 import json
 import os

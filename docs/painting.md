@@ -318,7 +318,7 @@ and attribution).
   `docs/compiled-map.md` and its version history.
 - The export copies a package's dependencies as now; atlases and `.paintuv` sidecars are dependencies,
   so they go with it. The exported runtime generates the paint shaders and keys like the editor.
-- The keys and the statement go into the header comment of `runtime/monolith_scene.c` and
+- The keys and the statement go into `docs/code/monolith_scene.md` (the format reference) and
   `docs/map-format.md` §2.
 
 ## 5. The atlas

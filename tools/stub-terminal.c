@@ -1,26 +1,7 @@
-// tools/stub-terminal.c: a fake terminal for tests of the request launcher (src/launcher.c). Built by
-// `./build.sh --tools stub-terminal` into build/tools/stub-terminal; it replaced tools/stub-terminal.sh
-// (2026-11-13) and does exactly what the script did.
-//
-// Use it as MONOLITH_TERMINAL=build/tools/stub-terminal: instead of opening a window and starting Claude Code
-// it only records how it was called, and nothing appears on screen. The launcher treats it as an unknown
-// terminal, so it passes the command to run after "-e".
-//
-// Environment (each one is optional; unset or empty = off):
-//   MONOLITH_STUB_LOG=<file>      writes the argv it was given to <file>, one argument per line (the file is
-//                                 replaced; no arguments = one empty line, as the script's printf did)
-//   MONOLITH_STUB_OPENED=<file>   appends one line per "window" to <file>: "HH:MM:SS.<nanoseconds> <pid>", to
-//                                 count them; the pid is the process group the launcher started (setsid), which
-//                                 the tests kill to stop a coordinator
-//   MONOLITH_STUB_RUN=<file>      runs the command after -e like a terminal would, in place of this process (same
-//                                 pid), stdout and stderr appended to <file>, stdin from /dev/null, and stays until
-//                                 it exits. With MONOLITH_CLAUDE=build/tools/stub-coordinator this is a coordinator
-//                                 without a window and without Claude (build/tools/test-coordinator)
-//
-// Exit status: 0, or the command's own with MONOLITH_STUB_RUN (127 / 126 when it can't be started; the message
-// then goes into <file>, as the script's `exec` printed it there).
-//
-// Called by: the editor (src/launcher.c) in launcher tests and build/tools/test-coordinator; the leak check.
+// tools/stub-terminal.c -> build/tools/stub-terminal: a fake terminal for tests of the request launcher
+// (src/launcher.c). Used as MONOLITH_TERMINAL, it never opens a window: it records how it was called and,
+// with MONOLITH_STUB_RUN, runs the command after -e in place of itself.
+// Reference: docs/code/stub-terminal.md
 
 #include "tool.h"
 

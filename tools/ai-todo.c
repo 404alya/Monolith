@@ -1,35 +1,8 @@
-// tools/ai-todo.c: the AI's task list, .claude/TODO.md (bugs and deferred work found by Claude sessions).
-// Replaces tools/ai-todo.sh; built by `./build.sh --tools ai-todo` into build/tools/ai-todo.
-//
-//   build/tools/ai-todo list
-//   build/tools/ai-todo add "<title>" "<description>"
-//   build/tools/ai-todo rm <id>...
-//
-// What it does: runs the prebuilt Simple-Todo program (submodules/simple-todo/todo.o, x86-64 Linux) against
-// the list file, after the checks this wrapper adds. Every mode and argument goes to todo.o unchanged
-// (including a wrong argument count, which todo.o reports itself); the checks are:
-//   add  keeps entries short: a title of at most 60 characters and a one-line description of at most 120
-//        that points to the details (file:line, a doc section, a request id). Title and description must
-//        each be one line (no newline, no carriage return). Characters are counted, not bytes, whatever the
-//        locale: UTF-8 continuation bytes (0x80-0xBF) are dropped before counting. Nothing is written when
-//        a check fails. The checks apply only to `add` with exactly a title and a description; any other
-//        argument count passes through and todo.o reports it.
-//   rm   takes only task ids (digits only): anything else could match a line the tool didn't write, such
-//        as the file's '#' header.
-//
-// The list file is fixed here (<repo root>/.claude/TODO.md). TODO_FILE from the environment is ignored on
-// purpose: the program overwrites it with the fixed path before todo.o starts, so an AI entry can never
-// land in the developer's TODO.md (tools/todo.c).
-//
-// Environment: TODO_FILE (ignored, then set for todo.o); nothing else.
-//
-// Exit codes: todo.o's own when it runs (this process is replaced by it, so its output, exit status and
-// signals are the caller's); 1 when submodules/simple-todo is not checked out or a check above fails.
-// 126 / 127 when todo.o can't be started (as a shell reports it).
-//
-// Messages keep the text of the shell script, with the program's name "ai-todo:" in place of "ai-todo.sh:".
-//
-// Callers: Claude sessions (the task-tracker skill), by hand.
+// tools/ai-todo.c -> build/tools/ai-todo list | add "<title>" "<description>" | rm <id>...: the AI's task
+// list, .claude/TODO.md, through the prebuilt Simple-Todo program (submodules/simple-todo/todo.o). The list
+// file is fixed (TODO_FILE is ignored), so an AI entry never lands in the developer's TODO.md; `add` keeps
+// entries short (60 / 120 characters, one line each), `rm` takes only task ids.
+// Reference: docs/code/ai-todo.md
 
 #include "tool.h"
 
@@ -71,7 +44,8 @@ int main(int argc, char **argv)
     // a rebuild of this program first when tools/ai-todo.c or tools/tool.h changed since it was built.
     ToolInit(argv, "ai-todo", "ai-todo");
 
-    // Step 2: the two fixed paths. The list file is never taken from the environment (see the header).
+    // Step 2: the two fixed paths. The list file is never taken from the environment
+    // (docs/code/ai-todo.md#the-list-file).
     const char *todoFile = nob_temp_sprintf("%s/.claude/TODO.md", gToolRoot);
     const char *todoBin = nob_temp_sprintf("%s/submodules/simple-todo/todo.o", gToolRoot);
 

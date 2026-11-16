@@ -1,30 +1,8 @@
-// tools/todo.c: the developer's task list, TODO.md at the repo root (CONTRIBUTING.md, "Bugs and tasks").
-// Replaces tools/todo.sh; built by `./build.sh --tools todo` into build/tools/todo.
-//
-//   build/tools/todo list
-//   build/tools/todo add "<title>" "<description>"
-//   build/tools/todo rm <id>...
-//
-// What it does: runs the prebuilt Simple-Todo program (submodules/simple-todo/todo.o, x86-64 Linux) against
-// the list file, after the one check this wrapper adds. Every mode and argument goes to todo.o unchanged
-// (list, add, rm, and whatever else it understands, including a wrong argument count, which todo.o reports
-// itself); `rm` first takes only task ids (digits only), because anything else could match a line the tool
-// didn't write, such as the file's '#' header.
-//
-// The list file is fixed here (<repo root>/TODO.md). TODO_FILE from the environment is ignored on purpose:
-// the program overwrites it with the fixed path before todo.o starts, so no caller can point it elsewhere.
-// Claude sessions never write this list; theirs is tools/ai-todo.c (.claude/TODO.md).
-//
-// Environment: TODO_FILE (ignored, then set for todo.o); nothing else.
-//
-// Exit codes: todo.o's own when it runs (this process is replaced by it, so its output, exit status and
-// signals are the caller's); 1 when submodules/simple-todo is not checked out, or when `rm` is given
-// something that is not a task id. 126 / 127 when todo.o can't be started (as a shell reports it).
-//
-// Messages keep the text of the shell script, with the program's name "todo:" in place of "todo.sh:".
-//
-// Callers: the developer, by hand; documented in CONTRIBUTING.md and the task-tracker skill (sessions may
-// read the list with `list`, never write it).
+// tools/todo.c -> build/tools/todo list | add "<title>" "<description>" | rm <id>...: the developer's task
+// list, TODO.md at the repo root, through the prebuilt Simple-Todo program (submodules/simple-todo/todo.o).
+// The list file is fixed (TODO_FILE is ignored); `rm` takes only task ids. Claude sessions never write
+// this list (theirs is tools/ai-todo.c).
+// Reference: docs/code/todo.md
 
 #include "tool.h"
 
@@ -46,8 +24,9 @@ int main(int argc, char **argv)
     // tools/todo.c or tools/tool.h changed since it was built.
     ToolInit(argv, "todo", "todo");
 
-    // Step 2: the two fixed paths. The list file is never taken from the environment (see the header), so
-    // the developer's list can only be written through this wrapper's own checks.
+    // Step 2: the two fixed paths. The list file is never taken from the environment
+    // (docs/code/todo.md#the-list-file), so the developer's list can only be written through this wrapper's own
+    // checks.
     const char *todoFile = nob_temp_sprintf("%s/TODO.md", gToolRoot);
     const char *todoBin = nob_temp_sprintf("%s/submodules/simple-todo/todo.o", gToolRoot);
 

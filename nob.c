@@ -30,7 +30,7 @@
 //                                compiled. The plain build doesn't build them. Each program then rebuilds
 //                                itself when its source changes (tools/tool.h, ToolRebuildSelf).
 //   ./build.sh examples [--win | test | lsan] -> the examples (examples/nob.c, compiled into examples/build/nob
-//                                when missing or older, then run with these arguments; its header comment
+//                                when missing or older, then run with these arguments; docs/code/nob-examples.md
 //                                lists what each mode builds)
 //   ./build.sh test [name...] [-- args...] -> the unit tests in tests/unit/ (UNIT_TESTS, region "Build steps"):
 //                                all of them or the ones named, each built with ASan + UBSan into
