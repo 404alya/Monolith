@@ -1,4 +1,3 @@
-
 # Monolith
 
 An **AI-assisted map designer** for 3D levels of any style. You fly through a level, point at a spot, select objects or drag a rectangle over the screen, and type what should change. e.g. "make this wall twice as tall", "plant three more pines along the path", "hang a neon sign over each of these stalls".
@@ -87,6 +86,13 @@ It also writes `build/win/monolith.exe`, the **view-only build**: it opens a map
 ## Working on monolith with Claude Code
 
 The repository carries everything Claude Code needs: `CLAUDE.md` (guard rails and hard rules, loaded in every session) and project skills in `.claude/skills/` (the workflows for map requests, map editing, assets and licences, engine code, lighting, benchmarking, the leak check, larger engine work, the request coordinator, and the project's history), plus the `/task-prompt` command. Claude loads the matching skill for the task by itself. Machine-specific settings go in your own `.claude/settings.local.json` (gitignored), e.g. `{"env": {"BLENDER": "/path/to/blender"}}` when Blender is not in `PATH`.
+
+## Found a bug or have a suggestion? 
+
+**Email us at [hi@notfound404.dev](mailto:hi@notfound404.dev)**
+
+> [!NOTE]
+> We don't use GitHub Issues because they tend to fill up with AI-generated spam. Email lets us focus on real reports from real people.
 
 ## Licence
 
