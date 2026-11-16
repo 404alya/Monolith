@@ -70,8 +70,8 @@ MapEditor
   failed[]                  steps that did not rebase (§5): shown in red, kept until dismissed
 ```
 
-`unsaved = (savedAt == undoCount && workHash == diskHash) ? 0 : |undoCount - savedAt|`
-(`-1`: every undo step counts). The HUD shows it whenever it is not 0, in every spectator mode.
+`unsaved = (savedAt < 0 ? undoCount : |undoCount - savedAt|) + lostCount + droppedUnsaved`, and 1 when that is 0 but
+`workHash != diskHash` (`MapEditUnsaved`; [code/mapedit.md](code/mapedit.md#undo--redo)). The HUD shows it whenever it is not 0, in every spectator mode.
 
 ## 3. The runtime's live-edit API (editor builds only)
 
@@ -396,7 +396,7 @@ the modal still runs for the rest.
 - `EDIT_ID_REMOVE`: drop the `id N` prefix of the selection's lines (§8.1).
 
 Edit script additions: `turn <yaw> [<pitch> <roll>] [local] [pivot x y z]`, `scale <f> | <fx>
-<fy> <fz> [pivot x y z]`, `size <sx> <sy> <sz>` (0 keeps an axis), `id remove`, and for
+<fy> <fz> [local] [pivot x y z]`, `size <sx> <sy> <sz>` (0 keeps an axis), `id remove`, and for
 `--edit-script` only: `save` (writes the --map file like CTRL+S) and `disk <file>` (replaces the
 map file with that file's bytes and runs the outside-change path, §5: the conflict test).
 
@@ -1580,7 +1580,7 @@ likewise. Nothing a game build needs for turned boxes is in an editor block.
 - Both targets, the examples and their test build without warnings; the runtime with and without
   `MONOLITH_EDITOR` / `MS_PATCHED_R3D`: 0 warnings; `build/tools/leakcheck`: OK.
 
-**Open:** `src/main.c`'s header comment and `docs/command-line.md` don't yet mention the turned-box
+**Open:** `src/main.c`'s header comment (now [code/main.md](code/main.md)) and `docs/command-line.md` don't yet mention the turned-box
 suffix of `--dump-boxes` / `--dump-scene` (both outside this step's files). The exported runtime has
 older comments outside the editor blocks that mention "editor builds" (the compiled-map reader and
 `InitData`, before this round).

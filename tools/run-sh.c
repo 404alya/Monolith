@@ -1,108 +1,9 @@
-// tools/run-sh.c -> build/run-sh.o: the shell every Claude session's commands run through. It behaves like
-// `bash -c` (same stdin, stdout, stderr, exit status, signals and background jobs) but first looks at the
-// command line and refuses the ordinary mistakes that break the guard rails (CLAUDE.md), with a message that
-// says why and what to use instead. A guard against mistakes, not a sandbox: the checks are simple on
-// purpose (the developer's call; "What it doesn't see" below). Written on nob.h with tools/tool.h.
-//
-// Modes:
-//   run-sh.o -c '<command line>' [arg0 [args...]]
-//       checks the line; when it passes, execs `bash -c '<command line>' [arg0 [args...]]` (always bash; a
-//       `cd` in it doesn't carry over to the next command). A refused line prints
-//           run-sh: refused: <rule>: <the word that broke it>; <what to do instead>
-//       on stderr and exits 126 without running anything. A benchmark takes the benchmark lock first.
-//   run-sh.o --check '<command line>'
-//       prints the decision ("run-sh: allowed" or the refusal line) and exits 0 or 126; runs nothing, no lock.
-//   run-sh.o --hook [--rewrite unprompted|all]
-//       the PreToolUse hook: the tool call's JSON on stdin, the answer on stdout ("The hook" below).
-//   run-sh.o --help
-// Every decision (all three modes) is appended to a log, one line each: <local time> TAB <mode> TAB
-// <decision> TAB <working directory> TAB <command, with \ \t \n escaped>.
-//
-// Environment: RUN_SH_DIR, the folder of the log and the benchmark lock (default <repo>/build/run-sh;
-// <dir>/log, <dir>/bench.lock; the unit test points it at its own folder). HOME for `~` and a bare `cd`.
-// __GL_SYNC_TO_VBLANK / vblank_mode: a benchmark needs one of them 0, in front of the command (also after
-// env), exported earlier in the line, or in run-sh.o's own environment.
-//
-// Exit codes: -c: the command's own status, 126 refused, 127 bash can't start; --check: 0 allowed, 126
-// refused; --hook: 0 with the answer, 2 when its input isn't the expected JSON (the call is then blocked);
-// 2 for a usage error.
-//
-// Callers: the PreToolUse hook in .claude/settings.json (`run-sh.o --hook` for every Bash and Monitor
-// call). Built by `./build.sh --tools run-sh`, then it rebuilds itself when this file, tools/tool.h or nob.h
-// is newer (ToolInit). tests/unit/run_sh_test.c (`./build.sh test run_sh`) checks every rule.
-//
-// How it reads a command (regions "Splitting" and "Checking a segment"):
-//   1. The line is cut into segments at ; & | && || newlines ( ) $( and backticks, but not inside '…' or
-//      "…". Each segment's words are split at blanks, quotes removed; a backslash keeps the next character;
-//      `# …` comments are dropped. `>` / `>>` (also `>file`, `2>`, `&>`) take the next word as a file the
-//      segment writes; `<`, `<<<` and `2>&1` are dropped; a here-document's body is skipped unread.
-//   2. The command word is the first word after a keyword in front (if then do else elif while until ! {),
-//      after any NAME=value words and after one wrapper with its options: sudo, env (and its NAME=value
-//      words), nice, nohup, timeout (and its duration), time, command, exec, xargs. Names compare by basename.
-//   3. `cd <dir>` sets the working directory of the segments after it (`cd` alone: $HOME; `cd -` or a dir
-//      with $ etc.: unknown). The end of a ( … ) or $( … ) restores the directory it started in.
-//
-// The rules (each enforces a CLAUDE.md line, named in the refusal):
-//   no deletion outside /tmp   ("Never delete with rm ... gio trash"; "temporary files you created under /tmp")
-//       rm / rmdir / unlink / shred with an operand that doesn't resolve under /tmp/ (never /tmp itself) or
-//       can't be checked (a word with $ ` * ? [ {, a relative path in an unknown directory); xargs feeding
-//       one of them; find -delete / -exec rm… with a root outside /tmp/; git clean without -n / --dry-run;
-//       git rm without --cached; git worktree remove outside /tmp/. gio trash is always allowed.
-//   no lost work               ("Never delete"; the work in the tree is the developer's)
-//       git reset --hard; git checkout with -- . -f --force; git restore without --staged; git stash drop|clear.
-//   no visible window          ("Never open a visible window")
-//       monolith (monolith, monolith.exe, also as wine's program; build.sh [--win] run; nob run) without
-//       --shot, --dump-boxes, --dump-scene, --dump-scene-diff, --dump-entities, --tri-report,
-//       --apply-edits, --inspect-model, --new-map, --export, --compile, --classify, --bake-surface or --bench
-//       --headless
-//       (old-monolith builds lack monolith's own guard); the plain examples (examples/build/linux/, win/;
-//       their test builds linux-test/, linux-lsan/ are fine); a word starting MONOLITH_ALLOW_WINDOW=, or
-//       export / declare / typeset / readonly / local MONOLITH_ALLOW_WINDOW….
-//   never touch the screen     ("Never switch the developer's workspace, desktop or window focus")
-//       i3-msg / swaymsg other than `-t get_*` without a payload; xdotool; wmctrl.
-//   benchmarks                 ("only --bench --headless, one at a time ... __GL_SYNC_TO_VBLANK=0 and --note")
-//       monolith's --bench without --headless, vsync off (Environment) or --note "<text>"; an example test
-//       build's --bench without vsync off; a second benchmark while one runs: -c takes an exclusive flock on
-//       <RUN_SH_DIR>/bench.lock through an fd without O_CLOEXEC before it execs bash, so bash and every child
-//       hold it until the run ends (also bench-export-ab). --check doesn't look at the lock.
-//   stay in the repo           ("Work only inside the repo, plus your own scratch and download folders")
-//       an absolute path (or ~) outside the repo and /tmp as a > / >> target, the last operand of cp / mv,
-//       or an operand of tee / mkdir / touch. /dev/null, /dev/std*, /dev/tty, /dev/fd/N are fine.
-//
-// "Under /tmp" (Resolve): the path made absolute against the working directory, then walked: each existing
-// component replaced by its realpath (links followed, `..` physical), the rest lexical. The last component
-// isn't followed (rm removes a link, not its target) unless the path ends in '/', or for find roots and git
-// worktree remove. The result must start with "/tmp/".
-//
-// What it doesn't see (these pass unchecked):
-//   - commands inside nested `bash -c '…'` / `eval` strings, interpreters (python3 -c, awk), scripts and
-//     compiled programs; a command word that only exists after expansion ($X, $(…));
-//   - wrappers other than the listed ones, or a second one (sudo env rm);
-//   - here-documents and here-strings (`bash <<EOF`: the body is skipped), text inside quotes ("$(rm x)");
-//   - destroying a file's content: `> file`, truncate, `cp /dev/null file`, sed -i;
-//   - two-step deletions: `mv <repo file> /tmp/x` then `rm /tmp/x`, or a link made and deleted through;
-//   - a cd that fails, or runs in a pipeline, after || or in the background (it still counts);
-//   - windows of other programs (xdg-open, image viewers), or monolith copied and run under another name.
-//
-// The hook (--hook): reads {"tool_name", "tool_input", "cwd", "permission_mode", ...}.
-//   - Bash or Monitor with a "command": checked with the JSON's "cwd". Refused: {"hookSpecificOutput":
-//     {"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"run-sh: refused:
-//     ..."}}, in every mode. Allowed: "updatedInput" is tool_input with "command" replaced by
-//     `<repo>/build/run-sh.o -c '<command>'` (' as '\''), every other field copied as written; no
-//     permissionDecision, so the normal permission flow continues on the rewritten command (Claude Code
-//     2.1.323 applies a bare updatedInput in every mode, also for Monitor, and matches allow rules against
-//     the rewritten command). The rewrite happens only in the modes that never ask (bypassPermissions,
-//     dontAsk, auto, or no / an unknown mode); in default, acceptEdits and plan an allowed command passes
-//     unchanged (empty answer: a rewritten one would miss the allow rules and every command would ask),
-//     unless `--rewrite all`. A command that already is exactly `<this run-sh.o> -c '…'` passes unchanged.
-//   - Monitor with "ws" and no command, and every other tool: passed (empty answer).
-//   - Input that isn't the expected JSON: exit 2 with the reason on stderr (blocks the call).
-//   <repo> is this program's repo: the hook runs $CLAUDE_PROJECT_DIR/build/run-sh.o, the main checkout's
-//   even in a worktree agent.
-//
-// Other limits: in the modes that only check, allowed commands run in the session's own shell (no lock, a
-// cd carries over, logged once as --hook). When tools/run-sh.c changed but doesn't compile, every call tries
-// again (a second or two) and then runs the old build with a warning. The log grows without limit.
+// tools/run-sh.c -> build/run-sh.o: the shell every Claude session's commands run through (the PreToolUse
+// hook in .claude/settings.json). It behaves like `bash -c` but first checks the command line against the
+// guard rails (CLAUDE.md) and refuses with "run-sh: refused: <rule>: <word>; <what to do instead>", exit 126.
+// A guard against ordinary mistakes, not a sandbox: the checks are simple on purpose. Every decision goes to
+// build/run-sh/log; a benchmark holds build/run-sh/bench.lock. Written on nob.h with tools/tool.h.
+// Reference: docs/code/run-sh.md
 
 #include "tool.h"
 
@@ -249,7 +150,7 @@ static char *Adopt(char *heap)
 
 // #region The decision
 
-// The rules' names, as the refusal line prints them (header comment: what each refuses and why).
+// The rules' names, as the refusal line prints them (docs/code/run-sh.md#the-rules: what each refuses and why).
 #define RULE_DELETE "no deletion outside /tmp"
 #define RULE_LOST   "no lost work"
 #define RULE_WINDOW "no visible window"
@@ -417,7 +318,7 @@ static void Redirection(Splitter *sp, char c)
     sp->next = '>';
 }
 
-// Cuts a command line into segments (header comment, "How it reads a command", step 1).
+// Cuts a command line into segments (docs/code/run-sh.md#how-it-reads-a-command, step 1).
 static Segments Split(const char *s)
 {
     Splitter sp = {.s = s, .next = 'w'};
@@ -525,7 +426,7 @@ static const char *Absolute(const char *cwd, const char *path)
     return Adopt(ToolNormalize(joined));
 }
 
-// Where a path really points (header comment, "How under /tmp is decided"): absolute against cwd, then
+// Where a path really points (docs/code/run-sh.md#how-under-tmp-is-decided): absolute against cwd, then
 // each existing component replaced by its realpath (symlinks followed, `..` physical), the rest lexical.
 // The last component is followed only when `followLast` or the path ends in '/'. NULL when the path is
 // relative and the working directory unknown.
@@ -673,7 +574,7 @@ static const char *const WRAPPER_VALUES[] = {"sudo -u", "sudo -g", "sudo -h", "s
 // The keywords that may stand in front of a command.
 static const char *const KEYWORDS[] = {"if", "then", "do", "else", "elif", "while", "until", "!", "{", NULL};
 
-// Finds a segment's command (header comment, "How it reads a command", step 2). False when the segment
+// Finds a segment's command (docs/code/run-sh.md#how-it-reads-a-command, step 2). False when the segment
 // has none (only assignments, `command -v`).
 static bool FindCommand(const Segment *seg, Command *c)
 {
@@ -992,7 +893,7 @@ static const char *StateDir(void)
     return d && d[0] ? d : Fmt("%s/build/run-sh", gToolRoot);
 }
 
-// Appends one line to the log (header comment: the format). A log that can't be written is skipped
+// Appends one line to the log (docs/code/run-sh.md#the-log: the format). A log that can't be written is skipped
 // silently: the command still runs (the log is for auditing, not a guard).
 static void LogDecision(const char *mode, const char *command, const char *cwd, const char *decision)
 {
@@ -1352,7 +1253,7 @@ static bool RewriteInMode(const char *mode, bool all)
     return !(strcmp(mode, "default") == 0 || strcmp(mode, "acceptEdits") == 0 || strcmp(mode, "plan") == 0);
 }
 
-// run-sh.o --hook [--rewrite all]: the PreToolUse answer for one tool call (header comment, "The hook").
+// run-sh.o --hook [--rewrite all]: the PreToolUse answer for one tool call (docs/code/run-sh.md#the-hook).
 static int Hook(bool rewriteAll)
 {
     // the tool call's JSON, all of stdin
@@ -1430,7 +1331,7 @@ static void Usage(void)
             "usage: run-sh.o -c '<command line>' [arg0 [args...]]   check, then run it with bash -c\n"
             "       run-sh.o --check '<command line>'             only print the decision\n"
             "       run-sh.o --hook [--rewrite unprompted|all]    the PreToolUse hook (JSON on stdin)\n"
-            "The rules, the log (build/run-sh/log) and the limits: the header comment of tools/run-sh.c.\n");
+            "The rules, the log (build/run-sh/log) and the limits: docs/code/run-sh.md.\n");
 }
 
 // Rebuilds itself when its source changed (ToolInit), then runs the mode its arguments name: -c, --check,

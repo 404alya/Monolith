@@ -10,7 +10,7 @@
 //      the rule's name in the refusal) must be the expected one. The table covers each rule's typical
 //      refusals and allowed cases, and the commands sessions run every day (the must-pass list); it has no
 //      rows for evasions (nested shells, interpreters, more wrappers): run-sh.o guards against ordinary
-//      mistakes and doesn't look for them (tools/run-sh.c, "What it doesn't see"). The sanitizer build's runs fail on any
+//      mistakes and doesn't look for them (docs/code/run-sh.md#what-it-doesnt-see). The sanitizer build's runs fail on any
 //      leak, UBSan or ASan report (LeakSanitizer's exit code differs from 0 / 126), so "zero leaks" covers
 //      run-sh.o itself. <scratch> in a case is a folder under /tmp/claude-<uid>/ (a session scratchpad's
 //      place), which holds a real symlink to the repo (link-to-repo) for the ways out of /tmp.
@@ -905,7 +905,15 @@ int main(int argc, char **argv)
     gScratch = Sprintf("/tmp/claude-%u/run-sh-test", (unsigned)getuid());
     MkdirP(gScratch);
     char *link = Sprintf("%s/link-to-repo", gScratch);
+    // A link left by an earlier run from another checkout (a worktree) points elsewhere: the cases
+    // that go out of the repo through it would then land inside that checkout. Make it point here.
     struct stat st;
+    char target[4096];
+    ssize_t len = lstat(link, &st) == 0 && S_ISLNK(st.st_mode) ? readlink(link, target, sizeof target - 1) : -1;
+    if (len >= 0) {
+        target[len] = '\0';
+        if (strcmp(target, gRoot) != 0) unlink(link);
+    }
     if (lstat(link, &st) != 0 && symlink(gRoot, link) != 0) {
         fprintf(stderr, "run_sh_test: can't make %s: %s\n", link, strerror(errno));
         return 1;

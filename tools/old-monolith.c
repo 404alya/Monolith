@@ -1,35 +1,7 @@
-// tools/old-monolith.c: build monolith as it was at an older commit; print the binary's path. It replaced
-// tools/old-monolith.sh (2026-11-13) with the same arguments, folders, log, messages and exit codes.
-//
-//   build/tools/old-monolith <commit>
-//
-// The migrate-map skill uses it to build a map format's last reader (the `last-reader:` lines of
-// .claude/skills/migrate-map/versions.md) and prove a migration against it.
-//
-// - <commit> is resolved in the main repository (the checkout that owns this repo's git objects, also when this
-//   program runs from a worktree). Folders are named after its first 12 hex digits.
-// - Reuse: if /tmp/monolith-old-<hash12>-<n>/ holds .old-monolith-done with the full hash and its
-//   build/linux/monolith exists, that binary is printed without building (the lowest such n wins).
-// - Otherwise: a fresh worktree /tmp/monolith-old-<hash12>-<n>/ (the first n with nothing of that name, nor a
-//   <n>.log), `git worktree add --detach`; submodules/r3d initialised at the commit's gitlink from the main
-//   checkout's objects when the commit has it as a submodule (no network; commits that vendor R3D as a plain tree
-//   need nothing); then the commit's own ./build.sh, with R3D_DIR unset (the commit's own R3D) and PATH led by
-//   the folder <worktree>/.old-monolith-shim, whose rm, rmdir and unlink are symlinks to this program: called by
-//   one of those names it only logs "<name> shim (not deleting): <arguments>" on stderr (which is the build
-//   log) and exits 0 (DeleteStandIn, before anything else). Log: /tmp/monolith-old-<hash12>-<n>.log. On success
-//   it writes .old-monolith-done.
-// - stdout: exactly one line on success, the binary's absolute path. Progress and errors go to stderr
-//   ("old-monolith: ..."); on failure: FAILED, the log, its last 20 lines, and always "left behind:".
-// - It never deletes anything (no rm, no git worktree remove / prune); it lists what it leaves.
-// - Old binaries may lack the agent-shell window guard: run them only with --dump-boxes, --dump-scene,
-//   --dump-scene-diff or --shot. Build one old commit at a time (a full R3D build each).
-//
-// Environment: PATH (the shims go in front of it for the build), R3D_DIR (removed for the build). No variables of
-// its own.
-// Exit codes: 0 built or reused; 1 usage; 2 no git history or commit not found;
-//             3 worktree or submodule setup failed; 4 the build failed (non-zero exit, or no binary).
-//             As rm / rmdir / unlink: always 0.
-// Called by: the migrate-map skill (and the developer); built by ./build.sh --tools.
+// tools/old-monolith.c -> build/tools/old-monolith <commit>: build monolith as it was at an older commit in
+// a worktree under /tmp and print the binary's path (one line on stdout). It never deletes anything; called
+// as rm / rmdir / unlink (the build's PATH shims) it only logs and exits 0. Used by the migrate-map skill.
+// Reference: docs/code/old-monolith.md
 
 #include "tool.h"
 

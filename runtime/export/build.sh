@@ -9,10 +9,11 @@
 #                              prebuilt/ has them
 #
 # This script is only the launcher: the build itself is the C program nob.c (written on nob.h,
-# next to it), whose header comment describes every step (the prebuilt libraries, the fallback
-# to building them from r3d/ with CMake, the map package copied next to the program) and what
-# a build needs. The launcher compiles nob.c into build/nob with ${CC:-cc} when that program is
-# missing or older than nob.c or nob.h, then replaces itself with it, passing on its arguments.
+# next to it). Every step (the prebuilt libraries, the fallback to building them from r3d/ with
+# CMake, the map package copied next to the program) and what a build needs are described in
+# monolith's docs/code/nob-export.md (in the monolith repository, not part of an export). The
+# launcher compiles nob.c into build/nob with ${CC:-cc} when that program is missing or older
+# than nob.c or nob.h, then replaces itself with it, passing on its arguments.
 #
 # -e: stop at the first failing command (the compile of nob.c); -u: an unset variable is an
 # error; -o pipefail: a failure inside a pipe counts (there is none, kept for safety).

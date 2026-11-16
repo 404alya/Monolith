@@ -1,35 +1,8 @@
 // tools/tool.h: what every small program in tools/ shares, header-only, on nob.h (src/vendor/nob/nob.h,
-// vendored unmodified). Each program is one file, tools/<name>.c, that includes this header first:
-//
-//     #include "tool.h"
-//
-//     int main(int argc, char **argv)
-//     {
-//         ToolInit(argv, "todo", "todo");  // name, repo root, rebuild itself when its source changed
-//         ...
-//     }
-//
-// `./build.sh --tools [name...]` (nob.c, region "Tools") compiles tools/<name>.c into build/tools/<name>
-// (tools/run-sh.c into build/run-sh.o); after that each program keeps itself current (ToolInit below), so
-// the docs and skills call build/tools/<name> directly.
-//
-// What is here, and why each piece exists:
-//   - ToolInit: the program's name for messages, the repo root found from the program's own path (as nob.c
-//     finds it from build/nob), and the rebuild of the program when tools/<name>.c, this header or nob.h is
-//     newer than the binary.
-//   - ToolSay / ToolErr / ToolDie: messages in the shell scripts' "<name>: ..." style, on stdout or stderr.
-//   - ToolRun / ToolCapture / ToolExec: running a command given as an argument list (nob's Nob_Cmd: no shell,
-//     so no quoting or word-splitting surprises) and getting its exit status, its output, or handing the
-//     process over to it. nob's own nob_cmd_run only answers true / false, and the scripts these programs
-//     replace read exit codes (monolith's exit 1 for a broken map, request-queue's 3 for a timeout).
-//   - ToolTrash: `gio trash <path>`, the repo's only way to delete (CLAUDE.md).
-//   - ToolProgram: the path of another program in build/tools/, with the message that says how to build it.
-//   - small shell equivalents the scripts used everywhere: ${VAR:-x} (ToolEnv), [[ a -nt b ]] (ToolNewer),
-//     mkdir -p (ToolMkdirP), $(cat f) (ToolReadTrimmed).
-//
-// Everything is `static inline` so a program that doesn't use a function gets no unused-function warning;
-// every program is a single translation unit, so nothing here needs a separate implementation switch.
-// Linux only, like the editor these tools serve (fork / exec, /proc/self/exe).
+// vendored unmodified). Each program is one file, tools/<name>.c, that includes this header first and calls
+// ToolInit, which also rebuilds the program when its source, this header or nob.h is newer. Everything is
+// `static inline`; Linux only.
+// Reference: docs/code/tool.md
 
 #ifndef MONOLITH_TOOL_H
 #define MONOLITH_TOOL_H

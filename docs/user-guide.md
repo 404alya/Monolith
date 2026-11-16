@@ -193,7 +193,7 @@ Every preset renders at full resolution: **Render scale** is a row you lower by 
 
 ## The view-only build
 
-On any system but Linux (the Windows build `build/win/monolith.exe`, also under wine: `./build.sh --win run --map maps/<name>`) monolith only opens a map to benchmark, look at and debug it. Walking and flying, the spectator camera and its viewpoints, 1–6, F1, F2 (its settings are saved; no Editor row), F3 / Shift+F3, F4, F5 (filter and fly to an id; no edits), F12, selecting with the mouse, hot reload of a map edited elsewhere (say over a shared folder) and the keybindings panel work. M, B, Enter, C, V, I, Ctrl+S, Ctrl+Z, F9, K / Ctrl+K, R and Delete / Ctrl+I in the id panel only show "view-only build: editing and requests need the Linux editor". The keybindings panel lists only the keys that work; the refused flags: [command-line.md](command-line.md#view-only-build).
+On any system but Linux (the Windows build `build/win/monolith.exe`, also under wine: `./build.sh --win run --map maps/<name>`) monolith only opens a map to benchmark, look at and debug it. Walking and flying, the spectator camera and its viewpoints, 1–6, F1, F2 (its settings are saved; no Editor row), F3 / Shift+F3, F4, F5 (filter and fly to an id; no edits), F12, selecting with the mouse, hot reload of a map edited elsewhere (say over a shared folder) and the keybindings panel work. M, B, Enter, C, V / Shift+V, I, Ctrl+S, Ctrl+Z / Ctrl+Y, F9, K / Shift+K / Ctrl+K / Ctrl+Shift+K, R and Delete / Shift+Delete / Ctrl+I in the id panel only show "view-only build: editing and requests need the Linux editor". The keybindings panel lists only the keys that work; the refused flags: [command-line.md](command-line.md#view-only-build).
 
 ## Making maps
 

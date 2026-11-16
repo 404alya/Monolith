@@ -1,48 +1,18 @@
 // monolith_scene -- load, draw, collide with and pick a monolith map package in any
 // raylib + R3D program. C11; depends only on raylib (raymath, rlgl) and R3D.
 //
-// monolith draws its maps with this same module, so a scene looks the same there and in
-// your game. It reads a map's compiled form, <name>.mapb (monolith's docs/compiled-map.md),
-// which monolith writes from the map's text (docs/map-format.md). Compile with
-// -DMS_PATCHED_R3D when building against monolith's patched R3D (see its patches.md);
-// without it the runtime uses upstream R3D APIs only (camera-fitted sun shadow, no depth
-// pre-pass toggle, no fog cache).
+// It reads a map's compiled form, <name>.mapb (monolith's docs/compiled-map.md). Compile with
+// -DMS_PATCHED_R3D against monolith's patched R3D; without it only upstream R3D APIs are used.
+// Scene contents are read-only for callers and MS_Unload frees everything the runtime owns; one
+// scene can be drawn at a time per R3D context.
+// Reference (overview, minimal use): monolith's docs/code/monolith_scene.md (in the monolith
+// repository, not part of an export).
 #ifdef MONOLITH_EDITOR
 //
-// Built with -DMONOLITH_EDITOR (the monolith editor, its tools and the examples), the module
-// also has the map text's parser (the format: the header comment of monolith_scene.c), the
-// compiler, hot reload, the map's source lines and the package / environment writers (the
-// sections marked "editor"). --export writes the module without them.
+// Built with -DMONOLITH_EDITOR, the module also has the map text's parser (the format: that
+// reference), the compiler, hot reload, the map's source lines and the package / environment
+// writers (the sections marked "editor"). --export writes the module without them.
 #endif
-//
-// Minimal use:
-//     InitWindow(w, h, "game");
-//     // optional: the map's shadow map size is an R3D init hint, so peek at it first
-//     MS_Scene *peek = MS_Load("maps/forest", &(MS_LoadOptions){ .noGpu = true });
-//     if (peek) { MS_SetInitHints(peek); MS_Unload(peek); }
-//     R3D_Init(w, h);
-//     MS_InitRenderer();                 // GL state the scene needs (depth clamp for the sun shadow)
-//     MS_Scene *scene = MS_Load("maps/forest", NULL);
-//     if (!scene) { puts(MS_LastError()); MS_ClearError(); return 1; }
-//     MS_ApplyEnvironment(scene);
-//     while (!WindowShouldClose()) {
-//         BeginDrawing();
-//             MS_Draw(scene, camera, (RenderTexture){ 0 });   // R3D_Begin .. R3D_End
-//         EndDrawing();
-//     }
-//     MS_Unload(scene);
-//     MS_ClearError();                   // frees the last error message, if any
-//
-// Inside your own R3D frame instead (your objects and the scene together):
-//     R3D_Begin(camera);
-//         MS_PushLights(scene, camera, aspect);
-//         MS_DrawGeometry(scene);
-//         ... your R3D_Draw* calls ...
-//     R3D_End();
-//
-// Scene contents are read-only for callers; everything the runtime owns (GPU resources,
-// parsed data, caches) is freed by MS_Unload. One scene can be drawn at a time per R3D
-// context (R3D's environment and fog bake are global).
 #ifndef MONOLITH_SCENE_H
 #define MONOLITH_SCENE_H
 

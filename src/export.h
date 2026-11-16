@@ -4,7 +4,7 @@
 
 #include "common.h"
 
-// Writes <outDir>/ (see the header comment of export.c): the package with every file the
+// Writes <outDir>/ (see docs/code/export.md): the package with every file the
 // scene references, the scene runtime without its editor parts, viewer.c, build.sh, the
 // bundled R3D, licences and README.md. Refuses a non-empty outDir
 // and writes nothing when a source is missing. Works with a noGpu scene (no window needed).

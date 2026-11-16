@@ -277,7 +277,7 @@ bool MapEditPreviewTransform(const EditOp *op, int cls, const MS_Transform *in, 
 
 // --apply-edits <script>: runs an edit script against the loaded scene (a noGpu load of
 // --map), writing the map file after every edit. Returns the exit status (0 = every line
-// worked). Format: the header comment of mapedit.c.
+// worked). Format: docs/code/mapedit.md#edit-script.
 int MapEditRunScript(const char *scriptPath);
 // --edit-script <script>: the same language applied live to the loaded GPU scene (working copy,
 // MS_EditSetText; nothing written unless the script says `save`), before --shot / --dump-* run.
