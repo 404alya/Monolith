@@ -81,11 +81,11 @@ static void BufAddC(Buf *b, const char *p)
 // printf into a new heap string (free it).
 __attribute__((format(printf, 1, 2))) static char *Sprintf(const char *fmt, ...)
 {
-    va_list args;
-    va_start(args, fmt);
+    va_list arg_ptr;
+    va_start(arg_ptr, fmt);
     char *s = NULL;
-    if (vasprintf(&s, fmt, args) < 0) s = NULL;
-    va_end(args);
+    if (vasprintf(&s, fmt, arg_ptr) < 0) s = NULL;
+    va_end(arg_ptr);
     if (!s) {
         fprintf(stderr, "run_sh_test: out of memory\n");
         exit(1);
@@ -214,12 +214,12 @@ __attribute__((format(printf, 2, 3))) static void Expect(bool ok, const char *fm
         return;
     }
     gFailed++;
-    va_list args;
-    va_start(args, fmt);
+    va_list arg_ptr;
+    va_start(arg_ptr, fmt);
     fprintf(stderr, "FAIL ");
-    vfprintf(stderr, fmt, args);
+    vfprintf(stderr, fmt, arg_ptr);
     fprintf(stderr, "\n");
-    va_end(args);
+    va_end(arg_ptr);
 }
 
 // mkdir -p for the scratch folders.

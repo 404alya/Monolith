@@ -476,10 +476,10 @@ static bool Identity(const TransformModal *t)
 static void RefuseF(MonoMsg *m, bool *first, const char *fmt, ...) MSG_PRINTF(3, 4);
 static void RefuseF(MonoMsg *m, bool *first, const char *fmt, ...)
 {
-    va_list ap;
-    va_start(ap, fmt);
-    char *text = MonoStrv(fmt, ap);
-    va_end(ap);
+    va_list arg_ptr;
+    va_start(arg_ptr, fmt);
+    char *text = MonoStrv(fmt, arg_ptr);
+    va_end(arg_ptr);
     MsgAppendf(m, "%s%s", *first ? "" : "; ", text ? text : "out of memory");
     free(text);
     *first = false;

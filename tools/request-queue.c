@@ -117,12 +117,12 @@ NOB_PRINTF_FORMAT(1, 2) static void Log(const char *fmt, ...)
     char *stamp = LocalTime("%Y-%m-%d %H:%M:%S", ts);
     Nob_String_Builder line = {0};
     nob_sb_appendf(&line, "%s.%03ld ", stamp, ts.tv_nsec / 1000000L);
-    va_list args;
-    va_start(args, fmt);
+    va_list arg_ptr;
+    va_start(arg_ptr, fmt);
     // nob_sb_appendf takes no va_list: format into a heap string first
     char *text = NULL;
-    if (vasprintf(&text, fmt, args) < 0) text = NULL;
-    va_end(args);
+    if (vasprintf(&text, fmt, arg_ptr) < 0) text = NULL;
+    va_end(arg_ptr);
     nob_sb_append_cstr(&line, text ? text : "");
     nob_da_append(&line, '\n');
     WriteFile(nob_temp_sprintf("%s/log", gCo), line.items, line.count, true);

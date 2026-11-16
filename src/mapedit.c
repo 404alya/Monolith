@@ -45,10 +45,10 @@ static void SbStr(StrBuf *b, const char *s) { SbAdd(b, s, (int)strlen(s)); }
 static void SbFmt(StrBuf *b, const char *fmt, ...)
 {
     char tmp[512];
-    va_list ap;
-    va_start(ap, fmt);
-    int n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
-    va_end(ap);
+    va_list arg_ptr;
+    va_start(arg_ptr, fmt);
+    int n = vsnprintf(tmp, sizeof(tmp), fmt, arg_ptr);
+    va_end(arg_ptr);
     SbAdd(b, tmp, n < (int)sizeof(tmp) ? n : (int)sizeof(tmp) - 1);
 }
 
@@ -543,10 +543,10 @@ typedef struct {
 static bool Refuse(Ctx *C, const char *fmt, ...) MSG_PRINTF(2, 3);
 static bool Refuse(Ctx *C, const char *fmt, ...)
 {
-    va_list ap;
-    va_start(ap, fmt);
-    char *why = MonoStrv(fmt, ap);
-    va_end(ap);
+    va_list arg_ptr;
+    va_start(arg_ptr, fmt);
+    char *why = MonoStrv(fmt, arg_ptr);
+    va_end(arg_ptr);
     MS_SetError("%s", why ? why : "out of memory");
     free(why);
     C->refused = true;
@@ -1201,10 +1201,10 @@ typedef struct {
 static void PatchWhat(Patch *P, const char *fmt, ...) MSG_PRINTF(2, 3);
 static void PatchWhat(Patch *P, const char *fmt, ...)
 {
-    va_list ap;
-    va_start(ap, fmt);
-    char *what = MonoStrv(fmt, ap);
-    va_end(ap);
+    va_list arg_ptr;
+    va_start(arg_ptr, fmt);
+    char *what = MonoStrv(fmt, arg_ptr);
+    va_end(arg_ptr);
     free(P->what);
     P->what = what;
 }

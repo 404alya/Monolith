@@ -24,10 +24,10 @@ void SpectatorMessageStatic(Spectator *s, const char *literal)
 
 void SpectatorMessagef(Spectator *s, const char *fmt, ...)
 {
-    va_list ap;
-    va_start(ap, fmt);
-    MsgSetv(&s->message, fmt, ap);
-    va_end(ap);
+    va_list arg_ptr;
+    va_start(arg_ptr, fmt);
+    MsgSetv(&s->message, fmt, arg_ptr);
+    va_end(arg_ptr);
     s->messageTime = 3.0f;
 }
 

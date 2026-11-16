@@ -108,10 +108,10 @@ void PanelStatusStatic(SettingsPanel *p, const char *literal, float seconds)
 
 void PanelStatusf(SettingsPanel *p, float seconds, const char *fmt, ...)
 {
-    va_list ap;
-    va_start(ap, fmt);
-    MsgSetv(&p->status, fmt, ap);
-    va_end(ap);
+    va_list arg_ptr;
+    va_start(arg_ptr, fmt);
+    MsgSetv(&p->status, fmt, arg_ptr);
+    va_end(arg_ptr);
     p->statusTime = seconds;
 }
 

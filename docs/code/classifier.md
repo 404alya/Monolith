@@ -6,7 +6,7 @@ Linux only, like the launcher (`waitpid`, `kill`): left out of the view-only bui
 
 ## The run
 
-The run is a plain child process started through nob.h (`src/vendor/nob/nob.h`, vendored unmodified; this is the only monolith source that implements it): a `Nob_Cmd` built with `nob_cmd_append` (an argument list: no shell, nothing quoted by hand) and `nob_cmd_run(.async, .stdin_path, .stdout_path, .stderr_path)`, so the call returns at once.
+The run is a plain child process started through nob.h (`src/vendor/nob/nob.h`, vendored, only its `va_list` names changed; this is the only monolith source that implements it): a `Nob_Cmd` built with `nob_cmd_append` (an argument list: no shell, nothing quoted by hand) and `nob_cmd_run(.async, .stdin_path, .stdout_path, .stderr_path)`, so the call returns at once.
 
 The request text is data: it goes to the child's stdin (`classifier-input.txt`), never on its command line.
 

@@ -19,24 +19,24 @@ static int gN = 0;            // the number of submits so far (names submit-<n>.
 // "  ok: <text>".
 NOB_PRINTF_FORMAT(1, 2) static void Ok(const char *fmt, ...)
 {
-    va_list args;
-    va_start(args, fmt);
+    va_list arg_ptr;
+    va_start(arg_ptr, fmt);
     fputs("  ok: ", stdout);
-    vprintf(fmt, args);
+    vprintf(fmt, arg_ptr);
     fputc('\n', stdout);
-    va_end(args);
+    va_end(arg_ptr);
     fflush(stdout);
 }
 
 // "  FAIL: <text>", and the test fails.
 NOB_PRINTF_FORMAT(1, 2) static void Bad(const char *fmt, ...)
 {
-    va_list args;
-    va_start(args, fmt);
+    va_list arg_ptr;
+    va_start(arg_ptr, fmt);
     fputs("  FAIL: ", stdout);
-    vprintf(fmt, args);
+    vprintf(fmt, arg_ptr);
     fputc('\n', stdout);
-    va_end(args);
+    va_end(arg_ptr);
     fflush(stdout);
     gFail = true;
 }
@@ -44,11 +44,11 @@ NOB_PRINTF_FORMAT(1, 2) static void Bad(const char *fmt, ...)
 // A plain line of output (the script's echo).
 NOB_PRINTF_FORMAT(1, 2) static void Echo(const char *fmt, ...)
 {
-    va_list args;
-    va_start(args, fmt);
-    vprintf(fmt, args);
+    va_list arg_ptr;
+    va_start(arg_ptr, fmt);
+    vprintf(fmt, arg_ptr);
     fputc('\n', stdout);
-    va_end(args);
+    va_end(arg_ptr);
     fflush(stdout);
 }
 

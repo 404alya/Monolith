@@ -26,12 +26,12 @@
 // Prints "profile: <message>" to stderr and exits 1 (the temporary folder is removed by atexit)
 static void Fail(const char *fmt, ...)
 {
-    va_list ap;
-    va_start(ap, fmt);
+    va_list arg_ptr;
+    va_start(arg_ptr, fmt);
     fputs("profile: ", stderr);
-    vfprintf(stderr, fmt, ap);
+    vfprintf(stderr, fmt, arg_ptr);
     fputc('\n', stderr);
-    va_end(ap);
+    va_end(arg_ptr);
     exit(1);
 }
 
@@ -58,14 +58,14 @@ static void *Alloc(size_t bytes)
 // A heap string formatted like printf
 static char *Format(const char *fmt, ...)
 {
-    va_list ap;
-    va_start(ap, fmt);
-    int n = vsnprintf(NULL, 0, fmt, ap);
-    va_end(ap);
+    va_list arg_ptr;
+    va_start(arg_ptr, fmt);
+    int n = vsnprintf(NULL, 0, fmt, arg_ptr);
+    va_end(arg_ptr);
     char *s = Alloc((size_t)n + 1);
-    va_start(ap, fmt);
-    vsnprintf(s, (size_t)n + 1, fmt, ap);
-    va_end(ap);
+    va_start(arg_ptr, fmt);
+    vsnprintf(s, (size_t)n + 1, fmt, arg_ptr);
+    va_end(arg_ptr);
     return s;
 }
 

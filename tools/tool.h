@@ -44,11 +44,11 @@ static const char *gToolSelf = NULL;
 // "<name>: <text>\n" on stdout (the scripts' plain `echo "name: ..."`).
 NOB_PRINTF_FORMAT(1, 2) static inline void ToolSay(const char *fmt, ...)
 {
-    va_list args;
-    va_start(args, fmt);
+    va_list arg_ptr;
+    va_start(arg_ptr, fmt);
     fprintf(stdout, "%s: ", gToolName);
-    vfprintf(stdout, fmt, args);
-    va_end(args);
+    vfprintf(stdout, fmt, arg_ptr);
+    va_end(arg_ptr);
     fputc('\n', stdout);
     fflush(stdout);
 }
@@ -57,11 +57,11 @@ NOB_PRINTF_FORMAT(1, 2) static inline void ToolSay(const char *fmt, ...)
 NOB_PRINTF_FORMAT(1, 2) static inline void ToolErr(const char *fmt, ...)
 {
     fflush(stdout);  // keep the order the two streams were written in when both go to one terminal or file
-    va_list args;
-    va_start(args, fmt);
+    va_list arg_ptr;
+    va_start(arg_ptr, fmt);
     fprintf(stderr, "%s: ", gToolName);
-    vfprintf(stderr, fmt, args);
-    va_end(args);
+    vfprintf(stderr, fmt, arg_ptr);
+    va_end(arg_ptr);
     fputc('\n', stderr);
     fflush(stderr);
 }
@@ -70,11 +70,11 @@ NOB_PRINTF_FORMAT(1, 2) static inline void ToolErr(const char *fmt, ...)
 NOB_PRINTF_FORMAT(2, 3) static inline void ToolDie(int code, const char *fmt, ...)
 {
     fflush(stdout);
-    va_list args;
-    va_start(args, fmt);
+    va_list arg_ptr;
+    va_start(arg_ptr, fmt);
     fprintf(stderr, "%s: ", gToolName);
-    vfprintf(stderr, fmt, args);
-    va_end(args);
+    vfprintf(stderr, fmt, arg_ptr);
+    va_end(arg_ptr);
     fputc('\n', stderr);
     exit(code);
 }

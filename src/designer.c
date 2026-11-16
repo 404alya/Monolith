@@ -651,10 +651,10 @@ void DesignerMessageStatic(Designer *d, bool error, const char *literal)
 
 void DesignerMessagef(Designer *d, bool error, const char *fmt, ...)
 {
-    va_list ap;
-    va_start(ap, fmt);
-    MsgSetv(&d->message, fmt, ap);
-    va_end(ap);
+    va_list arg_ptr;
+    va_start(arg_ptr, fmt);
+    MsgSetv(&d->message, fmt, arg_ptr);
+    va_end(arg_ptr);
     MessageShown(d, error);
 }
 

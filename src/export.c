@@ -65,10 +65,10 @@ static void FreePlan(Plan *P)
 static bool FileExistsf(const char *fmt, ...) MSG_PRINTF(1, 2);
 static bool FileExistsf(const char *fmt, ...)
 {
-    va_list ap;
-    va_start(ap, fmt);
-    char *path = MonoStrv(fmt, ap);
-    va_end(ap);
+    va_list arg_ptr;
+    va_start(arg_ptr, fmt);
+    char *path = MonoStrv(fmt, arg_ptr);
+    va_end(arg_ptr);
     bool found = path && FileExists(path);
     free(path);
     return found;
@@ -119,10 +119,10 @@ static void AddPkg(Plan *P, const char *root, const char *name, const char *rel,
 static void AddCopyf(Plan *P, const char *to, const char *fromFmt, ...) MSG_PRINTF(3, 4);
 static void AddCopyf(Plan *P, const char *to, const char *fromFmt, ...)
 {
-    va_list ap;
-    va_start(ap, fromFmt);
-    char *from = MonoStrv(fromFmt, ap);
-    va_end(ap);
+    va_list arg_ptr;
+    va_start(arg_ptr, fromFmt);
+    char *from = MonoStrv(fromFmt, arg_ptr);
+    va_end(arg_ptr);
     if (from) AddCopy(P, from, to, NULL);
     else { fprintf(stderr, "monolith: export: out of memory\n"); P->errors++; }
     free(from);

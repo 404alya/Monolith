@@ -13,25 +13,25 @@
 
 static const char OUT_OF_MEMORY[] = "out of memory";
 
-char *MonoStrv(const char *fmt, va_list ap)
+char *MonoStrv(const char *fmt, va_list arg_ptr)
 {
-    va_list count;
-    va_copy(count, ap);
-    int n = vsnprintf(NULL, 0, fmt, count);
-    va_end(count);
+    va_list arg_ptr_copy;
+    va_copy(arg_ptr_copy, arg_ptr);
+    int n = vsnprintf(NULL, 0, fmt, arg_ptr_copy);
+    va_end(arg_ptr_copy);
     if (n < 0) return NULL;
     char *s = MSG_MALLOC((size_t)n + 1);
     if (!s) return NULL;
-    vsnprintf(s, (size_t)n + 1, fmt, ap);
+    vsnprintf(s, (size_t)n + 1, fmt, arg_ptr);
     return s;
 }
 
 char *MonoStrf(const char *fmt, ...)
 {
-    va_list ap;
-    va_start(ap, fmt);
-    char *s = MonoStrv(fmt, ap);
-    va_end(ap);
+    va_list arg_ptr;
+    va_start(arg_ptr, fmt);
+    char *s = MonoStrv(fmt, arg_ptr);
+    va_end(arg_ptr);
     return s;
 }
 
@@ -51,25 +51,25 @@ void MsgSetStatic(MonoMsg *m, const char *literal)
     m->text = literal;
 }
 
-void MsgSetv(MonoMsg *m, const char *fmt, va_list ap)
+void MsgSetv(MonoMsg *m, const char *fmt, va_list arg_ptr)
 {
-    Take(m, MonoStrv(fmt, ap));
+    Take(m, MonoStrv(fmt, arg_ptr));
 }
 
 void MsgSetf(MonoMsg *m, const char *fmt, ...)
 {
-    va_list ap;
-    va_start(ap, fmt);
-    MsgSetv(m, fmt, ap);
-    va_end(ap);
+    va_list arg_ptr;
+    va_start(arg_ptr, fmt);
+    MsgSetv(m, fmt, arg_ptr);
+    va_end(arg_ptr);
 }
 
 void MsgAppendf(MonoMsg *m, const char *fmt, ...)
 {
-    va_list ap;
-    va_start(ap, fmt);
-    char *tail = MonoStrv(fmt, ap);
-    va_end(ap);
+    va_list arg_ptr;
+    va_start(arg_ptr, fmt);
+    char *tail = MonoStrv(fmt, arg_ptr);
+    va_end(arg_ptr);
     if (!tail) { Take(m, NULL); return; }
     const char *head = MsgText(m);
     size_t a = strlen(head), b = strlen(tail);

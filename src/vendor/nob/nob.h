@@ -229,7 +229,7 @@ typedef enum {
 // Any messages with the level below nob_minimal_log_level are going to be suppressed by the nob_default_log_handler.
 extern Nob_Log_Level nob_minimal_log_level;
 
-typedef void (Nob_Log_Handler)(Nob_Log_Level level, const char *fmt, va_list args);
+typedef void (Nob_Log_Handler)(Nob_Log_Level level, const char *fmt, va_list arg_ptr);
 NOB_DEPRECATED("Uncapitalized nob_log_handler type is deprecated. Use Nob_Log_Handler instead. It's just when we were releasing the log handler feature we forgot that we had a convention that all the types must be capitalized like that. Sorry about it!")
 typedef Nob_Log_Handler nob_log_handler;
 
@@ -753,7 +753,7 @@ NOBDEF char *nob_temp_strdup(const char *cstr);
 NOBDEF char *nob_temp_strndup(const char *cstr, size_t size);
 NOBDEF void *nob_temp_alloc(size_t size);
 NOBDEF char *nob_temp_sprintf(const char *format, ...) NOB_PRINTF_FORMAT(1, 2);
-NOBDEF char *nob_temp_vsprintf(const char *format, va_list ap);
+NOBDEF char *nob_temp_vsprintf(const char *format, va_list arg_ptr);
 // nob_temp_reset() - Resets the entire temporary storage to 0.
 //
 // It is generally not recommended to call this function ever. What you usually want to do is let's say you have a loop,
@@ -1078,10 +1078,10 @@ NOBDEF char *nob_win32_error_message(DWORD err) {
 NOBDEF void nob__panicf(const char *file, int line, const char *label, const char *format, ...)
 {
     fprintf(stderr, "%s:%d: %s: ", file, line, label);
-    va_list args;
-    va_start(args, format);
-    vfprintf(stderr, format, args);
-    va_end(args);
+    va_list arg_ptr;
+    va_start(arg_ptr, format);
+    vfprintf(stderr, format, arg_ptr);
+    va_end(arg_ptr);
     fprintf(stderr, "\n");
     abort();
 }
@@ -1100,14 +1100,14 @@ NOBDEF void nob__go_rebuild_urself(int argc, char **argv, const char *source_pat
 
     Nob_File_Paths source_paths = {0};
     nob_da_append(&source_paths, source_path);
-    va_list args;
-    va_start(args, source_path);
+    va_list arg_ptr;
+    va_start(arg_ptr, source_path);
     for (;;) {
-        const char *path = va_arg(args, const char*);
+        const char *path = va_arg(arg_ptr, const char*);
         if (path == NULL) break;
         nob_da_append(&source_paths, path);
     }
-    va_end(args);
+    va_end(arg_ptr);
 
     int rebuild_is_needed = nob_needs_rebuild(binary_path, source_paths.items, source_paths.count);
     if (rebuild_is_needed < 0) exit(1); // error
@@ -1979,7 +1979,7 @@ NOBDEF Nob_Log_Handler *nob_get_log_handler(void)
     return nob__log_handler;
 }
 
-NOBDEF void nob_default_log_handler(Nob_Log_Level level, const char *fmt, va_list args)
+NOBDEF void nob_default_log_handler(Nob_Log_Level level, const char *fmt, va_list arg_ptr)
 {
     if (level < nob_minimal_log_level) return;
 
@@ -2000,19 +2000,19 @@ NOBDEF void nob_default_log_handler(Nob_Log_Level level, const char *fmt, va_lis
     }
 
     size_t mark = nob_temp_save();
-    const char *msg = nob_temp_vsprintf(fmt, args);
+    const char *msg = nob_temp_vsprintf(fmt, arg_ptr);
     fprintf(stderr, "%s%s\n", prefix, msg);
     nob_temp_rewind(mark);
 }
 
-NOBDEF void nob_null_log_handler(Nob_Log_Level level, const char *fmt, va_list args)
+NOBDEF void nob_null_log_handler(Nob_Log_Level level, const char *fmt, va_list arg_ptr)
 {
     NOB_UNUSED(level);
     NOB_UNUSED(fmt);
-    NOB_UNUSED(args);
+    NOB_UNUSED(arg_ptr);
 }
 
-NOBDEF void nob_cancer_log_handler(Nob_Log_Level level, const char *fmt, va_list args)
+NOBDEF void nob_cancer_log_handler(Nob_Log_Level level, const char *fmt, va_list arg_ptr)
 {
     if (level < nob_minimal_log_level) return;
 
@@ -2033,17 +2033,17 @@ NOBDEF void nob_cancer_log_handler(Nob_Log_Level level, const char *fmt, va_list
     }
 
     size_t mark = nob_temp_save();
-    const char *msg = nob_temp_vsprintf(fmt, args);
+    const char *msg = nob_temp_vsprintf(fmt, arg_ptr);
     fprintf(stderr, "%s%s\n", prefix, msg);
     nob_temp_rewind(mark);
 }
 
 NOBDEF void nob_log(Nob_Log_Level level, const char *fmt, ...)
 {
-    va_list args;
-    va_start(args, fmt);
-    nob__log_handler(level, fmt, args);
-    va_end(args);
+    va_list arg_ptr;
+    va_start(arg_ptr, fmt);
+    nob__log_handler(level, fmt, arg_ptr);
+    va_end(arg_ptr);
 }
 
 NOBDEF bool nob_dir_entry_open(const char *dir_path, Nob_Dir_Entry *dir)
@@ -2413,30 +2413,30 @@ NOBDEF void *nob_temp_alloc(size_t requested_size)
     return result;
 }
 
-NOBDEF char *nob_temp_vsprintf(const char *format, va_list ap)
+NOBDEF char *nob_temp_vsprintf(const char *format, va_list arg_ptr)
 {
-    va_list args;
-    va_copy(args, ap);
-    int n = vsnprintf(NULL, 0, format, args);
-    va_end(args);
+    va_list arg_ptr_copy;
+    va_copy(arg_ptr_copy, arg_ptr);
+    int n = vsnprintf(NULL, 0, format, arg_ptr_copy);
+    va_end(arg_ptr_copy);
 
     NOB_ASSERT(n >= 0);
     char *result = (char*)nob_temp_alloc(n + 1);
     NOB_ASSERT(result != NULL && "Extend the size of the temporary allocator");
     // TODO: use proper arenas for the temporary allocator;
-    va_copy(args, ap);
-    vsnprintf(result, n + 1, format, args);
-    va_end(args);
+    va_copy(arg_ptr_copy, arg_ptr);
+    vsnprintf(result, n + 1, format, arg_ptr_copy);
+    va_end(arg_ptr_copy);
 
     return result;
 }
 
 NOBDEF char *nob_temp_sprintf(const char *format, ...)
 {
-    va_list args;
-    va_start(args, format);
-    char *result = nob_temp_vsprintf(format, args);
-    va_end(args);
+    va_list arg_ptr;
+    va_start(arg_ptr, format);
+    char *result = nob_temp_vsprintf(format, arg_ptr);
+    va_end(arg_ptr);
     return result;
 }
 
@@ -2604,20 +2604,20 @@ defer:
 
 NOBDEF int nob_sb_appendf(Nob_String_Builder *sb, const char *fmt, ...)
 {
-    va_list args;
+    va_list arg_ptr;
 
-    va_start(args, fmt);
-    int n = vsnprintf(NULL, 0, fmt, args);
-    va_end(args);
+    va_start(arg_ptr, fmt);
+    int n = vsnprintf(NULL, 0, fmt, arg_ptr);
+    va_end(arg_ptr);
 
     // NOTE: the new_capacity needs to be +1 because of the null terminator.
     // However, further below we increase sb->count by n, not n + 1.
     // This is because we don't want the sb to include the null terminator. The user can always sb_append_null() if they want it
     nob_da_reserve(sb, sb->count + n + 1);
     char *dest = sb->items + sb->count;
-    va_start(args, fmt);
-    vsnprintf(dest, n+1, fmt, args);
-    va_end(args);
+    va_start(arg_ptr, fmt);
+    vsnprintf(dest, n+1, fmt, arg_ptr);
+    va_end(arg_ptr);
 
     sb->count += n;
 

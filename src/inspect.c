@@ -124,12 +124,12 @@ static void JsonAssetString(const char *json, const char *key, char *out, int ou
 static int warnings;
 static void Warn(const char *fmt, ...)
 {
-    va_list ap;
-    va_start(ap, fmt);
+    va_list arg_ptr;
+    va_start(arg_ptr, fmt);
     printf("  - ");
-    vprintf(fmt, ap);
+    vprintf(fmt, arg_ptr);
     printf("\n");
-    va_end(ap);
+    va_end(arg_ptr);
     warnings++;
 }
 
@@ -138,14 +138,14 @@ typedef struct { char *s; int len, cap; } WarnText;
 
 static void WarnAdd(WarnText *w, const char *fmt, ...)
 {
-    va_list ap;
-    va_start(ap, fmt);
-    int n = vsnprintf(NULL, 0, fmt, ap);
-    va_end(ap);
+    va_list arg_ptr;
+    va_start(arg_ptr, fmt);
+    int n = vsnprintf(NULL, 0, fmt, arg_ptr);
+    va_end(arg_ptr);
     if (n < 0 || !MS_RESERVE(w->s, w->cap, w->len + n + 1)) return;
-    va_start(ap, fmt);
-    vsnprintf(w->s + w->len, n + 1, fmt, ap);
-    va_end(ap);
+    va_start(arg_ptr, fmt);
+    vsnprintf(w->s + w->len, n + 1, fmt, arg_ptr);
+    va_end(arg_ptr);
     w->len += n;
 }
 

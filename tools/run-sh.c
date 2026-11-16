@@ -126,14 +126,14 @@ static char *DupC(const char *p)
 // printf into the arena (any length).
 NOB_PRINTF_FORMAT(1, 2) static char *Fmt(const char *fmt, ...)
 {
-    va_list args;
-    va_start(args, fmt);
-    int n = vsnprintf(NULL, 0, fmt, args);
-    va_end(args);
+    va_list arg_ptr;
+    va_start(arg_ptr, fmt);
+    int n = vsnprintf(NULL, 0, fmt, arg_ptr);
+    va_end(arg_ptr);
     char *d = Alloc((size_t)(n < 0 ? 0 : n) + 1);
-    va_start(args, fmt);
-    vsnprintf(d, (size_t)n + 1, fmt, args);
-    va_end(args);
+    va_start(arg_ptr, fmt);
+    vsnprintf(d, (size_t)n + 1, fmt, arg_ptr);
+    va_end(arg_ptr);
     return d;
 }
 

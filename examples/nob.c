@@ -55,7 +55,7 @@ static Timings gTimings;
 static uint64_t gStartNanos;  // when main() started, for the whole run's wall time in the summary
 
 // nob's log handler: "[INFO] ..." to the terminal's stdout, warnings and errors to its stderr.
-static void LogHandler(Nob_Log_Level level, const char *fmt, va_list args)
+static void LogHandler(Nob_Log_Level level, const char *fmt, va_list arg_ptr)
 {
     FILE *f = level == NOB_INFO ? gOut : gErr;
     switch (level) {
@@ -65,7 +65,7 @@ static void LogHandler(Nob_Log_Level level, const char *fmt, va_list args)
     case NOB_NO_LOGS: return;
     default:          NOB_UNREACHABLE("Nob_Log_Level");
     }
-    vfprintf(f, fmt, args);
+    vfprintf(f, fmt, arg_ptr);
     fprintf(f, "\n");
     fflush(f);
 }
@@ -73,10 +73,10 @@ static void LogHandler(Nob_Log_Level level, const char *fmt, va_list args)
 // Our progress lines (the script's `echo`s: "built: ...", "compiled: ..."): to the terminal's stdout.
 NOB_PRINTF_FORMAT(1, 2) static void Say(const char *fmt, ...)
 {
-    va_list args;
-    va_start(args, fmt);
-    vfprintf(gOut, fmt, args);
-    va_end(args);
+    va_list arg_ptr;
+    va_start(arg_ptr, fmt);
+    vfprintf(gOut, fmt, arg_ptr);
+    va_end(arg_ptr);
     fputc('\n', gOut);
     fflush(gOut);
 }
@@ -84,11 +84,11 @@ NOB_PRINTF_FORMAT(1, 2) static void Say(const char *fmt, ...)
 // Error lines (the script's `echo ... >&2`): to the terminal's stderr, with the program's prefix.
 NOB_PRINTF_FORMAT(1, 2) static void SayErr(const char *fmt, ...)
 {
-    va_list args;
-    va_start(args, fmt);
+    va_list arg_ptr;
+    va_start(arg_ptr, fmt);
     fprintf(gErr, "build.sh: examples: ");
-    vfprintf(gErr, fmt, args);
-    va_end(args);
+    vfprintf(gErr, fmt, arg_ptr);
+    va_end(arg_ptr);
     fputc('\n', gErr);
     fflush(gErr);
 }

@@ -622,14 +622,14 @@ static _Thread_local bool errOom;
 // path NULL: no prefix) + the printf-formatted message. The new text is built in a new string
 // before the old one is freed, so arguments may point into the last error itself. Out of memory:
 // the last error becomes "out of memory" (never half a message).
-static void ErrPutV(bool append, const char *path, int line, const char *fmt, va_list ap)
+static void ErrPutV(bool append, const char *path, int line, const char *fmt, va_list arg_ptr)
 {
     size_t keep = append && !errOom ? errLen : 0;
     int pre = !path ? 0 : line > 0 ? snprintf(NULL, 0, "%s:%d: ", path, line) : snprintf(NULL, 0, "%s: ", path);
-    va_list measure;
-    va_copy(measure, ap);
-    int body = vsnprintf(NULL, 0, fmt, measure);
-    va_end(measure);
+    va_list arg_ptr_copy;
+    va_copy(arg_ptr_copy, arg_ptr);
+    int body = vsnprintf(NULL, 0, fmt, arg_ptr_copy);
+    va_end(arg_ptr_copy);
     if (pre < 0) pre = 0;       // (an encoding error: nothing to show; %ls is never used)
     if (body < 0) body = 0;
 
@@ -646,7 +646,7 @@ static void ErrPutV(bool append, const char *path, int line, const char *fmt, va
     s[keep] = '\0';
     if (pre && line > 0) snprintf(s + keep, (size_t)pre + 1, "%s:%d: ", path, line);
     else if (pre) snprintf(s + keep, (size_t)pre + 1, "%s: ", path);
-    if (body) vsnprintf(s + keep + pre, (size_t)body + 1, fmt, ap);
+    if (body) vsnprintf(s + keep + pre, (size_t)body + 1, fmt, arg_ptr);
     s[total] = '\0';
     free(errText);
     errText = s;
@@ -659,10 +659,10 @@ static void ErrPutV(bool append, const char *path, int line, const char *fmt, va
 static bool ErrSet(const char *fmt, ...) MS_PRINTF_LIKE(1, 2);
 static bool ErrSet(const char *fmt, ...)
 {
-    va_list ap;
-    va_start(ap, fmt);
-    ErrPutV(false, NULL, 0, fmt, ap);
-    va_end(ap);
+    va_list arg_ptr;
+    va_start(arg_ptr, fmt);
+    ErrPutV(false, NULL, 0, fmt, arg_ptr);
+    va_end(arg_ptr);
     return false;
 }
 
@@ -670,10 +670,10 @@ static bool ErrSet(const char *fmt, ...)
 static bool ErrAppendF(const char *fmt, ...) MS_PRINTF_LIKE(1, 2);
 static bool ErrAppendF(const char *fmt, ...)
 {
-    va_list ap;
-    va_start(ap, fmt);
-    ErrPutV(true, NULL, 0, fmt, ap);
-    va_end(ap);
+    va_list arg_ptr;
+    va_start(arg_ptr, fmt);
+    ErrPutV(true, NULL, 0, fmt, arg_ptr);
+    va_end(arg_ptr);
     return false;
 }
 
@@ -701,19 +701,19 @@ void MS_ClearError(void)
 #ifdef MONOLITH_EDITOR
 bool MS_SetError(const char *fmt, ...)
 {
-    va_list ap;
-    va_start(ap, fmt);
-    ErrPutV(false, NULL, 0, fmt, ap);
-    va_end(ap);
+    va_list arg_ptr;
+    va_start(arg_ptr, fmt);
+    ErrPutV(false, NULL, 0, fmt, arg_ptr);
+    va_end(arg_ptr);
     return false;
 }
 
 bool MS_AppendError(const char *fmt, ...)
 {
-    va_list ap;
-    va_start(ap, fmt);
-    ErrPutV(true, NULL, 0, fmt, ap);
-    va_end(ap);
+    va_list arg_ptr;
+    va_start(arg_ptr, fmt);
+    ErrPutV(true, NULL, 0, fmt, arg_ptr);
+    va_end(arg_ptr);
     return false;
 }
 #endif
@@ -1249,10 +1249,10 @@ bool MS_EnvKeyRange(const char *key, float *lo, float *hi, bool *loOpen)
 static bool ErrAt(const char *path, int line, const char *fmt, ...) MS_PRINTF_LIKE(3, 4);
 static bool ErrAt(const char *path, int line, const char *fmt, ...)
 {
-    va_list ap;
-    va_start(ap, fmt);
-    ErrPutV(false, path, line, fmt, ap);
-    va_end(ap);
+    va_list arg_ptr;
+    va_start(arg_ptr, fmt);
+    ErrPutV(false, path, line, fmt, arg_ptr);
+    va_end(arg_ptr);
     return false;
 }
 
@@ -2161,10 +2161,10 @@ typedef struct {
 // last error (ErrPutV); returns false, so a check can `return FailF(…)`
 static bool FailF(Parser *P, const char *fmt, ...)
 {
-    va_list ap;
-    va_start(ap, fmt);
-    ErrPutV(false, P->path, P->line, fmt, ap);
-    va_end(ap);
+    va_list arg_ptr;
+    va_start(arg_ptr, fmt);
+    ErrPutV(false, P->path, P->line, fmt, arg_ptr);
+    va_end(arg_ptr);
     return false;
 }
 
@@ -4099,10 +4099,10 @@ typedef struct {
 // `return CmFail(…)`
 static bool CmFail(CmReader *R, const char *fmt, ...)
 {
-    va_list ap;
-    va_start(ap, fmt);
-    ErrPutV(false, R->d->path, 0, fmt, ap);
-    va_end(ap);
+    va_list arg_ptr;
+    va_start(arg_ptr, fmt);
+    ErrPutV(false, R->d->path, 0, fmt, arg_ptr);
+    va_end(arg_ptr);
     return false;
 }
 

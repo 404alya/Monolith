@@ -96,7 +96,7 @@ monolith/
 │   ├── ui.c, font_*.h           # editor UI: embedded fonts, type scale, colour tokens, text / panel / key-hint helpers (look: ui-design.md)
 │   ├── png.c                    # PNG writer for --shot and request images (zlib level 1, ~4x faster than ExportImage)
 │   ├── glibc_compat.c           # Linux only: old glibc symbol versions (build and run)
-│   └── vendor/                  # third-party code, unmodified: xatlas/ (C++, MIT; the paint unwrap), nob/ (nob.h, the build program's and the tools' library, and in monolith `classifier.c`'s process start; MIT / public domain)
+│   └── vendor/                  # third-party code: xatlas/ (unmodified C++, MIT; the paint unwrap), nob/ (nob.h, only its `va_list` names changed; the build program's and the tools' library, and in monolith `classifier.c`'s process start; MIT / public domain)
 ├── submodules/r3d/              # vendored R3D; local fixes in patches.md
 └── submodules/simple-todo/      # git submodule: Simple-Todo, the task lists' CLI (prebuilt todo.o, x86-64 Linux; not part of the build or an export)
 ```

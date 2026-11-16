@@ -55,17 +55,17 @@ static pid_t gamePid;
 // In the forked child (an exec that failed: nob logs, then calls exit(1)) the message goes to the
 // child's stderr (classifier.log) and the child ends here with _exit(1), so the editor's atexit
 // handlers never run in a copy of the editor's process.
-static void NobLog(Nob_Log_Level level, const char *fmt, va_list args)
+static void NobLog(Nob_Log_Level level, const char *fmt, va_list arg_ptr)
 {
     if (level == NOB_NO_LOGS) return;
     if (getpid() != gamePid) {
         fputs("monolith: classifier: ", stderr);
-        vfprintf(stderr, fmt, args);
+        vfprintf(stderr, fmt, arg_ptr);
         fputc('\n', stderr);
         if (level == NOB_ERROR) _exit(1);
         return;
     }
-    char *text = MonoStrv(fmt, args);
+    char *text = MonoStrv(fmt, arg_ptr);
     TraceLog(level == NOB_INFO ? LOG_INFO : LOG_WARNING, "monolith: classifier: %s", text ? text : "(out of memory)");
     free(text);
 }
@@ -84,10 +84,10 @@ static void Finish(Classifier *c, bool ok, int tier)
 static void Fail(Classifier *c, const char *fmt, ...) MSG_PRINTF(2, 3);
 static void Fail(Classifier *c, const char *fmt, ...)
 {
-    va_list ap;
-    va_start(ap, fmt);
-    char *why = MonoStrv(fmt, ap);
-    va_end(ap);
+    va_list arg_ptr;
+    va_start(arg_ptr, fmt);
+    char *why = MonoStrv(fmt, arg_ptr);
+    va_end(arg_ptr);
     MsgSetf(&c->reason, "AI classifier failed (%s)", why ? why : "out of memory");
     free(why);
     Finish(c, false, 1);

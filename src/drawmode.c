@@ -47,10 +47,10 @@ static void SayStatic(DrawMode *dm, bool error, const char *literal)
 static void Sayf(DrawMode *dm, bool error, const char *fmt, ...) MSG_PRINTF(3, 4);
 static void Sayf(DrawMode *dm, bool error, const char *fmt, ...)
 {
-    va_list ap;
-    va_start(ap, fmt);
-    MsgSetv(&dm->message, fmt, ap);
-    va_end(ap);
+    va_list arg_ptr;
+    va_start(arg_ptr, fmt);
+    MsgSetv(&dm->message, fmt, arg_ptr);
+    va_end(arg_ptr);
     SayShown(dm, error);
 }
 
@@ -74,10 +74,10 @@ static void SbStr(Sb *b, const char *s) { SbAdd(b, s, (int)strlen(s)); }
 static void SbFmt(Sb *b, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 static void SbFmt(Sb *b, const char *fmt, ...)
 {
-    va_list ap;
-    va_start(ap, fmt);
-    char *piece = MonoStrv(fmt, ap);     // (sized to fit: a long path or cell is never cut)
-    va_end(ap);
+    va_list arg_ptr;
+    va_start(arg_ptr, fmt);
+    char *piece = MonoStrv(fmt, arg_ptr);     // (sized to fit: a long path or cell is never cut)
+    va_end(arg_ptr);
     if (!piece) { b->oom = true; return; }
     SbStr(b, piece);
     free(piece);
@@ -1824,11 +1824,11 @@ static bool UnwrapUsed(const DrawUnwrap *u)
 static void SaveFailed(bool *failed, char **text, const char *fmt, ...) MSG_PRINTF(3, 4);
 static void SaveFailed(bool *failed, char **text, const char *fmt, ...)
 {
-    va_list ap;
-    va_start(ap, fmt);
+    va_list arg_ptr;
+    va_start(arg_ptr, fmt);
     free(*text);
-    *text = MonoStrv(fmt, ap);
-    va_end(ap);
+    *text = MonoStrv(fmt, arg_ptr);
+    va_end(arg_ptr);
     *failed = true;
 }
 

@@ -37,10 +37,10 @@ static void SayStatic(EditMode *m, bool error, const char *literal)
 static void Sayf(EditMode *m, bool error, const char *fmt, ...) MSG_PRINTF(3, 4);
 static void Sayf(EditMode *m, bool error, const char *fmt, ...)
 {
-    va_list ap;
-    va_start(ap, fmt);
-    MsgSetv(&m->message, fmt, ap);
-    va_end(ap);
+    va_list arg_ptr;
+    va_start(arg_ptr, fmt);
+    MsgSetv(&m->message, fmt, arg_ptr);
+    va_end(arg_ptr);
     SayShown(m, error);
 }
 

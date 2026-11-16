@@ -1,6 +1,6 @@
 # `tools/tool.h`: what the tools share
 
-`tools/tool.h` is what every small program in `tools/` shares. It is header-only, on `nob.h` (`src/vendor/nob/nob.h`, vendored unmodified). Overview of all the tools: [architecture.md §8](../architecture.md#8-tools).
+`tools/tool.h` is what every small program in `tools/` shares. It is header-only, on `nob.h` (`src/vendor/nob/nob.h`, vendored, only its `va_list` names changed). Overview of all the tools: [architecture.md §8](../architecture.md#8-tools).
 
 ## A program
 

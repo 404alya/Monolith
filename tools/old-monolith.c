@@ -75,11 +75,11 @@ static void TailToStderr(const char *path, size_t lines)
 NOB_PRINTF_FORMAT(2, 3) static void Fail(int code, const char *fmt, ...)
 {
     // the reason as one heap string (no length limit: it may hold paths)
-    va_list args;
-    va_start(args, fmt);
+    va_list arg_ptr;
+    va_start(arg_ptr, fmt);
     char *reason = NULL;
-    if (vasprintf(&reason, fmt, args) < 0) reason = NULL;
-    va_end(args);
+    if (vasprintf(&reason, fmt, arg_ptr) < 0) reason = NULL;
+    va_end(arg_ptr);
     ToolErr("FAILED: %s", reason ? reason : "(out of memory)");
     struct stat st;
     if (gLog && stat(gLog, &st) == 0 && S_ISREG(st.st_mode)) {

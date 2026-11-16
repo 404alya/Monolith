@@ -37,12 +37,12 @@
 // nob's own messages: errors and warnings to stderr, as "[ERROR] ..." / "[WARNING] ...". Its "[INFO]" lines
 // are dropped (this program prints its own progress), and so is "command exited with exit code N" after a
 // command that failed: the command has printed why, and the step that ran it says what happens next.
-static void LogHandler(Nob_Log_Level level, const char *fmt, va_list args)
+static void LogHandler(Nob_Log_Level level, const char *fmt, va_list arg_ptr)
 {
     if (level == NOB_INFO || level == NOB_NO_LOGS) return;
     if (strcmp(fmt, "command exited with exit code %d") == 0) return;
     fprintf(stderr, level == NOB_WARNING ? "[WARNING] " : "[ERROR] ");
-    vfprintf(stderr, fmt, args);
+    vfprintf(stderr, fmt, arg_ptr);
     fprintf(stderr, "\n");
     fflush(stderr);
 }
@@ -50,10 +50,10 @@ static void LogHandler(Nob_Log_Level level, const char *fmt, va_list args)
 // A progress line on stdout.
 NOB_PRINTF_FORMAT(1, 2) static void Say(const char *fmt, ...)
 {
-    va_list args;
-    va_start(args, fmt);
-    vprintf(fmt, args);
-    va_end(args);
+    va_list arg_ptr;
+    va_start(arg_ptr, fmt);
+    vprintf(fmt, arg_ptr);
+    va_end(arg_ptr);
     putchar('\n');
     fflush(stdout);
 }
@@ -62,10 +62,10 @@ NOB_PRINTF_FORMAT(1, 2) static void Say(const char *fmt, ...)
 NOB_PRINTF_FORMAT(1, 2) static void SayErr(const char *fmt, ...)
 {
     fflush(stdout);
-    va_list args;
-    va_start(args, fmt);
-    vfprintf(stderr, fmt, args);
-    va_end(args);
+    va_list arg_ptr;
+    va_start(arg_ptr, fmt);
+    vfprintf(stderr, fmt, arg_ptr);
+    va_end(arg_ptr);
     fputc('\n', stderr);
     fflush(stderr);
 }

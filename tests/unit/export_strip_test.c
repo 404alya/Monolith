@@ -59,10 +59,10 @@ static char *Format(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static char *Format(const char *fmt, ...)
 {
     char *text = NULL;
-    va_list ap;
-    va_start(ap, fmt);
-    int n = vasprintf(&text, fmt, ap);
-    va_end(ap);
+    va_list arg_ptr;
+    va_start(arg_ptr, fmt);
+    int n = vasprintf(&text, fmt, arg_ptr);
+    va_end(arg_ptr);
     if (n < 0 || !text) {
         fprintf(stderr, "export_strip_test: out of memory\n");
         exit(1);

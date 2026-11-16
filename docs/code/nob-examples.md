@@ -4,7 +4,7 @@ The build program of the examples.
 
 `./build.sh examples [mode]` (the repo's `nob.c`, `BuildExamples`) compiles this file into `examples/build/nob` when that is missing or older than this file or nob.h, then runs it in its place with the mode. Run directly (`examples/build/nob [mode]`), it rebuilds itself the same way (`NOB_GO_REBUILD_URSELF`).
 
-It is written on nob.h (`src/vendor/nob/nob.h`, vendored unmodified), like the repo's own build program `nob.c`, whose structure and helpers it follows. It replaced `examples/build.sh` (2026-11-13): the same commands with the same arguments in the same order, the same output folders and data copies.
+It is written on nob.h (`src/vendor/nob/nob.h`, vendored, only its `va_list` names changed), like the repo's own build program `nob.c`, whose structure and helpers it follows. It replaced `examples/build.sh` (2026-11-13): the same commands with the same arguments in the same order, the same output folders and data copies.
 
 ## Modes
 

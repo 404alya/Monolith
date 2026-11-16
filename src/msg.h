@@ -27,7 +27,7 @@ void MsgSetStatic(MonoMsg *m, const char *literal);
 // arguments may quote it (MsgSetf(m, "auto save: %s", MsgText(m))). Out of memory: the static
 // "out of memory".
 void MsgSetf(MonoMsg *m, const char *fmt, ...) MSG_PRINTF(2, 3);
-void MsgSetv(MonoMsg *m, const char *fmt, va_list ap);
+void MsgSetv(MonoMsg *m, const char *fmt, va_list arg_ptr);
 // Appends printf output to the current text (a static text is copied first). Out of memory: the
 // static "out of memory".
 void MsgAppendf(MonoMsg *m, const char *fmt, ...) MSG_PRINTF(2, 3);
@@ -42,6 +42,6 @@ void MsgFree(MonoMsg *m);
 
 // A heap printf for one-off texts (sized to fit; free it). NULL when out of memory.
 char *MonoStrf(const char *fmt, ...) MSG_PRINTF(1, 2);
-char *MonoStrv(const char *fmt, va_list ap);
+char *MonoStrv(const char *fmt, va_list arg_ptr);
 
 #endif
