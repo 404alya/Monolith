@@ -2,3 +2,4 @@
 6588014131386032929 - Visual bug - Nesneler ic ice gecebiliyor, hareket ettikce, view degistikce bozuk gozukebiliyor. Ornegin suan monolith mapiinde bulunan firina baktigimizda, flickering efekti gorebiliyoruz.
 17008606743874899220 - Improvement: Build steps takes a lot of time. Review nob.c 
 4014179316579006546 - Review:  Review nob.h too, there are some temporary decisions
+5037731947903237667 - Feature: AI modelleri icin vector database yaparsam cok iyi olur
