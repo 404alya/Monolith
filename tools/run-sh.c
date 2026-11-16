@@ -157,6 +157,8 @@ static char *Adopt(char *heap)
 #define RULE_SCREEN "never touch the screen"
 #define RULE_BENCH  "benchmarks"
 #define RULE_STAY   "stay in the repo"
+#define RULE_SLOP   "leave .slop alone"
+#define RULE_GUARD  "the guard's source"
 
 // What to use instead, per refusal (the text after the ';').
 #define HINT_TRASH "move it to the trash with `gio trash <path>` (rm and the other deletion commands only " \
@@ -168,6 +170,8 @@ static char *Adopt(char *heap)
                   "--dump-entities, --tri-report, --apply-edits, --inspect-model, --new-map, --export, --compile, " \
                   "--classify, --bake-surface or --bench --headless (CLAUDE.md)"
 #define HINT_STAY "write only inside the repo or under /tmp/ (your scratchpad)"
+#define HINT_SLOP "`.slop/` holds the developer's slop.nvim markers, not project content (CLAUDE.md): don't read, " \
+                  "search or change it; leave it out of searches (`grep --exclude-dir=.slop`, `rg -g '!.slop'`)"
 
 // The characters that make a word uncheckable: what bash would expand (variables, substitutions, globs,
 // braces).
@@ -815,9 +819,49 @@ static void RuleStay(const char *cwd, const Command *c)
     if (copy && operands >= 2) CheckWritePath(cwd, last, Fmt("%s %s", b, last));
 }
 
+// Does a word name a path with a `.slop` component (`.slop`, `.slop/x`, `a/.slop`, `/r/.slop/x`)?
+static bool NamesSlop(const char *w)
+{
+    for (const char *p = w; (p = strstr(p, ".slop")) != NULL; p += 5) {
+        if ((p == w || p[-1] == '/') && (p[5] == '\0' || p[5] == '/')) return true;
+    }
+    return false;
+}
+
+// Rule "the guard's source": any word or > / >> target whose last component is run-sh.c (reading it
+// needs the developer's approval: the Read tool asks, the shell can't, so it refuses). `git add` is fine.
+static void RuleGuard(const Segment *seg)
+{
+    Command c;
+    if (FindCommand(seg, &c) && strcmp(Base(c.w[0]), "git") == 0 && c.n > 1 && strcmp(c.w[1], "add") == 0) return;
+    static const char *const hint = "reading or changing the guard's source needs the developer's approval: "
+                                    "ask them, then use the Read / Edit tools, which prompt for it";
+    for (size_t i = 0; i < seg->words.count; i++) {
+        if (strcmp(Base(seg->words.items[i]), "run-sh.c") == 0) Refuse(RULE_GUARD, seg->words.items[i], hint);
+    }
+    for (size_t i = 0; i < seg->writes.count; i++) {
+        if (strcmp(Base(seg->writes.items[i]), "run-sh.c") == 0) {
+            Refuse(RULE_GUARD, Fmt("> %s", seg->writes.items[i]), hint);
+        }
+    }
+}
+
+// Rule "leave .slop alone": any word or > / >> target naming a path inside `.slop/`.
+static void RuleSlop(const Segment *seg)
+{
+    for (size_t i = 0; i < seg->words.count; i++) {
+        if (NamesSlop(seg->words.items[i])) Refuse(RULE_SLOP, seg->words.items[i], HINT_SLOP);
+    }
+    for (size_t i = 0; i < seg->writes.count; i++) {
+        if (NamesSlop(seg->writes.items[i])) Refuse(RULE_SLOP, Fmt("> %s", seg->writes.items[i]), HINT_SLOP);
+    }
+}
+
 // Checks one segment with `*cwd` as its working directory (NULL: unknown); a cd changes it.
 static void CheckSegment(const char **cwd, const Segment *seg)
 {
+    RuleSlop(seg);
+    RuleGuard(seg);
     // MONOLITH_ALLOW_WINDOW=… anywhere, and the files the segment writes with > / >>
     for (size_t i = 0; i < seg->words.count; i++) {
         if (strncmp(seg->words.items[i], "MONOLITH_ALLOW_WINDOW=", 22) == 0) {

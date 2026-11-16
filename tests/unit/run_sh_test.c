@@ -253,6 +253,8 @@ typedef struct {
 #define SCREEN "never touch the screen"
 #define BENCH "benchmarks"
 #define STAY "stay in the repo"
+#define SLOP "leave .slop alone"
+#define GUARD "the guard's source"
 #define OK NULL
 
 static const Case CASES[] = {
@@ -391,6 +393,26 @@ static const Case CASES[] = {
     {"__GL_SYNC_TO_VBLANK=1 ./build/linux/monolith --bench --headless --note x", BENCH},
     {"__GL_SYNC_TO_VBLANK=0 true; ./build/linux/monolith --bench --headless --note x", BENCH},  // only for true
     {"examples/build/linux-test/01_minimal/minimal --bench r.md maps/x", BENCH},
+    // --- leave .slop alone
+    {"cat .slop/README.md.slop", SLOP},
+    {"ls .slop", SLOP},
+    {"grep -rn foo src .slop/src", SLOP},
+    {"cat <root>/.slop/CLAUDE.md.slop", SLOP},
+    {"cd .slop && ls", SLOP},
+    {"echo x > .slop/x", SLOP},
+    {"git diff -- .slop/", SLOP},
+    {"grep -rn --exclude-dir=.slop foo .", OK},
+    {"rg -g '!.slop' foo", OK},
+    {"cat src/x.slopy README.slop", OK},
+    // --- the guard's source
+    {"cat tools/run-sh.c", GUARD},
+    {"grep -n Rule <root>/tools/run-sh.c", GUARD},
+    {"sed -i s/a/b/ run-sh.c", GUARD},
+    {"echo x > tools/run-sh.c", GUARD},
+    {"./build.sh --tools run-sh", OK},
+    {"git add tools/run-sh.c tools/tool.h", OK},
+    {"git add x; cat tools/run-sh.c", GUARD},
+    {"cat tests/unit/run_sh_test.c docs/code/run-sh.md", OK},
     // --- stay in the repo
     {"echo x > /etc/foo", STAY},
     {"echo x >/etc/foo", STAY},

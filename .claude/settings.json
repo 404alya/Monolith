@@ -1,5 +1,9 @@
 {
   "idleCompaction": false,
+  "permissions": {
+    "deny": ["Read(./.slop/**)"],
+    "ask": ["Read(./tools/run-sh.c)"]
+  },
   "hooks": {
     "PreToolUse": [
       {

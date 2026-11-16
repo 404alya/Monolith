@@ -36,6 +36,8 @@ Both output folders are **self-contained** (copy or zip as-is).
 - **never touch the screen:** `i3-msg` / `swaymsg` other than `-t get_*`, `xdotool`, `wmctrl`.
 - **benchmarks:** `--bench` without `--headless`, `__GL_SYNC_TO_VBLANK=0` or `--note`; a second one while one runs (a lock held for the run's lifetime).
 - **stay in the repo:** absolute write targets (`>` / `>>`, `cp` / `mv` / `tee` / `mkdir` / `touch` destinations) outside the repo and `/tmp`.
+- **leave .slop alone:** any word or `>` target naming a path inside `.slop/` (the developer's slop.nvim markers).
+- **the guard's source:** any word or `>` target naming `run-sh.c` (`git add` is fine); reading it needs the developer's approval (the Read tool asks).
 
 It doesn't see: commands inside nested `bash -c` / `eval` strings, interpreters, scripts and compiled programs; expansions as command words (`$X`, `$(…)`); wrappers beyond the listed ones; here-documents (their body is skipped); content destruction (`> file`, `truncate`); `mv` into `/tmp` then `rm`; other programs' windows. `run-sh.o --check '<command>'` prints the decision without running anything; the log is `build/run-sh/log`. In bypass / auto / dontAsk sessions the command is rewritten into `run-sh.o -c '…'` (always bash, a `cd` doesn't carry over); in prompting modes it is only checked, so allow rules keep matching. A rule change goes into `tools/run-sh.c` with a row in `tests/unit/run_sh_test.c` (`./build.sh test run_sh`). If `run-sh.o` can't be built the hook blocks every command: fix `tools/run-sh.c` with the file tools, or the developer turns the hook off in `/hooks`.
 
