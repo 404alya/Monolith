@@ -88,6 +88,10 @@ It also writes `build/win/monolith.exe`, the **view-only build**: it opens a map
 
 The repository carries everything Claude Code needs: `CLAUDE.md` (guard rails and hard rules, loaded in every session) and project skills in `.claude/skills/` (the workflows for map requests, map editing, assets and licences, engine code, lighting, benchmarking, the leak check, larger engine work, the request coordinator, and the project's history), plus the `/task-prompt` and `/simple-task-prompt` commands. Claude loads the matching skill for the task by itself. Machine-specific settings go in your own `.claude/settings.local.json` (gitignored), e.g. `{"env": {"BLENDER": "/path/to/blender"}}` when Blender is not in `PATH`.
 
+## The `.slop/` folder
+
+`.slop/` holds markers written by the maintainer's slop.nvim editor extension. Each `.slop/<path>.slop` mirrors one file in the repository: `.slop/tools/todo.c.slop` belongs to `tools/todo.c`. It isn't part of monolith itself. Every commit includes it (`git add .slop` before committing), so the markers stay in step with the files they mirror. Claude Code sessions don't read or edit it, and the shell guard (`build/run-sh.o`) refuses commands that touch it.
+
 ## Found a bug or have a suggestion? 
 
 **Email us at [hi@notfound404.dev](mailto:hi@notfound404.dev)**
