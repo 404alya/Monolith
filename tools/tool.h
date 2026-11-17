@@ -85,12 +85,16 @@ NOB_PRINTF_FORMAT(2, 3) static inline void ToolDie(int code, const char *fmt, ..
 // ${NAME:-fallback}: the variable when it is set and not empty, else the fallback.
 static inline const char *ToolEnv(const char *name, const char *fallback)
 {
-    const char *v = getenv(name);
-    return v && *v ? v : fallback;
+  // searches the environment list to find the environment variable name, and returns a pointer to the corresponding value string.
+  const char *v = getenv(name);
+
+  return v && *v ? v : fallback;
 }
 
-// bash's [[ a -nt b ]]: a exists and is newer than b (nanosecond modification times), or a exists and b
-// doesn't. (nob's nob_needs_rebuild compares whole seconds, so a source saved in the same second as the
+// Returns True if:
+// - file a exists and is newer than file b (nanosecond modification times)
+// - file a exists and file b doesn't.
+// (nob's nob_needs_rebuild compares whole seconds, so a source saved in the same second as the
 // binary was built would not count as newer.)
 static inline bool ToolNewer(const char *a, const char *b)
 {
@@ -108,6 +112,7 @@ static inline bool ToolMkdirP(const char *path)
     size_t n = strlen(path);
     char *p = strdup(path);
     if (!p) return false;
+
     bool ok = true;
     for (size_t i = 1; i <= n && ok; i++) {
         if (p[i] != '/' && p[i] != '\0') continue;
@@ -173,6 +178,8 @@ static inline void ToolRedirect(const char *path, int target, int flags)
     int fd = open(path, flags, 0666);
     if (fd < 0) {
         fprintf(stderr, "%s: %s: %s\n", gToolName, path, strerror(errno));
+
+        // not exit() because the child must not run the parent's atexit handlers or flush its buffers - more info: man 3 setvbuf
         _exit(1);
     }
     if (fd != target) {
