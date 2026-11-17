@@ -37,7 +37,7 @@ Open bugs and future work live in two plain-text lists, one task per line (`<id>
 | List | File | Program | Written by |
 |---|---|---|---|
 | the maintainer's | `TODOs` | `build/tools/todo` | the maintainer only; Claude Code may read it, never change it |
-| the AI's | `.claude/TODO.md` | `build/tools/ai-todo` | Claude Code sessions: bugs they found outside their task, work they deferred |
+| the AI's | `.claude/TODOs` | `build/tools/ai-todo` | Claude Code sessions: bugs they found outside their task, work they deferred |
 
 ```bash
 build/tools/todo list                                   # print the list with the ids

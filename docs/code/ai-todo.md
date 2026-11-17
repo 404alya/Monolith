@@ -1,6 +1,6 @@
 # `tools/ai-todo.c`: the AI's task list
 
-`tools/ai-todo.c` manages the AI's task list, `.claude/TODO.md`: bugs and deferred work found by Claude sessions. It replaces `tools/ai-todo.sh` and is built by `./build.sh --tools ai-todo` into `build/tools/ai-todo`. The developer's own list is `tools/todo.c` ([todo.md](todo.md)). Overview of all the tools: [architecture.md §8](../architecture.md#8-tools).
+`tools/ai-todo.c` manages the AI's task list, `.claude/TODOs`: bugs and deferred work found by Claude sessions. It replaces `tools/ai-todo.sh` and is built by `./build.sh --tools ai-todo` into `build/tools/ai-todo`. The developer's own list is `tools/todo.c` ([todo.md](todo.md)). Overview of all the tools: [architecture.md §8](../architecture.md#8-tools).
 
 ## Usage
 
@@ -23,7 +23,7 @@ It runs the prebuilt Simple-Todo program (`submodules/simple-todo/todo.o`, x86-6
 
 ## The list file
 
-The list file is fixed: `<repo root>/.claude/TODO.md`. `TODO_FILE` from the environment is ignored on purpose: the program overwrites it with the fixed path before `todo.o` starts, so an AI entry can never land in the developer's `TODO.md` (`tools/todo.c`).
+The list file is fixed: `<repo root>/.claude/TODOs`. `TODO_FILE` from the environment is ignored on purpose: the program overwrites it with the fixed path before `todo.o` starts, so an AI entry can never land in the developer's `TODOs` (`tools/todo.c`).
 
 ## Environment
 

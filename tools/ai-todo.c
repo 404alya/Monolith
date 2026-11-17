@@ -1,5 +1,5 @@
 // tools/ai-todo.c -> build/tools/ai-todo list | add "<title>" "<description>" | rm <id>...: the AI's task
-// list, .claude/TODO.md, through the prebuilt Simple-Todo program (submodules/simple-todo/todo.o). The list
+// list, .claude/TODOs, through the prebuilt Simple-Todo program (submodules/simple-todo/todo.o). The list
 // file is fixed (TODO_FILE is ignored), so an AI entry never lands in the developer's TODOs; `add` keeps
 // entries short (60 / 120 characters, one line each), `rm` takes only task ids.
 // Reference: docs/code/ai-todo.md
@@ -46,7 +46,7 @@ int main(int argc, char **argv)
 
     // Step 2: the two fixed paths. The list file is never taken from the environment
     // (docs/code/ai-todo.md#the-list-file).
-    const char *todoFile = nob_temp_sprintf("%s/.claude/TODO.md", gToolRoot);
+    const char *todoFile = nob_temp_sprintf("%s/.claude/TODOs", gToolRoot);
     const char *todoBin = nob_temp_sprintf("%s/submodules/simple-todo/todo.o", gToolRoot);
 
     // Step 3: the submodule must be checked out (the script's `-x` test).

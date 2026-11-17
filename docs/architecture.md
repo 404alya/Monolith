@@ -45,7 +45,7 @@ monolith/
 ├── README.md, CONTRIBUTING.md, LICENSE (MIT)
 ├── TODOs                        # the maintainer's bug and task list (build/tools/todo; CONTRIBUTING.md, Bugs and tasks)
 ├── CLAUDE.md                    # Claude Code: guard rails, hard rules, index of skills (always loaded)
-├── .claude/TODO.md              # the AI's bug and task list: what Claude Code sessions found or deferred (build/tools/ai-todo)
+├── .claude/TODOs                # the AI's bug and task list: what Claude Code sessions found or deferred (build/tools/ai-todo)
 ├── .claude/skills/<topic>/      # Claude Code: workflows and lessons (map-request, engine-code, ...), loaded per task
 ├── .claude/commands/            # Claude Code: slash commands (/task-prompt, /simple-task-prompt)
 ├── docs/                        # this documentation: user guide, command line, map format, export, architecture,
@@ -63,7 +63,7 @@ monolith/
 │                                #   profile.c (CPU profiles with perf of ./build.sh profile, which builds it: build/linux-profile/profile);
 │                                #   stub-terminal.c, stub-coordinator.c, test-coordinator.c (launcher tests);
 │                                #   bench-export-ab.c (A/B bench pairs of two exports, through the harness's bench mode);
-│                                #   todo.c, ai-todo.c (the two task lists, TODOs and .claude/TODO.md, through submodules/simple-todo)
+│                                #   todo.c, ai-todo.c (the two task lists, TODOs and .claude/TODOs, through submodules/simple-todo)
 ├── examples/                    # 01_minimal (+ scene/), 02_existing_project, 03_live_editing, 05_entities,
 │                                #   nob.c (§4.3; run by ./build.sh examples)
 ├── tests/examples/harness.h     # test build of the examples: --shot in a hidden window, --bench (headless bench) (§4.3)

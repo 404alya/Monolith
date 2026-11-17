@@ -20,7 +20,7 @@ It runs the prebuilt Simple-Todo program (`submodules/simple-todo/todo.o`, x86-6
 
 The list file is fixed: `<repo root>/TODOs`. `TODO_FILE` from the environment is ignored on purpose: the program overwrites it with the fixed path before `todo.o` starts, so no caller can point it elsewhere.
 
-Claude sessions never write this list; theirs is `tools/ai-todo.c` (`.claude/TODO.md`, [ai-todo.md](ai-todo.md)).
+Claude sessions never write this list; theirs is `tools/ai-todo.c` (`.claude/TODOs`, [ai-todo.md](ai-todo.md)).
 
 ## Environment
 

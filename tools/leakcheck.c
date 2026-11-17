@@ -1110,8 +1110,8 @@ int main(int argc, char **argv)
         if (!CatInto("TODOs", nob_temp_sprintf("%s/TODOs", sr), false)) {
             WriteText(nob_temp_sprintf("%s/TODOs", sr), "", false);
         }
-        if (!CatInto(".claude/TODO.md", nob_temp_sprintf("%s/.claude/TODO.md", sr), false)) {
-            WriteText(nob_temp_sprintf("%s/.claude/TODO.md", sr), "", false);
+        if (!CatInto(".claude/TODOs", nob_temp_sprintf("%s/.claude/TODOs", sr), false)) {
+            WriteText(nob_temp_sprintf("%s/.claude/TODOs", sr), "", false);
         }
         if (symlink(nob_temp_sprintf("%s/submodules/simple-todo/todo.o", root),
                     nob_temp_sprintf("%s/submodules/simple-todo/todo.o", sr)) != 0) {
