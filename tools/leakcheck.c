@@ -1107,8 +1107,8 @@ int main(int argc, char **argv)
         MkdirP(nob_temp_sprintf("%s/submodules/simple-todo", sr));
         WriteText(nob_temp_sprintf("%s/build.sh", sr), "# placeholder: the leak check's scratch repo root\n", false);
         WriteText(nob_temp_sprintf("%s/nob.c", sr), "// placeholder: the leak check's scratch repo root\n", false);
-        if (!CatInto("TODO.md", nob_temp_sprintf("%s/TODO.md", sr), false)) {
-            WriteText(nob_temp_sprintf("%s/TODO.md", sr), "", false);
+        if (!CatInto("TODOs", nob_temp_sprintf("%s/TODOs", sr), false)) {
+            WriteText(nob_temp_sprintf("%s/TODOs", sr), "", false);
         }
         if (!CatInto(".claude/TODO.md", nob_temp_sprintf("%s/.claude/TODO.md", sr), false)) {
             WriteText(nob_temp_sprintf("%s/.claude/TODO.md", sr), "", false);

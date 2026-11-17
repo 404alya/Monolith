@@ -1,6 +1,6 @@
 // tools/ai-todo.c -> build/tools/ai-todo list | add "<title>" "<description>" | rm <id>...: the AI's task
 // list, .claude/TODO.md, through the prebuilt Simple-Todo program (submodules/simple-todo/todo.o). The list
-// file is fixed (TODO_FILE is ignored), so an AI entry never lands in the developer's TODO.md; `add` keeps
+// file is fixed (TODO_FILE is ignored), so an AI entry never lands in the developer's TODOs; `add` keeps
 // entries short (60 / 120 characters, one line each), `rm` takes only task ids.
 // Reference: docs/code/ai-todo.md
 

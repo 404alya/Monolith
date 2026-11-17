@@ -1,5 +1,5 @@
 // tools/todo.c -> build/tools/todo list | add "<title>" "<description>" | rm <id>...: the developer's task
-// list, TODO.md at the repo root, through the prebuilt Simple-Todo program (submodules/simple-todo/todo.o).
+// list, TODOs at the repo root, through the prebuilt Simple-Todo program (submodules/simple-todo/todo.o).
 // The list file is fixed (TODO_FILE is ignored); `rm` takes only task ids. Claude sessions never write
 // this list (theirs is tools/ai-todo.c).
 // Reference: docs/code/todo.md
@@ -27,7 +27,7 @@ int main(int argc, char **argv)
     // Step 2: the two fixed paths. The list file is never taken from the environment
     // (docs/code/todo.md#the-list-file), so the developer's list can only be written through this wrapper's own
     // checks.
-    const char *todoFile = nob_temp_sprintf("%s/TODO.md", gToolRoot);
+    const char *todoFile = nob_temp_sprintf("%s/TODOs", gToolRoot);
     const char *todoBin = nob_temp_sprintf("%s/submodules/simple-todo/todo.o", gToolRoot);
 
     // Step 3: the submodule must be checked out (the script's `-x` test: the file exists and may be run).

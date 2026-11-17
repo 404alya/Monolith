@@ -935,7 +935,7 @@ static const char *gR3dDir;  // $R3D_DIR, default <root>/submodules/r3d, used as
 // program rebuilds itself when its source changed (ToolRebuildSelf in tools/tool.h).
 static const char *TOOLS[] = {
     "run-sh",            // every shell command of a Claude session goes through it: guard rails (CLAUDE.md)
-    "todo",              // the developer's task list, TODO.md
+    "todo",              // the developer's task list, TODOs
     "ai-todo",           // the AI's task list, .claude/TODO.md
     "stub-terminal",     // MONOLITH_TERMINAL stand-in for launcher tests: no window
     "request-queue",     // the request queue on disk, run by the coordinator session

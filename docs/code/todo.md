@@ -1,6 +1,6 @@
 # `tools/todo.c`: the developer's task list
 
-`tools/todo.c` manages the developer's task list, `TODO.md` at the repo root (`CONTRIBUTING.md`, "Bugs and tasks"). It replaces `tools/todo.sh` and is built by `./build.sh --tools todo` into `build/tools/todo`. Overview of all the tools: [architecture.md §8](../architecture.md#8-tools).
+`tools/todo.c` manages the developer's task list, `TODOs` at the repo root (`CONTRIBUTING.md`, "Bugs and tasks"). It replaces `tools/todo.sh` and is built by `./build.sh --tools todo` into `build/tools/todo`. Overview of all the tools: [architecture.md §8](../architecture.md#8-tools).
 
 ## Usage
 
@@ -18,7 +18,7 @@ It runs the prebuilt Simple-Todo program (`submodules/simple-todo/todo.o`, x86-6
 
 ## The list file
 
-The list file is fixed: `<repo root>/TODO.md`. `TODO_FILE` from the environment is ignored on purpose: the program overwrites it with the fixed path before `todo.o` starts, so no caller can point it elsewhere.
+The list file is fixed: `<repo root>/TODOs`. `TODO_FILE` from the environment is ignored on purpose: the program overwrites it with the fixed path before `todo.o` starts, so no caller can point it elsewhere.
 
 Claude sessions never write this list; theirs is `tools/ai-todo.c` (`.claude/TODO.md`, [ai-todo.md](ai-todo.md)).
 
