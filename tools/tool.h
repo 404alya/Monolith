@@ -184,12 +184,14 @@ static inline void ToolRedirect(const char *path, int target, int flags)
     }
     if (fd != target) {
         dup2(fd, target);
-        close(fd);
+        if (close(fd) != 0) ToolErr("%s: %s", path, strerror(errno));
     }
 }
 
 // Starts cmd (searched in PATH like a shell when its first word has no '/') with the given streams;
 // `captureFd` >= 0 becomes the child's stdout (ToolCapture's pipe). Returns the pid, or -1 when fork fails.
+// closeFd is read end fd[0]
+// captureFd is write end fd[0]
 static inline pid_t ToolSpawn(Nob_Cmd *cmd, ToolIo io, int captureFd, int closeFd)
 {
     if (cmd->count == 0) return -1;
@@ -199,7 +201,7 @@ static inline pid_t ToolSpawn(Nob_Cmd *cmd, ToolIo io, int captureFd, int closeF
     if (pid != 0) return pid;
 
     // the child: set up the streams in the shell's order (stdin, stdout, stderr), then exec
-    if (closeFd >= 0) close(closeFd);
+    if (closeFd >= 0) close(closeFd); // Read end is unneeded
     int outFlags = O_WRONLY | O_CREAT | (io.append ? O_APPEND : O_TRUNC);
     if (io.in) ToolRedirect(io.in, STDIN_FILENO, O_RDONLY);
     if (captureFd >= 0) {
@@ -249,11 +251,12 @@ static inline int ToolCapture(Nob_Cmd *cmd, Nob_String_Builder *out, ToolIo io)
         return 126;
     }
     pid_t pid = ToolSpawn(cmd, io, fds[1], fds[0]);
+    int spawnErr = errno;
     cmd->count = 0;
-    close(fds[1]);
+    if (close(fds[1]) != 0) ToolErr("close pipe: %s", strerror(errno));
     if (pid < 0) {
-        close(fds[0]);
-        ToolErr("could not start a process: %s", strerror(errno));
+        if (close(fds[0]) != 0) ToolErr("close pipe: %s", strerror(errno));
+        ToolErr("could not start a process: %s", strerror(spawnErr));
         return 126;
     }
     char buf[4096];
@@ -263,7 +266,7 @@ static inline int ToolCapture(Nob_Cmd *cmd, Nob_String_Builder *out, ToolIo io)
         if (n <= 0) break;
         nob_sb_append_buf(out, buf, (size_t)n);
     }
-    close(fds[0]);
+    if (close(fds[0]) != 0) ToolErr("close pipe: %s", strerror(errno));
     int wstatus;
     while (waitpid(pid, &wstatus, 0) < 0) {
         if (errno != EINTR) return 126;

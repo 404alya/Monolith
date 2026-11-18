@@ -61,7 +61,7 @@ static char *Slurp(const char *path)
         char buf[8192];
         size_t n;
         while ((n = fread(buf, 1, sizeof buf, f)) > 0) nob_sb_append_buf(&sb, buf, n);
-        fclose(f);
+        if (fclose(f) != 0) ToolErr("%s: %s", path, strerror(errno));
     }
     nob_sb_append_null(&sb);
     return sb.items;
@@ -309,7 +309,7 @@ static bool LockFree(const char **ids, size_t count)
     int fd = open(nob_temp_sprintf("%s/.coordinator/lock", gR), O_RDONLY | O_CREAT | O_NOCTTY, 0666);
     if (fd < 0) return false;
     bool got = flock(fd, LOCK_EX | LOCK_NB) == 0;
-    close(fd);
+    if (close(fd) != 0) ToolErr("lock: %s", strerror(errno));
     return got;
 }
 

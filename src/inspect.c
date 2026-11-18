@@ -8,6 +8,7 @@
 #include <assimp/metadata.h>
 #include <assimp/postprocess.h>
 #include <assimp/scene.h>
+#include <errno.h>
 #include <math.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -79,7 +80,7 @@ static char *GltfJson(const char *path)
             else s[len] = 0;
         }
     }
-    fclose(f);
+    if (fclose(f) != 0) fprintf(stderr, "monolith: %s: %s\n", path, strerror(errno));
     return s;
 }
 

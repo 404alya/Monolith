@@ -742,14 +742,14 @@ static char *ReadWholeFile(const char *path, long maxBytes, int *size, bool repo
     if (fseek(f, 0, SEEK_END) == 0) len = ftell(f);
     else {
         READ_FAIL("%s: cannot seek to the end: %s", path, strerror(errno));
-        fclose(f);
+        if (fclose(f) != 0) fprintf(stderr, "monolith: %s: %s\n", path, strerror(errno));
         return NULL;
     }
 
     signed char start = (signed char)fseek(f, 0, SEEK_SET);
     if (start != 0) {
         READ_FAIL("%s: cannot seek to the start: %s", path, strerror(errno));
-        fclose(f);
+        if (fclose(f) != 0) fprintf(stderr, "monolith: %s: %s\n", path, strerror(errno));
         return NULL;
     }
 
@@ -762,7 +762,7 @@ static char *ReadWholeFile(const char *path, long maxBytes, int *size, bool repo
         free(buf);
         buf = NULL;
     }
-    fclose(f);
+    if (fclose(f) != 0) fprintf(stderr, "monolith: %s: %s\n", path, strerror(errno));
     if (buf) { buf[len] = '\0'; *size = (int)len; }
     return buf;
 #undef READ_FAIL
@@ -780,7 +780,7 @@ static unsigned long long CombinedHash(const char *text, int size, char *const *
         unsigned char buf[65536];
         size_t n;
         while ((n = fread(buf, 1, sizeof(buf), f)) > 0) h = Fnv1a64Update(h, buf, n);
-        fclose(f);
+        if (fclose(f) != 0) fprintf(stderr, "monolith: %s: %s\n", files[i], strerror(errno));
     }
     return h;
 }
@@ -1501,7 +1501,7 @@ static bool ImageFileSize(const char *full, int *w, int *h)
     if (!f) return false;
     unsigned char b[24];
     size_t n = fread(b, 1, sizeof(b), f);
-    fclose(f);
+    if (fclose(f) != 0) fprintf(stderr, "monolith: %s: %s\n", full, strerror(errno));
     static const unsigned char SIG[8] = { 0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n' };
     if (n == sizeof(b) && memcmp(b, SIG, 8) == 0 && memcmp(b + 12, "IHDR", 4) == 0) {
         *w = (int)((unsigned)b[16] << 24 | (unsigned)b[17] << 16 | (unsigned)b[18] << 8 | b[19]);
@@ -1675,7 +1675,7 @@ static bool FileHash(const char *path, unsigned long long *hash)
     unsigned char buf[65536];
     size_t got;
     while ((got = fread(buf, 1, sizeof(buf), f)) > 0) h = Fnv1a64Update(h, buf, got);
-    fclose(f);
+    if (fclose(f) != 0) fprintf(stderr, "monolith: %s: %s\n", path, strerror(errno));
     *hash = h;
     return true;
 }
@@ -3516,7 +3516,7 @@ static bool ModelDeps(Parser *P, const char *modelRel, const char *full)
             else ok = Fail(P, "\"%s\": not a GLB file assimp can read (no complete JSON chunk of at most 4 MB)", modelRel);
             free(json);
         }
-        fclose(f);
+        if (fclose(f) != 0) fprintf(stderr, "monolith: %s: %s\n", full, strerror(errno));
         if (glb) return ok;
     }
     // .gltf (or a text glTF named .glb) and .obj: the whole text
@@ -5045,7 +5045,7 @@ static MS_SourceState SourceState(const SceneData *d)
         h = Fnv1a64Update(h, buf, got);
         n += (long long)got;
     }
-    fclose(f);
+    if (fclose(f) != 0) fprintf(stderr, "monolith: %s: %s\n", d->srcPath, strerror(errno));
     return h == d->srcHash && n == d->srcSize ? MS_SOURCE_CURRENT : MS_SOURCE_STALE;
 }
 

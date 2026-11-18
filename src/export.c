@@ -780,7 +780,7 @@ static char *MakeReadme(const MS_Scene *s, const char *name, const char *assetsP
         buf[size] = 0;
         if (size != (size_t)n) { free(buf); buf = NULL; }
     }
-    fclose(f);
+    if (fclose(f) != 0) fprintf(stderr, "monolith: export: closing the temporary file: %s\n", strerror(errno));
     return buf;
 }
 
@@ -816,13 +816,17 @@ static bool CopyFileTo(const char *from, const char *to)
     FILE *in = fopen(from, "rb");
     if (!in) { fprintf(stderr, "monolith: export: cannot read %s\n", from); return false; }
     FILE *out = fopen(to, "wb");
-    if (!out) { fclose(in); fprintf(stderr, "monolith: export: cannot write %s\n", to); return false; }
+    if (!out) {
+        fprintf(stderr, "monolith: export: cannot write %s\n", to);
+        if (fclose(in) != 0) fprintf(stderr, "monolith: export: closing %s: %s\n", from, strerror(errno));
+        return false;
+    }
     char buf[65536];
     size_t n;
     bool ok = true;
     while ((n = fread(buf, 1, sizeof(buf), in)) > 0) ok &= fwrite(buf, 1, n, out) == n;
     ok &= !ferror(in);
-    fclose(in);
+    if (fclose(in) != 0) fprintf(stderr, "monolith: export: closing %s: %s\n", from, strerror(errno));
     ok &= fclose(out) == 0;
     if (!ok) fprintf(stderr, "monolith: export: error copying %s to %s\n", from, to);
     return ok;

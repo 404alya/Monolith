@@ -192,10 +192,11 @@ static pid_t StartWorker(const char *id, const char *pkg, bool edit, double work
     if (pid == 0) {
         // the child: no stdio buffers of the parent are flushed again (_exit), nothing else is touched
         if (edit) {
-            FILE *f = fopen(nob_temp_sprintf("%s/stub-edit.txt", abs), "ab");
+            const char *editPath = nob_temp_sprintf("%s/stub-edit.txt", abs);
+            FILE *f = fopen(editPath, "ab");
             if (f) {
                 fprintf(f, "stub edit for %s\n", id);
-                fclose(f);
+                if (fclose(f) != 0) ToolErr("%s: %s", editPath, strerror(errno));
             }
         }
         struct timespec ts = {(time_t)work, (long)((work - (double)(time_t)work) * 1e9)};
@@ -203,7 +204,10 @@ static pid_t StartWorker(const char *id, const char *pkg, bool edit, double work
         FILE *f = fopen(result, "wb");
         if (f) {
             fprintf(f, "Stub coordinator: %s done\n\nNothing was changed (test double).\n", id);
-            fclose(f);
+            if (fclose(f) != 0) {
+                ToolErr("%s: %s", result, strerror(errno));
+                _exit(1);
+            }
         }
         _exit(0);
     }

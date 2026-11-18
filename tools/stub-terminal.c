@@ -20,7 +20,7 @@ static void AppendTo(const char *path, int target)
     if (fd < 0) ToolDie(1, "%s: %s", path, strerror(errno));
     if (fd != target) {
         dup2(fd, target);
-        close(fd);
+        if (close(fd) != 0) ToolErr("%s: %s", path, strerror(errno));
     }
 }
 
@@ -40,7 +40,7 @@ int main(int argc, char **argv)
         FILE *f = fopen(log, "wb");
         if (f) {
             fwrite(sb.items, 1, sb.count, f);
-            fclose(f);
+            if (fclose(f) != 0) ToolErr("%s: %s", log, strerror(errno));
         } else {
             ToolErr("%s: %s", log, strerror(errno));
         }
@@ -59,7 +59,7 @@ int main(int argc, char **argv)
         FILE *f = fopen(opened, "ab");
         if (f) {
             fprintf(f, "%s.%09ld %ld\n", stamp, ts.tv_nsec, (long)getpid());
-            fclose(f);
+            if (fclose(f) != 0) ToolErr("%s: %s", opened, strerror(errno));
         } else {
             ToolErr("%s: %s", opened, strerror(errno));
         }
@@ -76,7 +76,7 @@ int main(int argc, char **argv)
         int in = open("/dev/null", O_RDONLY);
         if (in >= 0 && in != STDIN_FILENO) {
             dup2(in, STDIN_FILENO);
-            close(in);
+            if (close(in) != 0) ToolErr("/dev/null: %s", strerror(errno));
         }
         AppendTo(run, STDOUT_FILENO);
         dup2(STDOUT_FILENO, STDERR_FILENO);

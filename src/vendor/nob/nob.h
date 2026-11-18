@@ -1225,8 +1225,14 @@ NOBDEF bool nob_copy_file(const char *src_path, const char *dst_path)
 
 defer:
     NOB_FREE(buf);
-    close(src_fd);
-    close(dst_fd);
+    // monolith: check close; a failed close of the copy fails the copy (the fds are -1 when open failed)
+    if (src_fd >= 0 && close(src_fd) != 0) {
+        nob_log(NOB_WARNING, "Could not close file %s: %s", src_path, strerror(errno));
+    }
+    if (dst_fd >= 0 && close(dst_fd) != 0) {
+        nob_log(NOB_ERROR, "Could not write to file %s: %s", dst_path, strerror(errno));
+        result = false;
+    }
     return result;
 #endif
 }
@@ -2256,7 +2262,11 @@ NOBDEF bool nob_write_entire_file(const char *path, const void *data, size_t siz
     }
 
 defer:
-    if (f) fclose(f);
+    // monolith: check fclose; a failed close fails the write
+    if (f && fclose(f) != 0) {
+        nob_log(NOB_ERROR, "Could not write into file %s: %s", path, strerror(errno));
+        result = false;
+    }
     return result;
 }
 
@@ -2598,7 +2608,8 @@ NOBDEF bool nob_read_entire_file(const char *path, Nob_String_Builder *sb)
 
 defer:
     if (!result) nob_log(NOB_ERROR, "Could not read file %s: %s", path, strerror(errno));
-    if (f) fclose(f);
+    // monolith: check fclose
+    if (f && fclose(f) != 0) nob_log(NOB_WARNING, "Could not close file %s: %s", path, strerror(errno));
     return result;
 }
 

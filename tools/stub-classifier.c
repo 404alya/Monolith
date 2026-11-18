@@ -48,7 +48,7 @@ int main(int argc, char **argv)
             for (int i = 0; i < argc; i++) fprintf(f, "  arg: %s\n", argv[i]);
             fprintf(f, "stub-classifier stdin:\n");
             fwrite(in.items, 1, in.count, f);
-            fclose(f);
+            if (fclose(f) != 0) ToolErr("%s: %s", log, strerror(errno));
         } else {
             ToolErr("%s: %s", log, strerror(errno));
         }

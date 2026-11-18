@@ -1775,7 +1775,7 @@ static bool ReadFirstLine(const OpenRequest *q, const char *name, long *lastSize
     size_t n = fread(buf, 1, sizeof(buf) - 1, f);
     fseek(f, 0, SEEK_END);
     long size = ftell(f);
-    fclose(f);
+    if (fclose(f) != 0) fprintf(stderr, "monolith: %s: %s\n", path, strerror(errno));
     buf[n] = 0;
     // Still being written? Accept once it has a complete line or its size held still
     // for one poll interval.
@@ -2230,8 +2230,9 @@ static bool Launch(const char *title, const char *mark, const char *prompt, cons
     fcntl(fds[1], F_SETFD, FD_CLOEXEC);
     pid_t pid = fork();
     if (pid < 0) {
-        close(fds[0]); close(fds[1]);
         MS_SetError("fork: %s", strerror(errno));
+        if (close(fds[0]) != 0) fprintf(stderr, "monolith: close pipe: %s\n", strerror(errno));
+        if (close(fds[1]) != 0) fprintf(stderr, "monolith: close pipe: %s\n", strerror(errno));
         goto fail;
     }
     if (pid == 0) {
@@ -2251,11 +2252,11 @@ static bool Launch(const char *title, const char *mark, const char *prompt, cons
         (void)w;
         _exit(127);
     }
-    close(fds[1]);
+    if (close(fds[1]) != 0) fprintf(stderr, "monolith: close pipe: %s\n", strerror(errno));
     int childErr = 0;
     ssize_t r;
     do r = read(fds[0], &childErr, sizeof(childErr)); while (r < 0 && errno == EINTR);
-    close(fds[0]);
+    if (close(fds[0]) != 0) fprintf(stderr, "monolith: close pipe: %s\n", strerror(errno));
     if (r == (ssize_t)sizeof(childErr)) {
         waitpid(pid, NULL, 0);      // it has _exit()ed already
         MS_SetError("cannot run %s: %s", termPath, strerror(childErr));
@@ -2574,7 +2575,7 @@ static void ReadState(OpenRequest *q)
     FILE *f = fopen(path, "rb");
     if (!f) return;
     size_t n = fread(buf, 1, sizeof(buf) - 1, f);
-    fclose(f);
+    if (fclose(f) != 0) fprintf(stderr, "monolith: %s: %s\n", path, strerror(errno));
     buf[n] = 0;
     char word[16];
     int len = 0;
@@ -2593,7 +2594,8 @@ static bool CoordinatorAlive(void)
     int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
     if (fd < 0) return false;                   // no requests folder: nobody runs
     bool held = flock(fd, LOCK_EX | LOCK_NB) != 0 && errno == EWOULDBLOCK;
-    close(fd);                                  // (drops the lock if we just took it)
+    if (close(fd) != 0)                         // (drops the lock if we just took it)
+        fprintf(stderr, "monolith: %s: %s\n", path, strerror(errno));
     return held;
 }
 

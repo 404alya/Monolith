@@ -48,7 +48,7 @@ static bool ReadFile(const char *path, Nob_String_Builder *sb)
     size_t n;
     while ((n = fread(buf, 1, sizeof buf, f)) > 0) nob_sb_append_buf(sb, buf, n);
     bool ok = !ferror(f);
-    fclose(f);
+    if (fclose(f) != 0) ToolErr("closing %s: %s", path, strerror(errno));
     return ok;
 }
 
@@ -538,13 +538,13 @@ static int CaptureIn(const char *dir, Nob_Cmd *cmd, Nob_String_Builder *out, Too
     int here = open(".", O_RDONLY | O_DIRECTORY);
     if (here < 0 || chdir(dir) != 0) {
         ToolErr("cd: %s: %s", dir, strerror(errno));
-        if (here >= 0) close(here);
+        if (here >= 0 && close(here) != 0) ToolErr("close: %s", strerror(errno));
         cmd->count = 0;
         return 1;
     }
     int status = ToolCapture(cmd, out, io);
     if (fchdir(here) != 0) ToolErr("cd back: %s", strerror(errno));
-    close(here);
+    if (close(here) != 0) ToolErr("close: %s", strerror(errno));
     return status;
 }
 
@@ -943,7 +943,7 @@ static void Wait(int argc, char **argv)
     int fd = open(seenPath, O_WRONLY | O_CREAT | O_APPEND, 0666);
     if (fd >= 0) {
         futimens(fd, NULL);
-        close(fd);
+        if (close(fd) != 0) ToolErr("%s: %s", seenPath, strerror(errno));
     }
     for (;;) {
         Nob_File_Paths seen = {0}, events = {0};

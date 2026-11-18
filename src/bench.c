@@ -1,5 +1,7 @@
 #include "bench.h"
 #include "spectator.h"
+#include <errno.h>
+#include <string.h>
 #include <time.h>
 #ifndef _WIN32
 #   include <sys/utsname.h>
@@ -213,7 +215,7 @@ static bool CpuName(char *out, size_t size)
         out[strcspn(out, "\r\n")] = 0;
         found = out[0] != 0;
     }
-    fclose(f);
+    if (fclose(f) != 0) fprintf(stderr, "monolith: /proc/cpuinfo: %s\n", strerror(errno));
     return found;
 #endif
 }
@@ -372,7 +374,7 @@ void WriteBenchReport(const double *times, const int *shadowUpdates, int shadowS
         WriteProfileTable(f, true, viewMs, allMs);
         if (R3D_GetProfilerDroppedCount() > 0) fprintf(f, "\n%d profiler results were dropped.\n", R3D_GetProfilerDroppedCount());
     }
-    fclose(f);
+    if (fclose(f) != 0) { perror(path); goto done; }
 
     printf("report: %s\n", path);
     fflush(stdout);

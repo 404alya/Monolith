@@ -13,6 +13,7 @@
 // xatlas is compiled with XA_MULTITHREADED=0 (build.sh): the same input gives the same bytes.
 #include "paintunwrap.h"
 #include "vendor/xatlas/xatlas_c.h"
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -478,7 +479,7 @@ static bool HashFile(const char *path, unsigned long long *hash)
     while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
         for (size_t i = 0; i < n; i++) { h ^= buf[i]; h *= 1099511628211ULL; }
     bool ok = !ferror(f);
-    fclose(f);
+    if (fclose(f) != 0) fprintf(stderr, "monolith: %s: %s\n", path, strerror(errno));
     *hash = h;
     return ok;
 }

@@ -8,6 +8,7 @@
 #include "input.h"
 #include "monolith_scene.h"
 #include <ctype.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -141,7 +142,7 @@ bool InputScriptLoad(const char *path, int startFrame, int screenW, int screenH)
         S.total += st.frames;
     }
     free(line);
-    fclose(f);
+    if (fclose(f) != 0) fprintf(stderr, "monolith: --input-script %s: %s\n", path, strerror(errno));
     if (!ok) { InputScriptFree(); return false; }
     S.on = true;
     S.start = startFrame;

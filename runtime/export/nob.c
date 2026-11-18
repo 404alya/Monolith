@@ -76,7 +76,7 @@ NOB_PRINTF_FORMAT(1, 2) static void SayErr(const char *fmt, ...)
 // two streams don't overwrite each other.
 static bool Run(Nob_Cmd *cmd, const char *log)
 {
-    int savedOut = -1, savedErr = -1;
+    int savedOut = -1, savedErr = -1, closeErr = 0;     // closeErr: reported once stderr is back
     fflush(stdout);
     fflush(stderr);
     if (log) {
@@ -90,14 +90,18 @@ static bool Run(Nob_Cmd *cmd, const char *log)
         savedErr = dup(STDERR_FILENO);
         dup2(fd, STDOUT_FILENO);
         dup2(fd, STDERR_FILENO);
-        close(fd);
+        if (close(fd) != 0) closeErr = errno;
     }
     bool ok = nob_cmd_run_opt(cmd, (Nob_Cmd_Opt){0});
     if (log) {
         dup2(savedOut, STDOUT_FILENO);
         dup2(savedErr, STDERR_FILENO);
-        close(savedOut);
-        close(savedErr);
+        if (close(savedOut) != 0 && !closeErr) closeErr = errno;
+        if (close(savedErr) != 0 && !closeErr) closeErr = errno;
+        if (closeErr) {
+            SayErr("cannot write %s: %s", log, strerror(closeErr));
+            ok = false;
+        }
     }
     return ok;
 }
@@ -220,7 +224,7 @@ static bool CopyFile(const char *src, const char *dst)
     int out = open(dst, O_WRONLY | O_CREAT | O_TRUNC, st.st_mode & 07777);
     if (out < 0) {
         SayErr("cp: cannot create regular file '%s': %s", dst, strerror(errno));
-        close(in);
+        if (close(in) != 0) SayErr("cp: warning: closing '%s': %s", src, strerror(errno));
         return false;
     }
     bool ok = true;
@@ -244,7 +248,7 @@ static bool CopyFile(const char *src, const char *dst)
         }
         if (!ok) break;
     }
-    close(in);
+    if (close(in) != 0) SayErr("cp: warning: closing '%s': %s", src, strerror(errno));
     if (close(out) != 0 && ok) {
         SayErr("cp: error writing '%s': %s", dst, strerror(errno));
         ok = false;

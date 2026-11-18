@@ -89,7 +89,7 @@ static char *ReadFile(const char *path)
         len += got;
     } while (got > 0);
     bool ok = !ferror(f);
-    fclose(f);
+    if (fclose(f) != 0) fprintf(stderr, "profile: closing %s: %s\n", path, strerror(errno));
     if (!ok) { free(text); return NULL; }
     text[len] = '\0';
     return text;
@@ -265,7 +265,7 @@ static char *Capture(char *const argv[], Child c)
     void (*oldInt)(int) = signal(SIGINT, SIG_IGN);
     void (*oldQuit)(int) = signal(SIGQUIT, SIG_IGN);
     pid_t pid = Start(argv, c, fds[1]);
-    close(fds[1]);
+    if (close(fds[1]) != 0) fprintf(stderr, "profile: close pipe: %s\n", strerror(errno));
     char *text = NULL;
     size_t len = 0, cap = 0;
     for (;;) {
@@ -275,7 +275,7 @@ static char *Capture(char *const argv[], Child c)
         if (got <= 0) break;
         len += (size_t)got;
     }
-    close(fds[0]);
+    if (close(fds[0]) != 0) fprintf(stderr, "profile: close pipe: %s\n", strerror(errno));
     text[len] = '\0';
     int status = Wait(pid, argv[0]);
     signal(SIGINT, oldInt);
@@ -338,7 +338,7 @@ static void OpenSamples(SampleReader *r, const char *path)
 
 static void CloseSamples(SampleReader *r)
 {
-    fclose(r->file);
+    if (fclose(r->file) != 0) fprintf(stderr, "profile: closing the samples: %s\n", strerror(errno));
     free(r->line);
     regfree(&r->head);
     regfree(&r->frame);

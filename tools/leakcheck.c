@@ -50,7 +50,10 @@ static bool WriteText(const char *path, const char *text, bool append)
         return false;
     }
     fputs(text, f);
-    fclose(f);
+    if (fclose(f) != 0) {
+        ToolErr("%s: %s", path, strerror(errno));
+        return false;
+    }
     return true;
 }
 
@@ -69,8 +72,11 @@ static bool CatInto(const char *src, const char *dst, bool append)
         return false;
     }
     fwrite(sb.items, 1, sb.count, f);
-    fclose(f);
     nob_sb_free(sb);
+    if (fclose(f) != 0) {
+        ToolErr("%s: %s", dst, strerror(errno));
+        return false;
+    }
     return true;
 }
 
@@ -106,8 +112,11 @@ static bool HeadLinesAppend(const char *src, const char *dst, size_t lines)
         return false;
     }
     fwrite(sb.items, 1, end, f);
-    fclose(f);
     nob_sb_free(sb);
+    if (fclose(f) != 0) {
+        ToolErr("%s: %s", dst, strerror(errno));
+        return false;
+    }
     return true;
 }
 
@@ -138,8 +147,11 @@ static bool GrepOutPrefix(const char *src, const char *dst, const char *prefix)
         }
         i = end + (hasNl ? 1 : 0);
     }
-    fclose(f);
     nob_sb_free(sb);
+    if (fclose(f) != 0) {
+        ToolErr("%s: %s", dst, strerror(errno));
+        return false;
+    }
     return true;
 }
 

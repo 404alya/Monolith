@@ -298,7 +298,7 @@ int main(int argc, char **argv)
     // `: > "$LOG"`: create (or empty) the log
     int fd = open(gLog, O_WRONLY | O_CREAT | O_TRUNC, 0666);
     if (fd < 0) Fail(3, "cannot create the log %s", gLog);
-    close(fd);
+    if (close(fd) != 0) Fail(3, "cannot create the log %s: %s", gLog, strerror(errno));
     nob_da_append(&gCreated, gLog);
     ToolErr("building %s (%s) in %s (log: %s)", h12, full, wt, gLog);
 
@@ -391,7 +391,7 @@ int main(int argc, char **argv)
     FILE *log = fopen(gLog, "a");
     if (log) {
         fprintf(log, "old-monolith: build exit=%d secs=%ld\n", status, elapsed);
-        fclose(log);
+        if (fclose(log) != 0) Fail(3, "cannot write the log %s: %s", gLog, strerror(errno));
     }
     if (status != 0) Fail(4, "./build.sh exited with %d after %lds", status, elapsed);
     const char *bin = nob_temp_sprintf("%s/build/linux/monolith", wt);

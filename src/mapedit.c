@@ -7,6 +7,7 @@
 // Reference: docs/code/mapedit.md
 #include "mapedit.h"
 #include <ctype.h>
+#include <errno.h>
 #include <limits.h>
 #include <math.h>
 #include <stdarg.h>
@@ -59,13 +60,17 @@ static char *ReadFileBytes(const char *path, int *size)
     char *buf = NULL;
     int len = 0, cap = 0;
     for (;;) {
-        if (!MS_RESERVE(buf, cap, len + 65536 + 1) || len > MS_MAX_FILE_BYTES) { free(buf); fclose(f); return NULL; }
+        if (!MS_RESERVE(buf, cap, len + 65536 + 1) || len > MS_MAX_FILE_BYTES) {
+            free(buf);
+            if (fclose(f) != 0) fprintf(stderr, "monolith: %s: %s\n", path, strerror(errno));
+            return NULL;
+        }
         size_t got = fread(buf + len, 1, 65536, f);
         len += (int)got;
         if (got < 65536) break;
     }
     bool err = ferror(f);
-    fclose(f);
+    if (fclose(f) != 0) fprintf(stderr, "monolith: %s: %s\n", path, strerror(errno));
     if (err) { free(buf); return NULL; }
     buf[len] = '\0';
     *size = len;

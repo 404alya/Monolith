@@ -433,7 +433,7 @@ bool GfxLoad(GfxSettings *s, const char *path, int *ignored)
         }
     }
     free(line);
-    fclose(f);
+    if (fclose(f) != 0) fprintf(stderr, "monolith: %s: %s\n", path, strerror(errno));
     *ignored = bad;
     return true;
 }
