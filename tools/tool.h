@@ -286,11 +286,53 @@ static inline void ToolExec(Nob_Cmd *cmd)
     ToolDie(errno == ENOENT ? 127 : 126, "%s: %s", cmd->items[0], strerror(errno));
 }
 
+// `command -v name`: whether an executable `name` is in one of $PATH's folders (an empty entry is the
+// current folder, as in a shell; no PATH at all: false).
+static inline bool ToolInPath(const char *name)
+{
+    const char *path = getenv("PATH");
+    if (!path) return false;
+    for (const char *d = path;;) {
+        size_t len = strcspn(d, ":");
+        const char *cand = nob_temp_sprintf("%.*s/%s", (int)(len ? len : 1), len ? d : ".", name);
+        if (access(cand, X_OK) == 0) return true;
+        if (!d[len]) return false;
+        d += len + 1;
+    }
+}
+
+// Exits 1 with "<program>: <name> not found in PATH: <why>" when `name` isn't in PATH. `why` says what needs
+// it and how to install it. Call it before the program does any work, so a missing program stops it at once
+// instead of late, with scratch files left behind.
+static inline void ToolNeed(const char *name, const char *why)
+{
+    if (!ToolInPath(name)) ToolDie(1, "%s not found in PATH: %s", name, why);
+}
+
+// The packages that hold gio, as the README names them (also in run-sh's refusal when gio is missing).
+#define TOOL_GIO_PACKAGES "Arch: glib2, Debian / Ubuntu: libglib2.0-bin"
+
+// Why the repo needs gio and how to install it: the text after "gio not found in PATH: ".
+#define TOOL_GIO_WHY "the repo deletes only with `gio trash` (CLAUDE.md); install it (" TOOL_GIO_PACKAGES ") and run again"
+
+// ToolNeed for gio: every program that deletes anything (ToolTrash) calls it first.
+static inline void ToolNeedGio(void)
+{
+    ToolNeed("gio", TOOL_GIO_WHY);
+}
+
 // `gio trash <path>`: moves the path to the desktop trash (the developer can restore it). The repo's only
 // way to delete anything (CLAUDE.md: never rm). Returns gio's exit status; `quiet` sends gio's own error
 // text to /dev/null (callers that print their own message, like `gio trash ... 2>/dev/null || echo ...`).
+// Callers check for gio with ToolNeedGio at their start. As a safeguard for a caller that didn't, a missing
+// gio is also caught here: the reason is printed (even when quiet) and 127 returned, without exiting, so the
+// caller's own message, clean-up and report still follow.
 static inline int ToolTrash(const char *path, bool quiet)
 {
+    if (!ToolInPath("gio")) {
+        ToolErr("gio not found in PATH: %s", TOOL_GIO_WHY);
+        return 127;
+    }
     Nob_Cmd cmd = {0};
     nob_cmd_append(&cmd, "gio", "trash", path);
     int status = ToolRun(&cmd, (ToolIo){.err = quiet ? "/dev/null" : NULL});

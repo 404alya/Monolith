@@ -13,6 +13,7 @@ build/unit/run_sh/run_sh_test <run-sh.o> <run-sh-san.o> <out folder> <repo root>
 3. **The benchmark lock:** a `--bench` run (a fake monolith: `<scratch>/fakebin/monolith`, a link to `true`) holds the lock until its shell ends; a second one at the same time is refused, and runs once the first has ended.
 4. **The log:** every decision above is in `<out>/state/log` (`RUN_SH_DIR` points run-sh.o there, so the real `build/run-sh/log` is untouched).
 5. **The hook:** JSON on stdin, the exact answer on stdout (plain, already wrapped, `run_in_background` and `timeout` kept, single quotes, JSON escapes, Monitor, a WebSocket Monitor, a refused command, the permission modes that only check, `--rewrite all`, input that isn't JSON).
+6. **The gio hint:** `rm src/x`, `rm $X`, `git clean -fd`, `git rm src/x` (hints that name `gio trash`) and `git reset --hard` (one that doesn't) through `--check` with `PATH` set to `<scratch>/gio-found` (a stand-in `gio`, a link to `/bin/true`) and to `<scratch>/gio-missing` (empty): each is refused with exit 126 and its rule both times, and only the gio hints end in `; gio not found in PATH: install it (…)`, only with gio missing. Then the hook's deny reason for `rm -rf src` with gio missing, exactly.
 
 Exit 0 when everything passed, 1 otherwise (each failure printed with what came back).
 

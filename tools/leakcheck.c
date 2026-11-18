@@ -408,6 +408,9 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--bench") == 0) bench = true;
         else Usage();
     }
+    // gio: section 4 trashes tmp/ and the --new-map package; without it the run would fail only at the end,
+    // minutes later, and leave both behind. Checked before anything is built or written.
+    ToolNeedGio();
     bool lsan = strcmp(gMode, "lsan") == 0;
     // The sanitizer build's folder (./build.sh lsan / debug) and, in LSan mode, the examples' (./build.sh
     // examples lsan); --asan runs no examples (they have no ASan build)

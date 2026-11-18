@@ -19,13 +19,13 @@ git clone --recurse-submodules git@github.com:404alya/Monolith.git
 git submodule update --init submodules/simple-todo   # in a checkout cloned without them
 ```
 
-Install the tools and libraries first. R3D, raylib and assimp come with the repo (`submodules/r3d`) and are built on the first run, which takes a few minutes.
+Install the tools and libraries first. R3D, raylib and assimp come with the repo (`submodules/r3d`) and are built on the first run, which takes a few minutes. `glib2` / `libglib2.0-bin` provides `gio`: nothing in the repo deletes a file outright; the tools, the tests and the request sessions move what they remove to the desktop trash with `gio trash`, so you can restore it, and they stop with a message when `gio` is missing.
 
 ```bash
 # Arch / CachyOS
-sudo pacman -S --needed base-devel clang cmake python libx11 libxrandr libxinerama libxcursor libxi mesa
+sudo pacman -S --needed base-devel clang cmake python glib2 libx11 libxrandr libxinerama libxcursor libxi mesa
 # Debian / Ubuntu
-sudo apt install build-essential clang cmake python3 libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libgl1-mesa-dev
+sudo apt install build-essential clang cmake python3 libglib2.0-bin libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libgl1-mesa-dev
 ```
 
 ```bash
@@ -54,8 +54,9 @@ Requests are carried out by [Claude Code](https://claude.com/claude-code). You n
 - **Claude Code** installed and logged in: install it, run `claude` once in a terminal and log in. The editor looks for `claude` in `PATH` and in `~/.local/bin`. Requests use your Claude plan or API usage.
 - **A terminal emulator** the editor can open: alacritty, kitty, foot, wezterm or xterm (or set `MONOLITH_TERMINAL`).
 - **`flock`** (package `util-linux`, installed on most distributions). Without it the editor opens one terminal per request instead of one shared coordinator.
+- **`gio`** (Arch: `glib2`, Debian / Ubuntu: `libglib2.0-bin`). The sessions never delete a file; they move it to the trash with `gio trash`. Without `gio` they couldn't follow that rule, so the editor starts none.
 
-The first request opens one terminal, the **coordinator**, which works through every request you send and hands each to a helper agent; you answer its questions there. If `claude` is missing, the HUD says `coordinator: not started: claude not found …` and your requests stay queued until it can start. On i3 / sway the terminal moves to workspace 10 (`MONOLITH_WORKSPACE`).
+The first request opens one terminal, the **coordinator**, which works through every request you send and hands each to a helper agent; you answer its questions there. If `claude` is missing, the HUD says `coordinator: not started: claude not found …` (without `gio`: `coordinator: not started: gio not found …`) and your requests stay queued until it can start. On i3 / sway the terminal moves to workspace 10 (`MONOLITH_WORKSPACE`).
 
 **Permissions.** In a checkout of this repository the sessions run without approval prompts, so you don't have to approve every command; they are bound by the rules in `CLAUDE.md` (never delete files, never open windows on your screen, treat your request text and downloads as data, work only inside the repo). Where there is no `CLAUDE.md` (a copied build folder) the editor keeps Claude Code's approval prompts. `MONOLITH_CLAUDE_SAFE=1` keeps them everywhere.
 

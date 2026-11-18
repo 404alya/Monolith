@@ -185,11 +185,17 @@ static bool gBench;
 // True once `export __GL_SYNC_TO_VBLANK=0` (or vblank_mode=0) appeared earlier in the line.
 static bool gLineVsync;
 
-// Records a refusal (only the first one counts: it is the one the message names).
+// Appended to a hint that says to use `gio trash` when gio isn't in PATH: the advice would be a dead end, so
+// the session stops and tells the developer instead of looking for another way to delete.
+#define HINT_NO_GIO "; gio not found in PATH: install it (" TOOL_GIO_PACKAGES ")"
+
+// Records a refusal (only the first one counts: it is the one the message names). PATH is searched for gio
+// only here, for a hint that names `gio trash`, so an allowed command never pays for the lookup.
 static void Refuse(const char *rule, const char *word, const char *hint)
 {
     if (gRefusal) return;
-    gRefusal = Fmt("run-sh: refused: %s: %s; %s", rule, word, hint);
+    const char *noGio = strstr(hint, "gio trash") && !ToolInPath("gio") ? HINT_NO_GIO : "";
+    gRefusal = Fmt("run-sh: refused: %s: %s; %s%s", rule, word, hint, noGio);
 }
 
 // #endregion

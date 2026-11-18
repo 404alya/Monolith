@@ -6,6 +6,8 @@
 
 **`./build.sh` fails before any `[INFO] CMD:` line.** It first compiles the build program `nob.c` into `build/nob` with `${CC:-clang}`; the compiler's message says why (usually no C compiler: install clang, or run `CC=gcc ./build.sh`). A `build/nob` from a broken `nob.c` is replaced on the next run once `nob.c` compiles again.
 
+**`` gio not found in PATH: the repo deletes only with `gio trash` (CLAUDE.md); install it (Arch: glib2, Debian / Ubuntu: libglib2.0-bin) and run again ``.** Printed by `build/tools/leakcheck`, `build/tools/test-coordinator` or `./build.sh test export_strip` (after the program's name, e.g. `leakcheck: `), which stop before doing anything. They clean up after themselves by moving their scratch files to the trash with `gio trash`, never deleting them; without `gio` they would leave them behind. Install the package the message names and run again. Claude Code's refused deletions add `gio not found in PATH: install it (…)` for the same reason. The build itself doesn't need `gio`.
+
 **The Linux binary doesn't start on another machine.** It needs glibc 2.34 or newer, `libGL.so.1`, `libgcc_s.so.1`, and the X11 client libraries (libX11, libXrandr, libXinerama, libXcursor, libXi), which GLFW loads at start-up; `readelf -d build/linux/monolith | grep NEEDED` lists only the first ones.
 
 ## Starting
@@ -29,6 +31,8 @@
 ## Requests
 
 **`coordinator: not started: claude not found …`.** Install Claude Code and log in once (`claude` in a terminal). The editor looks in `PATH` and `~/.local/bin`, or set `MONOLITH_CLAUDE` to the program. Queued requests start with the next submit.
+
+**`coordinator: not started: gio not found in PATH (the sessions delete only with gio trash): install glib2 / libglib2.0-bin (the requests stay queued)`.** The sessions never delete a file; they move it to the trash with `gio trash` (`CLAUDE.md`), so without `gio` the editor starts none (in per-request mode the request fails with the same reason, and the bundle is kept). Install `glib2` (Arch) or `libglib2.0-bin` (Debian / Ubuntu); the editor keeps running, and queued requests start with the next submit. The editor searches the `PATH` it was started with: from a desktop launcher that may differ from your shell's.
 
 **No terminal opens.** The editor uses `MONOLITH_TERMINAL`, else `TERMINAL`, else the first of alacritty, kitty, foot, wezterm, xterm. kitty with `--single-instance` and wezterm's mux exit at once, so the editor can only close those windows on i3 / sway.
 

@@ -2193,6 +2193,13 @@ static bool Launch(const char *title, const char *mark, const char *prompt, cons
         MS_SetError("claude not found in PATH or ~/.local/bin (or MONOLITH_CLAUDE)");
         goto fail;
     }
+    // Request sessions delete only with `gio trash` (CLAUDE.md): a session without gio can't follow the
+    // rules, so none starts (the coordinator's requests stay queued until gio is installed)
+    char gio[4096];
+    if (!FindProgram("gio", gio, sizeof(gio))) {
+        MS_SetError("gio not found in PATH (the sessions delete only with gio trash): install glib2 / libglib2.0-bin");
+        goto fail;
+    }
 
     // argv: terminal [its extra args] [pre] [title] [dir] [exec] [wrapper] claude [claude args] prompt
     char titleBuf[300], dir[1024];

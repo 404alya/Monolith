@@ -27,7 +27,7 @@ The sections run in this order; each is marked "Section" in `main()`.
    - the real `build/tools/stub-terminal` (`./build.sh --tools stub-terminal`) when it is missing.
 2. **Output folder:** `build/leakcheck/<YYYYmmddHHMMSS>/` with `logs/` (kept; `build/` is not committed) and `tmp/` (shots, exports, scratch copies: trashed at the end). `build/leakcheck/latest` points at it.
 3. **Each run** (`Run` in the code): one command with the sanitizer's options in its environment. Its stdout and stderr go to `logs/<name>.out`, its sanitizer report to `logs/<name>.<pid>`, and `<name> <status>` is appended to `logs/runs.txt`. A run whose exit status is not the expected one fails the check.
-4. **Clean-up:** the files the runs created (`tmp/`, the new map packages in `maps/`) go to the trash (`gio trash`), never `rm`.
+4. **Clean-up:** the files the runs created (`tmp/`, the new map packages in `maps/`) go to the trash (`gio trash`), never `rm`. So `gio` is checked right after the flags, before section 1: without it the leak check stops at once (`leakcheck: gio not found in PATH: …`, exit 1) instead of failing here, minutes later, with both left behind.
 5. **Report:** `tools/lsan_report.py` (Python, kept) classifies the reports with `tools/lsan.supp` and prints one line per run and the stack of every leak of ours; then the final line.
 
 ## What it runs
@@ -116,7 +116,7 @@ Set for the runs (and put back after each):
 | Code | Meaning |
 |---|---|
 | 0 | Zero leaks of ours and every run exited as expected (`leakcheck: OK: zero leaks of ours`). |
-| 1 | A leak of ours, an unexpected exit status or a sanitizer error (`leakcheck: FAILED: ...`), or a build failed / a binary is missing. |
+| 1 | A leak of ours, an unexpected exit status or a sanitizer error (`leakcheck: FAILED: ...`), or a build failed / a binary is missing, or `gio` is not in `PATH` (checked first: `leakcheck: gio not found in PATH: …`). |
 | 2 | A bad argument. |
 
 ## Called by

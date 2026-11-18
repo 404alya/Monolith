@@ -34,6 +34,7 @@ It also sets `MONOLITH_LAUNCH=coordinator` and `MONOLITH_STUB_WORK=6` (each stub
 - CTRL+K n (`--close-submitted`) cancels a running request.
 - Killing the coordinator mid-run requeues untouched requests and reports touched ones on the next start.
 - Without a coordinator, a queued request is cancelled by the editor itself.
+- Without `gio` (case 5b: `PATH` is `<scratch>/no-gio-bin`, a symlink to every program of the test's own `PATH` except `gio`, plus `build/tools`), the editor starts no coordinator: its log says `monolith: coordinator not started: gio not found …`, no terminal opens (a separate `MONOLITH_STUB_OPENED` file stays empty) and the request stays `queued`.
 - Per-request mode still opens one terminal per request, without a state file.
 
 Overlaps are read from the queue log's timestamps (the claim and the end of each request).
@@ -42,7 +43,7 @@ Overlaps are read from the queue log's timestamps (the claim and the end of each
 
 One line per step (`  ok: ...` / `  FAIL: ...`), ending with `test-coordinator: OK` (exit 0) or `test-coordinator: FAILED` (exit 1).
 
-Exit 1 also when `build/linux/monolith` is missing (`./build.sh`), when `flock` (util-linux) is missing, or when `--new-map` fails. When a program of `build/tools/` is missing, the message says to run `./build.sh --tools <name>`.
+Exit 1 also when `build/linux/monolith` is missing (`./build.sh`), when `flock` (util-linux) or `gio` (Arch: `glib2`, Debian / Ubuntu: `libglib2.0-bin`; the test trashes its scratch folder) is not in `PATH` (`<name> not found in PATH: …`, checked before the scratch folder is made), or when `--new-map` fails. When a program of `build/tools/` is missing, the message says to run `./build.sh --tools <name>`.
 
 ## Called by
 

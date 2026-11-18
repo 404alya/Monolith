@@ -25,10 +25,10 @@ It replaces `tests/unit/export_strip_test.sh` (a grep per rule). Built and run b
 | `argv[2]` | The test's own folder (`build/unit/export_strip`), where it makes its export (passed by `nob.c`). |
 | `argv[3]` | Optional (after `--` on the command line): an existing export folder to check instead of making one. |
 
-Without `argv[3]` it exports `tests/models` with `build/linux/monolith` into `<argv[2]>/export-<YYYYmmddHHMMSS>/` (monolith's `--export`, hidden: no window), checks that, and moves the export to the trash afterwards (`gio trash`, the repo's only way to delete). With `argv[3]` it checks that folder and leaves it alone.
+Without `argv[3]` it exports `tests/models` with `build/linux/monolith` into `<argv[2]>/export-<YYYYmmddHHMMSS>/` (monolith's `--export`, hidden: no window), checks that, and moves the export to the trash afterwards (`gio trash`, the repo's only way to delete). With `argv[3]` it checks that folder and leaves it alone. On the path that makes an export, `gio` is checked first (`PATH`, as `tools/tool.h`'s `ToolNeedGio`, with the same message): without it the test stops before exporting (`export_strip_test: gio not found in PATH: …`, exit 1) rather than leave the export behind.
 
 ## Output and exit codes
 
 Line for line as the script printed it: `ok   no <rule>` per rule that passed; `FAIL <rule>:` and the hits (`path:line:text`, indented four spaces) per rule that didn't; then `export_strip_test: OK (<dir>)` or `export_strip_test: FAILED (<dir>)`.
 
-Exit 0 when all rules passed; 1 on any hit, a missing file, a missing monolith binary or a failed export.
+Exit 0 when all rules passed; 1 on any hit, a missing file, a missing monolith binary, a missing `gio` (only when it makes the export) or a failed export.

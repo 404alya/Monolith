@@ -5,6 +5,7 @@
 
 #include "tool.h"
 
+#include <dirent.h>
 #include <sys/file.h>
 
 // #region The scratch folder and small helpers
@@ -427,20 +428,6 @@ static void Show(const char **ids, size_t count)
 
 // #region main
 
-// `command -v name`: whether the program is found in PATH.
-static bool InPath(const char *name)
-{
-    const char *path = getenv("PATH");
-    if (!path) return false;
-    for (const char *d = path;;) {
-        size_t len = strcspn(d, ":");
-        const char *cand = nob_temp_sprintf("%.*s/%s", (int)(len ? len : 1), len ? d : ".", name);
-        if (access(cand, X_OK) == 0) return true;
-        if (!d[len]) return false;
-        d += len + 1;
-    }
-}
-
 // Sets an environment variable for one call (the script's `VAR=value Submit ...`), remembering the old
 // value; RestoreEnv puts it back.
 typedef struct {
@@ -465,6 +452,45 @@ static void RestoreEnv(SavedEnv saved)
     free(saved.old);
 }
 
+// The folder <scratch>/no-gio-bin: a symlink to every program in $PATH's folders but gio (the first of a name
+// wins, as in a PATH search), so a run with PATH=<it> finds everything except gio, without anything being
+// removed from the system. Made on the first call; returns its path (a temp string). The test fails when it
+// can't be made.
+static const char *NoGioFolder(void)
+{
+    const char *dir = nob_temp_sprintf("%s/no-gio-bin", gT);
+    struct stat st;
+    if (stat(dir, &st) == 0) return dir;
+    if (!ToolMkdirP(dir)) {
+        Bad("can't make %s", dir);
+        return dir;
+    }
+    const char *path = getenv("PATH");
+    for (const char *d = path ? path : ""; *d;) {
+        size_t len = strcspn(d, ":");
+        char *entry = strndup(len ? d : ".", len ? len : 1);
+        char *folder = entry ? realpath(entry, NULL) : NULL;  // absolute link targets, whatever the entry says
+        DIR *h = folder ? opendir(folder) : NULL;
+        for (struct dirent *e; h && (e = readdir(h));) {
+            if (e->d_name[0] == '.' || strcmp(e->d_name, "gio") == 0) continue;
+            size_t mark = nob_temp_save();  // thousands of names: give the temp buffer back after each
+            const char *from = nob_temp_sprintf("%s/%s", folder, e->d_name);
+            const char *to = nob_temp_sprintf("%s/%s", dir, e->d_name);
+            if (stat(from, &st) == 0 && !S_ISDIR(st.st_mode) && access(from, X_OK) == 0 && lstat(to, &st) != 0 &&
+                symlink(from, to) != 0) {
+                Bad("symlink %s: %s", to, strerror(errno));
+            }
+            nob_temp_rewind(mark);
+        }
+        if (h && closedir(h) != 0) ToolErr("%s: %s", folder, strerror(errno));
+        free(folder);
+        free(entry);
+        d += len;
+        if (*d == ':') d++;
+    }
+    return dir;
+}
+
 // The text of a check that compares the number of terminals.
 static const char *Terminals(void)
 {
@@ -478,10 +504,12 @@ int main(int argc, char **argv)
     if (chdir(gToolRoot) != 0) ToolDie(1, "cd %s: %s", gToolRoot, strerror(errno));
     bool keep = argc > 1 && strcmp(argv[1], "--keep") == 0;
 
-    // what the test needs: monolith, flock (the editor's lock wrapper uses it), the three programs
+    // what the test needs: monolith, flock (the editor's lock wrapper uses it), gio (the scratch folder goes to
+    // the trash at the end, and the editor refuses to start a coordinator without it), the three programs
     gGame = strdup(nob_temp_sprintf("%s/build/linux/monolith", gToolRoot));
     if (access(gGame, X_OK) != 0) ToolDie(1, "%s missing (./build.sh)", gGame);
-    if (!InPath("flock")) ToolDie(1, "flock (util-linux) missing");
+    ToolNeed("flock", "the editor's coordinator lock needs it; install util-linux and run again");
+    ToolNeedGio();
     const char *terminal = strdup(ToolProgram("stub-terminal"));
     const char *claude = strdup(ToolProgram("stub-coordinator"));
     ToolProgram("request-queue");  // stub-coordinator runs it: say now, not inside coordinator.out
@@ -691,6 +719,31 @@ int main(int argc, char **argv)
     } else {
         char *s = StateOf(Y1 ? Y1 : "");
         Bad("state %s", s);
+        free(s);
+    }
+
+    // 5b. no gio: the editor refuses to start a coordinator (its sessions delete only with `gio trash`), the
+    // request stays queued and no terminal opens
+    Echo("5b. no gio in PATH: the editor starts no coordinator, the request stays queued");
+    const char *noGioOpened = strdup(nob_temp_sprintf("%s/opened-no-gio.txt", gT));
+    SavedEnv noGioPath = SetEnvFor("PATH", nob_temp_sprintf("%s:%s/build/tools", NoGioFolder(), gToolRoot));
+    SavedEnv noGioStub = SetEnvFor("MONOLITH_STUB_OPENED", noGioOpened);
+    char *Z1 = Submit(A, "test no gio", NULL, 0);
+    RestoreEnv(noGioStub);
+    RestoreEnv(noGioPath);
+    char *noGioLine = FindLine(nob_temp_sprintf("%s/submit-%d.out", gT, gN), Contains,
+                               "monolith: coordinator not started: gio not found", false);
+    if (noGioLine) Ok("the editor refused: %s", strstr(noGioLine, "monolith: "));
+    else Bad("no \"coordinator not started: gio not found\" line (see submit-%d.out)", gN);
+    free(noGioLine);
+    struct stat stNoGio;
+    if (stat(noGioOpened, &stNoGio) != 0 || stNoGio.st_size == 0) Ok("no terminal opened");
+    else Bad("a terminal opened (see %s)", noGioOpened);
+    if (StateIs(Z1 ? Z1 : "", "queued")) {
+        Ok("%s stayed queued", Z1);
+    } else {
+        char *s = StateOf(Z1 ? Z1 : "");
+        Bad("state %s (want queued)", s);
         free(s);
     }
 

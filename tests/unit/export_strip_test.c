@@ -142,6 +142,23 @@ static int Trash(const char *path)
     return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
 }
 
+// `command -v name`: whether an executable `name` is in one of $PATH's folders (an empty entry is the current
+// folder; no PATH: false). The same lookup as tools/tool.h's ToolInPath (this test uses libc only).
+static bool InPath(const char *name)
+{
+    const char *path = getenv("PATH");
+    if (!path) return false;
+    for (const char *d = path;;) {
+        size_t len = strcspn(d, ":");
+        char *cand = Format("%.*s/%s", (int)(len ? len : 1), len ? d : ".", name);
+        bool found = access(cand, X_OK) == 0;
+        free(cand);
+        if (found) return true;
+        if (!d[len]) return false;
+        d += len + 1;
+    }
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 3) {
@@ -155,8 +172,14 @@ int main(int argc, char **argv)
 
     // Step 1: no folder given, so make an export of tests/models with the built monolith: build/unit/export_strip/
     // export-<timestamp>. monolith is run with --export (hidden window) and its output thrown away; a failure
-    // only says "the export failed".
+    // only says "the export failed". The export goes to the trash at the end, so gio is checked first (the
+    // message tools/tool.h's ToolNeedGio prints): without it the export would be left behind.
     if (!dir) {
+        if (!InPath("gio")) {
+            fprintf(stderr, "export_strip_test: gio not found in PATH: the repo deletes only with `gio trash` "
+                            "(CLAUDE.md); install it (Arch: glib2, Debian / Ubuntu: libglib2.0-bin) and run again\n");
+            return 1;
+        }
         char *game = Format("%s/build/linux/monolith", root);
         if (access(game, X_OK) != 0) {
             fprintf(stderr, "export_strip_test: run ./build.sh first\n");

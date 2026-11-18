@@ -1,5 +1,6 @@
 // tests/unit/run_sh_test.c: the test of tools/run-sh.c, run by `./build.sh test run_sh` with a plain and a
-// sanitizer build of run-sh.o: the rules table (--check only), -c, the benchmark lock, the log, the hook.
+// sanitizer build of run-sh.o: the rules table (--check only), -c, the benchmark lock, the log, the hook, the
+// gio hint (a deletion refusal with gio missing from PATH).
 // Its scratch folder /tmp/claude-<uid>/run-sh-test/ is reused between runs.
 // Reference: docs/code/run_sh_test.md
 
@@ -884,6 +885,77 @@ static void TestHook(void)
 
 // #endregion
 
+// #region 6. The gio hint
+
+// What a refusal that says `gio trash` gets appended when gio isn't in PATH.
+#define NO_GIO "; gio not found in PATH: install it (Arch: glib2, Debian / Ubuntu: libglib2.0-bin)"
+
+// Refusals whose hint says to use `gio trash` (`gio`: true) and one whose hint doesn't, run with PATH set to
+// a folder holding a stand-in `gio` (found) and to an empty folder (not found). The refusal stays (exit 126,
+// same rule); only a gio hint gets NO_GIO at its end, and only when gio is missing. Then the hook's deny
+// reason with gio missing.
+static void TestGioHint(void)
+{
+    char *found = Sprintf("%s/gio-found", gScratch), *missing = Sprintf("%s/gio-missing", gScratch);
+    MkdirP(found);
+    MkdirP(missing);
+    char *stand = Sprintf("%s/gio", found);
+    struct stat st;
+    if (lstat(stand, &st) != 0 && symlink("/bin/true", stand) != 0) {
+        Expect(false, "gio hint: can't make %s: %s", stand, strerror(errno));
+    }
+    const char *old = getenv("PATH");
+    char *saved = old ? strdup(old) : NULL;
+
+    static const struct {
+        const char *cmd, *rule;
+        bool gio;
+    } cases[] = {
+        {"rm src/x", DEL, true},     {"rm $X", DEL, true},        {"git clean -fd", DEL, true},
+        {"git rm src/x", DEL, true}, {"git reset --hard", LOST, false},
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        for (int have = 1; have >= 0; have--) {
+            setenv("PATH", have ? found : missing, 1);
+            const char *bins[] = {gPlain, gSan};
+            for (size_t b = 0; b < 2; b++) {
+                char *argv[] = {(char *)bins[b], "--check", (char *)cases[i].cmd, NULL};
+                Result r = Run(argv, gRoot, NULL);
+                char *prefix = Sprintf("run-sh: refused: %s: ", cases[i].rule);
+                char *tail = Sprintf("%s\n", NO_GIO);
+                size_t n = strlen(r.out.s), tn = strlen(tail);
+                bool hasTail = n >= tn && strcmp(r.out.s + n - tn, tail) == 0;
+                bool wantTail = cases[i].gio && !have;
+                Expect(r.code == 126 && strncmp(r.out.s, prefix, strlen(prefix)) == 0 && hasTail == wantTail &&
+                           (strstr(r.out.s, "gio not found") != NULL) == wantTail,
+                       "gio hint [%s] %s, gio %s: exit %d: %s%s", b ? "san" : "plain", cases[i].cmd,
+                       have ? "found" : "missing", r.code, r.out.s, r.err.s);
+                free(prefix), free(tail);
+                ResultFree(&r);
+            }
+        }
+    }
+
+    // the hook: the deny reason carries the same text
+    setenv("PATH", missing, 1);
+    const char *reason = "run-sh: refused: no deletion outside /tmp: rm src; move it to the trash with `gio trash "
+                         "<path>` (rm and the other deletion commands only take literal paths under /tmp/, e.g. your "
+                         "scratchpad)" NO_GIO;
+    char *jr = JsonQuote(reason);
+    char *want = Sprintf("{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\","
+                         "\"permissionDecisionReason\":%s}}\n", jr);
+    char *in = Sprintf("{\"cwd\":\"%s\",\"permission_mode\":\"bypassPermissions\",\"tool_name\":\"Bash\","
+                       "\"tool_input\":{\"command\":\"rm -rf src\"}}", gRoot);
+    Hook("refused, gio missing", in, want, 0, NULL);
+    free(jr), free(want), free(in);
+
+    if (saved) setenv("PATH", saved, 1);
+    else unsetenv("PATH");
+    free(saved), free(stand), free(found), free(missing);
+}
+
+// #endregion
+
 int main(int argc, char **argv)
 {
     if (argc != 5) {
@@ -925,7 +997,8 @@ int main(int argc, char **argv)
     TestBenchLock();
     TestHook();
     TestLog();
-    printf("run_sh_test: -c, lock, hook, log: %d passed, %d failed\n", gPassed - passedBefore,
+    TestGioHint();
+    printf("run_sh_test: -c, lock, hook, log, gio hint: %d passed, %d failed\n", gPassed - passedBefore,
            gFailed - failedBefore);
     printf("run_sh_test: %s: %d passed, %d failed\n", gFailed ? "FAILED" : "OK", gPassed, gFailed);
     free(gScratch);

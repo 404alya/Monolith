@@ -25,6 +25,8 @@ claude <permission flags> --model $MONOLITH_COORDINATOR_MODEL (default sonnet) [
 
 Later requests only go into the queue; they never open a window. The coordinator (`build/tools/request-queue`) claims bundles, hands each to a subagent on the request's model and writes every later state (claimed, question, done, failed, cancelled). The HUD follows `state` + `result.md`. Without `flock` (util-linux) the editor falls back to per-request mode.
 
+`Launch` checks, in this order, the terminal, `claude` (`FindClaude`) and `gio` (`FindProgram("gio")`: the sessions delete only with `gio trash`, `CLAUDE.md`, so a session without it couldn't follow the rules). When one is missing no terminal opens; for the coordinator the HUD shows `coordinator: not started: <why> (the requests stay queued)` (e.g. `gio not found in PATH (the sessions delete only with gio trash): install glib2 / libglib2.0-bin`), the note and the log say the same (`monolith: coordinator not started: …`), and the request starts with the next submit once the program is there. The editor keeps running.
+
 ### Per-request
 
 A new terminal per request runs, in the repo root (no state file):

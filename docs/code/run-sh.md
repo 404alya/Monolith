@@ -82,6 +82,12 @@ Each rule enforces a line of `CLAUDE.md`, and the refusal names the rule.
 | `leave .slop alone` | "`.slop/` is not project content" | any word or `>` / `>>` target naming a path with a `.slop` component (`.slop`, `.slop/x`, `<root>/.slop/x`). `git add .slop`, `--exclude-dir=.slop` and `rg -g '!.slop'` are fine; a recursive search of the repo that doesn't exclude it isn't seen. |
 | `the guard's source` | reading the guard's source needs the developer's approval (`.claude/settings.json` asks for the Read tool) | any word or `>` / `>>` target whose last component is `run-sh.c`. Building (`./build.sh --tools run-sh`), the test and `git add` are fine. |
 
+**When `gio` is missing.** Every deletion refusal says to use `gio trash` (the `rm` and unseen-path hints, `git clean`, `git rm`). When `gio` is not in `PATH`, that advice is a dead end, so the refusal gets `; gio not found in PATH: install it (Arch: glib2, Debian / Ubuntu: libglib2.0-bin)` at its end, and the session stops and tells the developer instead of looking for another way to delete. The refusal itself is the same (exit 126, same rule); `PATH` is searched only when a refusal's hint names `gio trash` (`Refuse` in the code), never for an allowed command. For example, with `gio` missing:
+
+```
+run-sh: refused: no deletion outside /tmp: rm src/x; move it to the trash with `gio trash <path>` (rm and the other deletion commands only take literal paths under /tmp/, e.g. your scratchpad); gio not found in PATH: install it (Arch: glib2, Debian / Ubuntu: libglib2.0-bin)
+```
+
 **The benchmark lock.** `-c` takes an exclusive `flock` on `<RUN_SH_DIR>/bench.lock` through a file descriptor without `O_CLOEXEC` before it `exec`s bash, so bash and every child hold the lock until the run ends (this also covers `bench-export-ab`). A second benchmark started meanwhile is refused. `--check` doesn't look at the lock.
 
 ## How under /tmp is decided
