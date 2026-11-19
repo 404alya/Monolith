@@ -2,7 +2,9 @@
 // everything the build does is here, written on nob.h (src/vendor/nob/nob.h, vendored unmodified).
 //
 // Modes: plain Linux build, run, debug, lsan, profile, --win, --tools, examples, test. Every command runs
-// through RunTimed() (timed, sequential; never nob_cmd_run directly or .async).
+// through RunTimed() (alone) or RunPool() (monolith's per-file compiles, in parallel, each timed with wait4);
+// never nob_cmd_run directly or .async. monolith compiles one object per C file into <build folder>-obj/,
+// only what is out of date (CompileObjects), and links only when an input changed (LinkIfStale).
 // Reference: docs/code/nob.md
 
 // sched_getaffinity / CPU_COUNT (the -j count, like nproc), nftw. Before nob.h, which only sets
@@ -42,11 +44,16 @@
 static FILE *gOut;
 static FILE *gErr;
 
-// One timed command, for the summary table.
+// One row of the summary table: a timed command, or a pool's own row (RunPool).
+//   wall    seconds from the command's start to its end (a pool's row: from its first start to its last reap)
+//   user, sys  CPU seconds of the command and every process it waited for (a pool's row: its commands' sum)
+//   pool    0: a command run alone (RunTimed); n: the n-th pool's command, or (header) that pool's own row
 typedef struct {
     const char *label;
-    double wall, user, sys;   // seconds
+    double wall, user, sys;
     bool ok;
+    int pool;
+    bool header;
 } Timing;
 
 typedef struct {
@@ -107,11 +114,19 @@ typedef struct {
     bool append;
 } Output;
 
-// Runs one command (resetting it, as nob_cmd_run does) and records its time. The only place a command runs:
-// prints nob's "[INFO] CMD: ..." echo, runs it synchronously, then prints
-// "[TIME] <label>: <wall> s wall, <cpu> s CPU (<user> user + <sys> sys)".
-// CPU time is the RUSAGE_CHILDREN difference: the command and every descendant it waited for. That is
-// exact only because nothing else runs at the same time (no .async anywhere).
+// The "[TIME] <label>: <wall> s wall, <cpu> s CPU (<user> user + <sys> sys)" line after a command.
+static void PrintTime(const Timing *t)
+{
+    fprintf(gOut, "[TIME] %s: %.2f s wall, %.2f s CPU (%.2f user + %.2f sys)%s\n", t->label, t->wall,
+            t->user + t->sys, t->user, t->sys, t->ok ? "" : " (failed)");
+    fflush(gOut);
+}
+
+// Runs one command on its own (resetting it, as nob_cmd_run does) and records its time. With RunPool the only
+// places a command runs: prints nob's "[INFO] CMD: ..." echo, runs it synchronously, then its "[TIME]" line.
+// CPU time is the RUSAGE_CHILDREN difference: the command and every descendant it waited for (all of
+// `cmake --build -j`'s compilers). That is exact only because nothing else runs meanwhile: RunPool reaps all
+// of its children before it returns, and never runs while a RunTimed command does.
 static bool RunTimed(Nob_Cmd *cmd, const char *label, Output out)
 {
     Nob_String_Builder echo = {0};
@@ -162,33 +177,239 @@ static bool RunTimed(Nob_Cmd *cmd, const char *label, Output out)
         .ok = ok,
     };
     nob_da_append(&gTimings, t);
-    fprintf(gOut, "[TIME] %s: %.2f s wall, %.2f s CPU (%.2f user + %.2f sys)%s\n", label, t.wall, t.user + t.sys,
-            t.user, t.sys, ok ? "" : " (failed)");
-    fflush(gOut);
+    PrintTime(&t);
+    return ok;
+}
+
+// One command of a pool: its argument list and its label in the summary.
+typedef struct {
+    Nob_Cmd cmd;
+    const char *label;
+} PoolJob;
+
+typedef struct {
+    PoolJob *items;
+    size_t count, capacity;
+} PoolJobs;
+
+// A pool command while it runs: its job, process, start time and the two temporary files that take its
+// stdout and stderr (unlinked at once by tmpfile(), so nothing is left behind).
+typedef struct {
+    PoolJob *job;
+    pid_t pid;
+    uint64_t start;
+    FILE *out, *err;
+} Running;
+
+static int gPools;  // pools run so far: the next pool's number in the summary
+
+// The pool's size: $JOBS when it is set (a positive number), else Nproc(), the -j count R3D's cmake build gets.
+static unsigned long Nproc(void);
+static size_t PoolSize(void)
+{
+    const char *jobs = getenv("JOBS");
+    if (!jobs || !*jobs) return (size_t)Nproc();
+    char *end;
+    unsigned long n = strtoul(jobs, &end, 10);
+    if (*end != '\0' || n == 0 || jobs[0] == '-') {
+        SayErr("build: JOBS must be a positive number (it is \"%s\")", jobs);
+        exit(1);
+    }
+    return (size_t)n;
+}
+
+// Copies what a pool command wrote to one of its temporary files to `to` (the terminal's stdout or stderr) and
+// closes the file.
+static void DrainCapture(FILE *f, FILE *to)
+{
+    char buf[1 << 14];
+    size_t n;
+    rewind(f);
+    while ((n = fread(buf, 1, sizeof buf, f)) > 0) fwrite(buf, 1, n, to);
+    fclose(f);
+    fflush(to);
+}
+
+// Starts one pool command: fork + exec with its stdout and stderr on two temporary files. False (with a
+// message) when the files or the process can't be made; a program that can't be executed is the child's
+// failure (exit 127, its message in the captured stderr), as with nob_cmd_run.
+static bool StartJob(PoolJob *job, Running *r)
+{
+    r->job = job;
+    r->out = tmpfile();
+    r->err = tmpfile();
+    if (!r->out || !r->err) {
+        SayErr("build: could not create a temporary file for %s: %s", job->label, strerror(errno));
+        if (r->out) fclose(r->out);
+        if (r->err) fclose(r->err);
+        return false;
+    }
+    // the files must not leak into the other commands of the pool (the child gets them as fds 1 and 2, which
+    // dup2 makes inheritable again)
+    fcntl(fileno(r->out), F_SETFD, FD_CLOEXEC);
+    fcntl(fileno(r->err), F_SETFD, FD_CLOEXEC);
+    // the NULL-terminated argv, made before fork(): the child only calls async-signal-safe functions
+    Nob_Cmd argv = {0};
+    nob_da_append_many(&argv, job->cmd.items, job->cmd.count);
+    nob_cmd_append(&argv, (const char *)NULL);
+    fflush(NULL);
+    r->start = nob_nanos_since_unspecified_epoch();
+    r->pid = fork();
+    if (r->pid < 0) {
+        SayErr("build: could not start %s: %s", job->label, strerror(errno));
+        nob_cmd_free(argv);
+        fclose(r->out);
+        fclose(r->err);
+        return false;
+    }
+    if (r->pid == 0) {
+        dup2(fileno(r->out), STDOUT_FILENO);
+        dup2(fileno(r->err), STDERR_FILENO);
+        execvp(argv.items[0], (char *const *)argv.items);
+        dprintf(STDERR_FILENO, "[ERROR] could not exec %s: %s\n", argv.items[0], strerror(errno));
+        _exit(127);
+    }
+    nob_cmd_free(argv);
+    return true;
+}
+
+// Runs `jobs` in a pool of up to `size` processes at once, as one step `label` of the summary, and resets
+// the list (each job's command is freed). For every command, when it ends: its "[INFO] CMD: ..." echo, its
+// stdout and stderr (captured whole, so parallel compilers never interleave mid-line; stdout to stdout,
+// stderr to stderr as before), why it failed if it did, and its "[TIME]" line. Its time is its own:
+// wall from fork to reap, CPU from wait4(), which returns that child's rusage (it and every process it
+// waited for), so numbers stay exact while commands overlap (RUSAGE_CHILDREN would mix them). After the first
+// failure no new command starts; the running ones are waited for. True when every command succeeded.
+static bool RunPool(PoolJobs *jobs, const char *label, size_t size)
+{
+    if (jobs->count == 0) return true;
+    if (size == 0) size = 1;
+    int pool = ++gPools;
+    // the pool's own row first, its commands' rows (in list order) after it; filled in at the end
+    size_t headerAt = gTimings.count;
+    nob_da_append(&gTimings, ((Timing){.label = label, .pool = pool, .header = true}));
+    Timing *rows = calloc(jobs->count, sizeof *rows);
+    bool *ran = calloc(jobs->count, sizeof *ran);
+    Running *running = calloc(size, sizeof *running);
+    NOB_ASSERT(rows && ran && running);
+
+    uint64_t t0 = nob_nanos_since_unspecified_epoch();
+    size_t next = 0, active = 0;
+    bool ok = true;
+    while (active > 0 || (ok && next < jobs->count)) {
+        // fill free slots while nothing has failed
+        while (ok && next < jobs->count && active < size) {
+            Running *slot = NULL;
+            for (size_t s = 0; s < size && !slot; s++) if (!running[s].job) slot = &running[s];
+            if (!StartJob(&jobs->items[next], slot)) {
+                slot->job = NULL;
+                rows[next] = (Timing){.label = jobs->items[next].label, .pool = pool};
+                ran[next] = true;
+                ok = false;
+                next++;
+                break;
+            }
+            next++;
+            active++;
+        }
+        if (active == 0) break;
+
+        // reap the next command to end; its own rusage comes with it
+        int status;
+        struct rusage ru;
+        pid_t pid = wait4(-1, &status, 0, &ru);
+        if (pid < 0) {
+            if (errno == EINTR) continue;
+            SayErr("build: wait4: %s", strerror(errno));
+            exit(1);
+        }
+        uint64_t t1 = nob_nanos_since_unspecified_epoch();
+        Running *r = NULL;
+        for (size_t s = 0; s < size && !r; s++) if (running[s].job && running[s].pid == pid) r = &running[s];
+        if (!r) continue;  // not one of ours (nob starts nothing else meanwhile)
+        size_t index = (size_t)(r->job - jobs->items);
+        bool jobOk = WIFEXITED(status) && WEXITSTATUS(status) == 0;
+
+        // the command's echo, output and time, in one piece
+        Nob_String_Builder echo = {0};
+        nob_cmd_render(r->job->cmd, &echo);
+        nob_sb_append_null(&echo);
+        nob_log(NOB_INFO, "CMD: %s", echo.items);
+        nob_sb_free(echo);
+        DrainCapture(r->out, gOut);
+        DrainCapture(r->err, gErr);
+        if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+            nob_log(NOB_ERROR, "command exited with exit code %d", WEXITSTATUS(status));
+        } else if (WIFSIGNALED(status)) {
+            nob_log(NOB_ERROR, "command process was terminated by signal %d", WTERMSIG(status));
+        }
+        rows[index] = (Timing){
+            .label = r->job->label,
+            .wall = (double)(t1 - r->start) / 1e9,
+            .user = Seconds(ru.ru_utime),
+            .sys = Seconds(ru.ru_stime),
+            .ok = jobOk,
+            .pool = pool,
+        };
+        ran[index] = true;
+        PrintTime(&rows[index]);
+        ok = ok && jobOk;
+        r->job = NULL;
+        active--;
+    }
+    uint64_t t1 = nob_nanos_since_unspecified_epoch();
+
+    // the rows of the commands that ran, in list order, and the pool's own row
+    Timing header = {.label = label, .wall = (double)(t1 - t0) / 1e9, .ok = ok, .pool = pool, .header = true};
+    size_t count = 0;
+    for (size_t i = 0; i < jobs->count; i++) {
+        if (!ran[i]) continue;
+        nob_da_append(&gTimings, rows[i]);
+        header.user += rows[i].user;
+        header.sys += rows[i].sys;
+        count++;
+    }
+    header.label = nob_temp_sprintf("%s: %zu commands, up to %zu at once", label, count, size);
+    gTimings.items[headerAt] = header;
+    PrintTime(&header);
+
+    for (size_t i = 0; i < jobs->count; i++) nob_cmd_free(jobs->items[i].cmd);
+    jobs->count = 0;
+    free(rows);
+    free(ran);
+    free(running);
     return ok;
 }
 
 // The summary table of every timed command and their total, plus the whole run's wall time (which also
 // covers nob's own work: the maps/ copy, compile_commands.json). Printed at the end of a build, before
-// `run` hands over to monolith, and before a failed build exits.
+// `run` hands over to monolith, and before a failed build exits. A pool is one row (its elapsed time, its
+// commands' CPU) with its commands indented below it: they ran at the same time, so their wall times overlap
+// and only the pool's row counts towards the total wall time; CPU counts every command once.
 static void PrintSummary(void)
 {
     if (gTimings.count == 0) return;
     size_t width = strlen("total");
     for (size_t i = 0; i < gTimings.count; i++) {
-        size_t n = strlen(gTimings.items[i].label);
+        Timing *t = &gTimings.items[i];
+        size_t n = strlen(t->label) + (t->pool && !t->header ? 2 : 0);
         if (n > width) width = n;
     }
     double wall = 0, user = 0, sys = 0;
-    fprintf(gOut, "[TIME] summary (wall = elapsed; CPU = user + sys of the command and every process it waited for)\n");
+    fprintf(gOut, "[TIME] summary (wall = elapsed; CPU = user + sys of the command and every process it waited for;\n"
+                  "       indented commands ran in parallel in the pool above them: their wall times overlap, the\n"
+                  "       pool's row is its elapsed time and the total counts that)\n");
     fprintf(gOut, "  %-*s %9s %9s %9s %9s\n", (int)width, "command", "wall s", "CPU s", "user s", "sys s");
     for (size_t i = 0; i < gTimings.count; i++) {
         Timing *t = &gTimings.items[i];
-        fprintf(gOut, "  %-*s %9.2f %9.2f %9.2f %9.2f%s\n", (int)width, t->label, t->wall, t->user + t->sys,
-                t->user, t->sys, t->ok ? "" : "  (failed)");
-        wall += t->wall;
-        user += t->user;
-        sys += t->sys;
+        bool inPool = t->pool && !t->header;
+        fprintf(gOut, "  %s%-*s %9.2f %9.2f %9.2f %9.2f%s\n", inPool ? "  " : "", (int)width - (inPool ? 2 : 0),
+                t->label, t->wall, t->user + t->sys, t->user, t->sys, t->ok ? "" : "  (failed)");
+        if (!inPool) wall += t->wall;
+        if (!t->header) {
+            user += t->user;
+            sys += t->sys;
+        }
     }
     fprintf(gOut, "  %-*s %9.2f %9.2f %9.2f %9.2f\n", (int)width, "total", wall, user + sys, user, sys);
     double whole = (double)(nob_nanos_since_unspecified_epoch() - gStartNanos) / 1e9;
@@ -1182,6 +1403,160 @@ static void Xatlas(const char *cxx, const char *obj, Nob_Cmd *extra)
     nob_cmd_free(flags);
 }
 
+static const char *RelativeToRoot(const char *path);
+
+// Whether any prerequisite in the compiler's dependency file <dep> (-MMD -MF: "<obj>: <source> <header>
+// ..." in make syntax, backslash-newline continuations, "\ " for a space in a name) is newer than <obj> or
+// gone (a header that was deleted or moved: the source may still name it, so compile and let the compiler
+// say). True also when <dep> can't be read: the object's inputs are then unknown.
+static bool DepsNewer(const char *dep, const char *obj)
+{
+    Nob_String_Builder text = {0};
+    if (!nob_read_entire_file(dep, &text)) return true;
+    nob_sb_append_null(&text);
+    // the rule's target ends at the first ':' followed by a blank or the line's end
+    const char *p = text.items;
+    while (*p && !(p[0] == ':' && (p[1] == ' ' || p[1] == '\t' || p[1] == '\n' || p[1] == '\\' || p[1] == '\0'))) p++;
+    bool newer = *p == '\0';  // no rule: unreadable, compile
+    if (*p) p++;
+    Nob_String_Builder name = {0};
+    while (!newer) {
+        // skip blanks and backslash-newline continuations; an unescaped newline ends the rule
+        while (*p == ' ' || *p == '\t' || (p[0] == '\\' && p[1] == '\n') || *p == '\r') p += p[0] == '\\' ? 2 : 1;
+        if (*p == '\0' || *p == '\n') break;
+        name.count = 0;
+        while (*p && *p != ' ' && *p != '\t' && *p != '\n' && !(p[0] == '\\' && p[1] == '\n')) {
+            if (p[0] == '\\' && (p[1] == ' ' || p[1] == '#' || p[1] == '\\')) p++;
+            else if (p[0] == '$' && p[1] == '$') p++;
+            nob_da_append(&name, *p);
+            p++;
+        }
+        nob_sb_append_null(&name);
+        struct stat st;
+        newer = stat(name.items, &st) != 0 || NewerThan(name.items, obj);
+    }
+    nob_sb_free(name);
+    nob_sb_free(text);
+    return newer;
+}
+
+// The compiler and its flags as one line, for a stamp file (like Xatlas's): arguments joined by spaces.
+static const char *StampText(const Nob_Cmd *cmd)
+{
+    Nob_String_Builder sb = {0};
+    for (size_t i = 0; i < cmd->count; i++) {
+        if (i > 0) nob_da_append(&sb, ' ');
+        nob_sb_append_cstr(&sb, cmd->items[i]);
+    }
+    nob_sb_append_null(&sb);
+    const char *text = nob_temp_strdup(sb.items);
+    nob_sb_free(sb);
+    return text;
+}
+
+// rm -f <path>, for a stamp that is about to become wrong: the build forgets it before the work it vouches
+// for, so work that fails half-way is redone next time instead of being taken for done.
+static void ForgetStamp(const char *path)
+{
+    if (remove(path) != 0 && errno != ENOENT) {
+        SayErr("rm: cannot remove '%s': %s", path, strerror(errno));
+        Fail(1);
+    }
+}
+
+// qsort order of compile jobs: larger source file first (the source is the argument after "-c"), then by
+// path, so the order is the same on every run.
+static int CompareJobSource(const void *a, const void *b)
+{
+    const char *sa = NULL, *sb = NULL;
+    const Nob_Cmd *ca = &((const PoolJob *)a)->cmd, *cb = &((const PoolJob *)b)->cmd;
+    for (size_t i = 0; i + 1 < ca->count; i++) if (strcmp(ca->items[i], "-c") == 0) sa = ca->items[i + 1];
+    for (size_t i = 0; i + 1 < cb->count; i++) if (strcmp(cb->items[i], "-c") == 0) sb = cb->items[i + 1];
+    struct stat st;
+    off_t za = sa && stat(sa, &st) == 0 ? st.st_size : 0;
+    off_t zb = sb && stat(sb, &st) == 0 ? st.st_size : 0;
+    if (za != zb) return za > zb ? -1 : 1;
+    return strcmp(sa ? sa : "", sb ? sb : "");
+}
+
+// Compiles every file of <sources> into its own object under <objDir> (the source's path below the repo root,
+// .c -> .o: build/linux-obj/src/main.o, build/linux-obj/runtime/monolith_scene.o), in parallel (RunPool, the
+// pool's size from PoolSize), and appends each object's path to <objects> in source order. <compile> is the
+// compiler and its flags in compiler order; each command is `<compile> -MMD -MF <obj>.d -c <source> -o <obj>`
+// (-MMD: the compiler writes the headers the source includes, system headers left out, as a make rule).
+// Only out-of-date objects compile: missing, older than their source or any header in their .d file, older
+// than nob.c (a change to the build program rebuilds everything, as for xatlas), or every object of the
+// folder when the compiler or flags differ from <objDir>/objects.flags (the stamp, written once every
+// object compiled with them). <what> names the build in messages and the summary.
+static void CompileObjects(const char *what, const Nob_Cmd *compile, const Nob_Cmd *sources, const char *objDir,
+                           Nob_Cmd *objects)
+{
+    const char *stamp = nob_temp_sprintf("%s/objects.flags", objDir);
+    const char *stampText = StampText(compile);
+    const char *nobSource = nob_temp_sprintf("%s/nob.c", gRoot);
+    if (!MkdirP(objDir)) Fail(1);
+    const char *previous = IsRegularFile(stamp) ? ReadTrimmed(stamp) : NULL;
+    bool flagsChanged = !previous || strcmp(previous, stampText) != 0;
+    if (flagsChanged) ForgetStamp(stamp);
+
+    PoolJobs jobs = {0};
+    for (size_t i = 0; i < sources->count; i++) {
+        const char *source = sources->items[i];
+        const char *rel = RelativeToRoot(source);
+        size_t n = strlen(rel);
+        if (n < 2 || strcmp(rel + n - 2, ".c") != 0 || rel[0] == '/') {
+            SayErr("build: %s: not a .c file under the repo", source);
+            Fail(1);
+        }
+        const char *obj = nob_temp_sprintf("%s/%.*s.o", objDir, (int)(n - 2), rel);
+        const char *dep = nob_temp_sprintf("%s.d", obj);
+        nob_cmd_append(objects, obj);
+        if (!MkdirP(nob_temp_dir_name(obj))) Fail(1);
+        if (!flagsChanged && IsRegularFile(obj) && !NewerThan(source, obj) && !NewerThan(nobSource, obj) &&
+            !DepsNewer(dep, obj)) {
+            continue;
+        }
+        PoolJob job = {.label = nob_temp_sprintf("compile %s", rel)};
+        nob_da_append_many(&job.cmd, compile->items, compile->count);
+        nob_cmd_append(&job.cmd, "-MMD", "-MF", dep, "-c", source, "-o", obj);
+        nob_da_append(&jobs, job);
+    }
+    if (jobs.count > 0) {
+        // the largest sources start first (size stands in for compile time): the pool's wall time is bounded
+        // by its longest command (runtime/monolith_scene.c), which would otherwise start last, in glob order.
+        // Only the start order changes; the objects (and the link) keep the source order.
+        qsort(jobs.items, jobs.count, sizeof *jobs.items, CompareJobSource);
+        size_t size = PoolSize();
+        Say("compiling %zu of %zu files of %s (%s) ...", jobs.count, sources->count, what,
+            flagsChanged ? "compiler or flags changed: all of them" : "out of date");
+        if (!RunPool(&jobs, nob_temp_sprintf("compile %s", what), size)) Fail(1);
+    }
+    nob_da_free(jobs);
+    if (flagsChanged && !WriteLine(stamp, stampText)) Fail(1);
+}
+
+// Runs the link command <link> (it writes <binary>) unless <binary> is up to date: it exists, the command is
+// the one in <stamp> (the last successful link's, so a changed flag, library or object list relinks), and none
+// of <inputs> (objects, static libraries) nor nob.c is newer than it. Skipping it when nothing changed keeps a
+// no-change build from paying the link. Resets <link> either way.
+static void LinkIfStale(Nob_Cmd *link, const char *label, const char *binary, const char *stamp,
+                        const Nob_Cmd *inputs)
+{
+    const char *stampText = StampText(link);
+    const char *previous = IsRegularFile(stamp) ? ReadTrimmed(stamp) : NULL;
+    bool stale = !IsRegularFile(binary) || !previous || strcmp(previous, stampText) != 0 ||
+                 NewerThan(nob_temp_sprintf("%s/nob.c", gRoot), binary);
+    for (size_t i = 0; i < inputs->count && !stale; i++) stale = NewerThan(inputs->items[i], binary);
+    if (!stale) {
+        Say("up to date: %s (no object or library changed: not linked)", RelativeToRoot(binary));
+        link->count = 0;
+        return;
+    }
+    ForgetStamp(stamp);
+    if (!RunTimed(link, label, (Output){0})) Fail(1);
+    if (!WriteLine(stamp, stampText)) Fail(1);
+}
+
 // The packaging every target shares: map packages next to the binary, and the font licences.
 static void CopyData(const char *out)
 {
@@ -1260,7 +1635,9 @@ static int BuildWindows(int argc, char **argv)
     nob_cmd_append(&xatlasFlags, "-O2");
     Xatlas("x86_64-w64-mingw32-g++", xatlasObj, &xatlasFlags);
 
-    // monolith: compile and link every C file in one command. -std=c11 -Wall -Wextra with zero warnings
+    // monolith: every C file compiled into its own object in build/win-obj/ (CompileObjects: in parallel, only
+    // what is out of date), then one link command with the same flags, the objects in source order, the xatlas
+    // object and the libraries. -std=c11 -Wall -Wextra with zero warnings
     // (-Wno-missing-field-initializers: designated initialisers that leave fields zero are intended), -O2.
     // Include paths: R3D's headers, its generated config header (build dir), raylib's, assimp's (source and
     // generated config; --inspect-model reads models through assimp, src/inspect.c), assimp's zlib (the PNG
@@ -1271,8 +1648,8 @@ static int BuildWindows(int argc, char **argv)
     // -s: strip the symbols (a smaller .exe). -static: libgcc, libstdc++ (assimp) and winpthread are linked
     // in as well, leaving only system DLLs (opengl32, gdi32, winmm, kernel32, ...) as imports. -lstdc++:
     // assimp is C++; opengl32/gdi32/winmm/shell32: what raylib's GLFW and the editor call.
-    Nob_Cmd cmd = {0};
-    nob_cmd_append(&cmd, winCc, "-std=c11", "-Wall", "-Wextra", "-Wno-missing-field-initializers", "-O2",
+    Nob_Cmd compile = {0};
+    nob_cmd_append(&compile, winCc, "-std=c11", "-Wall", "-Wextra", "-Wno-missing-field-initializers", "-O2",
                    nob_temp_sprintf("-I%s/include", gR3dDir),
                    nob_temp_sprintf("-I%s/generated/include", r3dWin),
                    nob_temp_sprintf("-I%s/external/raylib/raylib/include", r3dWin),
@@ -1284,19 +1661,35 @@ static int BuildWindows(int argc, char **argv)
                    nob_temp_sprintf("-I%s/runtime", gRoot), "-DMS_PATCHED_R3D", "-DMONOLITH_EDITOR");
     // The Windows build is the view-only editor (MONOLITH_EDITING 0, src/common.h): the launcher and its AI
     // classifier (POSIX, Linux only) are left out; launcher.h gives the stubs it links against.
-    size_t first = cmd.count, kept = first;
-    AppendGlob(&cmd, nob_temp_sprintf("%s/src/*.c", gRoot));
-    for (size_t k = first; k < cmd.count; k++) {
-        const char *base = strrchr(cmd.items[k], '/');
-        base = base ? base + 1 : cmd.items[k];
-        if (strcmp(base, "launcher.c") != 0 && strcmp(base, "classifier.c") != 0) cmd.items[kept++] = cmd.items[k];
+    Nob_Cmd sources = {0};
+    AppendGlob(&sources, nob_temp_sprintf("%s/src/*.c", gRoot));
+    size_t kept = 0;
+    for (size_t k = 0; k < sources.count; k++) {
+        const char *base = strrchr(sources.items[k], '/');
+        base = base ? base + 1 : sources.items[k];
+        if (strcmp(base, "launcher.c") != 0 && strcmp(base, "classifier.c") != 0) sources.items[kept++] = sources.items[k];
     }
-    cmd.count = kept;
-    AppendGlob(&cmd, nob_temp_sprintf("%s/runtime/*.c", gRoot));
+    sources.count = kept;
+    AppendGlob(&sources, nob_temp_sprintf("%s/runtime/*.c", gRoot));
+    Nob_Cmd objects = {0};
+    CompileObjects("monolith.exe (Windows)", &compile, &sources, nob_temp_sprintf("%s/build/win-obj", gRoot),
+                   &objects);
+    Nob_Cmd cmd = {0};
+    nob_da_append_many(&cmd, compile.items, compile.count);
+    nob_da_append_many(&cmd, objects.items, objects.count);
     nob_cmd_append(&cmd, xatlasObj, "-o", nob_temp_sprintf("%s/monolith.exe", out),
                    "-s", "-static", nob_temp_sprintf("-L%s/lib", r3dWin), "-lr3d", "-lraylib", "-lassimp",
                    "-lzlibstatic", "-lstdc++", "-lopengl32", "-lgdi32", "-lwinmm", "-lshell32", "-lm");
-    if (!RunTimed(&cmd, "compile+link monolith.exe (Windows)", (Output){0})) Fail(1);
+    // what the link reads besides the objects: xatlas and R3D's static libraries
+    Nob_Cmd linkInputs = {0};
+    nob_da_append_many(&linkInputs, objects.items, objects.count);
+    nob_cmd_append(&linkInputs, xatlasObj);
+    const char *libs[] = {"r3d", "raylib", "assimp", "zlibstatic"};
+    for (size_t i = 0; i < NOB_ARRAY_LEN(libs); i++) {
+        nob_cmd_append(&linkInputs, nob_temp_sprintf("%s/lib/lib%s.a", r3dWin, libs[i]));
+    }
+    LinkIfStale(&cmd, "link monolith.exe (Windows)", nob_temp_sprintf("%s/monolith.exe", out),
+                nob_temp_sprintf("%s/build/win-obj/monolith.link", gRoot), &linkInputs);
 
     CopyData(out);
     Say("built: build/win/monolith.exe");
@@ -1429,8 +1822,9 @@ static int BuildLinux(int argc, char **argv)
                    nob_temp_sprintf("-DR3D_BUILD_TYPE_NAME=\"%s\"", buildType),
                    nob_temp_sprintf("-I%s/runtime", gRoot), "-DMS_PATCHED_R3D", "-DMONOLITH_EDITOR");
 
-    // monolith: compile and link every C file (src/*.c, runtime/*.c in glob order) and the xatlas object in one
-    // command. Link flags:
+    // monolith: every C file (src/*.c, runtime/*.c in glob order) compiled into its own object with the flags,
+    // include paths and defines above (CompileObjects: in parallel, only what is out of date), then one link
+    // command: the same flags, the objects in source order, the xatlas object. Link flags:
     // -L <R3D lib dir> -lr3d -lraylib -lassimp -lzlibstatic: the static libraries built above.
     // -l:libstdc++.a: libstdc++ (needed by assimp) linked statically as well: the host's libstdc++ is usually
     // newer than other distros' and would fail to load there. -lgcc_s stays shared (every distro has it; the
@@ -1446,16 +1840,30 @@ static int BuildLinux(int argc, char **argv)
     Nob_Cmd sources = {0};
     AppendGlob(&sources, nob_temp_sprintf("%s/src/*.c", gRoot));
     AppendGlob(&sources, nob_temp_sprintf("%s/runtime/*.c", gRoot));
+    Nob_Cmd compile = {0};
+    nob_cmd_append(&compile, cc);
+    nob_da_append_many(&compile, cflags.items, cflags.count);
+    nob_da_append_many(&compile, includes.items, includes.count);
+    nob_da_append_many(&compile, defines.items, defines.count);
+    Nob_Cmd objects = {0};
+    CompileObjects(nob_temp_sprintf("monolith (%s)", RelativeToRoot(out)), &compile, &sources,
+                   nob_temp_sprintf("%s-obj", out), &objects);
     Nob_Cmd cmd = {0};
-    nob_cmd_append(&cmd, cc);
-    nob_da_append_many(&cmd, cflags.items, cflags.count);
-    nob_da_append_many(&cmd, includes.items, includes.count);
-    nob_da_append_many(&cmd, defines.items, defines.count);
-    nob_da_append_many(&cmd, sources.items, sources.count);
+    nob_da_append_many(&cmd, compile.items, compile.count);
+    nob_da_append_many(&cmd, objects.items, objects.count);
     nob_cmd_append(&cmd, xatlasObj, "-o", nob_temp_sprintf("%s/monolith", out),
                    nob_temp_sprintf("-L%s/lib", r3dLinux), "-lr3d", "-lraylib", "-lassimp", "-lzlibstatic",
                    "-l:libstdc++.a", "-lgcc_s", "-lGL", "-lm", "-lpthread", "-ldl", wrap.items);
-    if (!RunTimed(&cmd, nob_temp_sprintf("compile+link monolith (%s)", RelativeToRoot(out)), (Output){0})) Fail(1);
+    // what the link reads besides the objects: xatlas and R3D's static libraries
+    Nob_Cmd linkInputs = {0};
+    nob_da_append_many(&linkInputs, objects.items, objects.count);
+    nob_cmd_append(&linkInputs, xatlasObj);
+    const char *libs[] = {"r3d", "raylib", "assimp", "zlibstatic"};
+    for (size_t i = 0; i < NOB_ARRAY_LEN(libs); i++) {
+        nob_cmd_append(&linkInputs, nob_temp_sprintf("%s/lib/lib%s.a", r3dLinux, libs[i]));
+    }
+    LinkIfStale(&cmd, nob_temp_sprintf("link monolith (%s)", RelativeToRoot(out)), nob_temp_sprintf("%s/monolith", out),
+                nob_temp_sprintf("%s-obj/monolith.link", out), &linkInputs);
 
     CopyData(out);
     Say("built: %s/monolith", RelativeToRoot(out));

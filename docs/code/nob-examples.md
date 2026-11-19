@@ -17,7 +17,14 @@ The mode is the first argument. Any other argument, or none, is the plain build,
 | `./build.sh examples test` | `examples/build/linux-test/<example>/` | the test build (below) |
 | `./build.sh examples lsan` | `examples/build/linux-lsan/<example>/` | the test build with LeakSanitizer, `-O1 -g`; the leak check runs these |
 
-Each output folder holds the program(s) and the data they load (`scene/` or `assets/`), so it runs from anywhere. The object files go next to it, into `<output folder>-obj/<example>/` (outside the program folders, which stay copyable), as does the log of the last scene compile (`<output folder>-obj/compile.log`).
+Each output folder holds the program(s) and the data they load (`scene/` or `assets/`), so it runs from anywhere. The object files go next to it, into `<output folder>-obj/` (outside the program folders, which stay copyable): each main file's in `<example>/`, the runtime's in `runtime/` (the game build) and `runtime-editor/` (`-DMONOLITH_EDITOR`, for `03_live_editing`), as does the log of the last scene compile (`<output folder>-obj/compile.log`).
+
+## How a run goes
+
+1. Every program is registered (`Example`): its main file's object, the runtime objects it links (`RuntimeObjects`) and its link.
+2. **One pool compiles every out-of-date object** (`Build`, `RunPool`: up to `JOBS` or `nproc` at once, as in the repo's build). `runtime/monolith_scene.c` (~12 k lines, the longest compile) is compiled **once per flag set** (game and editor; Linux also `src/glibc_compat.c` per set) instead of inside every program's link, and starts first. An object is out of date when it is missing, older than its source, a header in its `.d` file (`-MMD`, the test harness included) or `examples/nob.c`, or when its compile command differs from its stamp `<obj>.flags`.
+3. **A second pool links** the programs that are out of date: missing, linked with another command than the one in `<example>/<program>.link`, or older than one of their objects, R3D's libraries or `examples/nob.c` (or one of their objects was just compiled). A run with nothing to do prints `up to date: <n> of the programs (…: not linked)`.
+4. Per example, in the script's order: `built: <path>`, the data copy, the scene compile.
 
 ## The test builds
 
@@ -46,6 +53,7 @@ examples/build/linux-test/01_minimal/minimal --bench report.md <package>
 |---|---|
 | `R3D_DIR` | Another R3D tree (default: `submodules/r3d`). Its `build-linux/` (or `build-mingw/` for `--win`) must hold the static libraries, `include/` and raylib's headers. |
 | `CC` | The Linux compiler (default clang). `--win` always uses `x86_64-w64-mingw32-gcc`. |
+| `JOBS` | How many compile (and link) commands run at once (a positive number); default `nproc`. |
 
 ## Exit codes
 
@@ -56,8 +64,8 @@ examples/build/linux-test/01_minimal/minimal --bench report.md <package>
 
 ## Output
 
-Like the repo's `nob.c`. Every command runs through `RunTimed()`, which echoes it (`[INFO] CMD: ...`) and prints how long it took (`[TIME] ...`); a summary table ends the run. Those lines and the progress lines (`built: <path>`, `compiled: <path>`, the text the script printed) go to stdout, errors to stderr, so `./build.sh examples lsan > /dev/null` (the leak check) stays quiet unless something fails.
+Like the repo's `nob.c`. Every command runs through `RunTimed()` (the scene compiles) or `RunPool()` (compiles and links, timed per command with `wait4()`, their output printed whole when each ends; the same code as `nob.c`'s, keep them in step), which echo it (`[INFO] CMD: ...`) and print how long it took (`[TIME] ...`); a summary table ends the run, each pool a row with its commands indented below it. Those lines and the progress lines (`built: <path>`, `compiled: <path>`, the text the script printed) go to stdout, errors to stderr, so `./build.sh examples lsan > /dev/null` (the leak check) stays quiet unless something fails.
 
 ## Keep in step
 
-The repo's `nob.c` mirrors these programs and their flags in `compile_commands.json` for clangd (`WriteCompileCommands`, "the examples"), and has the same glibc `--wrap` list (`glibcWrap`). A flag change here changes those lines there.
+The repo's `nob.c` mirrors these programs and their flags in `compile_commands.json` for clangd (`WriteCompileCommands`, "the examples"), and has the same glibc `--wrap` list (`glibcWrap`). A flag change here changes those lines there. The pool (`RunPool` and its helpers), `Nproc`, `DepsNewer` and the stamp helpers are copies of `nob.c`'s: the two programs are built on their own (each rebuilds when its own source or nob.h changes), so a shared header would escape those checks.
