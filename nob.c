@@ -13,6 +13,7 @@
 // points stdout/stderr at a log file, so it reaches the terminal), and its file helpers' "[INFO] created
 // directory ..." chatter isn't wanted: nob.c has its own file operations below.
 #define NOB_NO_ECHO
+
 // How nob rebuilds itself when nob.c or nob.h is newer than build/nob (NOB_GO_REBUILD_URSELF, e.g. when
 // build/nob is run directly): the same compiler and flags ./build.sh uses for it (${CC:-clang}, C11, all
 // warnings, -O1: the build program does little work of its own, so the cheap optimisation level is enough).

@@ -191,7 +191,7 @@ static inline void ToolRedirect(const char *path, int target, int flags)
 // Starts cmd (searched in PATH like a shell when its first word has no '/') with the given streams;
 // `captureFd` >= 0 becomes the child's stdout (ToolCapture's pipe). Returns the pid, or -1 when fork fails.
 // closeFd is read end fd[0]
-// captureFd is write end fd[0]
+// captureFd is write end fd[1]
 static inline pid_t ToolSpawn(Nob_Cmd *cmd, ToolIo io, int captureFd, int closeFd)
 {
     if (cmd->count == 0) return -1;
@@ -216,7 +216,7 @@ static inline pid_t ToolSpawn(Nob_Cmd *cmd, ToolIo io, int captureFd, int closeF
     else if (io.err) ToolRedirect(io.err, STDERR_FILENO, outFlags);
     // execvp wants a NULL-terminated array; cmd->items is a heap array with room to add one
     nob_da_append(cmd, (const char *)NULL);
-    execvp(cmd->items[0], (char *const *)cmd->items);
+    execvp(cmd->items[0], (char *const *)cmd->items); // Nothing after this line runs if there is no error
     fprintf(stderr, "%s: %s: %s\n", gToolName, cmd->items[0], strerror(errno));
     _exit(errno == ENOENT ? 127 : 126);
 }
@@ -250,7 +250,7 @@ static inline int ToolCapture(Nob_Cmd *cmd, Nob_String_Builder *out, ToolIo io)
         cmd->count = 0;
         return 126;
     }
-    pid_t pid = ToolSpawn(cmd, io, fds[1], fds[0]);
+    pid_t pid = ToolSpawn(cmd, io, fds[1], fds[0]); // writes to the pipe
     int spawnErr = errno;
     cmd->count = 0;
     if (close(fds[1]) != 0) ToolErr("close pipe: %s", strerror(errno));
@@ -259,7 +259,9 @@ static inline int ToolCapture(Nob_Cmd *cmd, Nob_String_Builder *out, ToolIo io)
         ToolErr("could not start a process: %s", strerror(spawnErr));
         return 126;
     }
+
     char buf[4096];
+    // read from pipe by chunk
     for (;;) {
         ssize_t n = read(fds[0], buf, sizeof buf);
         if (n < 0 && errno == EINTR) continue;

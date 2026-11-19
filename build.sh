@@ -12,7 +12,8 @@
 #
 # -e: stop at the first failing command (the compile of nob.c); -u: an unset variable is an error;
 # -o pipefail: a failure inside a pipe counts (there is none, kept for safety).
-set -euo pipefail
+# -x: in Unix shells like Bash. When enabled, the shell prints every command and its expanded arguments to standard error (stderr) right before executing it.
+set -euox pipefail
 
 # The repo root: this script's folder, as an absolute path (also when run as ../build.sh or via a
 # symlinked folder: `pwd` keeps the path as typed). nob takes the root from its own path, build/nob.
