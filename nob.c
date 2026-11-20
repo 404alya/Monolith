@@ -104,7 +104,7 @@ NOB_PRINTF_FORMAT(1, 2) static void SayErr(const char *fmt, ...)
 
 static double Seconds(struct timeval tv)
 {
-    return (double)tv.tv_sec + (double)tv.tv_usec / 1e6;
+    return (double)tv.tv_sec + (double)tv.tv_usec / 1e6; // Divides by 1,000,000 (since there are 1 million microseconds in 1 second).
 }
 
 // A command's output: NULL for the terminal, or a log file (both stdout and stderr, like `> log 2>&1`;
@@ -119,7 +119,7 @@ static void PrintTime(const Timing *t)
 {
     fprintf(gOut, "[TIME] %s: %.2f s wall, %.2f s CPU (%.2f user + %.2f sys)%s\n", t->label, t->wall,
             t->user + t->sys, t->user, t->sys, t->ok ? "" : " (failed)");
-    fflush(gOut);
+    fflush(gOut); // flush in case of pipe
 }
 
 // Runs one command on its own (resetting it, as nob_cmd_run does) and records its time. With RunPool the only
@@ -138,7 +138,7 @@ static bool RunTimed(Nob_Cmd *cmd, const char *label, Output out)
     // `> log 2>&1` / `>> log 2>&1`: point this process's fds 1 and 2 at the log for the duration of the
     // command, so the child inherits them. (nob's .stdout_path / .stderr_path can't do this: each opens the
     // file on its own with O_TRUNC, so the two streams would overwrite each other, and there's no append.)
-    int savedOut = -1, savedErr = -1;
+    int savedOut = -1, savedErr = -1; // The terminal's fds 1 and 2, only to restore them after the command.
     fflush(stdout);
     fflush(stderr);
     if (out.log) {

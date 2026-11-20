@@ -36,7 +36,10 @@
 typedef struct {
     char *from;             // source file (NULL: generated, see data)
     char *to;               // path inside the export folder, '/'-separated
-    char *pkgRel;           // path inside the map package, NULL for the other files
+    // Path relative to the map package root (e.g. "models/crate.glb"), NULL for files from
+    // elsewhere (R3D, prebuilt, generated). Finds sidecars and licence texts to copy along,
+    // and counts the file's bytes as the package's in the size report.
+    char *pkgPath;
     char *data;             // generated content (from == NULL)
     size_t size;
     bool exec;              // build.sh
@@ -53,7 +56,7 @@ static void FreePlan(Plan *P)
     for (int i = 0; i < P->count; i++) {
         free(P->items[i].from);
         free(P->items[i].to);
-        free(P->items[i].pkgRel);
+        free(P->items[i].pkgPath);
         free(P->items[i].data);
     }
     free(P->items);
@@ -80,16 +83,16 @@ static PlanItem *FindTo(const Plan *P, const char *to)
     return NULL;
 }
 
-// Adds a file to copy (once per destination). pkgRel: its path inside the map package, or NULL.
-static void AddCopy(Plan *P, const char *from, const char *to, const char *pkgRel)
+// Adds a file to copy (once per destination). pkgPath: its path inside the map package, or NULL.
+static void AddCopy(Plan *P, const char *from, const char *to, const char *pkgPath)
 {
     if (FindTo(P, to)) return;
-    char *f = MS_StrDup(from), *t = MS_StrDup(to), *r = pkgRel ? MS_StrDup(pkgRel) : NULL;
-    PlanItem *it = f && t && (r || !pkgRel) ? MS_PUSH(P->items, P->count, P->cap) : NULL;
+    char *f = MS_StrDup(from), *t = MS_StrDup(to), *r = pkgPath ? MS_StrDup(pkgPath) : NULL;
+    PlanItem *it = f && t && (r || !pkgPath) ? MS_PUSH(P->items, P->count, P->cap) : NULL;
     if (!it) { free(f); free(t); free(r); fprintf(stderr, "monolith: export: out of memory\n"); P->errors++; return; }
     it->from = f;
     it->to = t;
-    it->pkgRel = r;
+    it->pkgPath = r;
 }
 
 // Adds a generated file (takes ownership of data)
@@ -140,7 +143,7 @@ static void AddWritten(Plan *P, const char *to)
 
 static bool IsPkgCopied(const Plan *P, const char *rel)
 {
-    for (int i = 0; i < P->count; i++) if (P->items[i].pkgRel && strcmp(P->items[i].pkgRel, rel) == 0) return true;
+    for (int i = 0; i < P->count; i++) if (P->items[i].pkgPath && strcmp(P->items[i].pkgPath, rel) == 0) return true;
     return false;
 }
 
@@ -1004,14 +1007,14 @@ static unsigned char Export(const MS_Scene *s, const char *outDirIn)
     // every copied file (models and textures have them), and licence texts in the same folders
     // (e.g. models/kenney-License.txt), so the export carries the records ASSETS.md cites
     for (int k = 0, n = P.count; k < n; k++) {
-        const char *rel = P.items[k].pkgRel;
+        const char *rel = P.items[k].pkgPath;
         char side[MS_PATH_MAX + 16];
         snprintf(side, sizeof(side), "%s.asset.md", rel);
         if (FileExistsf("%s%s", root, side)) AddPkg(&P, root, name, side, NULL);
     }
     for (int k = 0, n = P.count; k < n; k++) {
         char dirRel[MS_PATH_MAX];
-        snprintf(dirRel, sizeof(dirRel), "%s", P.items[k].pkgRel);
+        snprintf(dirRel, sizeof(dirRel), "%s", P.items[k].pkgPath);
         char *slash = strrchr(dirRel, '/');
         if (!slash) continue;               // package root: only MAP.md / ASSETS.md, below
         *slash = 0;
@@ -1112,7 +1115,7 @@ static unsigned char Export(const MS_Scene *s, const char *outDirIn)
     int missing = 0;
     for (int i = 0; i < P.count; i++) {
         if (!P.items[i].from || FileExists(P.items[i].from)) continue;
-        fprintf(stderr, "monolith: export: missing: %s%s\n", P.items[i].from, P.items[i].pkgRel ? " (referenced by the map)" : "");
+        fprintf(stderr, "monolith: export: missing: %s%s\n", P.items[i].from, P.items[i].pkgPath ? " (referenced by the map)" : "");
         if (!missing && !failed) {
             MS_SetError("%s is missing", P.items[i].from);
             failed = true;
@@ -1138,7 +1141,7 @@ static unsigned char Export(const MS_Scene *s, const char *outDirIn)
         if (ok && it->from && it->exec) chmod(to, 0755);
 #endif
         long long b = ok ? (it->from ? FileBytes(it->from) : (long long)it->size) : 0;
-        if (it->pkgRel) bytesPkg += b;
+        if (it->pkgPath) bytesPkg += b;
         else if (strncmp(it->to, "r3d/", 4) == 0 || strncmp(it->to, "prebuilt/", 9) == 0) bytesR3d += b;
         else bytesOther += b;
         free(to);
