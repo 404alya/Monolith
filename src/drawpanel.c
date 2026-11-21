@@ -1,7 +1,9 @@
 // The draw panel (docs/painting.md 13.2): docked at the left edge below the HUD lines, 300 px
 // wide, in the ui.h look. From top to bottom: Target (the surface the cursor rested on last, what
-// paint there goes into or why it can't be painted), Pen (five pens, size, hardness), Colour
-// (R G B A, a swatch, the hex field, the recent colours), Density (texels per metre, the texel size
+// paint there goes into or why it can't be painted), Tools (the 22 tools' grid, the tool's name and
+// key, its options: brush, size, hardness, pixel perfect, spray, bucket, gradient, eyedropper;
+// docs/painting.md 18.9), Colour (saturation / value square, hue and alpha strips, fg / bg, R G B A,
+// the hex field, the recent colours, the palette), Density (texels per metre, the texel size
 // there, Resize to density, Pixel look, Clear paint; "Grid" with Fit to grid and no slider when the
 // target's material has a paint grid) and Faces (boxes only: the face groups of the box's paint).
 // The target, its rectangle and its lines come from the draw mode (dm->target); the actions act on it.
@@ -11,7 +13,7 @@
 // nothing is drawn) and the draw pass (DrawPanelDraw, with the HUD: the widgets draw a copy of the
 // DrawMode and read no input). A panel taller than the room below the HUD (a 720p window) scrolls:
 // the wheel over it scrolls, except over a slider or a field, which take the wheel themselves.
-// Nothing here allocates.
+// Nothing here allocates, except the palette's `+` (dm->palette is a heap array).
 #include "drawpanel.h"
 
 #include <math.h>
@@ -29,7 +31,6 @@
 #define GAP         6
 #define LABEL_W     74      // "Size", "Hardness", "Density"
 #define CHANNEL_W   20      // "R", "G", "B", "A"
-#define PEN_H       40
 #define BUTTON_H    28
 #define BOTTOM_ROOM 42      // kept free under the panel (the map message line)
 #define SCROLL_STEP 48
@@ -39,6 +40,7 @@ enum {
     W_SIZE_S = 1, W_SIZE_F, W_HARD_S, W_HARD_F,
     W_R_S, W_G_S, W_B_S, W_A_S, W_R_F, W_G_F, W_B_F, W_A_F,
     W_HEX, W_DENS_S, W_DENS_F,
+    W_SV, W_HUE, W_ALPHA, W_SPRAYW_S, W_SPRAYW_F, W_SPEED_S, W_SPEED_F, W_TOL_S, W_TOL_F,
 };
 
 typedef enum { PASS_MEASURE, PASS_INPUT, PASS_DRAW } Pass;
@@ -53,7 +55,6 @@ typedef struct {
 } Ctx;
 
 static const char *FACE_NAMES[6] = { "+x", "-x", "+y", "-y", "+z", "-z" };
-static const char *PEN_NAMES[PEN_COUNT] = { "round", "square", "soft", "eraser", "fill" };
 
 static bool Drawing(const Ctx *c) { return c->pass == PASS_DRAW; }
 static int ClampI(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
@@ -189,7 +190,7 @@ static void Title(Ctx *c)
         // (the pixel title's capitals, ~21 px from ~6 px below the y given, start where the old
         // title's did: 3 px into the title line; the hints sit on their middle)
         UiTitle("Draw", c->x, c->y - 3, UI_INK);
-        const char *hints = "{TAB} hide|{B} leave";
+        const char *hints = "{TAB} hide|{ESC} leave";
         UiHints(hints, c->x + c->w - UiHintsWidth(hints, UI_XS), c->y + 14 - UiLineHeight(UI_XS) / 2, UI_XS, UI_DIM);
     }
     c->y += TITLE_H;
@@ -208,7 +209,7 @@ static void SectionTarget(Ctx *c)
     c->y += GAP;
 }
 
-// The pen's icon, centred at cx, cy (shapes from the atlas)
+// The brush shape's icon, centred at cx, cy (shapes from the atlas)
 static void PenIcon(PenKind k, int cx, int cy, Color ink)
 {
     switch (k) {
@@ -236,25 +237,211 @@ static void PenIcon(PenKind k, int cx, int cy, Color ink)
     }
 }
 
-static void SectionPen(Ctx *c)
+// #region Tool icons (monochrome, about 18 x 18 px, in the style of PenIcon)
+
+static void Seg(float cx, float cy, float x0, float y0, float x1, float y1, float th, Color c)
+{
+    DrawLineEx((Vector2){ cx + x0, cy + y0 }, (Vector2){ cx + x1, cy + y1 }, th, c);
+}
+
+// A closed outline through n points (offsets from cx, cy): solid, or dashed (3 px on, 2 off, the
+// pattern running on around the corners)
+static void Outline(float cx, float cy, const Vector2 *pts, int n, bool dashed, Color c)
+{
+    float at = 0.0f;        // (dashed: where in the 5 px pattern the segment starts)
+    for (int i = 0; i < n; i++) {
+        Vector2 a = { cx + pts[i].x, cy + pts[i].y }, b = { cx + pts[(i + 1) % n].x, cy + pts[(i + 1) % n].y };
+        if (!dashed) { DrawLineEx(a, b, 2.0f, c); continue; }
+        float len = Vector2Distance(a, b);
+        if (len <= 0.0f) continue;
+        for (float t = -at; t < len; t += 5.0f) {
+            float t0 = fmaxf(t, 0.0f), t1 = fminf(t + 3.0f, len);
+            if (t1 > t0) DrawLineEx(Vector2Lerp(a, b, t0 / len), Vector2Lerp(a, b, t1 / len), 2.0f, c);
+        }
+        at = fmodf(at + len, 5.0f);
+    }
+}
+
+// A filled polygon (points counter-clockwise on screen, convex enough for a fan from its centre)
+static void FillFan(float cx, float cy, const Vector2 *pts, int n, Color c)
+{
+    for (int i = 0; i < n; i++) {
+        Vector2 a = { cx + pts[i].x, cy + pts[i].y }, b = { cx + pts[(i + 1) % n].x, cy + pts[(i + 1) % n].y };
+        DrawTriangle((Vector2){ cx, cy }, a, b, c);
+    }
+}
+
+// n points on an ellipse of radii rx, ry (counter-clockwise on screen); n <= 32
+static int EllipsePts(Vector2 *pts, int n, float rx, float ry)
+{
+    for (int i = 0; i < n; i++) {
+        float a = -2.0f * PI * (float)i / (float)n;
+        pts[i] = (Vector2){ rx * cosf(a), ry * sinf(a) };
+    }
+    return n;
+}
+
+static void ToolIcon(DrawTool t, int icx, int icy, Color ink)
+{
+    float cx = (float)icx, cy = (float)icy;
+    // (a freehand blob and a straight polygon, counter-clockwise on screen)
+    static const Vector2 BLOB[] = { { 1, -8 }, { -5, -7 }, { -8, -2 }, { -7, 4 }, { -2, 7 }, { 4, 6 }, { 8, 2 }, { 7, -4 } };
+    static const Vector2 POLY[] = { { -1, -8 }, { -8, -1 }, { -5, 7 }, { 6, 6 }, { 8, -4 } };
+    Vector2 e[32];
+    switch (t) {
+    case TOOL_PENCIL:
+        Seg(cx, cy, -4, 4, 7, -7, 5.0f, ink);
+        Seg(cx, cy, -8, 8, -4, 4, 2.0f, ink);
+        break;
+    case TOOL_ERASER: PenIcon(PEN_ERASER, icx, icy, ink); break;
+    case TOOL_SPRAY: {
+        static const int D[5][2] = { { 4, -8 }, { 7, -5 }, { 3, -3 }, { 8, -1 }, { 5, 1 } };
+        UiRoundRect((Rectangle){ cx - 8, cy - 3, 9, 12 }, 2, BLANK, ink);
+        DrawRectangle(icx - 6, icy - 7, 5, 4, ink);
+        for (int k = 0; k < 5; k++) DrawRectangle(icx + D[k][0], icy + D[k][1], 2, 2, ink);
+        break;
+    }
+    case TOOL_BUCKET: {
+        static const Vector2 B[] = { { -2, -8 }, { -9, -1 }, { -2, 6 }, { 5, -1 } };
+        Outline(cx, cy, B, 4, false, ink);
+        Seg(cx, cy, -5, -4, 1, 2, 2.0f, UiAlpha(ink, 0.5f));
+        UiRoundRect((Rectangle){ cx + 4, cy + 3, 6, 6 }, 3, ink, BLANK);
+        DrawTriangle((Vector2){ cx + 7, cy - 1 }, (Vector2){ cx + 4.3f, cy + 5 }, (Vector2){ cx + 9.7f, cy + 5 }, ink);
+        break;
+    }
+    case TOOL_GRADIENT:
+        for (int k = 0; k < 6; k++) DrawRectangle(icx - 9 + 3 * k, icy - 6, 3, 12, UiAlpha(ink, 1.0f - (float)k * 0.17f));
+        DrawRectangleLinesEx((Rectangle){ cx - 9, cy - 6, 18, 12 }, 1.0f, UiAlpha(ink, 0.6f));
+        break;
+    case TOOL_LINE: Seg(cx, cy, -8, 7, 8, -7, 2.0f, ink); break;
+    case TOOL_CURVE: {
+        Vector2 p0 = { -9, 6 }, c1 = { -3, -16 }, c2 = { 3, 16 }, p3 = { 9, -6 }, prev = p0;
+        for (int k = 1; k <= 12; k++) {
+            float s = (float)k / 12.0f, u = 1.0f - s;
+            Vector2 q = { u * u * u * p0.x + 3 * u * u * s * c1.x + 3 * u * s * s * c2.x + s * s * s * p3.x,
+                          u * u * u * p0.y + 3 * u * u * s * c1.y + 3 * u * s * s * c2.y + s * s * s * p3.y };
+            Seg(cx, cy, prev.x, prev.y, q.x, q.y, 2.0f, ink);
+            prev = q;
+        }
+        break;
+    }
+    case TOOL_RECT: DrawRectangleLinesEx((Rectangle){ cx - 8, cy - 6, 16, 12 }, 2.0f, ink); break;
+    case TOOL_RECT_FILL: DrawRectangle(icx - 8, icy - 6, 16, 12, ink); break;
+    case TOOL_ELLIPSE: Outline(cx, cy, e, EllipsePts(e, 24, 8.5f, 6.0f), false, ink); break;
+    case TOOL_ELLIPSE_FILL: FillFan(cx, cy, e, EllipsePts(e, 24, 9.0f, 6.5f), ink); break;
+    case TOOL_CONTOUR:
+        FillFan(cx, cy, BLOB, 8, UiAlpha(ink, 0.35f));
+        Outline(cx, cy, BLOB, 8, false, ink);
+        break;
+    case TOOL_POLYGON:
+        FillFan(cx, cy, POLY, 5, UiAlpha(ink, 0.35f));
+        Outline(cx, cy, POLY, 5, false, ink);
+        break;
+    case TOOL_MARQUEE: {
+        static const Vector2 R[] = { { -8, -6 }, { -8, 6 }, { 8, 6 }, { 8, -6 } };
+        Outline(cx, cy, R, 4, true, ink);
+        break;
+    }
+    case TOOL_MARQUEE_ELLIPSE: Outline(cx, cy, e, EllipsePts(e, 16, 8.5f, 6.5f), true, ink); break;
+    case TOOL_LASSO:
+        Outline(cx, cy - 2, BLOB, 8, true, ink);
+        Seg(cx, cy, -5, 4, -7, 9, 2.0f, ink);
+        break;
+    case TOOL_LASSO_POLY: Outline(cx, cy, POLY, 5, true, ink); break;
+    case TOOL_WAND:
+        Seg(cx, cy, -8, 8, 1, -1, 3.0f, ink);
+        Seg(cx, cy, 5, -10, 5, -2, 2.0f, ink);
+        Seg(cx, cy, 1, -6, 9, -6, 2.0f, ink);
+        DrawRectangle(icx + 7, icy + 1, 2, 2, ink);
+        DrawRectangle(icx - 1, icy - 10, 2, 2, ink);
+        break;
+    case TOOL_MOVE:
+        Seg(cx, cy, -7, 0, 7, 0, 2.0f, ink);
+        Seg(cx, cy, 0, -7, 0, 7, 2.0f, ink);
+        DrawTriangle((Vector2){ cx, cy - 10 }, (Vector2){ cx - 4, cy - 5 }, (Vector2){ cx + 4, cy - 5 }, ink);
+        DrawTriangle((Vector2){ cx, cy + 10 }, (Vector2){ cx + 4, cy + 5 }, (Vector2){ cx - 4, cy + 5 }, ink);
+        DrawTriangle((Vector2){ cx - 10, cy }, (Vector2){ cx - 5, cy + 4 }, (Vector2){ cx - 5, cy - 4 }, ink);
+        DrawTriangle((Vector2){ cx + 10, cy }, (Vector2){ cx + 5, cy - 4 }, (Vector2){ cx + 5, cy + 4 }, ink);
+        break;
+    case TOOL_BLUR:
+        UiRoundRect((Rectangle){ cx - 6, cy - 3, 12, 12 }, 6, ink, BLANK);
+        DrawTriangle((Vector2){ cx, cy - 10 }, (Vector2){ cx - 5.5f, cy }, (Vector2){ cx + 5.5f, cy }, ink);
+        break;
+    case TOOL_JUMBLE: {
+        static const int J[9][2] = { { -8, -8 }, { -1, -7 }, { 5, -8 }, { -7, -1 }, { 0, 0 }, { 6, -2 }, { -8, 5 }, { -2, 6 }, { 5, 5 } };
+        for (int k = 0; k < 9; k++)
+            DrawRectangle(icx + J[k][0], icy + J[k][1], 4, 4, UiAlpha(ink, k % 3 == 0 ? 1.0f : k % 3 == 1 ? 0.6f : 0.35f));
+        break;
+    }
+    case TOOL_EYEDROPPER:
+        Seg(cx, cy, -6, 6, 3, -3, 3.0f, ink);
+        Seg(cx, cy, -9, 9, -6, 6, 1.5f, ink);
+        UiRoundRect((Rectangle){ cx + 1, cy - 9, 8, 8 }, 4, ink, BLANK);
+        break;
+    default: break;
+    }
+}
+
+// #endregion
+
+static bool Hovered(const Ctx *c, Rectangle r)
+{
+    if (c->pass == PASS_MEASURE || !c->p->interactive || IsCursorHidden()) return false;
+    Vector2 m = GetMousePosition();
+    return CheckCollisionPointRec(m, r) && CheckCollisionPointRec(m, c->p->rect);
+}
+
+static bool RightClicked(const Ctx *c, Rectangle r)
+{
+    return c->pass == PASS_INPUT && Hovered(c, r) && IsMouseButtonPressed(MOUSE_BUTTON_RIGHT);
+}
+
+static bool ShiftDown(void) { return IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT); }
+
+// A row of n buttons (a choice; `current` is on): after a label (LABEL_W), or across the row without
+// one. The index clicked, else -1
+static int Choice(Ctx *c, const char *label, const char *const *names, int n, int current)
+{
+    int x0 = c->x;
+    if (label) {
+        Text(c, label, c->x, c->y + (BUTTON_H - UiLineHeight(UI_S)) / 2, UI_S, UI_TEXT);
+        x0 += LABEL_W;
+    }
+    int room = c->x + c->w - x0, clicked = -1;
+    for (int k = 0; k < n; k++) {
+        int a = x0 + k * (room + GAP) / n, b = x0 + (k + 1) * (room + GAP) / n - GAP;
+        if (Button(c, (Rectangle){ (float)a, (float)c->y, (float)(b - a), BUTTON_H }, names[k], k == current)) clicked = k;
+    }
+    c->y += BUTTON_H + GAP;
+    return clicked;
+}
+
+// A slider + number field row of an integer in lo..hi
+static void IntRow(Ctx *c, const char *label, int sliderId, int fieldId, int *value, int lo, int hi)
+{
+    Rectangle sr, fr;
+    Row(c, label, LABEL_W, UI_TEXT, &sr, &fr);
+    float v = (float)*value;
+    if (Slider(c, sliderId, sr, &v, (float)lo, (float)hi, 1.0f)) *value = ClampI((int)roundf(v), lo, hi);
+    v = (float)*value;
+    if (Field(c, fieldId, fr, &v, (float)lo, (float)hi, 1.0f, 0)) *value = ClampI((int)roundf(v), lo, hi);
+    c->y += ROW_H + ROW_GAP;
+}
+
+// Brush shape (round / square / soft), size, hardness (soft)
+static void BrushRows(Ctx *c)
 {
     DrawMode *dm = c->dm;
-    Header(c, "Pen", "{1}..{5}|{[}{]} size");
-    int bw = (c->w - (PEN_COUNT - 1) * GAP) / PEN_COUNT;
-    int left = c->x + (c->w - (bw * PEN_COUNT + (PEN_COUNT - 1) * GAP)) / 2;
-    for (int k = 0; k < PEN_COUNT; k++) {
-        Rectangle r = { (float)(left + k * (bw + GAP)), (float)c->y, (float)bw, PEN_H };
-        bool on = dm->pen == (PenKind)k;
-        if (Button(c, r, NULL, on)) dm->pen = (PenKind)k;
-        if (Drawing(c)) {
-            Color ink = on ? UI_ON_INK : UI_INK;       // (on: the button is white)
-            int cx = (int)(r.x + r.width / 2);
-            PenIcon((PenKind)k, cx, (int)r.y + 13, ink);
-            int tw = UiMeasure(PEN_NAMES[k], UI_XS);
-            UiText(PEN_NAMES[k], cx - tw / 2, (int)r.y + PEN_H - UiLineHeight(UI_XS) - 3, UI_XS, on ? UI_ON_INK : UI_DIM);
-        }
+    Text(c, "Brush", c->x, c->y + (BUTTON_H - UiLineHeight(UI_S)) / 2, UI_S, UI_TEXT);
+    int x0 = c->x + LABEL_W, room = c->w - LABEL_W;
+    for (int k = 0; k < 3; k++) {
+        int a = x0 + k * (room + GAP) / 3, b = x0 + (k + 1) * (room + GAP) / 3 - GAP;
+        Rectangle r = { (float)a, (float)c->y, (float)(b - a), BUTTON_H };
+        bool on = dm->shape == (PenKind)k;
+        if (Button(c, r, NULL, on)) dm->shape = (PenKind)k;
+        if (Drawing(c)) PenIcon((PenKind)k, (int)(r.x + r.width / 2), (int)(r.y + r.height / 2), on ? UI_ON_INK : UI_INK);
     }
-    c->y += PEN_H + GAP;
+    c->y += BUTTON_H + GAP;
 
     // Size: the slider runs over log2 (1 .. 256: 16 in the middle), the field is exact
     Rectangle sr, fr;
@@ -271,8 +458,8 @@ static void SectionPen(Ctx *c)
     if (Field(c, W_SIZE_F, fr, &fv, 1.0f, (float)DRAW_SIZE_MAX, 1.0f, 0)) dm->size = ClampI((int)fv, 1, DRAW_SIZE_MAX);
     c->y += ROW_H + ROW_GAP;
 
-    // Hardness: the soft pen's only (a row of its own while it is the pen)
-    if (dm->pen == PEN_SOFT) {
+    // Hardness: the soft brush's only
+    if (dm->shape == PEN_SOFT) {
         Row(c, "Hardness", LABEL_W, UI_TEXT, &sr, &fr);
         float hv = dm->hardness;
         if (Slider(c, W_HARD_S, sr, &hv, 0.0f, 1.0f, 0.01f)) dm->hardness = hv;
@@ -281,6 +468,91 @@ static void SectionPen(Ctx *c)
         c->y += ROW_H + ROW_GAP;
     }
     c->y += GAP - ROW_GAP;
+}
+
+// The options of the tool on (docs/painting.md 18.9): only DrawMode fields, nothing of the tools'
+// behaviour
+static void ToolOptions(Ctx *c)
+{
+    DrawMode *dm = c->dm;
+    DrawTool t = dm->tool;
+    bool brush = t == TOOL_PENCIL || t == TOOL_ERASER || t == TOOL_SPRAY || t == TOOL_LINE || t == TOOL_CURVE ||
+                 t == TOOL_RECT || t == TOOL_ELLIPSE || t == TOOL_BLUR || t == TOOL_JUMBLE;
+    if (brush) BrushRows(c);
+    if (t == TOOL_PENCIL) {
+        Rectangle r = { (float)(c->x + LABEL_W), (float)c->y, (float)(c->w - LABEL_W), BUTTON_H };
+        if (Button(c, r, "Pixel perfect", dm->pixelPerfect)) dm->pixelPerfect = !dm->pixelPerfect;
+        c->y += BUTTON_H + GAP;
+    } else if (t == TOOL_SPRAY) {
+        IntRow(c, "Width", W_SPRAYW_S, W_SPRAYW_F, &dm->sprayWidth, 1, 256);
+        IntRow(c, "Speed", W_SPEED_S, W_SPEED_F, &dm->spraySpeed, 1, 256);
+        c->y += GAP - ROW_GAP;
+    } else if (t == TOOL_BUCKET || t == TOOL_WAND) {
+        // (the wand: contiguous / global; the bucket also the whole region, today's fill)
+        static const char *const MODES[3] = { "Contiguous", "Global", "Region" };
+        int k = Choice(c, NULL, MODES, t == TOOL_BUCKET ? 3 : 2, (int)dm->bucket);
+        if (k >= 0) dm->bucket = (DrawBucketMode)k;
+        if (!(t == TOOL_BUCKET && dm->bucket == DRAW_BUCKET_REGION)) {
+            IntRow(c, "Tolerance", W_TOL_S, W_TOL_F, &dm->tolerance, 0, 255);
+            c->y += GAP - ROW_GAP;
+        }
+    } else if (t == TOOL_GRADIENT) {
+        static const char *const KINDS[2] = { "Linear", "Radial" };
+        int k = Choice(c, "Gradient", KINDS, 2, dm->gradientRadial ? 1 : 0);
+        if (k >= 0) dm->gradientRadial = k == 1;
+    } else if (t == TOOL_EYEDROPPER) {
+        static const char *const PICKS[2] = { "Screen", "Paint" };
+        int k = Choice(c, "Samples", PICKS, 2, dm->pickTool == DRAW_PICK_SCREEN ? 0 : 1);
+        if (k >= 0) dm->pickTool = k == 0 ? DRAW_PICK_SCREEN : DRAW_PICK_PAINT;
+    }
+    // (what the tool does when it has no options; the selection tools' modifiers)
+    if (DrawToolKindOf(t) == TOOLKIND_SELECT) {
+        const char *hints = "{SHIFT} adds|{ALT} subtracts|{SHIFT}{ALT} both";
+        if (Drawing(c)) UiHints(hints, c->x, c->y, UI_XS, UI_DIM);
+        c->y += UiLineHeight(UI_XS) + GAP;
+    } else if (DrawToolKindOf(t) == TOOLKIND_MOVE) {
+        c->y += Wrapped(c, "drags the selected pixels (no selection: the region's)", UI_XS, UI_DIM, 2) + GAP;
+    } else if (DrawToolKindOf(t) == TOOLKIND_SHAPE && !brush && t != TOOL_GRADIENT) {
+        c->y += Wrapped(c, "filled with fg (RMB: bg)", UI_XS, UI_DIM, 2) + GAP;
+    }
+}
+
+#define TOOL_COLS 8
+#define TOOL_H 30
+#define TOOL_GAP 4
+
+static void SectionTools(Ctx *c)
+{
+    DrawMode *dm = c->dm;
+    Header(c, "Tools", "{1}..{5} pens|{[}{]} size");
+    // The grid, DrawTool order row by row; the tool on is white
+    int bw = (c->w - (TOOL_COLS - 1) * TOOL_GAP) / TOOL_COLS;
+    int left = c->x + (c->w - (bw * TOOL_COLS + (TOOL_COLS - 1) * TOOL_GAP)) / 2;
+    int hover = -1;
+    for (int t = 0; t < TOOL_COUNT; t++) {
+        Rectangle r = { (float)(left + (t % TOOL_COLS) * (bw + TOOL_GAP)), (float)(c->y + (t / TOOL_COLS) * (TOOL_H + TOOL_GAP)),
+                        (float)bw, TOOL_H };
+        bool on = dm->tool == (DrawTool)t;
+        if (Button(c, r, NULL, on)) dm->tool = (DrawTool)t;
+        if (Hovered(c, r)) hover = t;
+        if (Drawing(c)) ToolIcon((DrawTool)t, (int)(r.x + r.width / 2), (int)(r.y + r.height / 2), on ? UI_ON_INK : UI_INK);
+    }
+    c->y += ((TOOL_COUNT + TOOL_COLS - 1) / TOOL_COLS) * (TOOL_H + TOOL_GAP) - TOOL_GAP + GAP;
+
+    // The hint line: the tool's name and its key (the one under the cursor, else the one on)
+    DrawTool shown = hover >= 0 ? (DrawTool)hover : dm->tool;
+    if (Drawing(c)) {
+        UiTextBold(DrawToolName(shown), c->x, c->y, UI_S, shown == dm->tool ? UI_INK : UI_DIM);
+        const char *key = DrawToolKeyName(shown);
+        const char *plus = strchr(key, '+');
+        const char *markup = !key[0] ? "~no key~"
+                           : plus ? TextFormat("{%.*s}+{%s}", (int)(plus - key), key, plus + 1) : TextFormat("{%s}", key);
+        UiHints(markup, c->x + c->w - UiHintsWidth(markup, UI_XS), c->y + (UiLineHeight(UI_S) - UiLineHeight(UI_XS)) / 2, UI_XS, UI_DIM);
+    }
+    c->y += UiLineHeight(UI_S) + GAP;
+
+    ToolOptions(c);
+    c->y += Wrapped(c, "not here: zoom, hand (the camera), slice, text, layers, frames", UI_XS, UI_FAINT, 2) + GAP;
 }
 
 static void FormatHex(char *out, int size, Color c)
@@ -313,14 +585,80 @@ static bool ParseHex(const char *s, Color *out)
 
 static bool SameColor(Color a, Color b) { return a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a; }
 
+// The selector's HSV from fg when fg's RGB changed elsewhere (a key, the eyedropper, a field): the
+// hue stays while the saturation or the value is 0, the saturation while the value is 0
+static void SyncHsv(DrawPanel *p, Color fg)
+{
+    if (p->hsvSet && fg.r == p->hsvOf.r && fg.g == p->hsvOf.g && fg.b == p->hsvOf.b) return;
+    Vector3 hsv = ColorToHSV(fg);
+    if (hsv.z > 0.0f) {
+        if (hsv.y > 0.0f && isfinite(hsv.x)) p->hue = hsv.x;
+        p->sat = hsv.y;
+    }
+    p->val = hsv.z;
+    p->hsvOf = fg;
+    p->hsvSet = true;
+}
+
+#define SV_W        188     // the saturation / value square
+#define SV_H        128
+#define HUE_W       16
+#define ALPHA_H     12
+#define FGBG        38      // the fg / bg squares (bg offset by FGBG_OFF down and right)
+#define FGBG_OFF    18
+#define PAL_CELL    20      // a palette swatch
+#define PAL_GAP     3
+
 static void SectionColor(Ctx *c)
 {
     DrawMode *dm = c->dm;
     DrawPanel *p = c->p;
     Header(c, "Colour", "{ALT}+LMB picks|{X} swap");
+    SyncHsv(p, dm->fg);
+
+    // The selector: saturation / value square, hue strip beside it, alpha strip under it
+    Rectangle sv = { (float)c->x, (float)c->y, SV_W, SV_H };
+    Rectangle hue = { sv.x + SV_W + 8, sv.y, HUE_W, SV_H };
+    Rectangle alpha = { sv.x, sv.y + SV_H + 8, SV_W, ALPHA_H };
+    if (c->pass != PASS_MEASURE) {
+        float s = p->sat, v = p->val, h = p->hue, a = (float)dm->fg.a;
+        bool hsvChanged = false;
+        if (UiSatValSquare(&p->drag, W_SV, sv, h, &s, &v) && c->pass == PASS_INPUT) {
+            p->sat = s;
+            p->val = v;
+            hsvChanged = true;
+        }
+        if (UiHueStrip(&p->drag, W_HUE, hue, &h) && c->pass == PASS_INPUT) {
+            p->hue = h;
+            hsvChanged = true;
+        }
+        if (hsvChanged) {
+            Color n = ColorFromHSV(p->hue, p->sat, p->val);
+            n.a = dm->fg.a;
+            dm->fg = n;
+            p->hsvOf = n;
+        }
+        if (UiAlphaStrip(&p->drag, W_ALPHA, alpha, dm->fg, &a) && c->pass == PASS_INPUT) dm->fg.a = (unsigned char)ClampI((int)a, 0, 255);
+    }
+
+    // fg / bg: overlapping squares (Aseprite's); a click on bg makes it fg (a swap, as X)
+    float fx = hue.x + HUE_W + 10;
+    Rectangle fgR = { fx, sv.y, FGBG, FGBG }, bgR = { fx + FGBG_OFF, sv.y + FGBG_OFF, FGBG, FGBG };
+    Swatch(c, bgR, dm->bg, false);
+    Swatch(c, fgR, dm->fg, false);
+    if (c->pass == PASS_INPUT && Hovered(c, bgR) && !Hovered(c, fgR) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        Color t = dm->fg;
+        dm->fg = dm->bg;
+        dm->bg = t;
+    }
+    Text(c, "fg", (int)fgR.x, (int)(bgR.y + FGBG + 4), UI_XS, UI_DIM);
+    Text(c, "bg", (int)(bgR.x + FGBG) - UiMeasure("bg", UI_XS), (int)(bgR.y + FGBG + 4), UI_XS, UI_DIM);
+    c->y += SV_H + 8 + ALPHA_H + GAP + 4;
+
+    // R G B A
     static const char *names[4] = { "R", "G", "B", "A" };
     for (int k = 0; k < 4; k++) {
-        unsigned char *ch = k == 0 ? &dm->color.r : k == 1 ? &dm->color.g : k == 2 ? &dm->color.b : &dm->color.a;
+        unsigned char *ch = k == 0 ? &dm->fg.r : k == 1 ? &dm->fg.g : k == 2 ? &dm->fg.b : &dm->fg.a;
         Rectangle sr, fr;
         Row(c, names[k], CHANNEL_W, UI_TEXT, &sr, &fr);
         float v = (float)*ch;
@@ -331,33 +669,61 @@ static void SectionColor(Ctx *c)
     }
     c->y += 1;
 
-    // The swatch (left half without alpha, right half over the checker) and the hex field
-    Color opaque = dm->color;
-    opaque.a = 255;
-    Rectangle sw = { (float)c->x, (float)c->y, 34, BUTTON_H };
-    Swatch(c, sw, opaque, false);
-    Swatch(c, (Rectangle){ sw.x + sw.width, sw.y, 34, BUTTON_H }, dm->color, false);
-    Rectangle hr = { sw.x + 2 * sw.width + GAP + 4, (float)c->y, 120, BUTTON_H };
-    if (p->edit.active != W_HEX && p->edit.claim != W_HEX) FormatHex(p->hex, sizeof(p->hex), dm->color);
+    // The hex field
+    Rectangle hr = { (float)c->x, (float)c->y, 120, BUTTON_H };
+    if (p->edit.active != W_HEX && p->edit.claim != W_HEX) FormatHex(p->hex, sizeof(p->hex), dm->fg);
     if (c->pass != PASS_MEASURE && UiTextField(&p->edit, W_HEX, hr, p->hex, sizeof(p->hex)) && c->pass == PASS_INPUT) {
         Color col;
-        if (ParseHex(p->hex, &col)) dm->color = col;
-        FormatHex(p->hex, sizeof(p->hex), dm->color);      // (an unreadable one goes back)
+        if (ParseHex(p->hex, &col)) dm->fg = col;
+        FormatHex(p->hex, sizeof(p->hex), dm->fg);      // (an unreadable one goes back)
     }
     Text(c, "hex", (int)(hr.x + hr.width) + 8, c->y + (BUTTON_H - UiLineHeight(UI_XS)) / 2, UI_XS, UI_DIM);
     c->y += BUTTON_H + GAP;
 
-    // The recent colours (a click picks one)
+    // The recent colours (a click picks one into fg, RMB into bg)
     int n = DRAW_RECENT_COLORS, sz = (c->w - (n - 1) * 4) / n;
     for (int k = 0; k < n; k++) {
         Rectangle r = { (float)(c->x + k * (sz + 4)), (float)c->y, (float)sz, 22 };
         if (k < dm->recentCount) {
-            if (Swatch(c, r, dm->recent[k], SameColor(dm->recent[k], dm->color))) dm->color = dm->recent[k];
+            if (Swatch(c, r, dm->recent[k], SameColor(dm->recent[k], dm->fg))) dm->fg = dm->recent[k];
+            else if (RightClicked(c, r)) dm->bg = dm->recent[k];
         } else if (Drawing(c) && dm->recentCount > 0) DrawRectangleLinesEx(r, 1.0f, UiAlpha(UI_LINE, 0.6f));
         // (with none yet the row shows its label alone, not the label over empty boxes)
     }
     if (dm->recentCount == 0) Text(c, "recent colours", c->x + 8, c->y + (22 - UiLineHeight(UI_XS)) / 2, UI_XS, UI_FAINT);
     c->y += 22 + GAP;
+
+    // The palette: + adds fg; a click picks into fg, RMB into bg, SHIFT+click removes
+    if (Drawing(c)) {
+        UiText("Palette", c->x, c->y, UI_XS, UI_DIM);
+        const char *hints = "RMB bg|{SHIFT}+click removes";
+        UiHints(hints, c->x + c->w - UiHintsWidth(hints, UI_XS), c->y, UI_XS, UI_DIM);
+    }
+    c->y += UiLineHeight(UI_XS) + 4;
+    int cols = (c->w + PAL_GAP) / (PAL_CELL + PAL_GAP);
+    int count = dm->paletteCount;
+    for (int k = 0; k <= count; k++) {
+        Rectangle r = { (float)(c->x + (k % cols) * (PAL_CELL + PAL_GAP)), (float)(c->y + (k / cols) * (PAL_CELL + PAL_GAP)), PAL_CELL, PAL_CELL };
+        if (k == count) {
+            // (+ at the end; it stops at DRAWSTATE_PALETTE_MAX, the state file's bound)
+            bool room = count < DRAWSTATE_PALETTE_MAX;
+            if (Button(c, r, room ? "+" : "", false) && room) {
+                Color *slot = MS_PUSH(dm->palette, dm->paletteCount, dm->paletteCap);
+                if (slot) *slot = dm->fg;
+            }
+            continue;
+        }
+        Color col = dm->palette[k];
+        if (Swatch(c, r, col, SameColor(col, dm->fg))) {
+            if (ShiftDown()) {
+                memmove(&dm->palette[k], &dm->palette[k + 1], sizeof(Color) * (size_t)(dm->paletteCount - k - 1));
+                dm->paletteCount--;
+                break;      // (the rest moved: drawn from the next frame on)
+            }
+            dm->fg = col;
+        } else if (RightClicked(c, r)) dm->bg = col;
+    }
+    c->y += (count / cols + 1) * (PAL_CELL + PAL_GAP) - PAL_GAP + GAP;
 }
 
 // The Density / Grid section's buttons: resize (Resize to density, or Fit to grid on a grid), Pixel
@@ -490,7 +856,7 @@ static void Layout(Ctx *c)
     c->y += 4;
     Title(c);
     if (only == DRAWPANEL_ALL || only == DRAWPANEL_TARGET) SectionTarget(c);
-    if (only == DRAWPANEL_ALL || only == DRAWPANEL_PEN) SectionPen(c);
+    if (only == DRAWPANEL_ALL || only == DRAWPANEL_TOOLS) SectionTools(c);
     if (only == DRAWPANEL_ALL || only == DRAWPANEL_COLOR) SectionColor(c);
     if (only == DRAWPANEL_ALL || only == DRAWPANEL_DENSITY) SectionDensity(c);
     if (only == DRAWPANEL_ALL || only == DRAWPANEL_FACES) SectionFaces(c);
@@ -525,7 +891,8 @@ void DrawPanelInit(DrawPanel *p)
 bool DrawPanelSetOnly(DrawPanel *p, const char *section)
 {
     static const struct { const char *name; DrawPanelSection s; } names[] = {
-        { "all", DRAWPANEL_ALL }, { "target", DRAWPANEL_TARGET }, { "pen", DRAWPANEL_PEN }, { "color", DRAWPANEL_COLOR },
+        { "all", DRAWPANEL_ALL }, { "target", DRAWPANEL_TARGET }, { "tools", DRAWPANEL_TOOLS }, { "pen", DRAWPANEL_TOOLS },
+        { "color", DRAWPANEL_COLOR },
         { "colour", DRAWPANEL_COLOR }, { "density", DRAWPANEL_DENSITY }, { "canvas", DRAWPANEL_DENSITY },
         { "faces", DRAWPANEL_FACES },
     };

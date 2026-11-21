@@ -172,6 +172,15 @@ bool UiSwatch(Rectangle r, Color c, bool selected);
 // A button in the panel's look (active: drawn on, as a pressed toggle); true when clicked
 // (LMB pressed on it). label NULL or "": no text (the caller draws an icon on it).
 bool UiButton(Rectangle r, const char *label, bool active);
+// The colour selector (docs/painting.md 18.9; Aseprite's): its gradients are content (the colours
+// they pick), the markers white over a dark edge. LMB presses and drags (drag->active == id while
+// held, also outside the widget: clamped to it); true when the value changed this frame.
+// Saturation 0..1 left to right, value 1..0 top to bottom, at `hue` (degrees)
+bool UiSatValSquare(UiDrag *drag, int id, Rectangle r, float hue, float *sat, float *val);
+// Hue 0..360 degrees from top to bottom (red at both ends)
+bool UiHueStrip(UiDrag *drag, int id, Rectangle r, float *hue);
+// Alpha 0..255 of c (its own alpha ignored), transparent at the left over the checker
+bool UiAlphaStrip(UiDrag *drag, int id, Rectangle r, Color c, float *alpha);
 // A widget had the mouse this frame (a drag, a field being typed into): the panel keeps it
 bool UiWidgetsBusy(const UiDrag *drag, const UiEdit *edit);
 // Rounded rectangle of any radius (radius >= half the shorter side: a disc or a pill), filled,

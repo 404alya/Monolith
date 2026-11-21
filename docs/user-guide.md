@@ -108,26 +108,48 @@ Editing one copy of a `repeat` row (a single pillar of a row of eight) splits th
 
 ### Painting (B)
 
-Marks, signs, decals and pixel art don't need a request either: press **B** in spectator mode and paint straight onto any box or model. As in edit mode the cursor is free and **holding the right mouse button flies**. The **draw panel** on the left shows what the cursor last rested on (the object, the face or model part, where its paint goes, or why it can't be painted), the pen, the colour and the density; a ring on the surface shows exactly which texels the brush will cover (at size 1, the one texel).
+Marks, signs, decals and pixel art don't need a request either: press **B** in spectator mode and paint straight onto any box or model. The tools, their keys and the colour picker are Aseprite's, and the cursor stays free: the **mouse wheel** moves toward the point under the cursor, **middle-drag** orbits around it, **Space + drag** (or Shift + middle-drag) pans; the arrow keys still fly to the viewpoints. The **draw panel** on the left shows what the cursor last rested on (the object, the face or model part, where its paint goes, or why it can't be painted), the tools and their options, the colour picker and the density; a ring on the surface shows exactly which texels the brush will cover (at size 1, the one texel). Your tool, brush, colours, palette and the panel's switches are kept per map, in `draw.ini` in the map's folder (not part of the map: it isn't exported or reloaded, commit it only if you want to share your palette).
 
 **Where the paint goes.** Paint is a layer over the material: the object keeps its look (its shader, textures, glow) everywhere you haven't painted. Each material that has paint gets an atlas, `textures/paint/<material>.png`, and the first stroke on a box face or a model part gives it a rectangle there: a `paint` line at the end of the map (under `# paint (draw mode)`), the material's `paint` key and an `id` on the object's line, one undoable edit. A stroke that runs over onto another face of the same box gives that face its rectangle too (still one undo). A model part drawn with its own material paints into `textures/paint/<file>_s<N>.png`. A model whose own texture coordinates repeat or overlap (most low-poly kits, scanned rocks) is **unwrapped** for paint on its first stroke (a `models/<file>.paintuv` file beside it; a large scan takes a few seconds, the HUD says so). Each face of a box has its own rectangle; the panel's **Faces** buttons group faces that should share paint (e.g. the four sides), then **Apply**. **Texels / m** sets how big a texel of new paint is (64 by default, clamped to 2048 texels a side: the panel says when), **Resize to density** gives the paint under the cursor a rectangle of that size (its paint resampled), **Pixel look** keeps texels crisp up close (`paint_filter nearest`), **Clear paint** removes the paint of that face or part.
 
 **The paint grid.** A map with a pixel look declares the grid its pixels lie on: `env paint.grid 24` (24 texels per metre, 4.2 cm pixels) for the whole map, or `paint_grid 20` on one material (`paint_grid 0`: none); its `MAP.md` says which. On such a material the panel's section is called **Grid** ("follows the grid of concrete: 24 texels/m (4.2 cm)") and has no density slider: a paint texel is one pixel of the map's grid, on the same lines as the surface's own pixels, and on every box of that material the texels meet where the boxes meet. Size 1 paints exactly one of those pixels, and the brush outline lies on them. A model part gets a fresh unwrap whose texels have the grid's size on the model you paint (other copies of the same model at another scale get larger or smaller texels; the panel says so). **Fit to grid** (in place of Resize to density) gives paint made before the grid was declared, or on a box that was moved or resized since, the face's cells again: paint that was already on the grid moves texel for texel, other paint is resampled. A face longer than 2048 grid pixels (85 m at 24/m) can't be painted on the grid; the panel says so. Without a grid, everything stays as described above.
 
+**Tools.** Each works on one face's rectangle or model part (its *region*) and is one undo step. The left button paints with the foreground colour, the right button with the background colour.
+
+| Key | Tool |
+|---|---|
+| B | pencil: round, square (pixel-exact) or soft brush; *pixel-perfect* at size 1 |
+| E | eraser (makes the paint transparent again) |
+| S | spray |
+| G / Shift+G | paint bucket (contiguous or global by colour with a tolerance, or the whole face / part) / gradient (foreground to background, linear or radial) |
+| L / Shift+L | line (Shift: 45° steps) / curve (drag the line, then click twice for its bends) |
+| U / Shift+U | rectangle / ellipse; press again for the filled one (Shift while dragging: square / circle) |
+| D / Shift+D | contour (a freehand shape, filled) / polygon (clicks; click the first point or Enter to close) |
+| M / Shift+M, Q / Shift+Q, W | select: rectangle / ellipse, lasso / polygonal lasso, magic wand. Shift adds, Alt subtracts, Shift+Alt intersects. Every other tool then paints only inside the selection |
+| V | move the selected pixels (no selection: the whole face's paint) |
+| R / Shift+R | blur / jumble |
+| I | eyedropper: the colour as you see it on screen (I again: the paint or surface colour instead) |
+
+Not here: Aseprite's zoom and hand (the mouse moves the camera instead), slice, text, layers and frames.
+
 | In draw mode | Action |
 |---|---|
-| left mouse drag | paint (fill: fill the face's rectangle or the model's UV island under the cursor) |
-| Alt+click | pick the colour: the paint where it is opaque, else what the surface shows |
-| 1 – 5 | pen: hard round, square (pixel-exact), soft round, eraser (makes the paint transparent again), fill; the effect toggles wait while draw mode is on |
+| left / right mouse drag | use the tool with the foreground / background colour |
+| Shift+click | pencil, eraser: a straight line from the last point |
+| Alt+click | pick the colour: the paint where it is opaque, else what the surface shows (the panel can switch it to the screen colour) |
+| wheel, middle-drag, Space + drag, Shift + middle-drag | move toward the point under the cursor, orbit, pan, pan |
+| 1 – 5 | pencil round, square, soft, eraser, fill the whole face; the effect toggles wait while draw mode is on |
 | [ / ], Ctrl+wheel | brush size in texels (1 – 256) |
 | Shift+wheel | brush alpha |
-| X | swap to the colour before |
+| X | swap foreground and background colour |
+| Ctrl+A / Ctrl+D / Ctrl+Shift+D / Ctrl+Shift+I | select the whole face / deselect / reselect / invert |
+| Enter | close the polygon or polygonal lasso, end the curve |
 | Tab | hide / show the panel |
-| Ctrl+Z / Ctrl+Shift+Z | undo / redo strokes, in the same history as the edits |
+| Ctrl+Z / Ctrl+Shift+Z | undo / redo strokes, in the same history as the edits (selections aren't undo steps) |
 | Ctrl+S | save |
-| B or Esc | leave draw mode (M, V and C switch modes); with unsaved paint the first press only reminds you |
+| Esc | cancel the shape being drawn; else leave draw mode (with unsaved paint the first press only reminds you). Edit, volume and snip mode (M, V, C) are reached from spectator mode after leaving |
 
-In the panel, drag a slider or click a number to type it (Enter or a click elsewhere applies, Esc cancels); the colour also takes a hex value (`#C83232` or `#C8323280`) and the last colours are one click away.
+In the panel, drag a slider or click a number to type it (Enter or a click elsewhere applies, Esc cancels); the colour is picked on the saturation / value square, the hue strip and the alpha strip, or as a hex value (`#C83232` or `#C8323280`); click the background square to swap; the last colours are one click away, and the palette row keeps your colours (+ adds the foreground colour, Shift+click removes one, right click picks into the background).
 
 **Saving** works as for edits: **Ctrl+S** writes each changed atlas as a PNG under the package's `textures/paint/` and each new unwrap beside its model, their `ASSETS.md` rows and sidecars (an atlas is recorded as made in monolith, CC0; an unwrap keeps its model's licence and attribution; a model without a licence row can't be unwrapped), then the map. A request needs everything saved first. Closing the editor with unsaved paint writes the atlases next to the unsaved map under `unsaved/`. When the map or an atlas changes on disk, your unsaved strokes are painted again on top. Paint can't go on lights, the sky, skinned models or a material whose shader already uses three textures.
 

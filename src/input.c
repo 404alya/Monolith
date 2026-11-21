@@ -15,7 +15,7 @@
 
 #define INPUT_KEYS 512
 
-typedef enum { STEP_WAIT, STEP_AT, STEP_MOVE, STEP_PRESS, STEP_DOWN, STEP_UP, STEP_CLICK, STEP_BDOWN, STEP_BUP } StepKind;
+typedef enum { STEP_WAIT, STEP_AT, STEP_MOVE, STEP_PRESS, STEP_DOWN, STEP_UP, STEP_CLICK, STEP_BDOWN, STEP_BUP, STEP_WHEEL } StepKind;
 
 typedef struct {
     StepKind kind;
@@ -31,6 +31,7 @@ static struct {
     bool down[INPUT_KEYS], prevDown[INPUT_KEYS], release[INPUT_KEYS];
     bool button[3], prevButton[3], releaseButton[3];
     int ch;                         // the character typed this frame (0: none)
+    float wheel;                    // the wheel's notches this frame (GetMouseWheelMove)
     Vector2 pos, prevPos;
     bool hidden;
     int w, h;
@@ -119,16 +120,22 @@ bool InputScriptLoad(const char *path, int startFrame, int screenW, int screenH)
                 st.frames = (int)strtol(w[3], &end, 10);
                 bad = bad || *end || st.frames < 1 || st.frames > 100000;
             }
-        } else if ((strcmp(w[0], "down") == 0 || strcmp(w[0], "up") == 0) && n == 2 && (strcmp(w[1], "lmb") == 0 || strcmp(w[1], "rmb") == 0)) {
+        } else if ((strcmp(w[0], "down") == 0 || strcmp(w[0], "up") == 0) && n == 2 &&
+                   (strcmp(w[1], "lmb") == 0 || strcmp(w[1], "rmb") == 0 || strcmp(w[1], "mmb") == 0)) {
             st.kind = w[0][0] == 'd' ? STEP_BDOWN : STEP_BUP;
-            st.key = w[1][0] == 'l' ? MOUSE_BUTTON_LEFT : MOUSE_BUTTON_RIGHT;
+            st.key = w[1][0] == 'l' ? MOUSE_BUTTON_LEFT : w[1][0] == 'r' ? MOUSE_BUTTON_RIGHT : MOUSE_BUTTON_MIDDLE;
+        } else if (strcmp(w[0], "wheel") == 0 && n == 2) {
+            st.kind = STEP_WHEEL;
+            st.x = strtof(w[1], &end);
+            bad = *end || !(st.x >= -1000.0f && st.x <= 1000.0f);
         } else if ((strcmp(w[0], "press") == 0 || strcmp(w[0], "down") == 0 || strcmp(w[0], "up") == 0) && n == 2) {
             st.kind = w[0][0] == 'p' ? STEP_PRESS : w[0][0] == 'd' ? STEP_DOWN : STEP_UP;
             st.key = KeyByName(w[1]);
             bad = st.key < 0;
         } else if (strcmp(w[0], "click") == 0 && n == 2) {
             st.kind = STEP_CLICK;
-            st.key = strcmp(w[1], "left") == 0 ? MOUSE_BUTTON_LEFT : strcmp(w[1], "right") == 0 ? MOUSE_BUTTON_RIGHT : -1;
+            st.key = strcmp(w[1], "left") == 0 ? MOUSE_BUTTON_LEFT : strcmp(w[1], "right") == 0 ? MOUSE_BUTTON_RIGHT
+                   : strcmp(w[1], "middle") == 0 ? MOUSE_BUTTON_MIDDLE : -1;
             bad = st.key < 0;
         } else bad = true;
         if (bad) {
@@ -170,6 +177,7 @@ void InputFrame(int frame)
     memcpy(S.prevButton, S.button, sizeof(S.button));
     S.prevPos = S.pos;
     S.ch = 0;
+    S.wheel = 0.0f;
     for (int k = 0; k < INPUT_KEYS; k++)
         if (S.release[k]) { S.down[k] = false; S.release[k] = false; }
     for (int b = 0; b < 3; b++)
@@ -201,6 +209,7 @@ void InputFrame(int frame)
         break;
     case STEP_BDOWN: S.button[st->key] = true; break;
     case STEP_BUP: S.button[st->key] = false; break;
+    case STEP_WHEEL: S.wheel = st->x; break;
     }
     if (++S.done >= st->frames) { S.at++; S.done = 0; }
 }
@@ -257,7 +266,7 @@ Vector2 InputGetMouseDelta(void)
     return (Vector2){ S.pos.x - S.prevPos.x, S.pos.y - S.prevPos.y };
 }
 
-float InputGetMouseWheelMove(void) { return S.on ? 0.0f : GetMouseWheelMove(); }
+float InputGetMouseWheelMove(void) { return S.on ? S.wheel : GetMouseWheelMove(); }
 
 void InputSetMousePosition(int x, int y)
 {

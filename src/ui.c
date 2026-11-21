@@ -977,20 +977,22 @@ bool UiTextField(UiEdit *edit, int id, Rectangle r, char *text, int textSize)
     return applied;
 }
 
+// The checker an alpha shows over: q px squares, cut at r's edges (content colours, not tokens)
+static void Checker(Rectangle r, int q)
+{
+    DrawRectangleRec(r, (Color){ 205, 205, 205, 255 });
+    for (int yy = 0; yy * q < (int)r.height; yy++)
+        for (int xx = yy & 1; xx * q < (int)r.width; xx += 2) {
+            float w = fminf((float)q, r.width - (float)(xx * q)), h = fminf((float)q, r.height - (float)(yy * q));
+            DrawRectangleRec((Rectangle){ r.x + (float)(xx * q), r.y + (float)(yy * q), w, h }, (Color){ 125, 125, 125, 255 });
+        }
+}
+
 bool UiSwatch(Rectangle r, Color c, bool selected)
 {
     bool hover = WHover(r);
     if (WDraw()) {
-        if (c.a < 255) {
-            // the checker the alpha shows over: 6 px squares, cut at the swatch's edges
-            const int q = 6;
-            DrawRectangleRec(r, (Color){ 205, 205, 205, 255 });
-            for (int yy = 0; yy * q < (int)r.height; yy++)
-                for (int xx = yy & 1; xx * q < (int)r.width; xx += 2) {
-                    float w = fminf((float)q, r.width - (float)(xx * q)), h = fminf((float)q, r.height - (float)(yy * q));
-                    DrawRectangleRec((Rectangle){ r.x + (float)(xx * q), r.y + (float)(yy * q), w, h }, (Color){ 125, 125, 125, 255 });
-                }
-        }
+        if (c.a < 255) Checker(r, 6);
         DrawRectangleRec(r, c);
         if (selected) DrawRectangleLinesEx((Rectangle){ r.x - 2, r.y - 2, r.width + 4, r.height + 4 }, 2.0f, UI_HOT);
         else DrawRectangleLinesEx(r, 1.0f, hover ? UI_DIM : UI_LINE);
@@ -1015,6 +1017,111 @@ bool UiButton(Rectangle r, const char *label, bool active)
     }
     return hover && WPressed();
 }
+
+// #region The colour selector (docs/painting.md 18.9)
+// The saturation / value square, the hue strip and the alpha strip. Their gradients are content (the
+// colours they pick), drawn with raylib's gradient rectangles (vertex colours: the square's two
+// layers give HSV exactly, white -> hue across, then black over it by value); the chrome is the
+// marker: white over a dark edge, so it reads on any colour.
+
+#define MARK_DARK CLITERAL(Color){ 0, 0, 0, 160 }
+
+// A drag that starts with an LMB press in r and follows the mouse while LMB is held (clamped to r).
+// True while it is this widget's (*t: the mouse's place in r, 0..1 each way)
+static bool AreaDrag(UiDrag *drag, int id, Rectangle r, Vector2 *t)
+{
+    if (!WInput()) return false;
+    if (drag->active == id) {
+        if (!WMouse() || !IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+            drag->active = 0;
+            return false;
+        }
+    } else if (drag->active == 0 && WHover(r) && WPressed()) drag->active = id;
+    else return false;
+    Vector2 m = GetMousePosition();
+    float w = r.width > 1.0f ? r.width - 1.0f : 1.0f, h = r.height > 1.0f ? r.height - 1.0f : 1.0f;
+    t->x = fminf(fmaxf((m.x - r.x) / w, 0.0f), 1.0f);
+    t->y = fminf(fmaxf((m.y - r.y) / h, 0.0f), 1.0f);
+    return true;
+}
+
+// The pure hue at h degrees (s = v = 1)
+static Color Hue(float h) { return ColorFromHSV(fmodf(fmaxf(h, 0.0f), 360.0f), 1.0f, 1.0f); }
+
+// A bar marker across a strip at t (0..1): along x (vertical = false: a vertical bar at x) or y
+static void StripMarker(Rectangle r, float t, bool vertical, bool held)
+{
+    Color ink = held ? UI_HOT : UI_INK;
+    if (vertical) {
+        int y = (int)(r.y + t * (r.height - 1.0f) + 0.5f);
+        DrawRectangle((int)r.x - 3, y - 2, (int)r.width + 6, 5, MARK_DARK);
+        DrawRectangle((int)r.x - 2, y - 1, (int)r.width + 4, 3, ink);
+    } else {
+        int x = (int)(r.x + t * (r.width - 1.0f) + 0.5f);
+        DrawRectangle(x - 2, (int)r.y - 3, 5, (int)r.height + 6, MARK_DARK);
+        DrawRectangle(x - 1, (int)r.y - 2, 3, (int)r.height + 4, ink);
+    }
+}
+
+bool UiSatValSquare(UiDrag *drag, int id, Rectangle r, float hue, float *sat, float *val)
+{
+    float s0 = *sat, v0 = *val;
+    Vector2 t;
+    if (AreaDrag(drag, id, r, &t)) {
+        *sat = t.x;
+        *val = 1.0f - t.y;
+    }
+    if (WDraw()) {
+        int x = (int)r.x, y = (int)r.y, w = (int)r.width, h = (int)r.height;
+        DrawRectangleGradientH(x, y, w, h, WHITE, Hue(hue));
+        DrawRectangleGradientV(x, y, w, h, (Color){ 0, 0, 0, 0 }, BLACK);
+        DrawRectangleLinesEx(r, 1.0f, UI_LINE);
+        // the marker: a ring at (s, v) (it may overhang the edge)
+        bool held = drag->active == id;
+        float cx = r.x + fminf(fmaxf(*sat, 0.0f), 1.0f) * (r.width - 1.0f), cy = r.y + (1.0f - fminf(fmaxf(*val, 0.0f), 1.0f)) * (r.height - 1.0f);
+        Rectangle outer = { roundf(cx) - 6, roundf(cy) - 6, 13, 13 }, inner = { roundf(cx) - 5, roundf(cy) - 5, 11, 11 };
+        Rounded(outer, 6, MARK_DARK, true);
+        Rounded(inner, 5, held ? UI_HOT : UI_INK, true);
+        Rounded((Rectangle){ inner.x + 1, inner.y + 1, 9, 9 }, 4, MARK_DARK, true);
+    }
+    return *sat != s0 || *val != v0;
+}
+
+bool UiHueStrip(UiDrag *drag, int id, Rectangle r, float *hue)
+{
+    float h0 = *hue;
+    Vector2 t;
+    if (AreaDrag(drag, id, r, &t)) *hue = fminf(t.y * 360.0f, 359.999f);
+    if (WDraw()) {
+        int x = (int)r.x, y = (int)r.y, w = (int)r.width, h = (int)r.height;
+        for (int k = 0; k < 6; k++) {       // red, yellow, green, cyan, blue, magenta, red
+            int y0 = y + k * h / 6, y1 = y + (k + 1) * h / 6;
+            DrawRectangleGradientV(x, y0, w, y1 - y0, Hue(60.0f * (float)k), Hue(60.0f * (float)(k + 1)));
+        }
+        DrawRectangleLinesEx(r, 1.0f, UI_LINE);
+        StripMarker(r, fminf(fmaxf(*hue / 360.0f, 0.0f), 1.0f), true, drag->active == id);
+    }
+    return *hue != h0;
+}
+
+bool UiAlphaStrip(UiDrag *drag, int id, Rectangle r, Color c, float *alpha)
+{
+    float a0 = *alpha;
+    Vector2 t;
+    if (AreaDrag(drag, id, r, &t)) *alpha = roundf(t.x * 255.0f);
+    if (WDraw()) {
+        Checker(r, 6);
+        Color clear = c, solid = c;
+        clear.a = 0;
+        solid.a = 255;
+        DrawRectangleGradientH((int)r.x, (int)r.y, (int)r.width, (int)r.height, clear, solid);
+        DrawRectangleLinesEx(r, 1.0f, UI_LINE);
+        StripMarker(r, fminf(fmaxf(*alpha / 255.0f, 0.0f), 1.0f), false, drag->active == id);
+    }
+    return *alpha != a0;
+}
+
+// #endregion
 
 bool UiWidgetsBusy(const UiDrag *drag, const UiEdit *edit)
 {

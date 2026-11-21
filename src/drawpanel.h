@@ -1,6 +1,7 @@
-// The draw panel (draw mode, docked left; drawpanel.c; docs/painting.md 13.2): target, pen, colour
-// picker, density or grid (resize / fit to grid, pixel look, clear), box face groups. Mouse-driven,
-// in the ui.h look.
+// The draw panel (draw mode, docked left; drawpanel.c; docs/painting.md 13.2, 18.9): target, tools
+// (the tool grid and the tool's options), colour (saturation / value square, hue and alpha strips,
+// fg / bg, hex, RGBA, recent colours, palette), density or grid (resize / fit to grid, pixel look,
+// clear), box face groups. Mouse-driven, in the ui.h look.
 #ifndef MONOLITH_DRAWPANEL_H
 #define MONOLITH_DRAWPANEL_H
 
@@ -13,11 +14,11 @@
 #define DRAWPANEL_RIGHT (DRAWPANEL_X + DRAWPANEL_W)
 
 typedef enum {
-    DRAWPANEL_ALL = 0, DRAWPANEL_TARGET, DRAWPANEL_PEN, DRAWPANEL_COLOR, DRAWPANEL_DENSITY, DRAWPANEL_FACES,
+    DRAWPANEL_ALL = 0, DRAWPANEL_TARGET, DRAWPANEL_TOOLS, DRAWPANEL_COLOR, DRAWPANEL_DENSITY, DRAWPANEL_FACES,
 } DrawPanelSection;
 
-// What the panel asks the draw mode to do this frame (the panel itself edits only dm's pen,
-// colour, density and switches); the values are DrawModePanelAction's DRAW_ACT_*
+// What the panel asks the draw mode to do this frame (the panel itself edits only dm's fields: the
+// tool and its options, the colours and palette, density and switches; never a tool's behaviour); the values are DrawModePanelAction's DRAW_ACT_*
 typedef enum {
     DRAWPANEL_ACT_NONE = 0,
     DRAWPANEL_ACT_RESIZE = DRAW_ACT_RESIZE,         // Resize to density; Fit to grid on a grid (docs/painting.md 17.7)
@@ -29,7 +30,11 @@ typedef enum {
 typedef struct {
     UiDrag drag;
     UiEdit edit;
-    char hex[12];                   // the hex field ("#RRGGBB" / "#RRGGBBAA"; follows dm->color while closed)
+    char hex[12];                   // the hex field ("#RRGGBB" / "#RRGGBBAA"; follows dm->fg while closed)
+    float hue, sat, val;            // the colour selector's HSV (hue 0..360): its own, so the hue stays
+                                    // while saturation or value is 0 ...
+    Color hsvOf;                    // ... and taken from fg again when fg's RGB is no longer this (fg
+    bool hsvSet;                    // changed elsewhere: a key, the eyedropper, a field)
     unsigned char faces[6];         // the face-group buttons: the target box's groups, with the user's
                                     // unapplied changes (kept until the target is another box)
     unsigned char facesLoaded[6];   // ... the groups they were loaded from
@@ -44,8 +49,8 @@ typedef struct {
 } DrawPanel;
 
 void DrawPanelInit(DrawPanel *p);
-// --draw-panel <section>: the section named (all, target, pen, color / colour, density (or canvas),
-// faces);
+// --draw-panel <section>: the section named (all, target, tools (or pen), color / colour, density (or
+// canvas), faces);
 // false for an unknown name
 bool DrawPanelSetOnly(DrawPanel *p, const char *section);
 // The panel's mouse input (call before DrawModeUpdate); true while the cursor is over it (or a

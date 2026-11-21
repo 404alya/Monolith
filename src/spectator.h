@@ -30,6 +30,18 @@ typedef struct {
                             // where CTRL+D duplicates)
     bool rmbFly;            // edit mode (set per frame): mouse look, WASD / E / Q / SPACE and the wheel
                             // only while RMB is held; G (move the player here) is the mode's grab
+    bool mouseNav;          // draw mode (set per frame; docs/painting.md 18.7): no keyboard flight and
+                            // no mouse look; the wheel moves toward / away from the point under the
+                            // cursor (not with CTRL or SHIFT: the brush's), MMB drag orbits around the
+                            // point under the cursor at the press, SPACE + LMB drag and SHIFT + MMB
+                            // drag pan in the view plane. The arrows keep the viewpoints, P the pose
+    // The navigation drag going on (mouseNav): 0 none, 1 orbit, 2 pan; its pivot (the scene point under
+    // the cursor at the press, or a point at navDist along the ray when nothing is there)
+    bool navBlocked;        // (set per frame) the cursor is on a panel: no wheel, no new drag (one
+                            // going on goes on)
+    int navDrag;
+    Vector3 navPivot;
+    float navDist;          // the last pivot's distance (the fallback depth over the sky)
 } Spectator;
 
 void LookAngles(Vector3 eye, Vector3 target, float *yaw, float *pitch);
@@ -45,7 +57,7 @@ void SpectatorFlyTo(Spectator *s, int view);
 void SpectatorFlyToPose(Spectator *s, Vector3 eye, float yaw, float pitch);
 void SpectatorJumpTo(Spectator *s, int view);
 // arrows: false while the arrow keys belong to something else (volume mode), so they
-// don't fly to viewpoints
+// don't fly to viewpoints. With mouseNav the camera moves only by the mouse (above)
 void UpdateSpectator(Spectator *s, Player *player, float dt, bool arrows);
 Camera3D SpectatorCamera(const Spectator *s);
 

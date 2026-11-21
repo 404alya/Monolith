@@ -23,7 +23,8 @@ One step per line; `#` starts a comment. A step takes one frame unless it says h
 | `move <dx> <dy> [n]` | the mouse moves by (dx, dy) px, spread evenly over n frames (default 1) |
 | `press <key>` | key down this frame, up the next one (a printable key types its char) |
 | `down <key>` / `up <key>` | hold / release a key (SHIFT, CTRL, ALT, ...) |
-| `click <left\|right>` | a button down this frame, up the next one |
-| `down lmb\|rmb` / `up lmb\|rmb` | hold / release a mouse button (a drag: `down lmb`, `move ...`, `up lmb`) |
+| `click <left\|right\|middle>` | a button down this frame, up the next one |
+| `down lmb\|rmb\|mmb` / `up lmb\|rmb\|mmb` | hold / release a mouse button (a drag: `down lmb`, `move ...`, `up lmb`) |
+| `wheel <n>` | the wheel turns n notches this frame (`GetMouseWheelMove` returns n; may be negative or fractional, \|n\| ≤ 1000) |
 
 **Keys:** A-Z, 0-9, ENTER, KP_ENTER, ESCAPE, BACKSPACE, TAB, DELETE, SPACE, MINUS, PERIOD, SHIFT, RSHIFT, CTRL, RCTRL, ALT, RALT, UP, DOWN, LEFT, RIGHT, LBRACKET, RBRACKET, F1 .. F12.

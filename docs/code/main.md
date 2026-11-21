@@ -26,7 +26,7 @@ The editor edits and reaches the AI only on Linux (+ i3 / sway). Built for any o
 **Refused:**
 
 - keys: M (the edit mode and everything in it: the transform modal, the rotate gizmo, I, CTRL+D, DELETE, CTRL+I), B, ENTER, C, V / SHIFT+V, CTRL+S, CTRL+Z / CTRL+Y, F9, K / SHIFT+K / CTRL+K / CTRL+SHIFT+K, R, and DELETE / SHIFT+DELETE / CTRL+I in the id panel. The HUD says "view-only build: editing and requests need the Linux editor" (`MSG_VIEW_ONLY`, `src/msg.h`).
-- flags: `--apply-edits`, `--edit-script`, `--paint-script`, `--new-map`, `--submit`, `--submit-wait`, `--close-submitted`, `--type`, `--classify`, `--edit-mode`, `--edit-id`, `--edit-modal`, `--edit-save`, `--model-picker`, `--model-picker-key`, `--draw-mode`, `--draw-panel`, `--cursor`, `--region`, `--volume`, `--bake-surface` (and its `--bake-*` options), `--export` and `--compile` print that message and exit 1 before anything is written.
+- flags: `--apply-edits`, `--edit-script`, `--paint-script`, `--new-map`, `--submit`, `--submit-wait`, `--close-submitted`, `--type`, `--classify`, `--edit-mode`, `--edit-id`, `--edit-modal`, `--edit-save`, `--model-picker`, `--model-picker-key`, `--draw-mode`, `--draw-panel`, `--draw-state`, `--cursor`, `--region`, `--volume`, `--bake-surface` (and its `--bake-*` options), `--export` and `--compile` print that message and exit 1 before anything is written.
 
 The launcher (`launcher.c`) is not in that build.
 
@@ -162,18 +162,26 @@ The HUD shows the snap step, the first selected object's map line and entity id,
 
 ### Draw mode (B)
 
-The draw mode (`drawmode.c`, `drawpanel.c`; [drawmode.md](drawmode.md), [painting.md](../painting.md)) paints on boxes and models, a layer over their material (its look stays wherever it isn't painted). The cursor is free; RMB held flies as in edit mode.
+The draw mode (`drawmode.c`, `drawpanel.c`; [drawmode.md](drawmode.md), [painting.md](../painting.md)) paints on boxes and models, a layer over their material (its look stays wherever it isn't painted). The keys are Aseprite's (painting.md 18.3; the tool keys are one table, `src/drawkeys.c`). The cursor stays free and the mouse moves the camera (`Spectator.mouseNav`, painting.md 18.7): no keyboard flight, no mouse look; RMB no longer flies here (edit mode keeps RMB flight).
 
 | Key | Action |
 |---|---|
-| LMB drag | paint with the pen under the cursor (fill: the face's rectangle / the UV island) |
+| B, E, S, G / SHIFT+G, L / SHIFT+L, U / SHIFT+U, D / SHIFT+D, M / SHIFT+M, Q / SHIFT+Q, W, V, R / SHIFT+R, I | the tool: pencil, eraser, spray, bucket / gradient, line / curve, rectangle / ellipse (again: filled), contour / polygon, marquee / elliptical marquee, lasso / polygonal lasso, magic wand, move, blur / jumble, eyedropper (again: screen ↔ paint) |
+| LMB drag | the tool (pencil, eraser, bucket in whole-region mode paint; the others come with the tools' round) |
 | ALT+LMB | pick the colour (an opaque paint texel, else the surface's albedo) |
-| 1..5 | the pen: hard round, square, soft round, eraser, fill (the effect toggles wait) |
+| 1..5 | pencil round / square / soft, eraser, bucket in whole-region mode (the effect toggles wait) |
 | `[` / `]` or CTRL+wheel | the size in texels (1..256) |
-| SHIFT+wheel | the alpha |
-| X | swap to the colour before |
+| SHIFT+wheel | the foreground alpha |
+| wheel | toward / away from the point under the cursor (20 % of its distance per notch) |
+| MMB drag | orbit around the point under the cursor at the press |
+| SPACE + LMB drag, SHIFT + MMB drag | pan (nothing is painted while SPACE or MMB is down) |
+| LEFT / RIGHT, P | fly to a viewpoint; print the view |
+| X | swap foreground and background |
+| CTRL+A / CTRL+D / CTRL+SHIFT+D / CTRL+SHIFT+I, ENTER | the selection and the shapes' ENTER (the tools' round) |
 | TAB | hide the panel |
-| B / ESC (and M, V, C) | leave; with unsaved edits the first B only says so |
+| ESC | cancel the shape in progress; else leave (with unsaved edits the first ESC only says so). M, V and C don't leave: leave first |
+
+The wheel and new drags don't act while the cursor is on the draw panel (`Spectator.navBlocked`); B enters draw mode from spectator mode only.
 
 The panel is docked left: target, pen, colour sliders / hex / recent colours, texels per metre + Resize to density + Pixel look + Clear paint (on a material with a paint grid: the grid line + Fit to grid, no slider), the box's face groups + Apply.
 
@@ -321,7 +329,8 @@ The material's shader gets `#define MS_BAKE 1`, `MS_BAKE_FACE`, `MS_BAKE_LEVEL`,
 | `--edit-save <manual\|auto>` | the edit save mode for this run (settings: `edit_save`) |
 | `--paint-script <script>` | strokes of the draw mode (see below) |
 | `--draw-mode` | with `--shot`: open the draw mode (B); with `--shot-hud` its HUD line and the brush cursor at `--cursor` (default: the middle of the shot) |
-| `--draw-panel [all\|target\|pen\|color\|density\|faces]` | with `--shot --shot-hud`: the draw mode with the draw panel (or one section of it), for HUD images; with `--input-script` the clicks go to the panel |
+| `--draw-panel [all\|target\|tools\|color\|density\|faces]` | with `--shot --shot-hud`: the draw mode with the draw panel (or one section of it; `pen` is an alias of `tools`), for HUD images; with `--input-script` the clicks go to the panel |
+| `--draw-state <file>` | the draw mode's kept state from and to this file (docs/painting.md 18.6) instead of `<package>/draw.ini`; with `--shot` (which otherwise reads and writes none) or the editor |
 | `--cursor x y` | with `--draw-mode` / `--draw-panel`: where the cursor is (shot pixels) |
 
 **`--edit-script <script>`.** The edit script language applied live, as the edit mode does (the working copy, `MS_EditSetText`; the map file is not written), plus:

@@ -40,6 +40,9 @@
 // rather than via <GL/gl.h> / <windows.h> (which clashes with raylib). On Windows x64 there
 // is a single calling convention, so this matches opengl32.dll.
 extern void glFinish(void);
+// (and the screen eyedropper's 1 x 1 read: GL 1.1 as well)
+extern void glReadPixels(int x, int y, int width, int height, unsigned int format, unsigned int type, void *pixels);
+extern unsigned int glGetError(void);
 
 #ifndef BENCHMARK_PATH
 #   define BENCHMARK_PATH "./benchmark/"
@@ -317,6 +320,54 @@ static Image ReadTarget(RenderTexture rt)
     return img;
 }
 
+// The screen eyedropper (docs/painting.md 18.8): the pixel at window position (x, y) (top-down) of
+// the scene just drawn into `fbo` (0: the window's back buffer, fbW x fbH: GetRenderWidth/Height, a
+// HiDPI window's being larger than its screen size; a multisampled one is resolved by the read
+// itself), as RGBA8 bytes: the same bytes ReadTarget and the --shot PNG get. One 1 x 1 read, only
+// when a click asked for it. False: outside the window, or GL refused (a multisampled offscreen
+// target: --bench-window, which never has the draw mode)
+static bool ReadScenePixel(unsigned int fbo, int fbW, int fbH, int x, int y, Color *out)
+{
+    int sw = GetScreenWidth(), sh = GetScreenHeight();
+    if (x < 0 || y < 0 || x >= sw || y >= sh || fbW <= 0 || fbH <= 0) return false;
+    int px = (int)((long long)x * fbW / sw), py = (int)((long long)y * fbH / sh);
+    rlDrawRenderBatchActive();      // (anything raylib still holds is in the framebuffer first)
+    for (int k = 0; k < 32 && glGetError() != 0; k++) {}   // (earlier errors aren't this read's)
+    rlBindFramebuffer(RL_READ_FRAMEBUFFER, fbo);
+    unsigned char rgba[4] = { 0 };
+    glReadPixels(px, fbH - 1 - py, 1, 1, 0x1908 /* GL_RGBA */, 0x1401 /* GL_UNSIGNED_BYTE */, rgba);   // (GL: bottom-up)
+    bool ok = glGetError() == 0;
+    rlBindFramebuffer(RL_READ_FRAMEBUFFER, 0);
+    *out = (Color){ rgba[0], rgba[1], rgba[2], rgba[3] };
+    return ok;
+}
+
+// --paint-script `pick screen` (DrawMode.screenRead): the scene drawn with the shot's camera into
+// the shot's target (no HUD), as the frame loop draws the shot's scene, and that pixel read. `fx`
+// (the --apply-edits path, which runs before the main loop's environment): applied on the first read
+typedef struct {
+    Camera3D camera;
+    RenderTexture target;       // (id 0: loaded at the window's size on the first read, then owned)
+    bool own;
+    const EffectState *fx;
+} ScreenReadCtx;
+
+static bool ScreenRead(void *user, int x, int y, Color *out)
+{
+    ScreenReadCtx *c = user;
+    if (c->fx) {
+        ApplyEnvironment(c->fx);
+        c->fx = NULL;
+    }
+    if (!c->target.id) {
+        c->target = LoadRenderTexture(GetScreenWidth(), GetScreenHeight());
+        if (!c->target.id) return false;
+        c->own = true;
+    }
+    DrawScene(c->camera, c->target, false);
+    return ReadScenePixel(c->target.id, c->target.texture.width, c->target.texture.height, x, y, out);
+}
+
 // A request: view.png is the frame exactly as --shot renders it (offscreen, no HUD),
 // view-marked.png the same pixels plus the selection, hit point and crosshair. One R3D
 // render into `rt`, read back before and after drawing the overlay on top (R3D_End leaves
@@ -395,6 +446,59 @@ static void FreeMainHeap(void)
     free(mainHeap.benchTimes);
     free(mainHeap.benchShadowUpdates);
     memset(&mainHeap, 0, sizeof(mainHeap));
+}
+
+// The draw mode's kept state (docs/painting.md 18.6): <package>/draw.ini in the editor, --draw-state's
+// file in any run (a hidden run without it reads and writes none). Each frame compares the draw mode
+// with what the file holds (DrawModeStateDiffers: no allocation); a change is copied (the palette's
+// memory grows only when it does) and written 1 s after the last one, when draw mode is left and at
+// exit. A failed write is logged by DrawStateSave, once per change (the next change tries again).
+typedef struct {
+    char *path;                 // heap; NULL: no file this run
+    DrawState saved;            // what the file holds, or will once the change waiting is written
+    bool pending;               // a change not written yet
+    double changedAt;           // when the last change was seen (GetTime)
+    bool wasActive;             // draw mode was on last frame
+} DrawKeep;
+
+static void DrawKeepLoad(DrawKeep *k, DrawMode *dm)
+{
+    if (!k->path) return;
+    // (from the draw mode's state: a missing file or a key it lacks keeps what the draw mode has,
+    // DrawModeInit's defaults, or a --draw-panel shot's recent colours)
+    DrawModeGetState(dm, &k->saved);
+    int ignored = 0;
+    if (DrawStateLoad(&k->saved, k->path, &ignored) && ignored > 0)
+        TraceLog(LOG_WARNING, "monolith: draw state %s: %d line%s ignored", k->path, ignored, ignored == 1 ? "" : "s");
+    if (!DrawModeSetState(dm, &k->saved)) TraceLog(LOG_WARNING, "monolith: draw state: the palette could not be loaded (out of memory)");
+    DrawModeGetState(dm, &k->saved);    // (as the draw mode clamped it: no write for that alone)
+    k->wasActive = dm->active;
+}
+
+static void DrawKeepWrite(DrawKeep *k)
+{
+    k->pending = false;
+    if (DrawStateSave(&k->saved, k->path)) TraceLog(LOG_INFO, "monolith: draw state saved to %s", k->path);
+}
+
+static void DrawKeepTick(DrawKeep *k, const DrawMode *dm, double now)
+{
+    if (!k->path) return;
+    if (DrawModeStateDiffers(dm, &k->saved) && DrawModeGetState(dm, &k->saved)) {
+        k->pending = true;
+        k->changedAt = now;
+    }
+    bool left = k->wasActive && !dm->active;
+    k->wasActive = dm->active;
+    if (k->pending && (left || now - k->changedAt >= 1.0)) DrawKeepWrite(k);
+}
+
+static void DrawKeepFree(DrawKeep *k)
+{
+    if (k->path && k->pending) DrawKeepWrite(k);
+    DrawStateFree(&k->saved);
+    free(k->path);
+    memset(k, 0, sizeof(*k));
 }
 
 static int Run(int argc, char **argv);
@@ -539,6 +643,7 @@ static int Run(int argc, char **argv)
     bool cursorSet = false;
     bool drawPanelFlag = false;             // --draw-panel [section]
     const char *drawPanelSection = NULL;
+    const char *drawStateArg = NULL;        // --draw-state <file> (docs/painting.md 18.6)
     int editSaveArg = -1;                   // --edit-save: 0 manual, 1 auto, -1 the settings'
     bool dumpSceneDiff = false;         // --dump-scene-diff: no indices or lines
     const char *reloadTestPath = NULL;
@@ -750,6 +855,7 @@ static int Run(int argc, char **argv)
             drawPanelFlag = true;       // (the section is optional)
             if (i + 1 < argc && strncmp(argv[i + 1], "--", 2) != 0) drawPanelSection = argv[++i];
         }
+        else if (strcmp(a, "--draw-state") == 0) { NEED(1); drawStateArg = argv[++i]; }
         else if (strcmp(a, "--edit-save") == 0) {
             NEED(1);
             const char *v = argv[++i];
@@ -866,7 +972,7 @@ static int Run(int argc, char **argv)
         static const char *const REFUSED[] = {
             "--apply-edits", "--edit-script", "--paint-script", "--new-map", "--submit", "--submit-wait",
             "--close-submitted", "--type", "--classify", "--edit-mode", "--edit-id", "--edit-modal",
-            "--edit-save", "--model-picker", "--model-picker-key", "--draw-mode", "--draw-panel", "--cursor", "--region",
+            "--edit-save", "--model-picker", "--model-picker-key", "--draw-mode", "--draw-panel", "--draw-state", "--cursor", "--region",
             "--volume", "--bake-surface", "--bake-face", "--bake-size", "--bake-texels", "--bake-levels", "--export",
             "--compile",
         };
@@ -934,6 +1040,12 @@ static int Run(int argc, char **argv)
         fprintf(stderr, "monolith: --draw-mode / --draw-panel need --shot\n");
         return 1;
     }
+    // --draw-state: the editor (instead of <package>/draw.ini) or a --shot run (read before the first
+    // frame, written as the editor does and at exit)
+    if (drawStateArg && windowless && !shotPath) {
+        fprintf(stderr, "monolith: --draw-state goes with --shot (or the editor)\n");
+        return 1;
+    }
     if (cursorSet && !drawModeFlag && !drawPanelFlag) {
         fprintf(stderr, "monolith: --cursor goes with --draw-mode or --draw-panel\n");
         return 1;
@@ -944,7 +1056,7 @@ static int Run(int argc, char **argv)
     static DrawPanel drawPanel;
     DrawPanelInit(&drawPanel);
     if (drawPanelFlag && !DrawPanelSetOnly(&drawPanel, drawPanelSection)) {
-        fprintf(stderr, "monolith: --draw-panel %s: no such section (all, target, pen, color, density, faces)\n", drawPanelSection);
+        fprintf(stderr, "monolith: --draw-panel %s: no such section (all, target, tools (or pen), color, density, faces)\n", drawPanelSection);
         return 1;
     }
     // --input-script: the input of a --shot run (input.c), from frame 10 on (every cache drawn)
@@ -1205,8 +1317,14 @@ static int Run(int argc, char **argv)
             static Designer pdes;
             DrawModeInit(&pd, &pe);
             DesignerSync(&pdes);
-            signed char status = (signed char)DrawModeRunScript(&pd, &pe, &pdes, PlayerCamera(&player), GetScreenWidth(),
+            // (`pick screen`: the scene in the main loop's environment, which isn't applied yet)
+            EffectState pfx = { .gfx = &gfx, .fx = fxSettings, .fxCount = fxCount };
+            ScreenReadCtx psr = { .camera = PlayerCamera(&player), .fx = &pfx };
+            pd.screenRead = ScreenRead;
+            pd.screenUser = &psr;
+            signed char status = (signed char)DrawModeRunScript(&pd, &pe, &pdes, psr.camera, GetScreenWidth(),
                                                                 GetScreenHeight(), paintScriptPath);
+            if (psr.own) UnloadRenderTexture(psr.target);
             int unsaved = EditModeUnsaved(&pe);
             if (unsaved > 0) TraceLog(LOG_INFO, "monolith: %d unsaved edit%s dropped (the paint script did not save)", unsaved, unsaved == 1 ? "" : "s");
             EditModeFree(&pe);
@@ -1337,6 +1455,10 @@ static int Run(int argc, char **argv)
         drawMode.recentCount = (int)(sizeof(recent) / sizeof(recent[0]));
         memcpy(drawMode.recent, recent, sizeof(recent));
     }
+    // The draw mode's kept state (DrawKeep above): the package's in the editor, --draw-state's anywhere
+    static DrawKeep drawKeep;
+    if (MONOLITH_EDITING) drawKeep.path = drawStateArg ? MS_StrDup(drawStateArg) : !automated ? DrawStatePath(scene->root) : NULL;
+    DrawKeepLoad(&drawKeep, &drawMode);
     if (modelPickerFlag && shotPath) {
         if (!edit.active) EditModeOpen(&edit, &designer);
         ModelPickerOpen(&picker, &edit, modelPickerFilter);
@@ -1718,7 +1840,14 @@ static int Run(int argc, char **argv)
         if (shotPath && paintScriptPath && frame == 10) {
             DesignerSync(&designer);
             Camera3D cam = spec.active ? SpectatorCamera(&spec) : PlayerCamera(&player);
+            // (`pick screen`: the shot's target; the frame below draws the shot's scene into it again)
+            ScreenReadCtx sr = { .camera = cam, .target = shotTarget };
+            drawMode.screenRead = ScreenRead;
+            drawMode.screenUser = &sr;
             if (DrawModeRunScript(&drawMode, &edit, &designer, cam, GetScreenWidth(), GetScreenHeight(), paintScriptPath) != 0) exitStatus = 1;
+            drawMode.screenRead = NULL;
+            drawMode.screenUser = NULL;
+            if (sr.own) UnloadRenderTexture(sr.target);
             if (!drawModeFlag && !drawPanelFlag) DrawModeClose(&drawMode);
             ApplyEnvironment(&effects);
         }
@@ -1776,11 +1905,14 @@ static int Run(int argc, char **argv)
             // Edit mode: the camera flies only while RMB is held; an RMB click (released within
             // 0.25 s, moved less than 4 px) clears the selection (DesignerUpdate doesn't then)
             bool editKeys = spec.active && edit.active;
-            // Draw mode (B, drawmode.c): the cursor is free and RMB flies, as in edit mode; the
-            // designer never sees its keys and clicks (no selection, no prompt box)
+            // Draw mode (B, drawmode.c): the cursor is free and the mouse moves the camera (wheel,
+            // MMB orbit, SPACE + LMB / SHIFT + MMB pan: spectator.c, docs/painting.md 18.7), not over
+            // the draw panel; the designer never sees its keys and clicks (no selection, no prompt box)
             bool drawKeys = spec.active && drawMode.active;
             designer.editMode = editKeys || drawKeys;
-            spec.rmbFly = editKeys || drawKeys;
+            spec.rmbFly = editKeys;
+            spec.mouseNav = drawKeys;
+            spec.navBlocked = false;
             if (editKeys && !EditModeModalRunning(&edit) && IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) {
                 rmbDownTime = GetTime();
                 rmbMoved = 0.0f;
@@ -1796,6 +1928,7 @@ static int Run(int argc, char **argv)
                 // The draw panel first: while the cursor is over it, LMB is its and nothing is painted
                 DrawPanelAction act = DRAWPANEL_ACT_NONE;
                 bool onPanel = !drawMode.panelHidden && editCursor == 1 && DrawPanelUpdate(&drawPanel, &drawMode, &act);
+                spec.navBlocked = onPanel;
                 drawMode.keysBlocked = typing || drawPanel.typing;
                 DrawModeResult dr = DrawModeUpdate(&drawMode, &edit, &designer, SpectatorCamera(&spec), onPanel, dt);
                 if (act != DRAWPANEL_ACT_NONE && DrawModePanelAction(&drawMode, &edit, (int)act, drawPanel.faces) == DRAWMODE_RELOADED)
@@ -1857,12 +1990,13 @@ static int Run(int argc, char **argv)
                 typing = typing || EditModeCapturesInput(&edit) || EditModeModalRunning(&edit) || ModelPickerCapturesInput(&picker);
             }
             spec.holdMove = (edit.active || drawMode.active) && (IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL));
-            // The cursor: free in edit mode (hidden while RMB flies or the modal runs), unless the
-            // prompt box, snip mode or the settings panel own it (they show and hide it themselves)
+            // The cursor: free in edit mode (hidden while RMB flies or the modal runs) and in draw mode
+            // (always: the mouse navigates there), unless the prompt box, snip mode or the settings
+            // panel own it (they show and hide it themselves)
             if (!hidden || scripted) {
                 int want = !(spec.active && (edit.active || drawMode.active)) || designer.promptOpen || designer.snipping || panel.open || idPanel.open ||
                            keys.open || keys.menu ? 0
-                         : EditModeModalRunning(&edit) || IsMouseButtonDown(MOUSE_BUTTON_RIGHT) ? 2 : 1;
+                         : EditModeModalRunning(&edit) || (edit.active && IsMouseButtonDown(MOUSE_BUTTON_RIGHT)) ? 2 : 1;
                 if (want != editCursor) {
                     if (want == 1 && IsCursorHidden()) {
                         EnableCursor();
@@ -1876,9 +2010,10 @@ static int Run(int argc, char **argv)
                     editCursor = want;
                 }
             }
+            // (draw mode: R is the blur tool)
             if (!MONOLITH_EDITING && spec.active && !typing && IsKeyPressed(KEY_R)) {
                 DesignerMessageStatic(&designer, true, MSG_VIEW_ONLY);     // (no requests: view-only)
-            } else if (spec.active && !typing && !EditModeTakesArrows(&edit) && IsKeyPressed(KEY_R)) {
+            } else if (spec.active && !drawMode.active && !typing && !EditModeTakesArrows(&edit) && IsKeyPressed(KEY_R)) {
                 Vector3 eye;
                 float yaw, pitch;
                 if (LauncherLastDone(&eye, &yaw, &pitch)) {
@@ -1910,6 +2045,7 @@ static int Run(int argc, char **argv)
         if (cursorPick) DesignerPickCursor(&designer, camera, GetScreenWidth(), GetScreenHeight(), GetMousePosition());
         else if (spec.active || shotPath) DesignerPickCamera(&designer, camera);
         InspectorApply(&inspector);     // buffer view and draw filter (nothing while it is off)
+        DrawKeepTick(&drawKeep, &drawMode, GetTime());     // (the draw mode's kept state: 1 s after a change)
         if (shotPath && drawMode.active && !scripted && (drawPanelFlag || drawModeFlag)) {
             // --draw-mode / --draw-panel shots without a script: the cursor at --cursor (default: the
             // middle of the shot) is what the HUD, the brush cursor and the panel show (a scripted one
@@ -1973,6 +2109,17 @@ static int Run(int argc, char **argv)
                 shadowUpdated = DrawScene(camera, shotTarget, (drawUi && designerUi) || inspectUi);   // overlays depth-test
             }
             if (bench && shadowUpdated && benchFrame >= 0 && benchFrame < benchFrames) benchShadowUpdates[benchView]++;
+            // The screen eyedropper (docs/painting.md 18.8): the scene is in its target and nothing is
+            // drawn over it yet (overlays, the brush cursor, the HUD come next), so the pixel is the
+            // scene's as seen. Only on the frame after a click, never per frame
+            int screenX, screenY;
+            if (DrawModeScreenWanted(&drawMode, &screenX, &screenY)) {
+                Color picked = { 0 };
+                bool ok = shotTarget.id ? ReadScenePixel(shotTarget.id, shotTarget.texture.width, shotTarget.texture.height,
+                                                         screenX, screenY, &picked)
+                                        : ReadScenePixel(0, GetRenderWidth(), GetRenderHeight(), screenX, screenY, &picked);
+                DrawModeScreenPicked(&drawMode, ok, picked);
+            }
 
             bool uiToTarget = (drawUi && shotPath) || emulateWindow;
             if (uiToTarget) BeginTextureMode(shotTarget);
@@ -2187,6 +2334,7 @@ static int Run(int argc, char **argv)
     MsgFree(&mapMessage);
     ModelPickerFree(&picker);
     EditModeFree(&edit);            // (the history releases its paint through the draw mode's hooks)
+    DrawKeepFree(&drawKeep);        // (a change still waiting is written)
     DrawModeFree(&drawMode);
     free(editModalText);
     InputScriptFree();

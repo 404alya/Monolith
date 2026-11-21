@@ -6,8 +6,15 @@
 
 #include "common.h"
 #include "designer.h"
+#include "drawkeys.h"
+#include "drawsettings.h"
+#include "drawtools.h"
 #include "editmode.h"
 
+// How a stroke's stamps lay down texels (a step's pen; docs/painting.md 7.2, 18.1). The pencil's
+// brush shape is one of the first three (DrawMode.shape); the eraser stamps PEN_ERASER, the bucket in
+// "whole region" mode PEN_FILL (today's fill). --paint-script `pen <name>` and the keys 1 .. 5 still
+// name all five: they set the tool and the shape (DrawModeSetPen)
 typedef enum {
     PEN_ROUND = 0,          // hard round
     PEN_SQUARE,             // s x s texels, pixel-exact
@@ -127,20 +134,101 @@ typedef struct {
                             // without paint has a number of its own)
 } DrawTarget;
 
+// Where a stroke's stamps go (docs/painting.md 7.1, 18.4): an entry's rectangle in atlas texels (a box
+// face group, on a grid its face's cells), or a model's UV island inside it. A shape, a selection and
+// a fill never leave their region
+typedef struct {
+    int x, y, w, h;
+    int file, slot;         // a model slot (its islands); -1 for a box face group
+    int island;             // -1: the whole rectangle
+} DrawRegion;
+
+// Line segments on a surface (world space, pairs of points: heap), built when what they show changed:
+// the selection's outline, a selection shape's preview
+typedef struct {
+    Vector3 *p;
+    int n, cap;
+} DrawLines;
+
+// The selection (docs/painting.md 18.5): editor state, never written into the map, not in the edit
+// history. One region at a time: a selection made on another region replaces it. While it is on,
+// every painting tool on its region paints only inside it (other regions are unaffected)
+typedef struct {
+    bool active;
+    int atlas;              // DrawMode.atlases index
+    DrawRegion region;
+    MS_SurfaceHit hit;      // the surface it was made on (its outline is drawn through that surface)
+    DtMask mask;            // the region's rectangle, 255 selected (heap)
+    DtMask regionMask;      // the region's texels (255), the same rectangle (heap)
+    DtMask last;            // what CTRL+D dropped (CTRL+SHIFT+D brings it back on the same region)
+    bool lastSet;
+    DrawRegion lastRegion;
+    int lastAtlas;
+    MS_SurfaceHit lastHit;
+    unsigned int gen;       // +1 whenever the mask or its region changes
+    DrawLines outline;      // the mask's border on its surface (built for gen at outlineVersion)
+    unsigned int outlineGen, outlineVersion;
+    bool outlineSet;
+} DrawSelection;
+
+// A shape or selection in progress (docs/painting.md 18.4): the points in atlas texels of one region,
+// previewed live in the atlas from the stroke's start pixels while the mouse is down (or the clicks of
+// a polygon / polygonal lasso / curve go on), one stroke on release. ESC drops it
+typedef struct {
+    bool on;
+    DrawTool tool;
+    bool rmb;               // started with RMB: the background colour
+    int stage;              // curve: 0 the line's drag, 1 and 2 its control points; polygon / polygonal
+                            // lasso: the clicks so far
+    DtSelOp selOp;          // selection tools: from SHIFT / ALT at the press
+    DtPoints pts;           // atlas texels (heap): 2 (line, rectangle, ellipse, gradient, marquee),
+                            // 4 (curve: a, b, c1, c2), n (contour, polygon, lasso, polygonal lasso)
+    MS_SurfaceHit hit;      // the surface of its first point
+    DrawRegion region;
+    int atlas;
+    MS_SurfaceHit lastOn;   // the last hit on the region (a point off it maps through its plane)
+    bool down;              // its button is held (a drag, or a click of the clicked tools)
+    float clickTime;        // GetTime() of the last click (a double click closes a polygon)
+    DtMask preview;         // a selection shape: its mask so far (heap), and its outline
+    DrawLines outline;
+} DrawShape;
+
 // The draw mode's state (owned by main.c, beside the EditMode whose MapEditor it shares)
 typedef struct {
     bool active;
-    // Pen and colour (the panel edits these)
-    PenKind pen;
+    // Tool, brush and colours (the panel and the keys edit these; kept per map: docs/painting.md 18.6)
+    DrawTool tool;
+    PenKind shape;          // the pencil's brush: PEN_ROUND, PEN_SQUARE, PEN_SOFT
     int size;               // texels, 1..DRAW_SIZE_MAX
     float hardness;         // soft round: 0..1
-    Color color;
+    bool pixelPerfect;      // the pencil at size 1: Aseprite's pixel-perfect
+    Color fg, bg;           // foreground (LMB) and background (RMB) colour; X swaps them. The brush
+                            // alpha is fg's (SHIFT+wheel)
     Color recent[DRAW_RECENT_COLORS];
     int recentCount;
+    Color *palette;         // the panel's palette row (heap; kept)
+    int paletteCount, paletteCap;
+    int sprayWidth, spraySpeed;     // the spray: disc diameter in texels, dots per 1/60 s
+    DrawBucketMode bucket;  // contiguous, global, the whole region (today's fill)
+    int tolerance;          // bucket and magic wand, 0..255
+    bool gradientRadial;
+    DrawPickMode pickAlt;   // what ALT+click samples (paint / albedo, or the screen)
+    DrawPickMode pickTool;  // what the eyedropper tool samples
     float density;          // texels per metre of new rectangles (and Resize to density) on materials
                             // without a paint grid (docs/painting.md 17.7)
     bool pixelLook;         // new atlases get paint_filter nearest
     bool panelHidden;       // TAB
+    DrawSelection sel;
+    DrawShape shapeDrag;
+    uint32_t seed;          // the spray's and jumble's next stroke (+1 per stroke; --paint-script spray sets it)
+    // The screen eyedropper (docs/painting.md 18.8): a click asks, main.c reads the pixel of the scene's
+    // image (before the HUD) on its next frame and hands it over (DrawModeScreenWanted / ..Picked)
+    bool screenWant;
+    int screenX, screenY;
+    bool screenToFg;        // (RMB: the background colour)
+    // --paint-script `pick screen`: renders and reads at once (main.c sets it; NULL: refused)
+    bool (*screenRead)(void *user, int x, int y, Color *out);
+    void *screenUser;
     // Atlases and unwraps (heap arrays)
     Atlas *atlases;
     int atlasCount, atlasCap;
@@ -156,6 +244,14 @@ typedef struct {
     bool lastOk;            // the last sample was on the stroke's surface
     float lastTx, lastTy;   // ... its texel (atlas pixels)
     int lastRegion;         // ... its region (the step's)
+    bool strokeRmb;         // the stroke's button is RMB (the background colour)
+    float sprayTime;        // the spray's time not yet sprayed (1/60 s ticks)
+    bool ppDirty;           // a pixel-perfect stroke got samples: redrawn before the frame's upload
+    // Where the pencil or eraser painted last (SHIFT+click draws a line from it on the same region)
+    bool lastPaintSet;
+    DrawRegion lastPaintRegion;
+    int lastPaintAtlas;
+    float lastPaintTx, lastPaintTy;
     MS_SurfaceHit lastHit;  // the surface of the last stroke's LMB down (--paint-script's faces,
     bool lastHitSet;        // resize, clear, pixel)
     // What is under the cursor (every frame) and why it can't be painted (refusalCode: Resolve's
@@ -171,10 +267,9 @@ typedef struct {
     bool messageError;
     bool messageSaid;
     EditMode *em;           // the edit mode whose history it shares (the hooks' user is the DrawMode)
-    Color prevColor;        // X swaps with it
     Vector2 cursorPx;       // where the cursor is (window pixels)
     bool hoverOk;           // hover is a surface that can be painted
-    float leaveWarnTime;    // B / ESC with unsaved paint warned: again within this leaves
+    float leaveWarnTime;    // ESC with unsaved paint warned: again within this leaves
     unsigned int rebaseGen;
     bool keysBlocked;       // set by the caller per frame: a panel field has the keyboard
     DrawGeom hoverGeom;     // where paint under the cursor goes
@@ -209,12 +304,30 @@ enum { DRAW_ACT_RESIZE = 1, DRAW_ACT_FACES, DRAW_ACT_PIXEL_LOOK, DRAW_ACT_CLEAR 
 
 // Sets the defaults and the edit history's paint hooks (call once, after EditMode is set up)
 void DrawModeInit(DrawMode *dm, EditMode *em);
+// The keys 1 .. 5 and --paint-script `pen`: round / square / soft set the pencil and its shape,
+// eraser the eraser, fill the bucket in whole-region mode
+void DrawModeSetPen(DrawMode *dm, PenKind pen);
+// The pen a stroke of the current tool stamps with (pencil: its shape; eraser; bucket in region mode: fill)
+PenKind DrawModeStampPen(const DrawMode *dm);
+// The kept state (docs/painting.md 18.6): to / from the per-map file's record. Get copies the palette
+// (false: out of memory); Set clamps every value and keeps dm's old palette when it can't copy it.
+// Differs: whether s no longer holds dm's state (every frame: no allocation)
+bool DrawModeGetState(const DrawMode *dm, DrawState *s);
+bool DrawModeSetState(DrawMode *dm, const DrawState *s);
+bool DrawModeStateDiffers(const DrawMode *dm, const DrawState *s);
+// The screen eyedropper (docs/painting.md 18.8): a click asked for the pixel at (x, y) of the window
+// (true); main.c reads it from the scene's image right after the scene is drawn, before any overlay or
+// HUD, and calls Picked (ok false: it couldn't be read)
+bool DrawModeScreenWanted(const DrawMode *dm, int *x, int *y);
+void DrawModeScreenPicked(DrawMode *dm, bool ok, Color c);
 // B in spectator mode: the mode on (edit, volume and snip mode end); off again
 void DrawModeOpen(DrawMode *dm, EditMode *em, Designer *d);
 void DrawModeClose(DrawMode *dm);
-// Spectator-mode input while the mode is on (B toggles it in main.c): LMB strokes at the cursor,
-// ALT+LMB the eyedropper, [ ] / CTRL+wheel the size, 1..5 the pen, X, TAB; CTRL+Z / CTRL+SHIFT+Z
-// and CTRL+S go through the edit mode (one history). cursorOnPanel: the panel has the mouse.
+// Spectator-mode input while the mode is on (B in spectator mode opens it, ESC leaves): the tools of
+// docs/painting.md 18.3 on LMB (and RMB: the background colour), ALT+LMB the eyedropper, [ ] /
+// CTRL+wheel the size, 1..5 the pens, X, TAB, the selection keys; CTRL+Z / CTRL+SHIFT+Z and CTRL+S go
+// through the edit mode (one history). Nothing is painted while SPACE or MMB is down (the camera's,
+// spectator.c). cursorOnPanel: the panel has the mouse.
 DrawModeResult DrawModeUpdate(DrawMode *dm, EditMode *em, Designer *d, Camera3D cam, bool cursorOnPanel, float dt);
 // What the cursor at px is over (dm->hover, refusal, hoverGeom): DrawModeUpdate does it; a shot
 // without input calls it for the HUD and the cursor

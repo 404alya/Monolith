@@ -1234,8 +1234,8 @@ static bool PrepareCompiled(const UnitTest *t, const char *out, Nob_Cmd *run);
 static bool PreparePaintunwrap(const UnitTest *t, const char *out, Nob_Cmd *run);
 static bool PrepareLibrary(const UnitTest *t, const char *out, Nob_Cmd *run);
 
-// The tests. All but run_sh are the old scripts' (collision, compiled, export_strip, msg, paintunwrap,
-// parse_error), each with its script's flags, sources and run.
+// The tests. All but run_sh, library and drawtools are the old scripts' (collision, compiled, export_strip,
+// msg, paintunwrap, parse_error), each with its script's flags, sources and run.
 static const UnitTest UNIT_TESTS[] = {
     {
         // corruption test of the compiled-map reader (tests/unit/compiled_test.c): three packages, copied
@@ -1285,6 +1285,18 @@ static const UnitTest UNIT_TESTS[] = {
         .prepare = PreparePaintunwrap,
     },
     {
+        // the draw mode's kept state (src/drawsettings.c, tests/unit/drawsettings_test.c; docs/painting.md 18.6):
+        // defaults, a round trip of every key, bad values and unknown keys, clamping, a long palette, the
+        // atomic write. Links raylib (TraceLog: the test counts the warnings) and the runtime (MS_RESERVE);
+        // its scratch files go into {out}
+        .name = "drawsettings",
+        .sources = (const char *[]){"tests/unit/drawsettings_test.c", "src/drawsettings.c", "src/drawkeys.c",
+                                    "runtime/monolith_scene.c", NULL},
+        .includes = (const char *[]){"runtime", "src", NULL},
+        .r3d = true,
+        .args = (const char *[]){"{out}", NULL},
+    },
+    {
         // the editor's message text (src/msg.c, tests/unit/msg_test.c): static vs heap texts, replace,
         // append, long strings, out of memory. Plain C + libc: needs no ./build.sh first.
         .name = "msg",
@@ -1300,6 +1312,15 @@ static const UnitTest UNIT_TESTS[] = {
         .name = "export_strip",
         .sources = (const char *[]){"tests/unit/export_strip_test.c", NULL},
         .args = (const char *[]){"{root}", "{out}", NULL},
+    },
+    {
+        // the draw mode's rasterisers and selection masks (src/drawtools.c, tests/unit/drawtools_test.c):
+        // exact texels of every shape, flood, blur, jumble, spray, the selection operations. Plain C + libm:
+        // needs no ./build.sh first.
+        .name = "drawtools",
+        .sources = (const char *[]){"tests/unit/drawtools_test.c", "src/drawtools.c", NULL},
+        .includes = (const char *[]){"src", NULL},
+        .libs = (const char *[]){"-lm", NULL},
     },
     {
         // tools/run-sh.c: every rule of its table through --check, -c's exit codes / stdin / signals, the

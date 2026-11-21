@@ -977,6 +977,22 @@ struct PaintStep {
     int sampleCount, sampleCap;
     PaintRegion *regions;
     int regionCount, regionCap;
+    // The tools of docs/painting.md 18.2 as input (a rebase replays them; StepRender draws them): the
+    // tool, its options, the colours (color: the start, color2 the gradient's end), the shape's points
+    // in atlas texels on regions[shapeRegion], the move's offset, and the selection it was clipped to
+    DrawTool tool;
+    bool pixelPerfect;      // the pencil at size 1: its samples' texels thinned (DtPixelPerfect)
+    Color color2;
+    DrawBucketMode bucket;
+    int tolerance;
+    bool radial;
+    uint32_t seed;          // jumble: the pick of each texel's neighbour
+    DtPoints pts;
+    int shapeRegion;
+    int dx, dy;
+    bool selOn;             // painting is clipped to sel on selRegion (the move: what moves)
+    DtMask sel;
+    PaintRegion selRegion;
 };
 
 static PaintStep *NewStep(DrawMode *dm, int ai, StepKind kind)
@@ -987,10 +1003,17 @@ static PaintStep *NewStep(DrawMode *dm, int ai, StepKind kind)
     p->atlas = ai;
     p->kind = kind;
     p->pending = true;
-    p->pen = dm->pen;
+    p->pen = DrawModeStampPen(dm);
     p->size = dm->size;
     p->hardness = dm->hardness;
-    p->color = dm->color;
+    p->color = dm->fg;
+    p->tool = kind == STEP_STROKE ? dm->tool : TOOL_PENCIL;
+    p->color2 = dm->bg;
+    p->bucket = dm->bucket;
+    p->tolerance = dm->tolerance;
+    p->radial = dm->gradientRadial;
+    p->seed = dm->seed;
+    p->shapeRegion = -1;
     p->oldW = p->newW = a->img.width;
     p->oldH = p->newH = a->img.height;
     p->created = !a->provided;
@@ -1035,13 +1058,16 @@ static void ReleaseStep(DrawMode *dm, PaintStep *p)
     FreeTiles(p);
     free(p->samples);
     free(p->regions);
+    DtPointsFree(&p->pts);
+    DtMaskFree(&p->sel);
     free(p);
 }
 
 static long long StepBytes(const PaintStep *p)
 {
     long long b = (long long)sizeof(PaintStep) + (long long)p->tileCap * (long long)sizeof(PaintTile) +
-                  (long long)p->sampleCap * (long long)sizeof(Sample) + (long long)p->regionCap * (long long)sizeof(PaintRegion);
+                  (long long)p->sampleCap * (long long)sizeof(Sample) + (long long)p->regionCap * (long long)sizeof(PaintRegion) +
+                  (long long)p->pts.cap * (long long)sizeof(DtPoint) + (long long)p->sel.w * p->sel.h;
     for (int i = 0; i < p->tileCount; i++) b += (long long)p->tiles[i].w * p->tiles[i].h * (p->tiles[i].mask ? 5 : 4);
     return b;
 }
@@ -1158,11 +1184,102 @@ static float SmoothStep(float e0, float e1, float x)
     return t * t * (3.0f - 2.0f * t);
 }
 
-typedef struct { Atlas *a; PaintStep *p; const PaintRegion *r; const DrawIslands *I; } StampCtx;
+// The pixel of (x, y) as the stroke started: its tile's undo copy once the stroke touched the tile,
+// else the atlas (untouched). NULL outside the atlas
+static const unsigned char *StartPx(const Atlas *a, const PaintStep *p, int x, int y)
+{
+    if (!a->img.data || x < 0 || y < 0 || x >= a->img.width || y >= a->img.height) return NULL;
+    int tx = x / DRAW_TILE, ty = y / DRAW_TILE, ti = ty * a->tilesX + tx;
+    if (a->tileSlot && ti < a->tilesX * a->tilesY && a->tileSlot[ti] >= 0 && a->tileSlot[ti] < p->tileCount) {
+        const PaintTile *t = &p->tiles[a->tileSlot[ti]];
+        return t->pixels + ((size_t)(y - ty * DRAW_TILE) * t->w + (x - tx * DRAW_TILE)) * 4;
+    }
+    return (const unsigned char *)a->img.data + ((size_t)y * a->img.width + x) * 4;
+}
+
+// One texel set to value v at coverage cov (the max-coverage rule of ApplyTexel): over, source-over
+// of v (its alpha times cov: the gradient, the bucket); else the start pixel moved toward v by cov
+// (blur, jumble, move: the pixel becomes v where the coverage is full)
+static void ApplyValue(Atlas *a, PaintStep *p, int x, int y, float cov, const unsigned char v[4], bool over)
+{
+    PaintTile *t = TileAt(a, p, x, y);
+    if (!t) return;
+    int lx = x - t->tx * DRAW_TILE, ly = y - t->ty * DRAW_TILE;
+    unsigned char cv = (unsigned char)ClampI((int)lroundf(cov * 255.0f), 0, 255);
+    unsigned char *m = &t->mask[ly * t->w + lx];
+    if (cv == 0 || cv <= *m) return;
+    *m = cv;
+    const unsigned char *orig = t->pixels + ((size_t)ly * t->w + lx) * 4;
+    unsigned char *dst = (unsigned char *)a->img.data + ((size_t)y * a->img.width + x) * 4;
+    if (over) Over(dst, orig, (Color){ v[0], v[1], v[2], v[3] }, cv / 255.0f * (v[3] / 255.0f));
+    else
+        for (int k = 0; k < 4; k++) dst[k] = (unsigned char)ClampI((int)lroundf(orig[k] + (v[k] - orig[k]) * (cv / 255.0f)), 0, 255);
+    MarkDirty(a, x, y, x + 1, y + 1);
+}
+
+// Where a step's texels go: its region (and the region's islands), and whether the step's selection
+// clips it (the selection is on this region)
+typedef struct { Atlas *a; PaintStep *p; const PaintRegion *r; const DrawIslands *I; bool sel; } StampCtx;
+
+static StampCtx MakeCtx(DrawMode *dm, Atlas *a, PaintStep *p, int region)
+{
+    const PaintRegion *r = &p->regions[region];
+    StampCtx c = { a, p, r, r->island >= 0 ? IslandsFor(dm, r->file, r->slot, r->w, r->h) : NULL, false };
+    c.sel = p->selOn && memcmp(r, &p->selRegion, sizeof(*r)) == 0;
+    return c;
+}
+
+// Blur and jumble at (x, y): from the start pixels of its 3 x 3 neighbours in the region (DtBlur on that
+// window; jumble's pick keyed on the texel, DtTexelHash, as DtJumble). False: nothing to take
+static bool FilterTexel(const StampCtx *c, int x, int y, unsigned char out[4])
+{
+    unsigned char px[36] = { 0 }, reg[9] = { 0 }, one = 255;
+    const unsigned char *cand[8];       // (one texel's neighbours: stack scratch)
+    int n = 0;
+    for (int j = -1; j <= 1; j++)
+        for (int i = -1; i <= 1; i++) {
+            const unsigned char *s = StartPx(c->a, c->p, x + i, y + j);
+            if (!s || !InRegion(c->r, c->I, x + i, y + j)) continue;
+            memcpy(px + ((j + 1) * 3 + (i + 1)) * 4, s, 4);
+            reg[(j + 1) * 3 + (i + 1)] = 255;
+            if (i != 0 || j != 0) cand[n++] = s;
+        }
+    if (!reg[4]) return false;
+    if (c->p->tool == TOOL_JUMBLE) {
+        memcpy(out, n ? cand[DtTexelHash(c->p->seed, x, y) % (uint32_t)n] : px + 16, 4);
+        return true;
+    }
+    DtImage img = { px, 3, 3, 12 };
+    DtMask R = { 0, 0, 3, 3, reg }, W = { 1, 1, 1, 1, &one };
+    DtBlur(out, &img, &R, &W);
+    return true;
+}
 
 static void StampTexel(const StampCtx *c, int x, int y, float cov)
 {
-    if (InRegion(c->r, c->I, x, y)) ApplyTexel(c->a, c->p, x, y, cov);
+    if (!InRegion(c->r, c->I, x, y)) return;
+    if (c->sel) {
+        cov *= DtMaskGet(&c->p->sel, x, y) / 255.0f;
+        if (cov <= 0.0f) return;
+    }
+    if (c->p->tool == TOOL_BLUR || c->p->tool == TOOL_JUMBLE) {
+        unsigned char v[4];
+        if (FilterTexel(c, x, y, v)) ApplyValue(c->a, c->p, x, y, cov, v, false);
+        return;
+    }
+    ApplyTexel(c->a, c->p, x, y, cov);
+}
+
+// A texel of the region set to v (ApplyValue), clipped to the selection unless noClip (the move)
+static void StampValue(const StampCtx *c, int x, int y, const unsigned char v[4], bool over, bool noClip)
+{
+    if (!InRegion(c->r, c->I, x, y)) return;
+    float cov = 1.0f;
+    if (c->sel && !noClip) {
+        cov = DtMaskGet(&c->p->sel, x, y) / 255.0f;
+        if (cov <= 0.0f) return;
+    }
+    ApplyValue(c->a, c->p, x, y, cov, v, over);
 }
 
 // The pixel-exact footprints (docs/painting.md 7.2) with (x0, y0) their first texel: the square pen's
@@ -1184,7 +1301,7 @@ static void Stamp(DrawMode *dm, Atlas *a, PaintStep *p, Sample s, const Sample *
 {
     if (s.region < 0 || s.region >= p->regionCount || !a->img.data) return;
     const PaintRegion *r = &p->regions[s.region];
-    StampCtx c = { a, p, r, r->island >= 0 ? IslandsFor(dm, r->file, r->slot, r->w, r->h) : NULL };
+    StampCtx c = MakeCtx(dm, a, p, s.region);
     if (p->pen == PEN_FILL) {
         for (int y = r->y; y < r->y + r->h; y++)
             for (int x = r->x; x < r->x + r->w; x++) StampTexel(&c, x, y, 1.0f);
@@ -1224,6 +1341,187 @@ static void Stamp(DrawMode *dm, Atlas *a, PaintStep *p, Sample s, const Sample *
             float cov = p->pen == PEN_SOFT ? 1.0f - SmoothStep(hard, 1.0f, d / rad) : 1.0f;
             StampTexel(&c, x, y, cov);
         }
+}
+
+// The region's texels as a mask (255) over its rectangle (heap; false: out of memory)
+static bool RegionMaskOf(DrawMode *dm, const PaintRegion *r, DtMask *m)
+{
+    if (!DtMaskInit(m, r->x, r->y, r->w, r->h)) return false;
+    const DrawIslands *I = r->island >= 0 ? IslandsFor(dm, r->file, r->slot, r->w, r->h) : NULL;
+    for (int y = 0; m->a && y < m->h; y++)
+        for (int x = 0; x < m->w; x++)
+            if (InRegion(r, I, r->x + x, r->y + y)) m->a[(size_t)y * m->w + x] = 255;
+    return true;
+}
+
+// The stroke's tiles back to its start pixels, their coverage cleared: a shape (or a pixel-perfect
+// stroke) is drawn again from its input
+static void StepRestore(Atlas *a, PaintStep *p)
+{
+    for (int i = 0; i < p->tileCount; i++) {
+        PaintTile *t = &p->tiles[i];
+        if (t->tx * DRAW_TILE + t->w > a->img.width || t->ty * DRAW_TILE + t->h > a->img.height) continue;
+        for (int r = 0; r < t->h; r++)
+            memcpy((unsigned char *)a->img.data + ((size_t)(t->ty * DRAW_TILE + r) * a->img.width + t->tx * DRAW_TILE) * 4,
+                   t->pixels + (size_t)r * t->w * 4, (size_t)t->w * 4);
+        if (t->mask) memset(t->mask, 0, (size_t)t->w * t->h);
+        MarkDirty(a, t->tx * DRAW_TILE, t->ty * DRAW_TILE, t->tx * DRAW_TILE + t->w, t->ty * DRAW_TILE + t->h);
+    }
+}
+
+// A pencil stroke at size 1 with pixel-perfect (docs/painting.md 18.1): each stretch of joined samples
+// as the texels its segments pass through (as Stamp's size-1 footprint walks them), thinned by
+// DtPixelPerfect, one texel each
+static void RenderPixelPerfect(DrawMode *dm, Atlas *a, PaintStep *p)
+{
+    DtPoints path = { 0 };
+    for (int i = 0; i < p->sampleCount; ) {
+        int region = p->samples[i].region, j = i;
+        DtPointsClear(&path);
+        do {
+            Sample s = p->samples[j];
+            Vector2 b = { s.tx, s.ty }, pa = j > i ? (Vector2){ p->samples[j - 1].tx, p->samples[j - 1].ty } : b;
+            int steps = ClampI((int)ceilf(Vector2Distance(pa, b) * 2.0f), 0, 1 << 16);
+            for (int k = 0; k <= steps; k++) {
+                float t = steps ? (float)k / steps : 1.0f;
+                int kx = (int)floorf(pa.x + (b.x - pa.x) * t), ky = (int)floorf(pa.y + (b.y - pa.y) * t);
+                if (path.n > 0 && path.p[path.n - 1].x == kx && path.p[path.n - 1].y == ky) continue;
+                DtPointsPush(&path, kx, ky);
+            }
+            j++;
+        } while (j < p->sampleCount && p->samples[j].joined && p->samples[j].region == region);
+        DtPixelPerfect(&path);
+        if (region >= 0 && region < p->regionCount) {
+            StampCtx c = MakeCtx(dm, a, p, region);
+            for (int k = 0; k < path.n; k++) StampTexel(&c, path.p[k].x, path.p[k].y, 1.0f);
+        }
+        i = j;
+    }
+    DtPointsFree(&path);
+}
+
+// The brush at each texel of an outline (line, curve, rectangle, ellipse)
+static void RenderOutline(DrawMode *dm, Atlas *a, PaintStep *p, const DtPoints *o)
+{
+    for (int i = 0; i < o->n; i++) Stamp(dm, a, p, (Sample){ o->p[i].x + 0.5f, o->p[i].y + 0.5f, p->shapeRegion, false }, NULL);
+}
+
+// Every texel of mask m (> 0) set to the step's colour (source-over), clipped to the region and the selection
+static void RenderMask(DrawMode *dm, Atlas *a, PaintStep *p, const DtMask *m)
+{
+    StampCtx c = MakeCtx(dm, a, p, p->shapeRegion);
+    const unsigned char v[4] = { p->color.r, p->color.g, p->color.b, p->color.a };
+    for (int y = 0; m->a && y < m->h; y++)
+        for (int x = 0; x < m->w; x++)
+            if (m->a[(size_t)y * m->w + x]) StampValue(&c, m->x + x, m->y + y, v, true, false);
+}
+
+// The bucket (contiguous / global): the flood of the start pixels from the seed within tolerance
+static void RenderBucket(DrawMode *dm, Atlas *a, PaintStep *p)
+{
+    const PaintRegion *r = &p->regions[p->shapeRegion];
+    DtMask region = { 0 }, out = { 0 };
+    DtImage img = { a->img.data, a->img.width, a->img.height, a->img.width * 4 };
+    if (RegionMaskOf(dm, r, &region) && DtMaskInit(&out, r->x, r->y, r->w, r->h) &&
+        DtFlood(&out, &img, &region, p->pts.p[0], p->tolerance, p->bucket == DRAW_BUCKET_CONTIGUOUS))
+        RenderMask(dm, a, p, &out);
+    DtMaskFree(&region);
+    DtMaskFree(&out);
+}
+
+// The gradient over the region (and the selection): color at pts[0] to color2 at pts[1], in sRGB bytes
+// with alpha, source-over
+static void RenderGradient(DrawMode *dm, Atlas *a, PaintStep *p)
+{
+    const PaintRegion *r = &p->regions[p->shapeRegion];
+    StampCtx c = MakeCtx(dm, a, p, p->shapeRegion);
+    const unsigned char c0[4] = { p->color.r, p->color.g, p->color.b, p->color.a };
+    const unsigned char c1[4] = { p->color2.r, p->color2.g, p->color2.b, p->color2.a };
+    for (int y = r->y; y < r->y + r->h; y++)
+        for (int x = r->x; x < r->x + r->w; x++) {
+            float t = DtGradientT(x, y, p->pts.p[0], p->pts.p[1], p->radial);
+            unsigned char v[4];
+            for (int k = 0; k < 4; k++) v[k] = (unsigned char)ClampI((int)lroundf(c0[k] + (c1[k] - c0[k]) * t), 0, 255);
+            StampValue(&c, x, y, v, true, false);
+        }
+}
+
+// The move: the selected texels (no selection: the region's) by dx, dy; where they land they replace
+// the pixels, where they left and nothing landed the texels become transparent; within the region
+static void RenderMove(DrawMode *dm, Atlas *a, PaintStep *p)
+{
+    const PaintRegion *r = &p->regions[p->shapeRegion];
+    StampCtx c = MakeCtx(dm, a, p, p->shapeRegion);
+    DtMask own = { 0 };
+    const DtMask *src = c.sel ? &p->sel : &own;
+    if (!c.sel && !RegionMaskOf(dm, r, &own)) return;
+    static const unsigned char zero[4] = { 0, 0, 0, 0 };
+    for (int y = r->y; y < r->y + r->h; y++)
+        for (int x = r->x; x < r->x + r->w; x++) {
+            int sx = x - p->dx, sy = y - p->dy;
+            const unsigned char *from = DtMaskGet(src, sx, sy) && InRegion(r, c.I, sx, sy) ? StartPx(a, p, sx, sy) : NULL;
+            if (from) {
+                unsigned char v[4];
+                memcpy(v, from, 4);         // (a copy: the write below may make this tile's copy first)
+                StampValue(&c, x, y, v, false, true);
+            } else if (DtMaskGet(src, x, y)) StampValue(&c, x, y, zero, false, true);
+        }
+    DtMaskFree(&own);
+}
+
+// The whole step drawn from its input onto the atlas (its tiles at their start pixels): a rebase's
+// replay, a shape's preview and its end. The old pens (pencil, eraser, the whole-region fill) stamp
+// their samples exactly as a live stroke did
+static void StepRender(DrawMode *dm, Atlas *a, PaintStep *p)
+{
+    bool shape = p->shapeRegion >= 0 && p->shapeRegion < p->regionCount;
+    DtPoints o = { 0 };
+    DtMask m = { 0 };
+    const DtPoint *q = p->pts.p;
+    switch (shape ? p->tool : TOOL_PENCIL) {
+    case TOOL_BUCKET:
+        if (p->pts.n >= 1) RenderBucket(dm, a, p);
+        break;
+    case TOOL_GRADIENT:
+        if (p->pts.n >= 2) RenderGradient(dm, a, p);
+        break;
+    case TOOL_MOVE:
+        RenderMove(dm, a, p);
+        break;
+    case TOOL_LINE:
+        if (p->pts.n >= 2) DtLine(&o, q[0], q[1]);
+        break;
+    case TOOL_CURVE:
+        if (p->pts.n >= 4) DtCurve(&o, q[0], q[2], q[3], q[1]);
+        break;
+    case TOOL_RECT:
+        if (p->pts.n >= 2) DtRectOutline(&o, q[0], q[1]);
+        break;
+    case TOOL_ELLIPSE:
+        if (p->pts.n >= 2) DtEllipseOutline(&o, q[0], q[1]);
+        break;
+    case TOOL_RECT_FILL:
+    case TOOL_ELLIPSE_FILL:
+    case TOOL_CONTOUR:
+    case TOOL_POLYGON: {
+        const PaintRegion *r = &p->regions[p->shapeRegion];
+        if (p->pts.n < 1 || !DtMaskInit(&m, r->x, r->y, r->w, r->h)) break;
+        if (p->tool == TOOL_RECT_FILL && p->pts.n >= 2) DtRectFill(&m, q[0], q[1]);
+        else if (p->tool == TOOL_ELLIPSE_FILL && p->pts.n >= 2) DtEllipseFill(&m, q[0], q[1]);
+        else if (p->tool == TOOL_CONTOUR || p->tool == TOOL_POLYGON) DtPolygonFill(&m, q, p->pts.n);
+        RenderMask(dm, a, p, &m);
+        break;
+    }
+    default:
+        if (p->pixelPerfect) RenderPixelPerfect(dm, a, p);
+        else
+            for (int i = 0; i < p->sampleCount; i++)
+                Stamp(dm, a, p, p->samples[i], i > 0 && p->samples[i].joined ? &p->samples[i - 1] : NULL);
+        break;
+    }
+    if (o.n > 0 && !o.oom) RenderOutline(dm, a, p, &o);
+    DtPointsFree(&o);
+    DtMaskFree(&m);
 }
 
 // #endregion
@@ -1630,6 +1928,8 @@ static void StrokeAbort(DrawMode *dm)
 // The sample of hit h for the stroke going on: on its object and material (a box: any face; a
 // model: its slot). A face without an entry gets one (its first stroke: the stroke's step holds the
 // text). False: not on the stroke's surface, or it can't be painted (said)
+static bool HitRegion(DrawMode *dm, const MS_SurfaceHit *h, int e, PaintRegion *out, float *tx, float *ty);
+
 static bool StrokeSample(DrawMode *dm, const MS_SurfaceHit *h, Sample *s)
 {
     if (!dm->stroking || !dm->stroke) return false;
@@ -1638,7 +1938,6 @@ static bool StrokeSample(DrawMode *dm, const MS_SurfaceHit *h, Sample *s)
     if (model ? h->slot != dm->strokeSlot : !HitIsBox(h)) return false;
     PaintStep *p = dm->stroke;
     int e = EntryFor(h->hit.obj, h->material, h->face, h->slot, NULL);
-    float rho = MS_PaintGridOf(scene, h->material);
     if (e < 0) {
         // (a new rectangle: a box face's cells on a grid, else at the density; a model slot's 17.4 / 17.5)
         int w, hh, x, y;
@@ -1662,12 +1961,25 @@ static bool StrokeSample(DrawMode *dm, const MS_SurfaceHit *h, Sample *s)
             return false;
         }
     }
+    PaintRegion r;
+    if (!HitRegion(dm, h, e, &r, &s->tx, &s->ty)) return false;
+    s->region = RegionIndex(p, r);
+    s->joined = false;
+    return s->region >= 0;
+}
+
+// The region and texel (atlas pixels, sub-texel) of hit h on its entry e: a box face on a grid its
+// cells (the texels it shows: the rectangle's lower-left part, 17.3) and the hit's texel from its
+// first cell (17.6), else the face's 0..1 over the whole rectangle; a model the hit triangle's island.
+// False: no paint coordinate or island there
+static bool HitRegion(DrawMode *dm, const MS_SurfaceHit *h, int e, PaintRegion *out, float *tx, float *ty)
+{
+    bool model = HitIsModel(h);
+    float rho = MS_PaintGridOf(scene, h->material);
     const MS_PaintEntry *E = MS_PaintEntryAt(scene, e);
     Vector2 uv;
     if (!HitPaintUv(h, &uv)) return false;
     PaintRegion r = { E->x, E->y, E->w, E->h, -1, -1, -1 };
-    // A box face on a grid: its cells (the texels it shows: the rectangle's lower-left part, 17.3), and
-    // the hit's texel from its first cell (17.6); else the face's 0..1 over the whole rectangle
     FaceCells fc;
     bool grid = !model && rho > 0.0f && FaceGridCells(h->hit.obj.index, h->face, rho, &fc);
     if (grid) {
@@ -1683,16 +1995,15 @@ static bool StrokeSample(DrawMode *dm, const MS_SurfaceHit *h, Sample *s)
         r.island = I && k >= 0 && k < I->triCount ? I->triIsland[k] : -1;
         if (r.island < 0) return false;
     }
-    s->region = RegionIndex(p, r);
+    *out = r;
     if (grid) {
-        s->tx = E->x + fc.u0 + Clamp01(uv.x) * (fc.u1 - fc.u0);
-        s->ty = E->y + fc.v0 + Clamp01(uv.y) * (fc.v1 - fc.v0);
+        *tx = E->x + fc.u0 + Clamp01(uv.x) * (fc.u1 - fc.u0);
+        *ty = E->y + fc.v0 + Clamp01(uv.y) * (fc.v1 - fc.v0);
     } else {
-        s->tx = E->x + Clamp01(uv.x) * E->w;
-        s->ty = E->y + Clamp01(uv.y) * E->h;
+        *tx = E->x + Clamp01(uv.x) * E->w;
+        *ty = E->y + Clamp01(uv.y) * E->h;
     }
-    s->joined = false;
-    return s->region >= 0;
+    return true;
 }
 
 static Probe ProbeHit(DrawMode *dm, const MS_SurfaceHit *h, Vector2 px)
@@ -1713,7 +2024,9 @@ static void StampProbe(DrawMode *dm, const Probe *pr)
     Sample s = pr->s;
     const Sample *prev = st->sampleCount > 0 ? &st->samples[st->sampleCount - 1] : NULL;
     if (prev) s.joined = prev->region == s.region && hypotf(s.tx - prev->tx, s.ty - prev->ty) <= 2.0f * Spacing(dm) + 1.0f;
-    Stamp(dm, a, st, s, s.joined ? prev : NULL);
+    // (pixel-perfect: the stroke is drawn again from its samples before the frame's upload, StrokeFrame)
+    if (st->pixelPerfect) dm->ppDirty = true;
+    else Stamp(dm, a, st, s, s.joined ? prev : NULL);
     Sample *slot = MS_PUSH(st->samples, st->sampleCount, st->sampleCap);
     if (slot) *slot = s;
 }
@@ -1777,16 +2090,29 @@ static bool StrokeBegin(DrawMode *dm, EditMode *em, const MS_SurfaceHit *h)
     return true;
 }
 
-// LMB up: the step goes into the history (one that allocated is there already); auto save writes
+static void StrokeFrame(DrawMode *dm);
+
+// LMB up: the step goes into the history (one that allocated is there already); auto save writes.
+// The pencil's and the eraser's last point stays for SHIFT+click
 static bool StrokeEnd(DrawMode *dm, EditMode *em)
 {
     if (!dm->stroking) return false;
+    StrokeFrame(dm);
     PaintStep *p = dm->stroke;
     Atlas *a = &dm->atlases[p->atlas];
+    if ((p->tool == TOOL_PENCIL || p->tool == TOOL_ERASER) && p->sampleCount > 0) {
+        const Sample *s = &p->samples[p->sampleCount - 1];
+        const PaintRegion *r = &p->regions[s->region];
+        dm->lastPaintSet = true;
+        dm->lastPaintRegion = (DrawRegion){ r->x, r->y, r->w, r->h, r->file, r->slot, r->island };
+        dm->lastPaintAtlas = p->atlas;
+        dm->lastPaintTx = s->tx;
+        dm->lastPaintTy = s->ty;
+    }
     Flush(dm);
     EndTiles(a, p);
     int tiles = p->tileCount;
-    const char *verb = p->pen == PEN_ERASER ? "erased" : p->pen == PEN_FILL ? "filled" : "painted";
+    const char *verb = p->pen == PEN_ERASER ? "erased" : p->pen == PEN_FILL ? "filled" : p->tool == TOOL_MOVE ? "moved pixels in" : "painted";
     if (!dm->strokePushed) {
         if (tiles > 0) {
             MS_EntityId *ids;
@@ -1804,6 +2130,490 @@ static bool StrokeEnd(DrawMode *dm, EditMode *em)
     if (em->ed.autoSave && tiles > 0 && DrawModeSave(dm, em) == 2)     // (2: not saved)
         Sayf(dm, true, "auto save: %s", MS_LastError());
     return true;
+}
+
+// #endregion
+
+// ======================================================================================
+// #region The tools: brush strokes' extras, shapes, the selection, the move (docs/painting.md 18.2,
+// 18.4, 18.5)
+// ======================================================================================
+
+static Vector3 FacePoint(int b, int f, Vector2 fu);
+static void OutlineBuild(DrawMode *dm, const DtMask *m, const MS_SurfaceHit *h, DrawLines *out);
+
+static DrawRegion ToDrawRegion(PaintRegion r) { return (DrawRegion){ r.x, r.y, r.w, r.h, r.file, r.slot, r.island }; }
+static PaintRegion ToPaintRegion(DrawRegion r) { return (PaintRegion){ r.x, r.y, r.w, r.h, r.file, r.slot, r.island }; }
+static bool SameRegion(DrawRegion a, PaintRegion b)
+{
+    PaintRegion pa = ToPaintRegion(a);
+    return memcmp(&pa, &b, sizeof(pa)) == 0;
+}
+
+static DtPoint ClampToRegion(DtPoint p, const PaintRegion *r)
+{
+    return (DtPoint){ ClampI(p.x, r->x, r->x + r->w - 1), ClampI(p.y, r->y, r->y + r->h - 1) };
+}
+
+// A stroke that must not go into the history (a shape cancelled, a press that found no texel): what it
+// painted goes back. A step that allocated a rectangle is in the history already: it stays (CTRL+Z)
+static void StrokeDrop(DrawMode *dm)
+{
+    if (!dm->stroking || !dm->stroke) { StrokeAbort(dm); return; }
+    PaintStep *p = dm->stroke;
+    Atlas *a = &dm->atlases[p->atlas];
+    StepRestore(a, p);
+    Flush(dm);
+    if (!dm->strokePushed) ReleaseStep(dm, p);
+    else EndTiles(a, p);
+    StrokeAbort(dm);
+}
+
+// The step clipped to the selection when it is on the step's atlas (the copy is the step's input)
+static void StepSelection(DrawMode *dm, PaintStep *p)
+{
+    if (!dm->sel.active || dm->sel.atlas != p->atlas) return;
+    p->selOn = DtMaskCopy(&p->sel, &dm->sel.mask);
+    p->selRegion = ToPaintRegion(dm->sel.region);
+}
+
+// The tool input of a stroke that just began: the button's colours, the options, the selection
+static void StepTool(DrawMode *dm, PaintStep *p, DrawTool tool, bool rmb)
+{
+    p->tool = tool;
+    p->color = rmb ? dm->bg : dm->fg;
+    p->color2 = rmb ? dm->fg : dm->bg;      // (the gradient runs bg -> fg with RMB)
+    p->pixelPerfect = tool == TOOL_PENCIL && dm->pixelPerfect && dm->size == 1;
+    p->seed = dm->seed++;
+    StepSelection(dm, p);
+}
+
+// A pixel-perfect stroke's samples since the last frame: the stroke drawn again (the thinning can
+// change texels behind the newest)
+static void StrokeFrame(DrawMode *dm)
+{
+    if (!dm->ppDirty || !dm->stroking || !dm->stroke) return;
+    dm->ppDirty = false;
+    Atlas *a = &dm->atlases[dm->stroke->atlas];
+    StepRestore(a, dm->stroke);
+    StepRender(dm, a, dm->stroke);
+}
+
+// One spray tick (1/60 s) at the probe: spraySpeed dots, each a brush stamp at a random texel in the
+// disc of the spray width, recorded as samples (a replay stamps them again)
+static void SprayTick(DrawMode *dm, const Probe *pr)
+{
+    PaintStep *p = dm->stroke;
+    if (!p || !pr->ok) return;
+    Atlas *a = &dm->atlases[p->atlas];
+    DtPoints dots = { 0 };
+    DtSpray(&dots, pr->s.tx, pr->s.ty, dm->sprayWidth * 0.5f, dm->spraySpeed, p->seed ^ ((uint32_t)p->sampleCount * 2654435761u));
+    for (int i = 0; i < dots.n; i++) {
+        Sample s = { dots.p[i].x + 0.5f, dots.p[i].y + 0.5f, pr->s.region, false };
+        Stamp(dm, a, p, s, NULL);
+        Sample *slot = MS_PUSH(p->samples, p->sampleCount, p->sampleCap);
+        if (slot) *slot = s;
+    }
+    DtPointsFree(&dots);
+}
+
+// The region, texel and atlas of the paint under h (an entry must exist: selections and the move
+// work on pixels). False: no paint there
+static bool SurfaceRegion(DrawMode *dm, const MS_SurfaceHit *h, PaintRegion *r, float *tx, float *ty, int *atlas)
+{
+    if (!HitIsBox(h) && !HitIsModel(h)) return false;
+    int e = EntryFor(h->hit.obj, h->material, h->face, h->slot, NULL);
+    if (e < 0 || !HitRegion(dm, h, e, r, tx, ty)) return false;
+    const char *rel = EntryAtlasRel(MS_PaintEntryAt(scene, e));
+    if (!rel) return false;
+    int ai = AtlasByRel(dm, rel);
+    if (ai < 0 || dm->atlases[ai].stale) {
+        char copy[MS_PATH_MAX];
+        snprintf(copy, sizeof(copy), "%s", rel);
+        int file = HitIsModel(h) ? scene->models[h->hit.obj.index].file : -1;
+        ai = AtlasOpen(dm, copy, h->material >= 0 ? scene->materials[h->material].name : NULL, file >= 0 ? scene->modelFiles[file].path : NULL,
+                       h->slot);
+    }
+    if (ai < 0 || !dm->atlases[ai].img.data) return false;
+    *atlas = ai;
+    return true;
+}
+
+// The texel the ray points at on the shape's region (docs/painting.md 18.4): the hit's when it lies on
+// the region; else the ray through the plane of the last hit on it (a box face's plane, a model's
+// triangle), extended past the surface; clamped to the region's rectangle. False: nowhere (the ray is
+// parallel to the plane or points away), the point stays
+static bool ShapeTexel(DrawMode *dm, Ray ray, DtPoint *out)
+{
+    DrawShape *S = &dm->shapeDrag;
+    PaintRegion want = ToPaintRegion(S->region);
+    MS_SurfaceHit h;
+    MS_RaycastSurface(scene, ray.position, ray.direction, 0.0f, &h);
+    PaintRegion r;
+    float tx, ty;
+    int e = HitIsBox(&h) || HitIsModel(&h) ? EntryFor(h.hit.obj, h.material, h.face, h.slot, NULL) : -1;
+    if (e >= 0 && h.hit.obj.kind == S->hit.hit.obj.kind && h.hit.obj.index == S->hit.hit.obj.index && h.material == S->hit.material &&
+        HitRegion(dm, &h, e, &r, &tx, &ty) && memcmp(&r, &want, sizeof(r)) == 0) {
+        S->lastOn = h;
+        *out = ClampToRegion((DtPoint){ (int)floorf(tx), (int)floorf(ty) }, &want);
+        return true;
+    }
+    const MS_SurfaceHit *L = &S->lastOn;
+    e = EntryFor(L->hit.obj, L->material, L->face, L->slot, NULL);
+    if (e < 0) return false;
+    const MS_PaintEntry *E = MS_PaintEntryAt(scene, e);
+    Vector3 O, U, V;
+    Vector2 o2 = { 0, 0 }, u2 = { 1, 0 }, v2 = { 0, 1 };     // (the paint coordinates of O, O + U, O + V)
+    if (HitIsBox(L)) {
+        O = FacePoint(L->hit.obj.index, L->face, (Vector2){ 0, 0 });
+        U = Vector3Subtract(FacePoint(L->hit.obj.index, L->face, (Vector2){ 1, 0 }), O);
+        V = Vector3Subtract(FacePoint(L->hit.obj.index, L->face, (Vector2){ 0, 1 }), O);
+    } else {
+        int k = HitTriangle(L);
+        Vector2 puv[3];
+        Vector3 pos[3];
+        if (k < 0 || !MS_ModelSlotPaintTriangle(scene, scene->models[L->hit.obj.index].file, L->slot, k, puv, pos)) return false;
+        const Matrix T = scene->models[L->hit.obj.index].transform;
+        O = Vector3Transform(pos[0], T);
+        U = Vector3Subtract(Vector3Transform(pos[1], T), O);
+        V = Vector3Subtract(Vector3Transform(pos[2], T), O);
+        o2 = puv[0];
+        u2 = puv[1];
+        v2 = puv[2];
+    }
+    Vector3 N = Vector3CrossProduct(U, V);
+    float den = Vector3DotProduct(ray.direction, N);
+    if (fabsf(den) < 1e-12f) return false;
+    float t = Vector3DotProduct(Vector3Subtract(O, ray.position), N) / den;
+    if (t < 0.0f) return false;
+    Vector3 d = Vector3Subtract(Vector3Add(ray.position, Vector3Scale(ray.direction, t)), O);
+    float uu = Vector3DotProduct(U, U), uv = Vector3DotProduct(U, V), vv = Vector3DotProduct(V, V);
+    float du = Vector3DotProduct(d, U), dv = Vector3DotProduct(d, V), g = uu * vv - uv * uv;
+    if (fabsf(g) < 1e-20f) return false;
+    float a = (du * vv - dv * uv) / g, b = (dv * uu - du * uv) / g;       // d = a U + b V
+    Vector2 p = { o2.x + a * (u2.x - o2.x) + b * (v2.x - o2.x), o2.y + a * (u2.y - o2.y) + b * (v2.y - o2.y) };
+    FaceCells fc;
+    float rho = MS_PaintGridOf(scene, L->material);
+    if (HitIsBox(L) && rho > 0.0f && FaceGridCells(L->hit.obj.index, L->face, rho, &fc)) {
+        tx = E->x + fc.u0 + p.x * (fc.u1 - fc.u0);
+        ty = E->y + fc.v0 + p.y * (fc.v1 - fc.v0);
+    } else {
+        tx = E->x + p.x * E->w;
+        ty = E->y + p.y * E->h;
+    }
+    if (!isfinite(tx) || !isfinite(ty)) return false;
+    tx = fminf(fmaxf(tx, -1e6f), 1e6f);
+    ty = fminf(fmaxf(ty, -1e6f), 1e6f);
+    *out = ClampToRegion((DtPoint){ (int)floorf(tx), (int)floorf(ty) }, &want);
+    return true;
+}
+
+static bool ShapePaints(DrawTool t) { return DrawToolKindOf(t) != TOOLKIND_SELECT && t != TOOL_EYEDROPPER; }
+
+// A shape, a bucket click or a move begins at hit h (docs/painting.md 18.4): its stroke's step (the
+// atlas; a first rectangle when the surface has none) and its first point; selection tools: the
+// paint's region under h, no step. False with the reason said
+static bool ShapeBegin(DrawMode *dm, EditMode *em, const MS_SurfaceHit *h, DrawTool tool, bool rmb, DtSelOp op)
+{
+    DrawShape *S = &dm->shapeDrag;
+    PaintRegion r;
+    float tx, ty;
+    int ai;
+    if (ShapePaints(tool)) {
+        if (!StrokeBegin(dm, em, h)) return false;
+        Sample s;
+        if (!StrokeSample(dm, h, &s)) {
+            if (!dm->messageError) SayStatic(dm, true, "no paint texel there");
+            StrokeDrop(dm);
+            return false;
+        }
+        PaintStep *p = dm->stroke;
+        StepTool(dm, p, tool, rmb);
+        p->shapeRegion = s.region;
+        r = p->regions[s.region];
+        tx = s.tx;
+        ty = s.ty;
+        ai = p->atlas;
+    } else if (!SurfaceRegion(dm, h, &r, &tx, &ty, &ai)) {
+        SayStatic(dm, true, "nothing painted here: a selection needs the surface's paint (paint it first)");
+        return false;
+    }
+    S->on = true;
+    S->tool = tool;
+    S->rmb = rmb;
+    S->selOp = op;
+    S->stage = 0;
+    S->hit = *h;
+    S->lastOn = *h;
+    S->region = ToDrawRegion(r);
+    S->atlas = ai;
+    S->down = true;
+    S->clickTime = (float)GetTime();
+    S->outline.n = 0;
+    DtPointsClear(&S->pts);
+    DtPoint p0 = ClampToRegion((DtPoint){ (int)floorf(tx), (int)floorf(ty) }, &r);
+    int n = tool == TOOL_CURVE ? 4 : tool == TOOL_BUCKET || tool == TOOL_WAND || tool == TOOL_CONTOUR || tool == TOOL_LASSO ? 1 : 2;
+    for (int i = 0; i < n; i++) DtPointsPush(&S->pts, p0.x, p0.y);
+    return !S->pts.oom;
+}
+
+// SHIFT: lines snap to 45 degrees, rectangles and ellipses become squares and circles (b moves)
+static DtPoint Constrain(DrawTool tool, DtPoint a, DtPoint b)
+{
+    int dx = b.x - a.x, dy = b.y - a.y, ax = abs(dx), ay = abs(dy);
+    if ((tool == TOOL_LINE || tool == TOOL_CURVE) && ax > 2 * ay) dy = 0;
+    else if ((tool == TOOL_LINE || tool == TOOL_CURVE) && ay > 2 * ax) dx = 0;
+    else {
+        int m = ax > ay ? ax : ay;
+        dx = dx < 0 ? -m : m;
+        dy = dy < 0 ? -m : m;
+    }
+    return (DtPoint){ a.x + dx, a.y + dy };
+}
+
+// A selection shape's mask so far (its preview) and its outline on the surface
+static void SelectPreview(DrawMode *dm)
+{
+    DrawShape *S = &dm->shapeDrag;
+    PaintRegion r = ToPaintRegion(S->region);
+    DtMaskFree(&S->preview);
+    if (!DtMaskInit(&S->preview, r.x, r.y, r.w, r.h)) return;
+    const DtPoint *q = S->pts.p;
+    if (S->tool == TOOL_MARQUEE && S->pts.n >= 2) DtRectFill(&S->preview, q[0], q[1]);
+    else if (S->tool == TOOL_MARQUEE_ELLIPSE && S->pts.n >= 2) DtEllipseFill(&S->preview, q[0], q[1]);
+    else if (S->tool == TOOL_LASSO || S->tool == TOOL_LASSO_POLY) DtPolygonFill(&S->preview, q, S->pts.n);
+    OutlineBuild(dm, &S->preview, &S->hit, &S->outline);
+}
+
+// The shape drawn again from its points: a painting tool into the atlas (its stroke's tiles back to
+// their start pixels first), a selection tool as its preview outline
+static void ShapeRedraw(DrawMode *dm)
+{
+    DrawShape *S = &dm->shapeDrag;
+    if (!S->on) return;
+    if (!ShapePaints(S->tool)) { SelectPreview(dm); return; }
+    PaintStep *p = dm->stroke;
+    if (!dm->stroking || !p) return;
+    Atlas *a = &dm->atlases[p->atlas];
+    DtPointsClear(&p->pts);
+    for (int i = 0; i < S->pts.n; i++) DtPointsPush(&p->pts, S->pts.p[i].x, S->pts.p[i].y);
+    if (S->tool == TOOL_MOVE && S->pts.n >= 2) {
+        p->dx = S->pts.p[1].x - S->pts.p[0].x;
+        p->dy = S->pts.p[1].y - S->pts.p[0].y;
+    }
+    StepRestore(a, p);
+    StepRender(dm, a, p);
+}
+
+// The selection becomes mask m (op: replace, add, subtract, intersect) on region r of atlas ai, made on
+// hit h. A selection on another region is replaced; texels outside the region never stay selected
+static void SelectionApply(DrawMode *dm, const PaintRegion *r, int ai, const MS_SurfaceHit *h, const DtMask *m, DtSelOp op)
+{
+    DrawSelection *S = &dm->sel;
+    if (!S->active || S->atlas != ai || !SameRegion(S->region, *r)) {
+        DtMask rm = { 0 }, nm = { 0 };
+        if (!RegionMaskOf(dm, r, &rm) || !DtMaskInit(&nm, r->x, r->y, r->w, r->h)) {
+            DtMaskFree(&rm);
+            SayStatic(dm, true, "out of memory");
+            return;
+        }
+        DtMaskFree(&S->mask);
+        DtMaskFree(&S->regionMask);
+        S->mask = nm;
+        S->regionMask = rm;
+        S->region = ToDrawRegion(*r);
+        S->atlas = ai;
+    }
+    S->hit = *h;
+    DtMaskCombine(&S->mask, m, op);
+    DtMaskClip(&S->mask, &S->regionMask);
+    S->active = !DtMaskEmpty(&S->mask);
+    S->gen++;
+    int x0, y0, x1, y1;
+    if (DtMaskBounds(&S->mask, &x0, &y0, &x1, &y1)) Sayf(dm, false, "selection: %d×%d texels", x1 - x0 + 1, y1 - y0 + 1);
+    else SayStatic(dm, false, "selection: none");
+}
+
+// The selection dropped (CTRL+D: kept for CTRL+SHIFT+D)
+static void SelectionDrop(DrawMode *dm, bool keep)
+{
+    DrawSelection *S = &dm->sel;
+    if (!S->active) return;
+    if (keep && DtMaskCopy(&S->last, &S->mask)) {
+        S->lastSet = true;
+        S->lastRegion = S->region;
+        S->lastAtlas = S->atlas;
+        S->lastHit = S->hit;
+    }
+    S->active = false;
+    S->gen++;
+}
+
+// Whether region r of atlas ai still exists: an active entry of that atlas starts at its corner and
+// holds it (gone, moved or shrunk after a reload or an undo: false)
+static bool RegionLive(const DrawMode *dm, DrawRegion r, int ai)
+{
+    if (ai < 0 || ai >= dm->atlasCount) return false;
+    int n = MS_PaintEntryCount(scene);
+    for (int i = 0; i < n; i++) {
+        const MS_PaintEntry *E = MS_PaintEntryAt(scene, i);
+        const char *rel = E->active ? EntryAtlasRel(E) : NULL;
+        if (rel && strcmp(rel, dm->atlases[ai].rel) == 0 && E->x == r.x && E->y == r.y && r.w <= E->w && r.h <= E->h) return true;
+    }
+    return false;
+}
+
+// After a reload or an undo: a selection (and the one CTRL+D kept) whose region is gone is dropped
+static void SelectionValidate(DrawMode *dm)
+{
+    DrawSelection *S = &dm->sel;
+    if (S->active && !RegionLive(dm, S->region, S->atlas)) {
+        S->active = false;
+        S->gen++;
+    }
+    if (S->lastSet && !RegionLive(dm, S->lastRegion, S->lastAtlas)) S->lastSet = false;
+}
+
+// The selection's outline for this frame (rebuilt only when the selection or the scene changed)
+static void PrepareSelection(DrawMode *dm)
+{
+    DrawSelection *S = &dm->sel;
+    if (!S->active) return;
+    if (S->outlineSet && S->outlineGen == S->gen && S->outlineVersion == scene->version) return;
+    OutlineBuild(dm, &S->mask, &S->hit, &S->outline);
+    S->outlineSet = true;
+    S->outlineGen = S->gen;
+    S->outlineVersion = scene->version;
+}
+
+// CTRL+A on hit h (the paint under the cursor, else the selection's region): all of the region
+static void SelectAllAt(DrawMode *dm, const MS_SurfaceHit *h)
+{
+    PaintRegion r;
+    float tx, ty;
+    int ai;
+    if (h && SurfaceRegion(dm, h, &r, &tx, &ty, &ai)) {
+        DtMask m = { 0 };
+        if (RegionMaskOf(dm, &r, &m)) SelectionApply(dm, &r, ai, h, &m, DT_SEL_REPLACE);
+        DtMaskFree(&m);
+    } else if (dm->sel.active) {
+        DtMaskCombine(&dm->sel.mask, &dm->sel.regionMask, DT_SEL_REPLACE);
+        dm->sel.gen++;
+        SayStatic(dm, false, "selection: all of its region");
+    } else SayStatic(dm, true, "nothing painted here to select");
+}
+
+static void SelectAll(DrawMode *dm) { SelectAllAt(dm, dm->hoverOk ? &dm->hover : NULL); }
+
+static void Deselect(DrawMode *dm)
+{
+    if (!dm->sel.active) return;
+    SelectionDrop(dm, true);
+    SayStatic(dm, false, "deselected (CTRL+SHIFT+D brings it back)");
+}
+
+static void Reselect(DrawMode *dm)
+{
+    DrawSelection *S = &dm->sel;
+    SelectionValidate(dm);
+    if (!S->lastSet) { SayStatic(dm, true, "nothing to reselect"); return; }
+    PaintRegion r = ToPaintRegion(S->lastRegion);
+    DtMask keep = { 0 };
+    if (!DtMaskCopy(&keep, &S->last)) { SayStatic(dm, true, "out of memory"); return; }
+    S->active = false;
+    SelectionApply(dm, &r, S->lastAtlas, &S->lastHit, &keep, DT_SEL_REPLACE);
+    DtMaskFree(&keep);
+}
+
+static void SelectInvert(DrawMode *dm)
+{
+    if (!dm->sel.active) { SayStatic(dm, true, "nothing selected to invert"); return; }
+    DtMaskInvert(&dm->sel.mask, &dm->sel.regionMask);
+    dm->sel.active = !DtMaskEmpty(&dm->sel.mask);
+    dm->sel.gen++;
+    SayStatic(dm, false, dm->sel.active ? "selection inverted" : "selection inverted: none");
+}
+
+// The magic wand at hit h: the bucket's flood (tolerance, contiguous / global) of the paint as a selection
+static void WandAt(DrawMode *dm, const MS_SurfaceHit *h, DtSelOp op)
+{
+    PaintRegion r;
+    float tx, ty;
+    int ai;
+    if (!SurfaceRegion(dm, h, &r, &tx, &ty, &ai)) { SayStatic(dm, true, "nothing painted here to select"); return; }
+    const Atlas *a = &dm->atlases[ai];
+    DtImage img = { a->img.data, a->img.width, a->img.height, a->img.width * 4 };
+    DtMask region = { 0 }, out = { 0 };
+    DtPoint seed = ClampToRegion((DtPoint){ (int)floorf(tx), (int)floorf(ty) }, &r);
+    if (RegionMaskOf(dm, &r, &region) && DtMaskInit(&out, r.x, r.y, r.w, r.h) &&
+        DtFlood(&out, &img, &region, seed, dm->tolerance, dm->bucket != DRAW_BUCKET_GLOBAL))
+        SelectionApply(dm, &r, ai, h, &out, op);
+    else SayStatic(dm, true, "the magic wand found nothing there");
+    DtMaskFree(&region);
+    DtMaskFree(&out);
+}
+
+// The shape ends: a painting shape is drawn once more and its stroke goes into the history (one
+// step), a move takes the selection with it; a selection shape becomes the selection
+static void ShapeCommit(DrawMode *dm, EditMode *em)
+{
+    DrawShape *S = &dm->shapeDrag;
+    if (!S->on) return;
+    if (!ShapePaints(S->tool)) {
+        SelectPreview(dm);
+        PaintRegion r = ToPaintRegion(S->region);
+        SelectionApply(dm, &r, S->atlas, &S->hit, &S->preview, S->selOp);
+        S->on = false;
+        S->outline.n = 0;
+        return;
+    }
+    ShapeRedraw(dm);
+    PaintStep *p = dm->stroke;
+    if (S->tool == TOOL_MOVE && p && p->selOn && dm->sel.active && dm->sel.atlas == p->atlas &&
+        SameRegion(dm->sel.region, p->regions[p->shapeRegion])) {
+        DtMask moved = { 0 };
+        if (DtMaskInit(&moved, dm->sel.mask.x, dm->sel.mask.y, dm->sel.mask.w, dm->sel.mask.h)) {
+            DtMaskShift(&moved, &dm->sel.mask, p->dx, p->dy);
+            DtMaskClip(&moved, &dm->sel.regionMask);
+            DtMaskFree(&dm->sel.mask);
+            dm->sel.mask = moved;
+            dm->sel.active = !DtMaskEmpty(&moved);
+            dm->sel.gen++;
+        }
+    }
+    S->on = false;
+    StrokeEnd(dm, em);
+}
+
+// ESC, a tool change, leaving: the shape in progress dropped (its pixels back, no step in the
+// history; a rectangle its first point allocated stays, CTRL+Z removes it). True when there was one
+static bool ShapeCancel(DrawMode *dm)
+{
+    DrawShape *S = &dm->shapeDrag;
+    if (!S->on) return false;
+    if (ShapePaints(S->tool)) StrokeDrop(dm);
+    S->on = false;
+    S->outline.n = 0;
+    return true;
+}
+
+// ENTER: closes the polygon / polygonal lasso (its fixed points), ends the curve (no control point
+// yet: straight; after the first: c2 = c1)
+static void ShapeEnter(DrawMode *dm, EditMode *em)
+{
+    DrawShape *S = &dm->shapeDrag;
+    if (!S->on) return;
+    if (S->tool == TOOL_POLYGON || S->tool == TOOL_LASSO_POLY) {
+        if (S->pts.n > 1) S->pts.n--;       // (the point that follows the cursor)
+        if (S->pts.n >= 3) ShapeCommit(dm, em);
+        else if (ShapeCancel(dm)) SayStatic(dm, false, "a polygon needs 3 points");
+    } else if (S->tool == TOOL_CURVE && S->stage >= 1) {
+        if (S->stage == 1) {
+            S->pts.p[2] = S->pts.p[0];
+            S->pts.p[3] = S->pts.p[1];
+        } else S->pts.p[3] = S->pts.p[2];
+        ShapeCommit(dm, em);
+    }
 }
 
 // #endregion
@@ -1876,7 +2686,7 @@ static bool ReplayStep(DrawMode *dm, PaintStep *p)
     if (p->kind != STEP_STROKE) return false;
     FreeTiles(p);
     if (!TilesInit(a)) return false;
-    for (int i = 0; i < p->sampleCount; i++) Stamp(dm, a, p, p->samples[i], i > 0 && p->samples[i].joined ? &p->samples[i - 1] : NULL);
+    StepRender(dm, a, p);
     EndTiles(a, p);
     a->dirty = false;
     return true;
@@ -2607,8 +3417,7 @@ static void AddRecent(DrawMode *dm, Color c)
 
 static void SetColor(DrawMode *dm, Color c)
 {
-    if (memcmp(&dm->color, &c, sizeof(Color)) != 0) dm->prevColor = dm->color;
-    dm->color = c;
+    dm->fg = c;     // (the background colour stays: X swaps them, docs/painting.md 18.1)
     AddRecent(dm, c);
 }
 
@@ -2968,8 +3777,12 @@ void DrawModeOpen(DrawMode *dm, EditMode *em, Designer *d)
     if (!em->ed.work && !MapEditBegin(&em->ed)) SayStatic(dm, true, "this map can't be painted (a compiled map?): load its .map");
 }
 
+// Leaving: a shape in progress and the selection are dropped (docs/painting.md 18.5)
 void DrawModeClose(DrawMode *dm)
 {
+    ShapeCancel(dm);
+    SelectionDrop(dm, false);
+    dm->sel.lastSet = false;
     dm->active = false;
     dm->hoverOk = false;
     dm->unwrapWant = false;     // (an unwrap asked for and not made yet: no stroke after leaving)
@@ -2984,28 +3797,48 @@ static DrawModeResult History(DrawMode *dm, EditMode *em, Designer *d, bool undo
     unsigned char r = undo ? MapEditUndo(&em->ed, &ids, &count) : MapEditRedo(&em->ed, &ids, &count);
     char *text = MS_StrDup(r != 1 ? MapEditNote(&em->ed) : MS_LastError());     // (DesignerSync runs first)
     DesignerSync(d);        // (the selection stays: the draw mode doesn't select)
+    SelectionValidate(dm);  // (the draw mode's selection goes with its region)
     free(ids);
     Sayf(dm, r == 1, "%s", text ? text : "out of memory");      // (1: not done; 2: done, the auto save failed)
     free(text);
     return r != 1 ? DRAWMODE_RELOADED : DRAWMODE_NONE;
 }
 
-// Leaves the mode for `next` (B / ESC: spectator; M edit, V volume, C snip mode); with unsaved
-// edits the first press only says so
-static bool Leave(DrawMode *dm, EditMode *em, Designer *d, int key)
+// ESC with nothing in progress: leaves the mode for spectator mode; with unsaved edits the first ESC
+// only says so (again within WARN_TIME leaves)
+static bool Leave(DrawMode *dm, EditMode *em)
 {
     int unsaved = MapEditUnsaved(&em->ed);
-    if (unsaved > 0 && dm->leaveWarnTime <= 0.0f && (key == KEY_B || key == KEY_ESCAPE)) {
+    if (unsaved > 0 && dm->leaveWarnTime <= 0.0f) {
         dm->leaveWarnTime = WARN_TIME;
-        Sayf(dm, true, "%d unsaved edit%s: CTRL+S saves, B again leaves them unsaved (still live)", unsaved, unsaved == 1 ? "" : "s");
+        Sayf(dm, true, "%d unsaved edit%s: CTRL+S saves, ESC again leaves them unsaved (still live)", unsaved, unsaved == 1 ? "" : "s");
         return false;
     }
+    ShapeCancel(dm);
     if (dm->stroking) StrokeEnd(dm, em);
     DrawModeClose(dm);
-    if (key == KEY_M) EditModeOpen(em, d);
-    else if (key == KEY_V) DesignerVolumeModeBegin(d);
-    else if (key == KEY_C) DesignerSnipBegin(d);
     return true;
+}
+
+// A tool key (docs/painting.md 18.3, the table in drawkeys.c): the tool, U / SHIFT+U cycling to the
+// filled shape and back, I on the eyedropper toggling its mode. A shape in progress is dropped
+static void ToolKeys(DrawMode *dm, bool shift)
+{
+    for (int i = 0; i < DrawToolKeyCount(); i++) {
+        const DrawToolKey *k = DrawToolKeyAt(i);
+        if (k->shift != shift || !IsKeyPressed(k->key)) continue;
+        if (k->tool == TOOL_EYEDROPPER && dm->tool == TOOL_EYEDROPPER) {
+            dm->pickTool = dm->pickTool == DRAW_PICK_SCREEN ? DRAW_PICK_PAINT : DRAW_PICK_SCREEN;
+            Sayf(dm, false, "eyedropper: %s", dm->pickTool == DRAW_PICK_SCREEN ? "the screen" : "the paint");
+            return;
+        }
+        int t = DrawToolForKey(k->key, shift, dm->tool);
+        if (t < 0) return;
+        if ((DrawTool)t != dm->tool) ShapeCancel(dm);
+        dm->tool = (DrawTool)t;
+        Sayf(dm, false, "tool: %s", DrawToolName(dm->tool));
+        return;
+    }
 }
 
 static void SizeStep(DrawMode *dm, int dir)
@@ -3016,20 +3849,203 @@ static void SizeStep(DrawMode *dm, int dir)
     dm->size = ClampI(s, 1, DRAW_SIZE_MAX);
 }
 
-// LMB down on hit h at px: the stroke begins with a stamp there (its first one on a surface without a
-// rectangle allocates one). True when the text changed live
-static bool PressStroke(DrawMode *dm, EditMode *em, const MS_SurfaceHit *h, Vector2 px)
+// SHIFT+click with the pencil or the eraser: a straight line from where the tool painted last, when
+// that is on the probe's region of the same atlas (Aseprite's); false: no such point
+static bool ShiftLine(DrawMode *dm, const Probe *pr)
+{
+    PaintStep *p = dm->stroke;
+    if (!p || !pr->ok || !dm->lastPaintSet || dm->lastPaintAtlas != p->atlas || !SameRegion(dm->lastPaintRegion, p->regions[pr->s.region]))
+        return false;
+    Sample a = { dm->lastPaintTx, dm->lastPaintTy, pr->s.region, false }, b = pr->s;
+    b.joined = true;
+    Sample *slot = MS_PUSH(p->samples, p->sampleCount, p->sampleCap);
+    if (slot) *slot = a;
+    slot = MS_PUSH(p->samples, p->sampleCount, p->sampleCap);
+    if (slot) *slot = b;
+    if (p->pixelPerfect) dm->ppDirty = true;
+    else {
+        Atlas *at = &dm->atlases[p->atlas];
+        Stamp(dm, at, p, a, NULL);
+        Stamp(dm, at, p, b, &a);
+    }
+    return true;
+}
+
+// A press of a brush tool (or the whole-region bucket) on hit h at px: the stroke begins with a stamp
+// there (its first one on a surface without a rectangle allocates one; the spray's first tick; SHIFT
+// with the pencil or the eraser: the line from its last point). True when the text changed live
+static bool PressStroke(DrawMode *dm, EditMode *em, const MS_SurfaceHit *h, Vector2 px, bool rmb, bool shiftLine)
 {
     unsigned int version = scene->version;
     if (!StrokeBegin(dm, em, h)) return false;
+    dm->strokeRmb = rmb;
+    dm->sprayTime = 0.0f;
+    StepTool(dm, dm->stroke, dm->tool, rmb);
     Probe p = ProbeHit(dm, h, px);
-    if (p.ok) StampProbe(dm, &p);
+    bool line = shiftLine && (dm->tool == TOOL_PENCIL || dm->tool == TOOL_ERASER) && ShiftLine(dm, &p);
+    if (p.ok && !line) {
+        if (dm->tool == TOOL_SPRAY) SprayTick(dm, &p);
+        else StampProbe(dm, &p);
+    }
     dm->lastPx = px;
     dm->lastOk = p.ok;
     dm->lastTx = p.s.tx;
     dm->lastTy = p.s.ty;
     dm->lastRegion = p.s.region;
     return scene->version != version;
+}
+
+// The eyedropper (the tool, or ALT+click) at px: paint mode picks now (docs/painting.md 7.4), screen
+// mode asks main.c for the pixel of the scene's image (18.8). RMB: into the background colour
+static void Pick(DrawMode *dm, Camera3D cam, int w, int h, Vector2 px, bool rmb, DrawPickMode mode)
+{
+    if (mode == DRAW_PICK_SCREEN) {
+        dm->screenWant = true;
+        dm->screenX = (int)px.x;
+        dm->screenY = (int)px.y;
+        dm->screenToFg = !rmb;
+        return;
+    }
+    Color c;
+    bool paint;
+    if (!Eyedropper(dm, &dm->hover, cam, w, h, px, &c, &paint)) return;
+    if (rmb) {
+        dm->bg = c;
+        AddRecent(dm, c);
+    } else SetColor(dm, c);
+    Sayf(dm, false, "picked #%02X%02X%02X a%d into %s (%s)", c.r, c.g, c.b, c.a, rmb ? "bg" : "fg", paint ? "the paint" : "the surface's albedo");
+}
+
+// The selection operation of a selection tool's press: SHIFT add, ALT subtract, both intersect
+static DtSelOp SelOpOf(bool shift, bool alt)
+{
+    return shift && alt ? DT_SEL_AND : shift ? DT_SEL_ADD : alt ? DT_SEL_SUB : DT_SEL_REPLACE;
+}
+
+// A press (LMB, or RMB: the background colour) off the panel with the current tool (docs/painting.md
+// 18.2, 18.3). True when the text changed live
+static bool Press(DrawMode *dm, EditMode *em, Camera3D cam, int w, int h, Vector2 px, bool rmb, bool shift, bool alt)
+{
+    Settle(dm, 0.0f, true);     // (a click: the panel shows that surface at once)
+    DrawTool t = dm->tool;
+    DrawToolKind kind = DrawToolKindOf(t);
+    if (alt && kind != TOOLKIND_SELECT) { Pick(dm, cam, w, h, px, rmb, dm->pickAlt); return false; }
+    if (t == TOOL_EYEDROPPER) { Pick(dm, cam, w, h, px, rmb, dm->pickTool); return false; }
+    if (!dm->hoverOk) {
+        if (dm->refusalCode >= 2) Sayf(dm, true, "%s", MsgText(&dm->refusal));     // (a refusal)
+        return false;
+    }
+    if (kind == TOOLKIND_SELECT) {
+        if (rmb) return false;      // (the selection tools ignore RMB)
+        if (t == TOOL_WAND) WandAt(dm, &dm->hover, SelOpOf(shift, alt));
+        else if (ShapeBegin(dm, em, &dm->hover, t, false, SelOpOf(shift, alt))) ShapeRedraw(dm);
+        return false;
+    }
+    if (!EditModeConfirm(em, STROKE_KEY)) return false;
+    unsigned int version = scene->version;
+    if (kind == TOOLKIND_BRUSH || (t == TOOL_BUCKET && dm->bucket == DRAW_BUCKET_REGION)) {
+        if (dm->hoverGeom.needsUnwrap) {
+            // (the note shows for a frame, then the next update unwraps: a large scan takes seconds)
+            int file = scene->models[dm->hover.hit.obj.index].file;
+            char *row = AssetsRow(scene->modelFiles[file].path);
+            if (!row) Sayf(dm, true, "%s has no licence row in ASSETS.md (its paint unwrap derives from it)", scene->modelFiles[file].path);
+            else {
+                dm->unwrapWant = true;
+                dm->unwrapHit = dm->hover;
+                dm->unwrapPx = px;
+                dm->unwrapVersion = scene->version;
+                dm->strokeRmb = rmb;
+                Sayf(dm, false, "unwrapping %s for paint (a large model takes a few seconds) ...", GetFileName(scene->modelFiles[file].path));
+            }
+            free(row);
+            return false;
+        }
+        PressStroke(dm, em, &dm->hover, px, rmb, shift);
+    } else if (t == TOOL_MOVE && dm->hoverGeom.fresh) {
+        SayStatic(dm, true, "nothing painted here to move");
+    } else if (ShapeBegin(dm, em, &dm->hover, t, rmb, DT_SEL_REPLACE)) {
+        if (t == TOOL_BUCKET) ShapeCommit(dm, em);     // (a click: one step)
+        else ShapeRedraw(dm);
+    }
+    return scene->version != version;
+}
+
+// A shape in progress this frame (docs/painting.md 18.2, 18.4): its moving point follows the cursor
+// (clamped to the region), a release ends a drag, clicks add a polygon's points or a curve's control
+// points. Nothing moves while the camera has the mouse
+static void ShapeInput(DrawMode *dm, EditMode *em, Camera3D cam, int w, int h, Vector2 px, bool nav, bool shift, bool lP, bool rP)
+{
+    DrawShape *S = &dm->shapeDrag;
+    if (nav) return;
+    bool pressed = S->rmb ? rP : lP;
+    bool released = S->down && !IsMouseButtonDown(S->rmb ? MOUSE_BUTTON_RIGHT : MOUSE_BUTTON_LEFT);
+    if (released) S->down = false;
+    DtPoint q;
+    bool have = ShapeTexel(dm, GetScreenToWorldRayEx(px, cam, w, h), &q);
+    DtPoint *P = S->pts.p;
+    int n = S->pts.n;
+    bool changed = false;
+    switch (S->tool) {
+    case TOOL_CONTOUR:
+    case TOOL_LASSO:
+        if (have && (P[n - 1].x != q.x || P[n - 1].y != q.y)) changed = DtPointsPush(&S->pts, q.x, q.y);
+        if (released) { ShapeCommit(dm, em); return; }
+        break;
+    case TOOL_POLYGON:
+    case TOOL_LASSO_POLY:
+        if (have && (P[n - 1].x != q.x || P[n - 1].y != q.y)) {
+            P[n - 1] = q;
+            changed = true;
+        }
+        if (pressed) {
+            float now = (float)GetTime();
+            bool twice = now - S->clickTime < 0.4f && n >= 2 && P[n - 2].x == P[n - 1].x && P[n - 2].y == P[n - 1].y;
+            bool first = n - 1 >= 3 && abs(P[n - 1].x - P[0].x) <= 1 && abs(P[n - 1].y - P[0].y) <= 1;
+            S->clickTime = now;
+            if ((twice && n - 1 >= 3) || first) {
+                S->pts.n--;
+                ShapeCommit(dm, em);
+                return;
+            }
+            changed = DtPointsPush(&S->pts, P[n - 1].x, P[n - 1].y);
+        }
+        break;
+    case TOOL_CURVE:
+        if (S->stage == 0) {
+            if (have) {
+                if (shift) q = Constrain(S->tool, P[0], q);
+                changed = P[1].x != q.x || P[1].y != q.y;
+                P[1] = q;
+                P[2] = P[0];
+                P[3] = P[1];
+            }
+            if (released) S->stage = 1;
+        } else {
+            DtPoint *c = &P[S->stage == 1 ? 2 : 3];
+            if (have && (c->x != q.x || c->y != q.y)) {
+                *c = q;
+                if (S->stage == 1) P[3] = q;
+                changed = true;
+            }
+            if (pressed) S->down = true;
+            if (released) {
+                if (S->stage == 2) { ShapeCommit(dm, em); return; }
+                S->stage = 2;
+            }
+        }
+        break;
+    default:        // line, rectangles, ellipses, gradient, marquees, move: a drag a -> b
+        if (have) {
+            if (shift && (S->tool == TOOL_LINE || S->tool == TOOL_RECT || S->tool == TOOL_RECT_FILL || S->tool == TOOL_ELLIPSE ||
+                          S->tool == TOOL_ELLIPSE_FILL))
+                q = Constrain(S->tool, P[0], q);
+            changed = P[1].x != q.x || P[1].y != q.y;
+            P[1] = q;
+        }
+        if (released) { ShapeCommit(dm, em); return; }
+        break;
+    }
+    if (changed && S->on) ShapeRedraw(dm);
 }
 
 DrawModeResult DrawModeUpdate(DrawMode *dm, EditMode *em, Designer *d, Camera3D cam, bool cursorOnPanel, float dt)
@@ -3040,29 +4056,37 @@ DrawModeResult DrawModeUpdate(DrawMode *dm, EditMode *em, Designer *d, Camera3D 
     if (em->warnTime > 0.0f) em->warnTime -= dt;
     if (!dm->active) return DRAWMODE_NONE;
     int w = GetScreenWidth(), h = GetScreenHeight();
-    bool flying = IsMouseButtonDown(MOUSE_BUTTON_RIGHT);
+    // The camera's (spectator.c, mouseNav): nothing is painted while SPACE or MMB is down, and a brush
+    // stroke going on ends when either goes down (or its button comes up); a shape waits
+    bool nav = IsKeyDown(KEY_SPACE) || IsMouseButtonDown(MOUSE_BUTTON_MIDDLE);
     DrawModeResult res = DRAWMODE_NONE;
-    if (dm->stroking && (flying || !IsMouseButtonDown(MOUSE_BUTTON_LEFT))) StrokeEnd(dm, em);
+    if (dm->stroking && !dm->shapeDrag.on && (nav || !IsMouseButtonDown(dm->strokeRmb ? MOUSE_BUTTON_RIGHT : MOUSE_BUTTON_LEFT)))
+        StrokeEnd(dm, em);
     dm->onPanel = cursorOnPanel;
-    if (!cursorOnPanel && !flying) {
+    if (!cursorOnPanel) {
         HoverAt(dm, cam, GetMousePosition(), w, h);
         Settle(dm, dt, false);
-    } else {
-        HoverRefresh(dm);
-        if (flying) dm->hoverOk = false;
-    }
+    } else HoverRefresh(dm);
 
-    // The frame after the unwrap's note: the unwrap, then the stroke where LMB went down
+    // The frame after the unwrap's note: the unwrap, then the stroke where the button went down
     if (dm->unwrapWant && !dm->stroking) {
         dm->unwrapWant = false;
-        if (dm->unwrapVersion == scene->version && !flying) {
-            if (PressStroke(dm, em, &dm->unwrapHit, dm->unwrapPx)) res = DRAWMODE_RELOADED;
-            if (dm->stroking && !IsMouseButtonDown(MOUSE_BUTTON_LEFT)) StrokeEnd(dm, em);     // (a click: one dab)
-            if (!cursorOnPanel && !flying) HoverAt(dm, cam, GetMousePosition(), w, h);
+        if (dm->unwrapVersion == scene->version && !nav) {
+            if (PressStroke(dm, em, &dm->unwrapHit, dm->unwrapPx, dm->strokeRmb, false)) res = DRAWMODE_RELOADED;
+            if (dm->stroking && !IsMouseButtonDown(dm->strokeRmb ? MOUSE_BUTTON_RIGHT : MOUSE_BUTTON_LEFT)) StrokeEnd(dm, em);     // (a click: one dab)
+            if (!cursorOnPanel) HoverAt(dm, cam, GetMousePosition(), w, h);
         } else SayStatic(dm, true, "the unwrap was dropped: the map changed (click again)");
     }
 
     bool ctrl = Ctrl(), shift = Shift(), alt = Alt();
+    bool escUsed = false;
+    // A shape in progress: ESC drops it, ENTER closes a polygon or ends a curve
+    if (!dm->keysBlocked && dm->shapeDrag.on && !ctrl && !alt) {
+        if (IsKeyPressed(KEY_ESCAPE)) {
+            escUsed = ShapeCancel(dm);
+            SayStatic(dm, false, "shape cancelled");
+        } else if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) ShapeEnter(dm, em);
+    }
     if (!dm->stroking && !dm->keysBlocked) {
         if (ctrl && IsKeyPressed(KEY_Z)) return History(dm, em, d, !shift);
         if (ctrl && IsKeyPressed(KEY_Y)) return History(dm, em, d, false);
@@ -3077,52 +4101,47 @@ DrawModeResult DrawModeUpdate(DrawMode *dm, EditMode *em, Designer *d, Camera3D 
             MapEditClearFailed(&em->ed);
             SayStatic(dm, false, "list of edits that could not be re-applied cleared");
         }
-        static const int LEAVE[] = { KEY_B, KEY_ESCAPE, KEY_M, KEY_V, KEY_C };
-        for (int k = 0; k < 5 && !ctrl && !alt; k++)
-            if (IsKeyPressed(LEAVE[k])) { Leave(dm, em, d, LEAVE[k]); return DRAWMODE_NONE; }
-        for (int k = 0; k < PEN_COUNT && !ctrl && !alt; k++)
-            if (IsKeyPressed(KEY_ONE + k)) dm->pen = (PenKind)k;
-        if (!ctrl && !alt && IsKeyPressed(KEY_X)) {
-            Color c = dm->color;
-            dm->color = dm->prevColor;
-            dm->prevColor = c;
+        // The selection (CTRL+A, CTRL+D, CTRL+SHIFT+D, CTRL+SHIFT+I)
+        if (ctrl && !alt && !shift && IsKeyPressed(KEY_A)) SelectAll(dm);
+        if (ctrl && !alt && IsKeyPressed(KEY_D)) {
+            if (shift) Reselect(dm);
+            else Deselect(dm);
         }
-        if (!ctrl && !alt && IsKeyPressed(KEY_TAB)) dm->panelHidden = !dm->panelHidden;
+        if (ctrl && !alt && shift && IsKeyPressed(KEY_I)) SelectInvert(dm);
+        if (!ctrl && !alt) {
+            // ESC with nothing in progress: leave (B no longer leaves: it is the pencil)
+            if (!escUsed && IsKeyPressed(KEY_ESCAPE) && Leave(dm, em)) return DRAWMODE_NONE;
+            ToolKeys(dm, shift);
+            for (int k = 0; k < PEN_COUNT; k++)
+                if (IsKeyPressed(KEY_ONE + k)) {
+                    ShapeCancel(dm);
+                    DrawModeSetPen(dm, (PenKind)k);
+                }
+            if (IsKeyPressed(KEY_X)) {
+                Color c = dm->fg;
+                dm->fg = dm->bg;
+                dm->bg = c;
+            }
+            if (IsKeyPressed(KEY_TAB)) dm->panelHidden = !dm->panelHidden;
+        }
         if (IsKeyPressed(KEY_LEFT_BRACKET) || IsKeyPressedRepeat(KEY_LEFT_BRACKET)) SizeStep(dm, -1);
         if (IsKeyPressed(KEY_RIGHT_BRACKET) || IsKeyPressedRepeat(KEY_RIGHT_BRACKET)) SizeStep(dm, 1);
     }
-    float wheel = flying || cursorOnPanel ? 0.0f : GetMouseWheelMove();
+    float wheel = cursorOnPanel ? 0.0f : GetMouseWheelMove();     // (without CTRL / SHIFT: the camera's)
     if (wheel != 0.0f && ctrl) SizeStep(dm, wheel > 0.0f ? 1 : -1);
-    else if (wheel != 0.0f && shift) dm->color.a = (unsigned char)ClampI(dm->color.a + (wheel > 0.0f ? 8 : -8), 0, 255);
+    else if (wheel != 0.0f && shift) dm->fg.a = (unsigned char)ClampI(dm->fg.a + (wheel > 0.0f ? 8 : -8), 0, 255);
 
     Vector2 px = GetMousePosition();
-    if (!cursorOnPanel && !flying && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !dm->unwrapWant) {
-        Settle(dm, 0.0f, true);     // (a click: the panel shows that surface at once)
-        if (alt) {
-            Color c;
-            bool paint;
-            if (Eyedropper(dm, &dm->hover, cam, w, h, px, &c, &paint)) {
-                SetColor(dm, c);
-                Sayf(dm, false, "picked #%02X%02X%02X a%d (%s)", c.r, c.g, c.b, c.a, paint ? "the paint" : "the surface's albedo");
-            }
-        } else if (dm->hoverOk && EditModeConfirm(em, STROKE_KEY)) {
-            if (dm->hoverGeom.needsUnwrap) {
-                // (the note shows for a frame, then the next update unwraps: a large scan takes seconds)
-                int file = scene->models[dm->hover.hit.obj.index].file;
-                char *row = AssetsRow(scene->modelFiles[file].path);
-                if (!row) Sayf(dm, true, "%s has no licence row in ASSETS.md (its paint unwrap derives from it)", scene->modelFiles[file].path);
-                else {
-                    dm->unwrapWant = true;
-                    dm->unwrapHit = dm->hover;
-                    dm->unwrapPx = px;
-                    dm->unwrapVersion = scene->version;
-                    Sayf(dm, false, "unwrapping %s for paint (a large model takes a few seconds) ...", GetFileName(scene->modelFiles[file].path));
-                }
-                free(row);
-            } else if (PressStroke(dm, em, &dm->hover, px)) res = DRAWMODE_RELOADED;
-        } else if (!dm->hoverOk && dm->refusalCode >= 2) Sayf(dm, true, "%s", MsgText(&dm->refusal));     // (a refusal)
-    } else if (dm->stroking && dm->pen != PEN_FILL && (px.x != dm->lastPx.x || px.y != dm->lastPx.y)) {
-        unsigned int version = scene->version;
+    bool lP = IsMouseButtonPressed(MOUSE_BUTTON_LEFT), rP = IsMouseButtonPressed(MOUSE_BUTTON_RIGHT);
+    unsigned int version = scene->version;
+    if (dm->shapeDrag.on) ShapeInput(dm, em, cam, w, h, px, nav, shift, lP, rP);
+    else if (!cursorOnPanel && !nav && (lP || rP) && !dm->stroking && !dm->unwrapWant) Press(dm, em, cam, w, h, px, !lP, shift, alt);
+    else if (dm->stroking && dm->stroke && dm->stroke->tool == TOOL_SPRAY) {
+        // (the spray: speed dots per 1/60 s at the cursor, moving or not; a slow frame sprays at most 8 ticks)
+        dm->sprayTime = fminf(dm->sprayTime + dt * 60.0f, 8.0f);
+        Probe b = ProbeHit(dm, &dm->hover, px);
+        for (; dm->sprayTime >= 1.0f; dm->sprayTime -= 1.0f) SprayTick(dm, &b);
+    } else if (dm->stroking && dm->stroke && dm->stroke->pen != PEN_FILL && (px.x != dm->lastPx.x || px.y != dm->lastPx.y)) {
         Probe a = { .px = dm->lastPx, .ok = dm->lastOk, .s = { dm->lastTx, dm->lastTy, dm->lastRegion, false } };
         Probe b = ProbeHit(dm, &dm->hover, px);
         StrokeSegment(dm, cam, w, h, a, b);
@@ -3131,10 +4150,12 @@ DrawModeResult DrawModeUpdate(DrawMode *dm, EditMode *em, Designer *d, Camera3D 
         dm->lastTx = b.s.tx;
         dm->lastTy = b.s.ty;
         dm->lastRegion = b.s.region;
-        if (scene->version != version) res = DRAWMODE_RELOADED;
     }
+    if (scene->version != version) res = DRAWMODE_RELOADED;
+    StrokeFrame(dm);
     Flush(dm);
     TargetRefresh(dm);
+    PrepareSelection(dm);       // (before the cursor's: both may build the slot triangles, the cursor's last)
     PrepareCursor(dm);
     return res;
 }
@@ -3147,7 +4168,9 @@ DrawModeResult DrawModeUpdate(DrawMode *dm, EditMode *em, Designer *d, Camera3D 
 
 void DrawModeBeforeSync(DrawMode *dm)
 {
-    // (a stroke going on ends first: the history the rebase rewrites may hold its step)
+    // (a shape in progress is dropped, a stroke going on ends first: the history the rebase rewrites
+    // may hold its step)
+    ShapeCancel(dm);
     if (dm->stroking) StrokeEnd(dm, dm->em);
     dm->rebaseGen++;
     for (int i = 0; i < dm->atlasCount; i++)
@@ -3185,6 +4208,7 @@ void DrawModeSync(DrawMode *dm, EditMode *em, bool newScene)
         TraceLog(LOG_WARNING, "monolith: draw: the paint atlases could not be loaded again: %s", MS_LastError());
     for (int i = 0; i < dm->atlasCount; i++)
         if (dm->atlases[i].provided) Upload(&dm->atlases[i], 0, 0, dm->atlases[i].img.width, dm->atlases[i].img.height);
+    SelectionValidate(dm);
 }
 
 int DrawModeDrawHud(const DrawMode *dm, const EditMode *em, int x, int y)
@@ -3208,12 +4232,20 @@ int DrawModeDrawHud(const DrawMode *dm, const EditMode *em, int x, int y)
     char unsaved[64] = "";
     int n = EditModeUnsaved(em);
     if (n > 0) snprintf(unsaved, sizeof(unsaved), "  |  %d unsaved edit%s", n, n == 1 ? "" : "s");
-    Color c = dm->color;
+    Color c = dm->fg;
     // The mode name as a mark in the draw mode's colour, the rest in HUD text (their backdrop
     // strips abut: UiHudText's starts 6 px left of its text)
     int rx = x + UiHudMark("DRAW", x, y, UI_HUD_LINE, UI_S, UI_MODE_DRAW);
-    UiHudText(TextFormat("%s%s  #%02X%02X%02X a%d%s%s", PEN_NAMES[dm->pen], dm->pen == PEN_FILL ? "" : TextFormat(" %d px", dm->size),
-                         c.r, c.g, c.b, c.a, target, unsaved), rx, y, UI_HUD_LINE, UI_S, UI_TEXT);
+    // The tool (the pencil with its brush, the brush tools and outlines with their size), the colour
+    // and the selection's extent
+    DrawTool t = dm->tool;
+    bool sized = DrawToolKindOf(t) == TOOLKIND_BRUSH || t == TOOL_LINE || t == TOOL_CURVE || t == TOOL_RECT || t == TOOL_ELLIPSE;
+    char tool[96], sel[48] = "";
+    snprintf(tool, sizeof(tool), "%s%s%s", DrawToolName(t), t == TOOL_PENCIL ? TextFormat(" (%s)", PEN_NAMES[DrawModeStampPen(dm)]) : "",
+             t == TOOL_SPRAY ? TextFormat(" %d px, width %d", dm->size, dm->sprayWidth) : sized ? TextFormat(" %d px", dm->size) : "");
+    int x0, y0, x1, y1;
+    if (dm->sel.active && DtMaskBounds(&dm->sel.mask, &x0, &y0, &x1, &y1)) snprintf(sel, sizeof(sel), "  |  selection %d×%d", x1 - x0 + 1, y1 - y0 + 1);
+    UiHudText(TextFormat("%s  #%02X%02X%02X a%d%s%s%s", tool, c.r, c.g, c.b, c.a, sel, target, unsaved), rx, y, UI_HUD_LINE, UI_S, UI_TEXT);
     return UI_HUD_LINE;
 }
 
@@ -3379,7 +4411,7 @@ static void PrepareCursor(DrawMode *dm)
     int file = scene->models[h->hit.obj.index].file;
     const DrawSlotTris *S = SlotTrisFor(dm, file, h->slot);
     int k = S ? HitTriangle(h) : -1;
-    if (S && dm->pen == PEN_FILL && k >= 0 && k < S->n) SlotOutline(dm, S->root[k]);
+    if (S && DrawModeStampPen(dm) == PEN_FILL && k >= 0 && k < S->n) SlotOutline(dm, S->root[k]);
 }
 
 // The eye of the brush cursor being drawn. Its lines lie on the surface itself, where the overlay's
@@ -3438,6 +4470,88 @@ static Vector3 TriPoint(const Vector2 *uv, const Vector3 *pos, Vector2 t)
     float a = ((uv[1].y - uv[2].y) * (t.x - uv[2].x) + (uv[2].x - uv[1].x) * (t.y - uv[2].y)) / den;
     float b = ((uv[2].y - uv[0].y) * (t.x - uv[2].x) + (uv[0].x - uv[2].x) * (t.y - uv[2].y)) / den;
     return Vector3Add(Vector3Add(Vector3Scale(pos[0], a), Vector3Scale(pos[1], b)), Vector3Scale(pos[2], 1.0f - a - b));
+}
+
+static void LinesPush(DrawLines *L, Vector3 a, Vector3 b)
+{
+    if (!MS_RESERVE(L->p, L->cap, L->n + 2)) return;
+    L->p[L->n++] = a;
+    L->p[L->n++] = b;
+}
+
+// One border segment a-b (atlas texel corners) of a mask on hit h's surface into L: a box face through
+// its entry's mapping (on a grid its cells), cut at the face's edges; a model slot through every slot
+// triangle it crosses (each triangle's affine map), cut at the triangle's edges
+static void OutlineSegment(DrawMode *dm, const MS_SurfaceHit *h, const MS_PaintEntry *E, const FaceCells *fc, Vector2 a, Vector2 b,
+                           DrawLines *L)
+{
+    if (HitIsBox(h)) {
+        static const Vector2 face[4] = { { 0, 0 }, { 1, 0 }, { 1, 1 }, { 0, 1 } };
+        Vector2 ua, ub;
+        if (fc) {
+            ua = (Vector2){ (a.x - E->x - fc->u0) / (fc->u1 - fc->u0), (a.y - E->y - fc->v0) / (fc->v1 - fc->v0) };
+            ub = (Vector2){ (b.x - E->x - fc->u0) / (fc->u1 - fc->u0), (b.y - E->y - fc->v0) / (fc->v1 - fc->v0) };
+        } else {
+            ua = (Vector2){ (a.x - E->x) / E->w, (a.y - E->y) / E->h };
+            ub = (Vector2){ (b.x - E->x) / E->w, (b.y - E->y) / E->h };
+        }
+        if (ClipSegment(&ua, &ub, face, 4))
+            LinesPush(L, FacePoint(h->hit.obj.index, h->face, ua), FacePoint(h->hit.obj.index, h->face, ub));
+        return;
+    }
+    const MS_ModelInstance *M = &scene->models[h->hit.obj.index];
+    const DrawSlotTris *S = SlotTrisFor(dm, M->file, h->slot);
+    if (!S) return;
+    Vector2 ua = { (a.x - E->x) / E->w, (a.y - E->y) / E->h }, ub = { (b.x - E->x) / E->w, (b.y - E->y) / E->h };
+    Vector2 lo = { fminf(ua.x, ub.x), fminf(ua.y, ub.y) }, hi = { fmaxf(ua.x, ub.x), fmaxf(ua.y, ub.y) };
+    for (int t = 0; t < S->n; t++) {
+        const Vector2 *uvs = &S->uv[3 * t];
+        if (fmaxf(uvs[0].x, fmaxf(uvs[1].x, uvs[2].x)) < lo.x || fminf(uvs[0].x, fminf(uvs[1].x, uvs[2].x)) > hi.x ||
+            fmaxf(uvs[0].y, fmaxf(uvs[1].y, uvs[2].y)) < lo.y || fminf(uvs[0].y, fminf(uvs[1].y, uvs[2].y)) > hi.y)
+            continue;
+        Vector2 p = ua, q = ub;
+        if (!ClipSegment(&p, &q, uvs, 3)) continue;
+        LinesPush(L, Vector3Transform(TriPoint(uvs, &S->pos[3 * t], p), M->transform),
+                  Vector3Transform(TriPoint(uvs, &S->pos[3 * t], q), M->transform));
+    }
+}
+
+// The border of mask m (between its texels > 0 and the others; runs merged) as lines on hit h's
+// surface (docs/painting.md 18.5): built when the selection or a selection shape changed, drawn by
+// DrawModeDrawCursor
+static void OutlineBuild(DrawMode *dm, const DtMask *m, const MS_SurfaceHit *h, DrawLines *out)
+{
+    out->n = 0;
+    if (!m->a || (!HitIsBox(h) && !HitIsModel(h))) return;
+    int e = EntryFor(h->hit.obj, h->material, h->face, h->slot, NULL);
+    if (e < 0) return;
+    const MS_PaintEntry *E = MS_PaintEntryAt(scene, e);
+    FaceCells fc;
+    float rho = MS_PaintGridOf(scene, h->material);
+    bool grid = HitIsBox(h) && rho > 0.0f && FaceGridCells(h->hit.obj.index, h->face, rho, &fc) && fc.u1 > fc.u0 && fc.v1 > fc.v0;
+    if (E->w <= 0 || E->h <= 0) return;
+#define IN(x, y) ((x) >= 0 && (y) >= 0 && (x) < m->w && (y) < m->h && m->a[(size_t)(y) * m->w + (x)])
+    for (int y = 0; y <= m->h; y++)         // the row boundaries: horizontal runs
+        for (int x = 0, start = -1; x <= m->w; x++) {
+            bool edge = x < m->w && IN(x, y - 1) != IN(x, y);
+            if (edge && start < 0) start = x;
+            if (!edge && start >= 0) {
+                OutlineSegment(dm, h, E, grid ? &fc : NULL, (Vector2){ (float)(m->x + start), (float)(m->y + y) },
+                               (Vector2){ (float)(m->x + x), (float)(m->y + y) }, out);
+                start = -1;
+            }
+        }
+    for (int x = 0; x <= m->w; x++)         // the column boundaries: vertical runs
+        for (int y = 0, start = -1; y <= m->h; y++) {
+            bool edge = y < m->h && IN(x - 1, y) != IN(x, y);
+            if (edge && start < 0) start = y;
+            if (!edge && start >= 0) {
+                OutlineSegment(dm, h, E, grid ? &fc : NULL, (Vector2){ (float)(m->x + x), (float)(m->y + start) },
+                               (Vector2){ (float)(m->x + x), (float)(m->y + y) }, out);
+                start = -1;
+            }
+        }
+#undef IN
 }
 
 // A closed or open polyline of n rectangle-texel points drawn on the hovered surface: on a box face
@@ -3541,32 +4655,63 @@ static void CursorFill(const DrawMode *dm, Color col)
         CursorLine(Vector3Transform(S->outline[i], M->transform), Vector3Transform(S->outline[i + 1], M->transform), col);
 }
 
+static void DrawLinesOn(const DrawLines *L, Color col)
+{
+    for (int i = 0; i + 1 < L->n; i += 2) CursorLine(L->p[i], L->p[i + 1], col);
+}
+
+// The selection's outline and a selection shape's preview (UI_MODE_DRAW), then the tool's cursor on
+// the surface under it: the brush footprint (the brush tools and the outlines the brush draws), the
+// spray's disc, the whole-region fill's outline, else a texel marker with a cross
 void DrawModeDrawCursor(const DrawMode *dm, Camera3D cam)
 {
     const MS_SurfaceHit *h = &dm->hover;
     const DrawGeom *g = &dm->hoverGeom;
-    if (!dm->active || !dm->hoverOk || dm->onPanel || !g->ok || dm->hoverVersion != scene->version) return;
-    if (!HitIsBox(h) && !HitIsModel(h)) return;
-    if (g->uv.x < 0.0f || g->w <= 0 || g->h <= 0) return;     // (a model before its unwrap: no paint coordinates yet)
+    bool selLines = dm->active && dm->sel.active && dm->sel.outlineSet && dm->sel.outlineVersion == scene->version && dm->sel.outline.n > 0;
+    bool shapeLines = dm->active && dm->shapeDrag.on && dm->shapeDrag.outline.n > 0;
+    bool cursor = dm->active && dm->hoverOk && !dm->onPanel && g->ok && dm->hoverVersion == scene->version && (HitIsBox(h) || HitIsModel(h)) &&
+                  g->uv.x >= 0.0f && g->w > 0 && g->h > 0;     // (a model before its unwrap: no paint coordinates yet)
+    if (!selLines && !shapeLines && !cursor) return;
     DesignerBeginOverlay3D(cam);
     cursorEye = cam.position;
+    if (selLines) DrawLinesOn(&dm->sel.outline, UI_MODE_DRAW);
+    if (shapeLines) DrawLinesOn(&dm->shapeDrag.outline, Fade(UI_MODE_DRAW, 0.8f));
+    if (!cursor) {
+        DesignerEndOverlay3D();
+        return;
+    }
     Color col = Fade(CURSOR_COLOR, 0.95f);
-    if (dm->pen == PEN_FILL) CursorFill(dm, col);
-    else {
-        // The pen's footprint in the rectangle's texels about the hit (docs/painting.md 7.2; on a grid the
-        // face's cells, 17.2)
-        float tx = g->u0 + Clamp01(g->uv.x) * (g->u1 - g->u0), ty = g->v0 + Clamp01(g->uv.y) * (g->v1 - g->v0);
+    PenKind pen = DrawModeStampPen(dm);
+    DrawTool t = dm->tool;
+    // The tool's footprint in the rectangle's texels about the hit (docs/painting.md 7.2; on a grid the
+    // face's cells, 17.2)
+    float tx = g->u0 + Clamp01(g->uv.x) * (g->u1 - g->u0), ty = g->v0 + Clamp01(g->uv.y) * (g->v1 - g->v0);
+    bool brush = t == TOOL_PENCIL || t == TOOL_ERASER || t == TOOL_BLUR || t == TOOL_JUMBLE || t == TOOL_LINE || t == TOOL_CURVE ||
+                 t == TOOL_RECT || t == TOOL_ELLIPSE;
+    if (pen == PEN_FILL) CursorFill(dm, col);
+    else if (t == TOOL_SPRAY) CursorRing(dm, tx, ty, dm->sprayWidth * 0.5f, tx, ty, col, true);
+    else if (brush) {
         int s = dm->size < 1 ? 1 : dm->size;
-        if (dm->pen == PEN_SQUARE) CursorQuad(dm, floorf(tx) - (float)(s / 2), floorf(ty) - (float)(s / 2), (float)s, tx, ty, col);
+        if (pen == PEN_SQUARE) CursorQuad(dm, floorf(tx) - (float)(s / 2), floorf(ty) - (float)(s / 2), (float)s, tx, ty, col);
         else if (s == 1) CursorQuad(dm, floorf(tx), floorf(ty), 1.0f, tx, ty, col);
         else if (s == 2) CursorQuad(dm, floorf(tx - 0.5f), floorf(ty - 0.5f), 2.0f, tx, ty, col);
         else {
             // (a ring: the texels whose centre is inside it are painted; the eraser's is dashed, the
             // soft pen's solid core a fainter ring inside)
-            CursorRing(dm, tx, ty, s * 0.5f, tx, ty, col, dm->pen == PEN_ERASER);
-            if (dm->pen == PEN_SOFT && dm->hardness > 0.05f && dm->hardness < 0.95f)
+            CursorRing(dm, tx, ty, s * 0.5f, tx, ty, col, pen == PEN_ERASER);
+            if (pen == PEN_SOFT && dm->hardness > 0.05f && dm->hardness < 0.95f)
                 CursorRing(dm, tx, ty, s * 0.5f * dm->hardness, tx, ty, Fade(CURSOR_COLOR, 0.45f), false);
         }
+    } else {
+        // (the click, shape, selection and move tools: the texel under the cursor and a cross 2 texels out)
+        float cx = floorf(tx), cy = floorf(ty);
+        CursorQuad(dm, cx, cy, 1.0f, tx, ty, col);
+        Vector2 a[2] = { { cx - 2.0f, cy + 0.5f }, { cx, cy + 0.5f } }, b[2] = { { cx + 1.0f, cy + 0.5f }, { cx + 3.0f, cy + 0.5f } };
+        Vector2 c[2] = { { cx + 0.5f, cy - 2.0f }, { cx + 0.5f, cy } }, d[2] = { { cx + 0.5f, cy + 1.0f }, { cx + 0.5f, cy + 3.0f } };
+        CursorPolyline(dm, a, 2, tx, ty, col, false);
+        CursorPolyline(dm, b, 2, tx, ty, col, false);
+        CursorPolyline(dm, c, 2, tx, ty, col, false);
+        CursorPolyline(dm, d, 2, tx, ty, col, false);
     }
     DesignerEndOverlay3D();
 }
@@ -3580,12 +4725,22 @@ void DrawModeDrawCursor(const DrawMode *dm, Camera3D cam)
 void DrawModeInit(DrawMode *dm, EditMode *em)
 {
     memset(dm, 0, sizeof(*dm));
-    dm->pen = PEN_ROUND;
+    dm->tool = TOOL_PENCIL;
+    dm->shape = PEN_ROUND;
     dm->size = 4;
     dm->hardness = 0.5f;
-    dm->color = (Color){ 200, 50, 50, 255 };
-    dm->prevColor = (Color){ 255, 255, 255, 255 };
+    dm->fg = (Color){ 200, 50, 50, 255 };
+    dm->bg = (Color){ 255, 255, 255, 255 };
     dm->density = DRAW_DENSITY_DEFAULT;
+    // (the new tools' options: Aseprite's defaults, docs/painting.md 18.6; drawsettings.c's
+    // DrawStateDefaults holds the same values)
+    dm->sprayWidth = 16;
+    dm->spraySpeed = 32;
+    dm->bucket = DRAW_BUCKET_CONTIGUOUS;
+    dm->tolerance = 0;
+    dm->pickAlt = DRAW_PICK_PAINT;
+    dm->pickTool = DRAW_PICK_SCREEN;
+    dm->sel.atlas = dm->sel.lastAtlas = dm->shapeDrag.atlas = -1;
     dm->em = em;
     dm->strokeAtlas = -1;
     em->ed.paintHooks = (MapEditPaintHooks){ dm, HookUndo, HookRedo, HookRebase, HookRelease, HookBytes, HookSave };
@@ -3610,7 +4765,109 @@ void DrawModeFree(DrawMode *dm)
     MsgFree(&dm->target.into);
     MsgFree(&dm->target.texel);
     MsgFree(&dm->target.gridLine);
+    free(dm->palette);
+    free(dm->sel.mask.a);
+    free(dm->sel.regionMask.a);
+    free(dm->sel.last.a);
+    free(dm->shapeDrag.pts.p);
+    free(dm->shapeDrag.preview.a);
+    free(dm->shapeDrag.outline.p);
+    free(dm->sel.outline.p);
     memset(dm, 0, sizeof(*dm));
+}
+
+void DrawModeSetPen(DrawMode *dm, PenKind pen)
+{
+    if (pen == PEN_ERASER) dm->tool = TOOL_ERASER;
+    else if (pen == PEN_FILL) {
+        dm->tool = TOOL_BUCKET;
+        dm->bucket = DRAW_BUCKET_REGION;
+    } else if (pen >= PEN_ROUND && pen <= PEN_SOFT) {
+        dm->tool = TOOL_PENCIL;
+        dm->shape = pen;
+    }
+}
+
+PenKind DrawModeStampPen(const DrawMode *dm)
+{
+    if (dm->tool == TOOL_ERASER) return PEN_ERASER;
+    if (dm->tool == TOOL_BUCKET && dm->bucket == DRAW_BUCKET_REGION) return PEN_FILL;
+    return dm->shape >= PEN_ROUND && dm->shape <= PEN_SOFT ? dm->shape : PEN_ROUND;
+}
+
+// (the kept fields of DrawState and DrawMode, one list: Get, Set and Differs follow it)
+#define KEPT_SCALARS(X) \
+    X(size) X(hardness) X(pixelPerfect) X(fg) X(bg) X(recentCount) X(sprayWidth) X(spraySpeed) X(bucket) \
+    X(tolerance) X(gradientRadial) X(pickAlt) X(pickTool) X(density) X(pixelLook) X(panelHidden)
+
+bool DrawModeGetState(const DrawMode *dm, DrawState *s)
+{
+    s->tool = (int)dm->tool;
+    s->shape = (int)dm->shape;
+#define GET(f) s->f = dm->f;
+    KEPT_SCALARS(GET)
+#undef GET
+    memcpy(s->recent, dm->recent, sizeof(s->recent));
+    s->paletteCount = 0;
+    if (dm->paletteCount > 0 && !MS_RESERVE(s->palette, s->paletteCap, dm->paletteCount)) return false;
+    if (dm->paletteCount > 0) memcpy(s->palette, dm->palette, sizeof(Color) * (size_t)dm->paletteCount);
+    s->paletteCount = dm->paletteCount;
+    return true;
+}
+
+bool DrawModeSetState(DrawMode *dm, const DrawState *s)
+{
+    dm->tool = s->tool >= 0 && s->tool < TOOL_COUNT ? (DrawTool)s->tool : TOOL_PENCIL;
+    dm->shape = s->shape >= PEN_ROUND && s->shape <= PEN_SOFT ? (PenKind)s->shape : PEN_ROUND;
+#define SET(f) dm->f = s->f;
+    KEPT_SCALARS(SET)
+#undef SET
+    dm->size = ClampI(dm->size, 1, DRAW_SIZE_MAX);
+    dm->hardness = Clamp01(dm->hardness);
+    dm->recentCount = ClampI(dm->recentCount, 0, DRAW_RECENT_COLORS);
+    memcpy(dm->recent, s->recent, sizeof(dm->recent));
+    dm->sprayWidth = ClampI(dm->sprayWidth, 1, 256);
+    dm->spraySpeed = ClampI(dm->spraySpeed, 1, 256);
+    if ((int)dm->bucket < DRAW_BUCKET_CONTIGUOUS || dm->bucket > DRAW_BUCKET_REGION) dm->bucket = DRAW_BUCKET_CONTIGUOUS;
+    dm->tolerance = ClampI(dm->tolerance, 0, 255);
+    if (dm->pickAlt != DRAW_PICK_SCREEN) dm->pickAlt = DRAW_PICK_PAINT;
+    if (dm->pickTool != DRAW_PICK_PAINT) dm->pickTool = DRAW_PICK_SCREEN;
+    if (!(dm->density >= 8.0f && dm->density <= 512.0f)) dm->density = DRAW_DENSITY_DEFAULT;
+    int n = s->paletteCount > 0 ? s->paletteCount : 0;
+    if (n > 0 && !MS_RESERVE(dm->palette, dm->paletteCap, n)) return false;
+    if (n > 0) memcpy(dm->palette, s->palette, sizeof(Color) * (size_t)n);
+    dm->paletteCount = n;
+    return true;
+}
+
+bool DrawModeStateDiffers(const DrawMode *dm, const DrawState *s)
+{
+    if (s->tool != (int)dm->tool || s->shape != (int)dm->shape) return true;
+#define DIFF(f) if (memcmp(&s->f, &dm->f, sizeof(s->f)) != 0) return true;
+    KEPT_SCALARS(DIFF)
+#undef DIFF
+    if (memcmp(s->recent, dm->recent, sizeof(Color) * (size_t)ClampI(dm->recentCount, 0, DRAW_RECENT_COLORS)) != 0) return true;
+    if (s->paletteCount != dm->paletteCount) return true;
+    return dm->paletteCount > 0 && memcmp(s->palette, dm->palette, sizeof(Color) * (size_t)dm->paletteCount) != 0;
+}
+
+bool DrawModeScreenWanted(const DrawMode *dm, int *x, int *y)
+{
+    if (!dm->active || !dm->screenWant) return false;
+    *x = dm->screenX;
+    *y = dm->screenY;
+    return true;
+}
+
+// (phase 5 says what it picked, as the paint eyedropper does)
+void DrawModeScreenPicked(DrawMode *dm, bool ok, Color c)
+{
+    dm->screenWant = false;
+    if (!ok) { SayStatic(dm, true, "the screen pixel could not be read"); return; }
+    c.a = 255;
+    if (dm->screenToFg) SetColor(dm, c);
+    else dm->bg = c;
+    Sayf(dm, false, "picked #%02X%02X%02X (the screen)", c.r, c.g, c.b);
 }
 
 // A surface hit made from paint coordinates (a script's `uv`): box face f at face coordinates (u, v),
@@ -3769,8 +5026,15 @@ static unsigned char ScriptReload(DrawMode *dm, EditMode *em, Designer *d, MonoM
 // one frame of LMB drag (px: through the screen-space sampling; uv: straight in paint coordinates).
 // Returns 0 done, 1 failed; the script's line in *line either way
 static unsigned char ScriptStroke(DrawMode *dm, EditMode *em, Camera3D cam, int w, int h, bool uv, MS_ObjRef obj, int fs,
-                                  const Vector2 *pts, int count, MonoMsg *line)
+                                  const Vector2 *pts, int count, bool rmb, MonoMsg *line)
 {
+    DrawToolKind kind = DrawToolKindOf(dm->tool);
+    bool bucket = dm->tool == TOOL_BUCKET && dm->bucket != DRAW_BUCKET_REGION;
+    if (kind != TOOLKIND_BRUSH && !(dm->tool == TOOL_BUCKET)) {
+        MsgSetf(line, "%s is not a brush or click tool: use %s", DrawToolScriptName(dm->tool),
+                kind == TOOLKIND_SELECT ? "select" : dm->tool == TOOL_MOVE ? "move" : dm->tool == TOOL_EYEDROPPER ? "pick" : "shape");
+        return 1;
+    }
     MS_SurfaceHit hit;
     if (uv) {
         // (a model that needs an unwrap: made first, so its paint coordinates exist; synchronous here)
@@ -3799,19 +5063,37 @@ static unsigned char ScriptStroke(DrawMode *dm, EditMode *em, Camera3D cam, int 
     unsigned int version = scene->version;
     MsgSetStatic(&dm->message, "");     // (what the stroke says, alone)
     dm->messageError = false;
+    if (bucket) {       // (contiguous / global: one click at the first point, one step)
+        bool begun = ShapeBegin(dm, em, &hit, TOOL_BUCKET, rmb, DT_SEL_REPLACE);
+        if (begun) ShapeCommit(dm, em);
+        MsgSetf(line, "bucket: %s", MsgText(&dm->message));
+        return begun && !dm->messageError ? 0 : 1;
+    }
     if (!StrokeBegin(dm, em, &hit)) { MsgSetf(line, "%s", MsgText(&dm->message)); return 1; }
+    dm->strokeRmb = rmb;
+    StepTool(dm, dm->stroke, dm->tool, rmb);
+    bool spray = dm->tool == TOOL_SPRAY;
     Probe a = ProbeHit(dm, &hit, pts[0]);
     if (!dm->stroking) { MsgSetf(line, "%s", MsgText(&dm->message)); return 1; }
-    if (a.ok) StampProbe(dm, &a);
+    if (a.ok && spray) SprayTick(dm, &a);       // (each point of a spray stroke: one tick, 1/60 s)
+    else if (a.ok) StampProbe(dm, &a);
+    StrokeFrame(dm);
     Flush(dm);
-    for (int i = 1; i < count && dm->pen != PEN_FILL && dm->stroking; i++) {
-        if (uv) UvSegment(dm, obj, fs, pts[i - 1], pts[i]);
+    for (int i = 1; i < count && DrawModeStampPen(dm) != PEN_FILL && dm->stroking; i++) {
+        if (spray) {
+            MS_SurfaceHit hb;
+            if (uv ? UvHit(obj, fs, pts[i].x, pts[i].y, &hb) : (hb = CastAt(cam, w, h, pts[i]), true)) {
+                Probe b = ProbeHit(dm, &hb, pts[i]);
+                SprayTick(dm, &b);
+            }
+        } else if (uv) UvSegment(dm, obj, fs, pts[i - 1], pts[i]);
         else {
             MS_SurfaceHit hb = CastAt(cam, w, h, pts[i]);
             Probe b = ProbeHit(dm, &hb, pts[i]);
             StrokeSegment(dm, cam, w, h, a, b);
             a = b;
         }
+        StrokeFrame(dm);
         Flush(dm);     // (a frame: one upload per atlas)
     }
     int samples = dm->stroke ? dm->stroke->sampleCount : 0;
@@ -3823,6 +5105,119 @@ static unsigned char ScriptStroke(DrawMode *dm, EditMode *em, Camera3D cam, int 
             failed ? " -- " : "", !failed ? "" : failMessage ? failMessage : "out of memory");
     free(failMessage);
     return failed || dm->messageError ? 1 : 0;
+}
+
+// A script shape's point on the shape's region: px through the shot's camera as the mouse (ShapeTexel:
+// off the region, its plane), uv straight from paint coordinates; clamped to the region
+static bool ScriptShapeTexel(DrawMode *dm, Camera3D cam, int w, int h, bool uv, MS_ObjRef obj, int fs, Vector2 pt, DtPoint *out)
+{
+    if (!uv) return ShapeTexel(dm, GetScreenToWorldRayEx(pt, cam, w, h), out);
+    MS_SurfaceHit hit;
+    PaintRegion r, want = ToPaintRegion(dm->shapeDrag.region);
+    float tx, ty;
+    int e;
+    if (!UvHit(obj, fs, pt.x, pt.y, &hit) || (e = EntryFor(hit.hit.obj, hit.material, hit.face, hit.slot, NULL)) < 0 ||
+        !HitRegion(dm, &hit, e, &r, &tx, &ty))
+        return false;
+    *out = ClampToRegion((DtPoint){ (int)floorf(tx), (int)floorf(ty) }, &want);
+    return true;
+}
+
+// `shape` and `select` (docs/painting.md 18.10): the tool through these points as one press, drag (or
+// clicks) and release. Returns 0 done, 1 failed; the script's line in *line either way
+static unsigned char ScriptShape(DrawMode *dm, EditMode *em, Camera3D cam, int w, int h, DrawTool tool, bool uv, MS_ObjRef obj, int fs,
+                                 const Vector2 *pts, int count, bool rmb, DtSelOp op, MonoMsg *line)
+{
+    bool many = tool == TOOL_CONTOUR || tool == TOOL_POLYGON || tool == TOOL_LASSO || tool == TOOL_LASSO_POLY;
+    int need = tool == TOOL_CURVE ? 4 : tool == TOOL_WAND ? 1 : 2;
+    if (many ? count < 3 : count != need) {
+        if (many) MsgSetf(line, "%s needs 3 or more points, not %d", DrawToolScriptName(tool), count);
+        else MsgSetf(line, "%s needs %d point%s, not %d", DrawToolScriptName(tool), need, need == 1 ? "" : "s", count);
+        return 1;
+    }
+    MS_SurfaceHit hit;
+    if (uv ? !UvHit(obj, fs, pts[0].x, pts[0].y, &hit) : (hit = CastAt(cam, w, h, pts[0]), false)) {
+        MsgSetStatic(line, "no such surface point (face / slot, paint uv)");
+        return 1;
+    }
+    HoverHit(dm, &hit);
+    if (!dm->hoverOk) {
+        if (dm->refusalCode >= 2) MsgSetf(line, "%s", MsgText(&dm->refusal));
+        else MsgSetStatic(line, "nothing to paint there");
+        return 1;
+    }
+    MsgSetStatic(&dm->message, "");
+    dm->messageError = false;
+    if (tool == TOOL_WAND) WandAt(dm, &hit, op);
+    else if (ShapeBegin(dm, em, &hit, tool, rmb, op)) {
+        DrawShape *S = &dm->shapeDrag;
+        DtPointsClear(&S->pts);
+        for (int i = 0; i < count; i++) {
+            DtPoint q;
+            if (!ScriptShapeTexel(dm, cam, w, h, uv, obj, fs, pts[i], &q)) {
+                ShapeCancel(dm);
+                MsgSetf(line, "%s: point %d is not on the surface's plane", DrawToolScriptName(tool), i + 1);
+                return 1;
+            }
+            DtPointsPush(&S->pts, q.x, q.y);
+        }
+        ShapeCommit(dm, em);
+    }
+    MsgSetf(line, "%s: %s", DrawToolScriptName(tool), MsgText(&dm->message));
+    return dm->messageError ? 1 : 0;
+}
+
+// --paint-script `print`'s tool and selection lines
+static void PrintTool(const DrawMode *dm)
+{
+    static const char *const SHAPES[3] = { "round", "square", "soft" };
+    printf("paint:   tool %s brush %s size %d pixelperfect %s fg %d %d %d %d bg %d %d %d %d spray %d %d seed %u bucket %s %d gradient %s palette %d",
+           DrawToolScriptName(dm->tool), SHAPES[DrawModeStampPen(dm) <= PEN_SOFT ? DrawModeStampPen(dm) : 0], dm->size,
+           dm->pixelPerfect ? "on" : "off", dm->fg.r, dm->fg.g, dm->fg.b, dm->fg.a, dm->bg.r, dm->bg.g, dm->bg.b, dm->bg.a, dm->sprayWidth,
+           dm->spraySpeed, (unsigned int)dm->seed, dm->bucket == DRAW_BUCKET_GLOBAL ? "global" : dm->bucket == DRAW_BUCKET_REGION ? "region" : "contiguous",
+           dm->tolerance, dm->gradientRadial ? "radial" : "linear", dm->paletteCount);
+    for (int i = 0; i < dm->paletteCount; i++) printf(" #%02X%02X%02X%02X", dm->palette[i].r, dm->palette[i].g, dm->palette[i].b, dm->palette[i].a);
+    printf("\n");
+    const DrawSelection *S = &dm->sel;
+    int x0, y0, x1, y1;
+    if (!S->active || S->atlas < 0 || S->atlas >= dm->atlasCount || !DtMaskBounds(&S->mask, &x0, &y0, &x1, &y1)) {
+        printf("paint:   selection none%s\n", S->lastSet ? " (reselect kept)" : "");
+        return;
+    }
+    printf("paint:   selection %s region %d %d %d %d island %d bounds %d %d %d %d hash %016llx\n", dm->atlases[S->atlas].rel, S->region.x,
+           S->region.y, S->region.w, S->region.h, S->region.island, x0, y0, x1, y1, (unsigned long long)DtMaskHash(&S->mask));
+}
+
+// A script's points: `px <x> <y> ...` or `uv <id N:i | entity HEX:i> <face|slot> <u> <v> ...` from w[*at]
+// (n words); false: not that form
+static bool ScriptPoints(char **wd, int n, int at, bool *uv, MS_ObjRef *obj, int *fs, Vector2 **pts, int *ptCap, int *count)
+{
+    if (at >= n || (strcmp(wd[at], "px") != 0 && strcmp(wd[at], "uv") != 0)) return false;
+    *uv = wd[at][0] == 'u';
+    at++;
+    *fs = -1;
+    *obj = (MS_ObjRef){ MS_OBJ_NONE, -1 };
+    if (*uv) {
+        float v = 0.0f;
+        if (!ParseEntity(wd, n, &at, obj) || at >= n || !ScriptNum(wd[at], &v) || v < 0) return false;
+        *fs = (int)v;
+        at++;
+    }
+    *count = (n - at) / 2;
+    if ((n - at) % 2 != 0 || *count < 1 || !MS_RESERVE(*pts, *ptCap, *count)) return false;
+    for (int k = 0; k < *count; k++)
+        if (!ScriptNum(wd[at + 2 * k], &(*pts)[k].x) || !ScriptNum(wd[at + 2 * k + 1], &(*pts)[k].y)) return false;
+    return true;
+}
+
+static bool ScriptColor(char **wd, int n, Color *c)
+{
+    float f[4];
+    if (n != 4 && n != 5) return false;
+    for (int k = 0; k < n - 1; k++)
+        if (!ScriptNum(wd[1 + k], &f[k]) || f[k] < 0 || f[k] > 255) return false;
+    *c = (Color){ (unsigned char)f[0], (unsigned char)f[1], (unsigned char)f[2], n == 5 ? (unsigned char)f[3] : 255 };
+    return true;
 }
 
 // --paint-script <file> (docs/painting.md 14): one command per line, '#' starts a comment; each prints
@@ -3852,6 +5247,27 @@ static unsigned char ScriptStroke(DrawMode *dm, EditMode *em, Camera3D cam, int 
 //                                      (reload, the unsaved edits and strokes rebased)
 //   put <file> <package path>          a package file becomes the file's bytes (a PNG a request
 //                                      repainted), no reload yet; reload: the reload now
+// The tools (docs/painting.md 18.10); `stroke` and `dab` use the current tool when it is a brush or the
+// bucket (spray: each point one tick of dots; bucket contiguous / global: a click at the first point):
+//   tool <name>                        pencil eraser spray bucket gradient line curve rect rectfill ellipse
+//                                      ellipsefill contour polygon marquee ellipsemarquee lasso polylasso
+//                                      wand move blur jumble eyedropper
+//   brush <round|square|soft>   pixelperfect <on|off>   swap   gradient <linear|radial>
+//   fg <r> <g> <b> [<a>] / bg ...      the colours (color is fg)
+//   spray <width> <speed> <seed>       the spray's options and the next strokes' seed (+1 per stroke)
+//   bucket <contiguous|global|region> [<tolerance>]
+//   button <left|right>                the button of the next strokes, shapes and picks (right: bg)
+//   shape px <x0> <y0> ... / shape uv <obj> <face|slot> <u0> <v0> ...
+//                                      the current shape tool through these points as one stroke (line,
+//                                      rect, ellipse, gradient: 2; curve: 4, a b c1 c2; contour, polygon: 3+);
+//                                      a point off the surface maps through its plane, clamped to the region
+//   shiftclick px <x> <y>              SHIFT+click with the pencil / eraser (a line from its last point)
+//   select <rect|ellipse|lasso|wand> px|uv ... [add|sub|and]    a selection (2, 2, 3+, 1 points)
+//   selectall / deselect / reselect / invert    on the surface painted (or hovered) last
+//   move <dx> <dy>                     the move tool: the selection's pixels (none: the region's)
+//   pick paint px <x> <y>              the paint eyedropper into fg (button right: bg)
+//   print                              also: the tool and its options, the colours, the palette, the
+//                                      selection (its region, bounds and DtMaskHash)
 int DrawModeRunScript(DrawMode *dm, EditMode *em, Designer *d, Camera3D cam, int w, int h, const char *path)
 {
     char *text = LoadFileText(path);
@@ -3870,6 +5286,7 @@ int DrawModeRunScript(DrawMode *dm, EditMode *em, Designer *d, Camera3D cam, int
     // stroke; pixel keeps acting on the last stroke's surface, as before the paint-grid round)
     MS_SurfaceHit hoverHit = { 0 };
     bool hoverNewer = false;
+    bool rmb = false;           // `button right`: the next strokes, shapes and picks use the background colour
     MonoMsg msg = { 0 };        // (each command's line)
     for (char *line = text; line && status == 0; ) {
         char *nl = strchr(line, '\n');
@@ -3891,7 +5308,7 @@ int DrawModeRunScript(DrawMode *dm, EditMode *em, Designer *d, Camera3D cam, int
         dm->messageSaid = false;
         if (strcmp(wd[0], "pen") == 0 && n == 2) {
             static const char *const NAMES[PEN_COUNT] = { "round", "square", "soft", "eraser", "fill" };
-            for (int k = 0; k < PEN_COUNT; k++) if (strcmp(wd[1], NAMES[k]) == 0) { dm->pen = (PenKind)k; ok = true; }
+            for (int k = 0; k < PEN_COUNT; k++) if (strcmp(wd[1], NAMES[k]) == 0) { DrawModeSetPen(dm, (PenKind)k); ok = true; }
             MsgSetf(&msg, ok ? "pen %s" : "pen <round|square|soft|eraser|fill>, not %s", wd[1]);
         } else if (strcmp(wd[0], "size") == 0 && n == 2 && ScriptNum(wd[1], &f[0]) && f[0] >= 1 && f[0] <= DRAW_SIZE_MAX) {
             dm->size = (int)f[0];
@@ -3905,7 +5322,7 @@ int DrawModeRunScript(DrawMode *dm, EditMode *em, Designer *d, Camera3D cam, int
             ok = true;
             for (int k = 0; k < n - 1; k++) ok = ok && ScriptNum(wd[1 + k], &f[k]) && f[k] >= 0 && f[k] <= 255;
             if (ok) SetColor(dm, (Color){ (unsigned char)f[0], (unsigned char)f[1], (unsigned char)f[2], n == 5 ? (unsigned char)f[3] : 255 });
-            if (ok) MsgSetf(&msg, "color %d %d %d %d", dm->color.r, dm->color.g, dm->color.b, dm->color.a);
+            if (ok) MsgSetf(&msg, "color %d %d %d %d", dm->fg.r, dm->fg.g, dm->fg.b, dm->fg.a);
             else MsgSetStatic(&msg, "color <r> <g> <b> [<a>] (0-255)");
         } else if (strcmp(wd[0], "density") == 0 && n == 2 && ScriptNum(wd[1], &f[0]) && f[0] >= 8 && f[0] <= 512) {
             dm->density = f[0];
@@ -3946,7 +5363,7 @@ int DrawModeRunScript(DrawMode *dm, EditMode *em, Designer *d, Camera3D cam, int
             ok = ok && (n - at) % 2 == 0 && count >= 1 && (!dab || count == 1) && MS_RESERVE(pts, ptCap, count);
             for (int k = 0; ok && k < count; k++) ok = ScriptNum(wd[at + 2 * k], &pts[k].x) && ScriptNum(wd[at + 2 * k + 1], &pts[k].y);
             if (!ok) MsgSetf(&msg, "%s px <x> <y> ... | %s uv <id N:i | entity HEX:i> <face|slot> <u> <v> ...", wd[0], wd[0]);
-            else ok = ScriptStroke(dm, em, cam, w, h, uv, obj, fs, pts, count, &msg) == 0;     // (0: done)
+            else ok = ScriptStroke(dm, em, cam, w, h, uv, obj, fs, pts, count, rmb, &msg) == 0;     // (0: done)
             hoverNewer = false;
         } else if (strcmp(wd[0], "hover") == 0 && n == 4 && strcmp(wd[1], "px") == 0 && ScriptNum(wd[2], &f[0]) && ScriptNum(wd[3], &f[1])) {
             DrawModeHover(dm, cam, (Vector2){ f[0], f[1] }, w, h);
@@ -3997,6 +5414,7 @@ int DrawModeRunScript(DrawMode *dm, EditMode *em, Designer *d, Camera3D cam, int
             MsgSetf(&msg, "poll: %d reload%s, %d failed", reloads, reloads == 1 ? "" : "s", failed);
         } else if (strcmp(wd[0], "print") == 0 && n == 1) {
             PrintState(dm, em);
+            PrintTool(dm);
             ok = true;
             MsgSetf(&msg, "%d atlas%s, %d entr%s", dm->atlasCount, dm->atlasCount == 1 ? "" : "es", MS_PaintEntryCount(scene),
                     MS_PaintEntryCount(scene) == 1 ? "y" : "ies");
@@ -4013,12 +5431,174 @@ int DrawModeRunScript(DrawMode *dm, EditMode *em, Designer *d, Camera3D cam, int
             else if (wd[0][0] == 'p') { ok = true; MsgSetf(&msg, "wrote %.600s (no reload yet)", dst); }
             else ok = ScriptReload(dm, em, d, &msg) == 0;       // (0: reloaded)
             if (bytes) UnloadFileData(bytes);
-        } else MsgSetf(&msg, "unknown command '%s' (pen size hardness color density pixel faces resize clear stroke dab "
-                             "hover pick undo redo save print poll disk put reload)", wd[0]);
+        } else if (strcmp(wd[0], "tool") == 0 && n == 2) {
+            int t = DrawToolByScriptName(wd[1]);
+            ok = t >= 0;
+            if (ok) {
+                ShapeCancel(dm);
+                dm->tool = (DrawTool)t;
+                MsgSetf(&msg, "tool %s", DrawToolName(dm->tool));
+            } else MsgSetf(&msg, "tool: no tool named %s", wd[1]);
+        } else if (strcmp(wd[0], "brush") == 0 && n == 2) {
+            static const char *const SHAPES[3] = { "round", "square", "soft" };
+            for (int k = 0; k < 3; k++)
+                if (strcmp(wd[1], SHAPES[k]) == 0) { dm->shape = (PenKind)k; ok = true; }
+            MsgSetf(&msg, ok ? "brush %s" : "brush <round|square|soft>, not %s", wd[1]);
+        } else if (strcmp(wd[0], "pixelperfect") == 0 && n == 2 && (strcmp(wd[1], "on") == 0 || strcmp(wd[1], "off") == 0)) {
+            dm->pixelPerfect = wd[1][1] == 'n';
+            ok = true;
+            MsgSetf(&msg, "pixel-perfect %s", wd[1]);
+        } else if ((strcmp(wd[0], "fg") == 0 || strcmp(wd[0], "bg") == 0) && (n == 4 || n == 5)) {
+            Color c;
+            ok = ScriptColor(wd, n, &c);
+            if (ok && wd[0][0] == 'f') SetColor(dm, c);
+            else if (ok) {
+                dm->bg = c;
+                AddRecent(dm, c);
+            }
+            if (ok) MsgSetf(&msg, "%s %d %d %d %d", wd[0], c.r, c.g, c.b, c.a);
+            else MsgSetf(&msg, "%s <r> <g> <b> [<a>] (0-255)", wd[0]);
+        } else if (strcmp(wd[0], "swap") == 0 && n == 1) {
+            Color c = dm->fg;
+            dm->fg = dm->bg;
+            dm->bg = c;
+            ok = true;
+            MsgSetStatic(&msg, "swapped fg and bg");
+        } else if (strcmp(wd[0], "spray") == 0 && n == 4 && ScriptNum(wd[1], &f[0]) && ScriptNum(wd[2], &f[1]) && ScriptNum(wd[3], &f[2]) &&
+                   f[0] >= 1 && f[0] <= 256 && f[1] >= 1 && f[1] <= 256 && f[2] >= 0 && f[2] <= 4294967295.0f) {
+            dm->sprayWidth = (int)f[0];
+            dm->spraySpeed = (int)f[1];
+            dm->seed = (uint32_t)strtoul(wd[3], NULL, 10);
+            ok = true;
+            MsgSetf(&msg, "spray width %d speed %d seed %u", dm->sprayWidth, dm->spraySpeed, (unsigned int)dm->seed);
+        } else if (strcmp(wd[0], "bucket") == 0 && (n == 2 || n == 3)) {
+            static const char *const MODES[3] = { "contiguous", "global", "region" };
+            int mode = -1;
+            for (int k = 0; k < 3; k++)
+                if (strcmp(wd[1], MODES[k]) == 0) mode = k;
+            ok = mode >= 0 && (n == 2 || (ScriptNum(wd[2], &f[0]) && f[0] >= 0 && f[0] <= 255));
+            if (ok) {
+                dm->bucket = (DrawBucketMode)mode;
+                if (n == 3) dm->tolerance = (int)f[0];
+                MsgSetf(&msg, "bucket %s tolerance %d", MODES[mode], dm->tolerance);
+            } else MsgSetStatic(&msg, "bucket <contiguous|global|region> [<tolerance 0-255>]");
+        } else if (strcmp(wd[0], "gradient") == 0 && n == 2 && (strcmp(wd[1], "linear") == 0 || strcmp(wd[1], "radial") == 0)) {
+            dm->gradientRadial = wd[1][0] == 'r';
+            ok = true;
+            MsgSetf(&msg, "gradient %s", wd[1]);
+        } else if (strcmp(wd[0], "button") == 0 && n == 2 && (strcmp(wd[1], "left") == 0 || strcmp(wd[1], "right") == 0)) {
+            rmb = wd[1][0] == 'r';
+            ok = true;
+            MsgSetf(&msg, "button %s", wd[1]);
+        } else if (strcmp(wd[0], "shape") == 0 || strcmp(wd[0], "select") == 0) {
+            // shape px|uv ...: the current shape tool; select <rect|ellipse|lasso|wand> px|uv ... [add|sub|and]
+            bool sel = wd[0][1] == 'e';
+            DtSelOp op = DT_SEL_REPLACE;
+            int words = n;
+            if (sel && n > 2) {
+                const char *last = wd[n - 1];
+                op = strcmp(last, "add") == 0 ? DT_SEL_ADD : strcmp(last, "sub") == 0 ? DT_SEL_SUB : strcmp(last, "and") == 0 ? DT_SEL_AND : DT_SEL_REPLACE;
+                if (op != DT_SEL_REPLACE) words--;
+            }
+            int tool = -1;
+            if (!sel) tool = DrawToolKindOf(dm->tool) == TOOLKIND_SHAPE ? (int)dm->tool : -1;
+            else if (n > 1) {
+                static const char *const KINDS[4] = { "rect", "ellipse", "lasso", "wand" };
+                static const DrawTool TOOLS[4] = { TOOL_MARQUEE, TOOL_MARQUEE_ELLIPSE, TOOL_LASSO, TOOL_WAND };
+                for (int k = 0; k < 4; k++)
+                    if (strcmp(wd[1], KINDS[k]) == 0) tool = TOOLS[k];
+            }
+            bool uv;
+            int count, fs;
+            MS_ObjRef obj;
+            if (tool < 0 && !sel) MsgSetf(&msg, "shape: %s is not a shape tool (line, curve, rect, rectfill, ellipse, ellipsefill, gradient, contour, polygon)",
+                                          DrawToolScriptName(dm->tool));
+            else if (tool < 0) MsgSetStatic(&msg, "select <rect|ellipse|lasso|wand> px|uv ... [add|sub|and]");
+            else if (!ScriptPoints(wd, words, sel ? 2 : 1, &uv, &obj, &fs, &pts, &ptCap, &count))
+                MsgSetf(&msg, "%s px <x> <y> ... | %s uv <id N:i | entity HEX:i> <face|slot> <u> <v> ...", wd[0], wd[0]);
+            else ok = ScriptShape(dm, em, cam, w, h, (DrawTool)tool, uv, obj, fs, pts, count, rmb && !sel, op, &msg) == 0;
+            hoverNewer = false;
+        } else if (strcmp(wd[0], "shiftclick") == 0 && n == 4 && strcmp(wd[1], "px") == 0 && ScriptNum(wd[2], &f[0]) && ScriptNum(wd[3], &f[1])) {
+            if (dm->tool != TOOL_PENCIL && dm->tool != TOOL_ERASER) MsgSetStatic(&msg, "shiftclick: the pencil or the eraser");
+            else {
+                MS_SurfaceHit hit = CastAt(cam, w, h, (Vector2){ f[0], f[1] });
+                HoverHit(dm, &hit);
+                MsgSetStatic(&dm->message, "");
+                dm->messageError = false;
+                if (dm->hoverOk) PressStroke(dm, em, &hit, (Vector2){ f[0], f[1] }, rmb, true);
+                if (!dm->hoverOk) MsgSetStatic(&msg, "shiftclick: nothing to paint there");
+                else if (dm->stroking) {
+                    int samples = dm->stroke->sampleCount;
+                    StrokeEnd(dm, em);
+                    ok = !dm->messageError;
+                    MsgSetf(&msg, "shiftclick: %s (%d samples)", MsgText(&dm->message), samples);
+                } else MsgSetf(&msg, "shiftclick: %s", MsgText(&dm->message));
+            }
+            hoverNewer = false;
+        } else if ((strcmp(wd[0], "selectall") == 0 || strcmp(wd[0], "deselect") == 0 || strcmp(wd[0], "reselect") == 0 ||
+                    strcmp(wd[0], "invert") == 0) && n == 1) {
+            dm->messageError = false;
+            if (wd[0][0] == 's') SelectAllAt(dm, hoverNewer ? &hoverHit : dm->lastHitSet ? &dm->lastHit : NULL);
+            else if (wd[0][0] == 'd') {
+                ok = dm->sel.active;
+                Deselect(dm);
+            } else if (wd[0][0] == 'r') Reselect(dm);
+            else SelectInvert(dm);
+            ok = !dm->messageError && (wd[0][0] != 'd' || ok);
+            MsgSetf(&msg, "%s: %s", wd[0], dm->messageSaid ? MsgText(&dm->message) : "nothing selected");
+        } else if (strcmp(wd[0], "move") == 0 && n == 3 && ScriptNum(wd[1], &f[0]) && ScriptNum(wd[2], &f[1])) {
+            // the move tool on the selection's region (none: the region of the surface painted or hovered last)
+            const MS_SurfaceHit *on = dm->sel.active ? &dm->sel.hit : hoverNewer ? &hoverHit : dm->lastHitSet ? &dm->lastHit : NULL;
+            MsgSetStatic(&dm->message, "");
+            dm->messageError = false;
+            if (!on) MsgSetStatic(&msg, "move: nothing selected or painted yet");
+            else if (ShapeBegin(dm, em, on, TOOL_MOVE, false, DT_SEL_REPLACE)) {
+                DrawShape *S = &dm->shapeDrag;
+                S->pts.p[1] = (DtPoint){ S->pts.p[0].x + (int)f[0], S->pts.p[0].y + (int)f[1] };
+                ShapeCommit(dm, em);
+                ok = !dm->messageError;
+                MsgSetf(&msg, "move %d %d: %s", (int)f[0], (int)f[1], MsgText(&dm->message));
+            } else MsgSetf(&msg, "move: %s", MsgText(&dm->message));
+        } else if (strcmp(wd[0], "pick") == 0 && n == 5 && strcmp(wd[2], "px") == 0 && strcmp(wd[1], "paint") == 0 && ScriptNum(wd[3], &f[0]) &&
+                   ScriptNum(wd[4], &f[1])) {
+            MS_SurfaceHit hit = CastAt(cam, w, h, (Vector2){ f[0], f[1] });
+            Color c = { 0 };
+            bool paint = false;
+            ok = Eyedropper(dm, &hit, cam, w, h, (Vector2){ f[0], f[1] }, &c, &paint);
+            if (ok && rmb) {
+                dm->bg = c;
+                AddRecent(dm, c);
+            } else if (ok) SetColor(dm, c);
+            if (ok) MsgSetf(&msg, "picked %d %d %d %d into %s (%s)", c.r, c.g, c.b, c.a, rmb ? "bg" : "fg", paint ? "the paint" : "the albedo");
+            else MsgSetStatic(&msg, "nothing there");
+        } else if (strcmp(wd[0], "pick") == 0 && n >= 2 && strcmp(wd[1], "screen") == 0) {
+            // (docs/painting.md 18.8: main.c's screenRead draws the scene with the shot's camera into the
+            // shot target and reads the one pixel, no HUD)
+            Color c = { 0 };
+            ok = n == 5 && strcmp(wd[2], "px") == 0 && ScriptNum(wd[3], &f[0]) && ScriptNum(wd[4], &f[1]) &&
+                 f[0] >= 0 && f[1] >= 0 && f[0] < w && f[1] < h;
+            if (!ok) MsgSetStatic(&msg, "pick screen px <x> <y> (inside the shot)");
+            else if (!dm->screenRead) {
+                ok = false;
+                MsgSetStatic(&msg, "pick screen: no scene image to read here");
+            } else if (!(ok = dm->screenRead(dm->screenUser, (int)f[0], (int)f[1], &c))) {
+                MsgSetStatic(&msg, "pick screen: the pixel could not be read");
+            } else {
+                c.a = 255;
+                if (rmb) {
+                    dm->bg = c;
+                    AddRecent(dm, c);
+                } else SetColor(dm, c);
+                MsgSetf(&msg, "picked %d %d %d %d into %s (the screen)", c.r, c.g, c.b, c.a, rmb ? "bg" : "fg");
+            }
+        } else MsgSetf(&msg, "unknown command '%s' (pen size hardness color density pixel faces resize clear stroke dab hover pick undo redo "
+                             "save print poll disk put reload tool brush pixelperfect fg bg swap spray bucket gradient button shape "
+                             "shiftclick select selectall deselect reselect invert move)", wd[0]);
         printf("paint: %s:%d: %s%s\n", path, lineNo, ok ? "" : "FAILED: ", MsgText(&msg));
         if (!ok) status = 1;
     }
     Flush(dm);
+    PrepareSelection(dm);       // (the shot shows the selection's outline)
     free(pts);
     MsgFree(&msg);
     fflush(stdout);

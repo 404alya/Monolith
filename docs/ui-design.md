@@ -106,6 +106,18 @@ weight sits on the grid; bolder weights are not used.
 - **Slider**: a 2 px track (`UI_LINE`), its filled part `UI_DIM`, a 12 px disc thumb (`UI_INK`;
   hover and held `UI_HOT`), which glows while held (the halo sprite in white, 45 %).
 - **Swatch**: selected: 2 px `UI_HOT` outline. Otherwise 1 px `UI_LINE`, `UI_DIM` on hover.
+- **Colour selector** (`UiSatValSquare`, `UiHueStrip`, `UiAlphaStrip`; the draw panel's colour
+  section, Aseprite's): a saturation / value square, a vertical hue strip (red at both ends) and an
+  alpha strip over the swatch checker. Their **gradients are content**, the colours they pick, not
+  chrome, so they are the one place the panel is coloured; the chrome around them stays monochrome:
+  a 1 px `UI_LINE` edge, and markers in `UI_INK` (`UI_HOT` while dragged) over a dark edge
+  (black 160) so they read on any colour: a ring in the square, a 3 px bar across each strip.
+- **Icon button grid** (the draw panel's tools): buttons as above with no label, each icon drawn
+  from atlas shapes and lines in one ink (`UI_INK`, `UI_ON_INK` on the button that is on), about
+  18 × 18 px; the name and the key of the tool under the cursor (or the one on) on the line below,
+  key caps as in hints.
+- **fg / bg squares**: two swatches overlapping (the background one down and right, behind), labelled
+  `fg` / `bg` in `UI_XS` `UI_DIM`.
 - **Toast** (`UiToast`): the panel with its halo, faded as a whole. A status toast (error, done)
   adds a mark bar in its colour; the text stays Outfit (sentences with paths read badly in a
   pixel face).

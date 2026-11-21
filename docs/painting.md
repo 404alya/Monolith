@@ -688,8 +688,8 @@ stay; a request that removes the object leaves its entries inactive (§4.2).
 
 ### 13.1 Keys
 
-As in the first round, except: **H** (shared mode) is gone; ALT+LMB samples what the surface shows
-(§7.4).
+Replaced by Aseprite's keys and the mouse camera: §18.3 and §18.7 (before that round: as in the first
+round, except **H** (shared mode) was gone and ALT+LMB sampled what the surface shows, §7.4).
 
 ### 13.2 The panel (`src/drawpanel.c`)
 
@@ -698,7 +698,7 @@ As in the first round (its implementation notes give the layout), except:
 1. **Target**: what the cursor rests on and where its paint goes: "box line 120 #3, face +z: concrete
    atlas 1024×512, 96×64 at 0 0", "model barrel.glb slot 1: crate atlas, a new 512² rectangle", "the
    first stroke adds 96×64 to concrete's atlas", or the refusal in `UI_ERROR` (§3.4). No shared switch.
-2. **Pen**, 3. **Colour**: unchanged.
+2. **Pen**, 3. **Colour**: replaced by the **Tools** section and the colour picker of §18.9.
 4. **Density** (was *Canvas*; **Grid** on a material with a paint grid, §17.7: "follows the grid of
    concrete: 24 texels/m (4.2 cm)", no slider, *Fit to grid* for *Resize*; without a grid the slider
    under "concrete has no paint grid: 64 texels/m from the panel"): texels / m, the texel size the
@@ -984,11 +984,661 @@ texels): the panel's face groups size a rectangle with it.
   covering cells `o .. o + w` of a face, `o` written in the `paint` statement, the paint stage testing
   the window) would lift it at one more compare per pixel; not in this round.
 
+## 18. Tools and the Aseprite controls
+
+The developer paints with Aseprite every day; draw mode follows its tools, keys and colour picker,
+keeps its choices per map, and moves the camera with the mouse instead of RMB flight. This section
+is the plan of that round (task prompt `2026-11-21_aseprite-style-draw-mode`); its implementation notes
+are appended at the end as the streams merge. Everything in §1–§17 stays: the paint data (atlases,
+`paint` statements, unwraps, undo tiles, the one history), `--paint-script`'s existing commands and
+their hashes, and the look of every map.
+
+**The developer's calls** (asked before the streams started):
+
+1. **Keys:** inside draw mode the letters are Aseprite's. B in spectator mode still enters draw mode;
+   **ESC** leaves it (the first ESC cancels a shape, polygon or curve in progress; with unsaved edits
+   the next one warns, the one after leaves, as B did). M, V and C no longer switch to edit, volume or
+   snip mode from draw mode: leave first, then press them in spectator mode.
+2. **Camera:** mouse navigation (§18.7): wheel to the point under the cursor, MMB drag orbits, SPACE +
+   LMB drag or SHIFT + MMB drag pans. No keyboard flight in draw mode; the arrows keep the viewpoints.
+   Edit mode keeps RMB flight unchanged.
+3. **Kept state: per map**, in the map package (`<package>/draw.ini`, §18.6).
+
+### 18.1 Tool, brush, colours
+
+`DrawMode` (`src/drawmode.h`) holds a **tool** (`DrawTool`, `src/drawkeys.h`) instead of a pen.
+`PenKind` stays as what a step's stamps do (round, square, soft, eraser, fill: §7.2), so every
+stroke of the old pens is stamped by the same code and gives the same pixels:
+
+| Tool | The step's pen (`DrawModeStampPen`) |
+|---|---|
+| pencil | its **brush shape**: round, square or soft (`DrawMode.shape`) |
+| eraser | eraser (the brush's size; its shape only for the cursor) |
+| bucket in *whole region* mode | fill (today's fill) |
+
+The keys **1 .. 5** and `--paint-script pen <name>` keep their meaning through `DrawModeSetPen`: 1–3
+the pencil with that shape, 4 the eraser, 5 the bucket in whole-region mode.
+
+**Brush:** shape, size (1–256 texels), hardness (soft), **pixel-perfect** (pencil at size 1: the
+L-corners of a freehand path are dropped as Aseprite does, `DtPixelPerfect`). The brush alpha is the
+foreground colour's alpha (SHIFT+wheel, the A slider) as before; Aseprite's separate opacity is not
+added.
+
+**Colours:** a **foreground** (`fg`, was `color`) and a **background** (`bg`, was `prevColor`). LMB
+paints with fg, **RMB** with bg (§18.3). **X** swaps them. Picking or typing a colour sets fg only
+(before, it pushed the old colour into the swap slot). Every colour set goes to the recent row (8, as
+before). The **palette** is a heap array the panel adds to (§18.9) and the state file keeps.
+
+### 18.2 The tools
+
+Every tool works on one **region** (`DrawRegion`: an entry's rectangle, on a grid its face's cells, or
+a model's UV island in it; §7.1, §7.3, §17.7) in that region's atlas texels. What is drawn in texel
+space is what the stroke model of §7.1 composites: source-over in sRGB bytes from the pixels the stroke
+started from, the highest coverage per texel, clipped to the region **and the selection** (§18.5).
+Every tool that changes pixels is **one stroke: one undo step**, saved by CTRL+S, replayable by a
+rebase (§12: the step records its input, §18.4).
+
+| Tool | Key | Kind | What it does |
+|---|---|---|---|
+| Pencil | B | brush | the brush along the drag (round, square, soft); pixel-perfect at size 1 |
+| Eraser | E | brush | lowers alpha (§7.2) |
+| Spray | S | brush | each 1/60 s while down: *speed* dots (the brush's size and shape each) at random in a disc of *width* around the cursor; seeded per stroke, so a replay is identical |
+| Paint bucket | G | click | *contiguous* (4-connected from the click) or *global* (the whole region) by colour within *tolerance*; *whole region* (today's fill) as a third mode |
+| Gradient | SHIFT+G | shape | drag a → b: fg at a to bg at b, *linear* or *radial*, over the region (or the selection), interpolated in sRGB bytes with alpha (Aseprite's) |
+| Line | L | shape | Bresenham a → b, the brush at each texel; SHIFT snaps to multiples of 45° |
+| Curve | SHIFT+L | shape | drag the line, then click (or drag) twice for the two control points (Aseprite's); ENTER after the first ends it with c1 = c2 |
+| Rectangle | U | shape | outline with the brush; U again: filled; SHIFT: square |
+| Ellipse | SHIFT+U | shape | outline; SHIFT+U again: filled; SHIFT while dragging: circle |
+| Contour | D | shape | a freehand drag, filled (with its outline) on release |
+| Polygon | SHIFT+D | shape | clicks; a click on the first point, a double click or ENTER closes and fills |
+| Rectangular / elliptical marquee | M / SHIFT+M | select | drag a rectangle / ellipse |
+| Lasso / polygonal lasso | Q / SHIFT+Q | select | a freehand outline / clicks (closed as the polygon) |
+| Magic wand | W | select | the bucket's flood (tolerance, contiguous / global) as a selection |
+| Move | V | move | drags the selected pixels (no selection: all of the region's) by whole texels; the source becomes transparent, the moved pixels replace what they land on; clipped to the region; the selection moves with them |
+| Blur | R | brush | under the brush: the alpha-weighted 3 × 3 mean (`DtBlur`), from the stroke's start pixels |
+| Jumble | SHIFT+R | brush | under the brush: each texel takes a random neighbour's colour (seeded per stroke) |
+| Eyedropper | I | click | picks into fg (RMB: bg); its own mode *screen* or *paint* (§18.8); I again toggles it |
+
+**SHIFT+click** with the pencil or eraser: a straight line from the last point the tool painted on
+the same region (Aseprite's), the brush along it, one step.
+
+**RMB** paints with bg in every painting tool (the gradient then runs bg → fg); the eraser erases the
+same with either button; the selection tools ignore RMB; the eyedropper's RMB picks into bg.
+
+**Not ported** (the panel's tool grid and the user guide say so): Zoom and Hand (they are the camera,
+§18.7), Slice, Text, Aseprite's ink modes, symmetry, tiled mode, the CTRL "move while held"
+modifier (CTRL is the size, undo and save chords), and anything about frames, layers, cels or the
+timeline. Copy / cut / paste of a selection is a later round (the stretch goal was not taken).
+
+### 18.3 The keys
+
+The table lives once in code (`src/drawkeys.c`, `DrawToolForKey`); the panel's hints and the keys
+panel's *Draw mode* group read it. Keys need no CTRL and no ALT unless said; nothing below acts while
+a panel field has the keyboard (`keysBlocked`, as now).
+
+| Key | Draw mode (this round) | Before, in draw mode | Elsewhere (unchanged) |
+|---|---|---|---|
+| B | pencil | leave draw mode | spectator: enter draw mode |
+| E | eraser | fly up (RMB) | fly up |
+| S | spray | fly back (RMB) | fly back |
+| G / SHIFT+G | bucket / gradient | — | spectator: move the player here (not in edit / draw mode) |
+| L / SHIFT+L | line / curve | — | edit mode: gizmo axes (L) |
+| U / SHIFT+U | rectangle ↔ filled / ellipse ↔ filled | — | |
+| D / SHIFT+D | contour / polygon | fly right (RMB) | fly right |
+| M / SHIFT+M | marquee / elliptical marquee | into edit mode | spectator: edit mode |
+| Q / SHIFT+Q | lasso / polygonal lasso | fly down (RMB) | fly down |
+| W | magic wand | fly forward (RMB) | fly forward |
+| V | move | into volume mode | spectator: volume mode |
+| R / SHIFT+R | blur / jumble | — | spectator: a request |
+| I | eyedropper (again: screen ↔ paint) | — | edit mode: model picker |
+| C | — | into snip mode | spectator: snip mode |
+| ALT+LMB | eyedropper for one click (mode: `pick_alt`); with a selection tool: subtract | eyedropper | |
+| SHIFT+LMB | pencil / eraser: line from the last point; selection tools: add; shapes: square / circle / 45° | — | |
+| SHIFT+ALT+LMB | selection tools: intersect | — | |
+| RMB | paint with bg (§18.2) | fly while held | edit mode: fly while held |
+| X | swap fg / bg | swap with the colour before | |
+| 1 .. 5 | pencil round / square / soft, eraser, bucket (whole region) | the five pens | effect toggles |
+| [ ] , CTRL+wheel | brush size | same | |
+| SHIFT+wheel | fg alpha ± 8 | same | |
+| wheel | toward / away from the point under the cursor (§18.7) | fly speed (RMB) | |
+| MMB drag | orbit around the point under the cursor | — | |
+| SPACE + LMB drag, SHIFT + MMB drag | pan | SPACE: fly up (RMB) | |
+| CTRL+A / CTRL+D | select all of the region under the cursor / deselect | — | |
+| CTRL+SHIFT+D / CTRL+SHIFT+I | reselect / invert the selection | — | |
+| ENTER | close the polygon / polygonal lasso, end the curve | — | |
+| ESC | cancel what is in progress; else leave draw mode (unsaved: warns first) | leave | |
+| TAB, CTRL+Z / Y / SHIFT+Z, CTRL+S, CTRL+SHIFT+DELETE, P, F-keys, arrows | as before | | |
+
+H and Z (Aseprite's hand and zoom) and T (text) do nothing in draw mode.
+
+### 18.4 Shapes in texel space
+
+A shape is defined by **hits on one region**: its first point's hit fixes the region (and atlas);
+every later point (the drag, the clicks) is the cursor's ray mapped to that region's texels through
+the same mapping a stroke uses (`DrawGeom`; a box face on a grid its `paintTexel`, §17.6). A point
+whose ray leaves the region (another face, another object, the sky) is **clamped to the region's edge**:
+the texel on the region's border nearest to the point's mapping on the region's plane (a box face: the
+face's plane; a model island: the last hit triangle's plane), so a rectangle dragged past the face's
+edge ends at it.
+
+While the mouse is down (or a polygon's / curve's clicks go on) the shape is **previewed in the atlas
+itself**: each frame the stroke's touched tiles go back to its start pixels and the shape is drawn
+again (coverage masks reset), so the preview is the lit, real result; on release (or when the polygon
+closes) the stroke ends: one step. ESC restores the start pixels and drops the step (nothing in the
+history). The rasterisers are pure code (`src/drawtools.c`, unit-tested): outlines as texel lists
+(`DtLine`, `DtCurve`, `DtRectOutline`, `DtEllipseOutline`; the brush is stamped at each), filled shapes
+and selections as masks (`DtRectFill`, `DtEllipseFill`, `DtPolygonFill`), fills as masks
+(`DtFlood`), and per-texel colours for gradient, blur, jumble and move.
+
+A step records its input for a rebase: the tool, its options, the colours, the button, the region and
+the points in atlas texels (and the seed of spray and jumble, and the selection mask it was clipped
+to). The pencil and the old pens keep recording samples, so their replay is unchanged.
+
+### 18.5 The selection
+
+`DrawSelection` (`src/drawmode.h`): a **per-region mask** in atlas texels (the region's rectangle,
+255 = selected), the region's own mask (rectangle or UV island) beside it, and the surface it was made
+on. One region at a time; a selection made on another region replaces it. Operations (`DtSelOp`):
+**replace** (no modifier), **add** (SHIFT), **subtract** (ALT), **intersect** (SHIFT+ALT), plus
+**invert** (CTRL+SHIFT+I: within the region), **all** (CTRL+A: the whole region under the cursor, or
+the selection's region), **none** (CTRL+D: kept for CTRL+SHIFT+D, *reselect*). A selection never holds
+texels outside its region (`DtMaskClip`).
+
+**Clipping:** while a selection is on, every texel a tool would change on the selection's region is
+first tested against the mask (the stamp's coverage times the mask's 0 / 255): painting outside it does
+nothing. Other regions are unaffected (in Aseprite the canvas is the region).
+
+**Editor state only:** never written into the map, not an undo step (as in monolith's edit mode,
+selections are not in the history). It is dropped when its region no longer exists after a reload or
+an undo (the entry's rectangle moved, resized or gone), and when draw mode is left.
+
+**Shown** as an outline over the surface (its mask's border edges mapped back through the region's
+geometry, as the brush cursor maps its footprint: §13.3), in the HUD's draw-mode colour, dashed and
+moving (Aseprite's marching ants) only if it costs nothing per frame beyond the outline itself.
+
+### 18.6 The kept state (`<package>/draw.ini`)
+
+Per map (the developer's call 3), in the map package's folder: `draw.ini`, `key=value` lines as
+`settings.ini` (`src/drawsettings.c`, `DrawState`). It is not referenced by the map, so it is not
+watched by the hot reload, not exported and not part of the map's look or hash. Whether to commit it
+with the package is the developer's choice (it is untracked until then).
+
+| Key | Values | Default |
+|---|---|---|
+| `tool` | `pencil`, `eraser`, … (the `--paint-script` names, §18.10) | `pencil` |
+| `brush` | `round`, `square`, `soft` | `round` |
+| `size` | 1–256 | 4 |
+| `hardness` | 0–1 | 0.5 |
+| `pixel_perfect` | `on`, `off` | `off` (Aseprite's) |
+| `fg`, `bg` | `#RRGGBB` or `#RRGGBBAA` | `#C83232FF`, `#FFFFFFFF` |
+| `recent` | up to 8 colours, comma-separated, newest first | none |
+| `palette` | any number of colours, comma-separated (a heap array) | none |
+| `spray_width`, `spray_speed` | 1–256 texels, 1–256 dots per 1/60 s | 16, 32 |
+| `bucket` | `contiguous`, `global`, `region` | `contiguous` |
+| `tolerance` | 0–255 | 0 (Aseprite's) |
+| `gradient` | `linear`, `radial` | `linear` |
+| `pick_alt` | `paint`, `screen` (ALT+click) | `paint` |
+| `pick_tool` | `screen`, `paint` (the eyedropper tool) | `screen` |
+| `density` | 8–512 texels/m | 64 |
+| `pixel_look` | `on`, `off` | `off` |
+| `panel` | `shown`, `hidden` | `shown` |
+
+**Loading** follows `GfxLoad`'s rules: a missing file is the defaults (silently); an unknown key or a
+bad value is one warning in the log (with its line) and that key keeps its default; the rest loads.
+**Saving**: the whole file, written to a temporary file and renamed over it, **one second after the
+last change** (the main loop compares `DrawModeStateDiffers` each frame, no allocation), when draw
+mode is left and at exit. A failed write is logged once per change, never blocks painting.
+
+**When:** the interactive editor reads it when the map loads (and when another map is opened) and
+writes it as above. A hidden run (`--shot`, `--apply-edits`, `--paint-script`) neither reads nor
+writes it, so every shot and hash stays independent of the developer's choices, unless
+`--draw-state <file>` names a file: then that file is read before the first frame and written as
+above and at exit (the phase-2 test of two runs, on a scratch file).
+
+### 18.7 The camera in draw mode
+
+`Spectator.mouseNav` (`src/spectator.h`) beside `rmbFly`; `main.c` sets it per frame in draw mode
+(`rmbFly` stays for edit mode only). With it on:
+
+- **No keyboard flight and no mouse look:** WASD / E / Q / SPACE are the tools'. The arrows still fly
+  to the viewpoints, P still prints the pose.
+- **Wheel** (no CTRL, no SHIFT, not over the panel): toward the point under the cursor by 20 % of its
+  distance per notch, away by the inverse (1 / 0.8); the point is the scene's hit under the cursor
+  (`MS_Raycast`), or over the sky a point at the last pivot's distance (10 m at first) along the ray.
+  The point stays under the cursor (the move is along the cursor's ray). Not closer than 0.05 m.
+- **MMB drag: orbit** around the point under the cursor at the press: yaw and pitch change by 0.005
+  rad per pixel and the camera turns about the pivot, so the pivot stays where it was on screen.
+  Pitch is clamped as today (±1.55 rad).
+- **SPACE + LMB drag, SHIFT + MMB drag: pan** in the view plane, so the scene point under the cursor
+  at the press follows the cursor (world per pixel = 2 · depth · tan(fov / 2) / height). A SPACE + LMB
+  pan ends when SPACE or the button comes up (Aseprite's hand); the button still held then paints nothing.
+- The cursor stays visible and free; nothing is painted while SPACE or MMB is held, and a stroke going
+  on ends when either goes down. A drag that starts on the panel is the panel's (`navBlocked`).
+- A viewpoint flight is cancelled by any of these, as by manual flight now.
+
+### 18.8 The screen eyedropper
+
+Two sampling modes: **paint** (today's, §7.4: the paint where opaque, else the surface's albedo) and
+**screen**: the colour of the pixel as seen, the lit, tonemapped scene **before the HUD**, alpha 255.
+The eyedropper tool's mode is `pick_tool` (default screen; I again toggles), ALT+click's is
+`pick_alt` (default paint); both are kept. Screen mode works on any pixel of the scene view, also
+the sky and surfaces that can't be painted; paint mode needs a paintable surface as now.
+
+**Where it is read:** a click sets `DrawMode.screenWant` and the window position; `main.c`, on its next
+frame, right after the scene is drawn into its target (the window's back buffer, the frame-reuse cache
+or the `--shot` target) and **before** any overlay, the brush cursor or the HUD, reads that one pixel
+(`glReadPixels` of 1 × 1 from the framebuffer the scene was drawn into) and calls
+`DrawModeScreenPicked`. **Cost:** one 1 × 1 read on the frame after a click, never per frame. With
+frame reuse the cache holds the scene before the overlay, so the read is the same there.
+
+`--paint-script pick screen px <x> <y>` renders and reads at once through `DrawMode.screenRead` (set by
+`main.c`): the shot's camera, the scene drawn into the shot target as the final shot draws it, the one
+pixel read back. The phase-5 check: on a scratch map with a flat colour, the bytes equal the `--shot`
+PNG's at that pixel.
+
+### 18.9 The panel
+
+The draw panel (`src/drawpanel.c`) in the `docs/ui-design.md` look:
+
+- **Tools** (replaces *Pen*): a grid of icon buttons (22 tools, `DrawTool` order), drawn in the atlas
+  style of today's `PenIcon`, monochrome, the selected one white; the tool's name and key as the hint
+  line ("rectangle  U"). Under it the **tool's options**: brush shape, size, hardness (soft),
+  pixel-perfect (pencil), spray width and speed, bucket mode and tolerance (bucket, wand), linear /
+  radial (gradient), screen / paint (eyedropper), and a line "not here: zoom, hand (the camera), slice,
+  text, layers, frames".
+- **Colour**: a **saturation / value square** with a **hue strip** beside it and an **alpha strip**
+  under it (Aseprite's colour selector; the gradients are content, not chrome), the **fg / bg swatches**
+  (overlapping squares as Aseprite's; click bg to make it fg, X swaps), the hex field and the RGBA
+  sliders as now, the recent row, and the **palette row**: `+` adds fg, a click picks into fg (RMB into
+  bg), SHIFT+click removes one. The panel keeps the hue while saturation or value is 0 (its own HSV
+  state, synced from fg when fg changes elsewhere).
+- Target, Density / Grid and Faces stay as they are.
+
+### 18.10 `--paint-script` and `--input-script`
+
+Every existing `--paint-script` command keeps its meaning (`pen` through `DrawModeSetPen`); new ones:
+
+| Command | What |
+|---|---|
+| `tool <name>` | pencil, eraser, spray, bucket, gradient, line, curve, rect, rectfill, ellipse, ellipsefill, contour, polygon, marquee, ellipsemarquee, lasso, polylasso, wand, move, blur, jumble, eyedropper |
+| `brush <round\|square\|soft>` | the pencil's shape |
+| `pixelperfect <on\|off>` | |
+| `fg <r> <g> <b> [<a>]` / `bg <r> <g> <b> [<a>]` | the colours (`color` is `fg`) |
+| `swap` | X |
+| `spray <width> <speed> <seed>` | the spray's options and the next strokes' seed |
+| `bucket <contiguous\|global\|region> [<tolerance>]` | |
+| `gradient <linear\|radial>` | |
+| `button <left\|right>` | which button the next strokes, shapes and clicks use (right: bg) |
+| `shape px <x0> <y0> <x1> <y1> …` / `shape uv <id N:i\|entity HEX:i> <face\|slot> <u0> <v0> …` | the current shape tool through those points (line, rect, ellipse, gradient: 2; curve: 4, a b c1 c2; contour, polygon: n ≥ 3) as one stroke, as the mouse would |
+| `shiftclick px <x> <y>` | SHIFT+click with the pencil / eraser |
+| `select <rect\|ellipse\|lasso\|wand> px\|uv … [add\|sub\|and]` | a selection (rect, ellipse: 2 points; lasso: n ≥ 3; wand: 1) |
+| `selectall`, `deselect`, `reselect`, `invert` | on the surface of the last stroke / hover |
+| `move <dx> <dy>` | the move tool: the selection's pixels (or the region's) by whole texels |
+| `pick screen px <x> <y>` / `pick paint px <x> <y>` | the eyedropper in that mode (`pick px` stays: ALT+click's mode) |
+| `print` | adds the tool, fg / bg, the palette, and the selection (region, bounds, `DtMaskHash`) |
+
+`stroke` and `dab` use the current tool when it is a brush or click tool (spray, blur, jumble, bucket);
+a shape or selection tool with `stroke` is an error that names `shape` / `select`.
+
+`--input-script` gains `wheel <n>` (one frame, n notches, may be negative or fractional), `click
+middle`, `down mmb` / `up mmb`. New flag: `--draw-state <file>` (§18.6).
+
+### 18.11 Streams
+
+| Phase | Who | Files | Done when |
+|---|---|---|---|
+| 1 | lead | this section, `src/drawkeys.c/.h`, `src/drawtools.h`, `src/drawsettings.h`, the headers' new fields, the rename (`color` → `fg`, `prevColor` → `bg`, `pen` → `tool` + `shape`) | both builds 0 warnings; the old paint scripts' hashes unchanged |
+| 2 | A | `src/drawsettings.c`, `src/drawpanel.c/.h`, `src/ui.c/.h`, the state's wiring in `src/main.c` (load, debounce, save, `--draw-state`), `tests/unit/drawsettings_test.c` | §18.6, §18.9 |
+| 4 | B | `src/spectator.c`, `src/input.c`, `DrawModeUpdate`'s key block in `src/drawmode.c`, the draw-mode input of `src/main.c`, `src/keyspanel.c` | §18.3, §18.7 |
+| 3a | C (beside A and B) | `src/drawtools.c`, `tests/unit/drawtools_test.c` | every rasteriser and selection operation unit-tested |
+| 3b | C (after B merged) | the tools' hook into `src/drawmode.c` (strokes, preview, selection, replay, `--paint-script` commands) | §18.2, §18.4, §18.5, §18.10 |
+| 5 | D | the screen read in `src/main.c`, `pick screen` | §18.8 |
+| 6 | lead | the docs, the final check | |
+
 ## Implementation notes
 
 (Appended per stream as it merges. The paint-layer round's notes come first as they merge; the first
 round's notes below describe the canvas model and the bake that the paint layer replaces. Phase 4 moves
 what is only history into the `project-history` skill.)
+
+### Implementation notes: Aseprite round phase 2 (kept state, tool grid, colour picker)
+
+What phase 2 built (§18.6, §18.9), and the choices it made.
+
+- **`src/drawsettings.c`** implements `drawsettings.h` as declared. Defaults are `DrawModeInit`'s
+  (pencil, round, 4, 0.5, `#C83232FF` / `#FFFFFFFF`, spray 16 / 32, contiguous, tolerance 0, linear,
+  `pick_alt` paint, `pick_tool` screen, 64 texels/m, no pixel look, panel shown). The file follows
+  `GfxLoad`'s rules: a missing file is no error and changes nothing; an unknown key, a line without
+  `=` or a bad value is one `TraceLog` warning with its line, that key keeps its value, the rest
+  loads, and `*ignored` counts them. Numbers out of range are **clamped** (`size = 0` → 1,
+  `tolerance = 300` → 255, `density = 4` → 8), not refused, as `GfxLoad` clamps; non-numbers,
+  fractions for whole-number keys and `nan` / `inf` are bad values. Only a whole-line `#` is a
+  comment (colours start with `#`). `recent` keeps its first 8 colours and `palette` its first
+  `DRAWSTATE_PALETTE_MAX` (4096), each with one warning; one bad colour refuses the whole list (the key
+  keeps its value). The palette is a heap array (`MS_RESERVE` / `MS_PUSH`), read from lines of any
+  length. Floats are written with the shortest of `%.6g` / `%.9g` that reads back exactly, so a round
+  trip is `DrawStateEqual`. **Saving** writes `<path>.tmp` and renames it over `<path>` (on Windows
+  the old file is removed first: its `rename` doesn't replace); a failure is logged by
+  `DrawStateSave` and the temporary file removed.
+- **The file**, as the editor writes it:
+
+  ```
+  # monolith draw mode: tool, brush, colours and options of this map (docs/painting.md 18.6).
+  # Written by the editor; not part of the map (not exported, not in its look or hash).
+  tool = ellipse
+  brush = round
+  size = 16
+  hardness = 0.5
+  pixel_perfect = off
+  fg = #40DA45
+  bg = #FFFFFF
+  recent = #C83232,#28282C,#ECDCB4,#5A8C46,#3C6EC880
+  palette = #102030,#FFFFFF80
+  spray_width = 16
+  spray_speed = 32
+  bucket = contiguous
+  tolerance = 0
+  gradient = linear
+  pick_alt = paint
+  pick_tool = screen
+  density = 64
+  pixel_look = off
+  panel = shown
+  ```
+
+- **`tests/unit/drawsettings_test.c`** (`./build.sh test drawsettings`; links raylib for `TraceLog`, whose
+  callback counts the warnings, and the runtime for `MS_RESERVE`): the defaults, `DrawStatePath`, a
+  missing file, a round trip of every key off its default with a 300-colour palette, copy / equal /
+  free, each key alone, 11 bad lines (11 warnings, the good keys loaded, the bad ones at their
+  defaults), `SetKey` leaving the state unchanged on a bad value, clamping at both ends and past
+  `long`'s range, 10 recent colours, a 4106-colour palette, every tool's script name, an unwritable
+  path, no `.tmp` left after a save.
+- **`main.c`** (`DrawKeep`, beside `Run`): the file is `<scene->root>/draw.ini` in the interactive
+  editor, `--draw-state <file>` in any run (it goes with `--shot` or the editor; refused in the
+  view-only build), none otherwise. It is read after `DrawModeInit` (and after `--draw-panel`'s
+  preset recent colours) **on top of the draw mode's own state**, so a missing file or a key it lacks
+  keeps what the draw mode has; then `DrawModeSetState` and a `DrawModeGetState` back (the values as
+  the draw mode clamped them, so they alone cause no write). Each frame `DrawModeStateDiffers`
+  (no allocation) compares the draw mode with that record; a change is copied into it (the palette's
+  memory only grows when the palette does) and noted with its time; the file is written 1 s after the
+  last change, on the frame draw mode is left, and at exit (`DrawKeepFree`). A failed write is logged
+  once per change (the next change tries again). The map has no "open another map" path today
+  (`RestartRenderer` reloads the same package), so the file is read once.
+- **The panel** (`src/drawpanel.c`): **Tools** replaces *Pen*: a grid of 8 columns (3 rows, `DrawTool`
+  order) of icon buttons, each icon drawn from atlas shapes and lines in the style of `PenIcon`,
+  monochrome (`UI_INK`, `UI_ON_INK` on the white button of the tool on); the hint line shows the tool
+  under the cursor (dim) or the one on (`UI_INK`) with its key from `DrawToolKeyName` as key caps
+  ("ellipse  SHIFT+U"). The options follow the tool: **Brush** (round / square / soft as `PenIcon`
+  buttons), **Size**, **Hardness** (soft) for the tools that stamp the brush (pencil, eraser, spray,
+  line, curve, rectangle, ellipse, blur, jumble); **Pixel perfect** (pencil); **Width** / **Speed**
+  (spray); **Contiguous / Global / Region** and **Tolerance** (bucket; the wand shows the first two;
+  no tolerance in region mode); **Linear / Radial** (gradient); **Screen / Paint** (eyedropper,
+  `pickTool`); a hint line for the selection tools' modifiers and for move; "filled with fg (RMB: bg)"
+  for the filled shapes; then "not here: zoom, hand (the camera), slice, text, layers, frames". The
+  panel writes only `DrawMode` fields (`tool`, `shape`, `size`, …), never a tool's behaviour. The
+  keys 1 .. 5 still work through `DrawModeSetPen` (the header's hint). The title's hint says ESC
+  leaves (B is the pencil now).
+- **Colour**: a saturation / value square (188 × 128) with the hue strip (16 px, red at the top) beside
+  it and the alpha strip under it (`UiSatValSquare`, `UiHueStrip`, `UiAlphaStrip` in `src/ui.c`); the fg
+  / bg squares overlapping at the right (a click on bg's visible part swaps them, as X); then R G B A
+  (on `dm->fg`), the hex field, the recent row (RMB on a swatch: into bg) and the **palette**: a label
+  line with its hints, 20 px swatches in rows of 12, `+` at the end (adds fg with `MS_PUSH`; it stops at
+  `DRAWSTATE_PALETTE_MAX`), a click picks into fg, RMB into bg, SHIFT+click removes. The panel keeps its
+  own HSV (`DrawPanel.hue / sat / val`): taken from fg only when fg's RGB is no longer the one the
+  panel last set or saw (`hsvOf`), keeping the hue while saturation or value is 0 and the saturation
+  while value is 0. The square's gradient is two raylib gradient rectangles (white → pure hue across,
+  then transparent → black down), which is HSV exactly; the markers (a ring, two bars) are white over a
+  dark edge.
+- **`--draw-panel tools`** names the section; `pen` stays an alias (the same image).
+- **Checks** (pine_forest, `--view 1 --draw-mode --draw-panel --draw-state <scratch file>`): a first run
+  whose `--input-script` clicks the size slider, the hue strip, the square and the ellipse in the grid
+  wrote `tool = ellipse`, `size = 16`, `fg = #40DA45`; a second run without a script showed that state
+  and left the file byte-identical. `/tmp/aseprite-pens.paint` on a scratch copy still gives bark
+  `3ee2d93c88894cf3` and forest_floor `167823aeb5bd64f5`.
+
+### Implementation notes: Aseprite round phase 3a (the rasterisers)
+
+`src/drawtools.c` implements every function of `src/drawtools.h`: pure C (libc and libm, no raylib),
+every buffer on the heap (point lists grow by doubling, `oom` set when a push fails), checked by
+`tests/unit/drawtools_test.c` (`./build.sh test drawtools`, ASan + UBSan; plain C, needs no build first).
+Not yet called by `drawmode.c` (phase 3b hooks it in).
+
+**Algorithms.**
+
+- **Line:** Bresenham (Zingl's all-octant form), both ends, in order a → b.
+- **Pixel-perfect:** Aseprite's `IntertwineAsPixelPerfect`. Consecutive repeats go first. A texel whose
+  neighbours share a row or column with it, but not with each other, is dropped, and the texel after a
+  dropped one is always kept, so a staircase of 1-texel steps becomes a diagonal. A right angle with
+  longer arms also loses its corner texel (Aseprite does the same).
+- **Rectangle outline:** clockwise from the top-left corner, each texel once (a 5 × 4 rectangle gives
+  14 texels). One row or column is a line.
+- **Ellipse:** Alois Zingl's `plotEllipseRect`, the algorithm Aseprite's `algo_ellipse` uses, in 64-bit
+  integers (the error terms grow with the size cubed, which overflows Windows' 32-bit `long`). It
+  handles every size: 1 × 1, 2 × 2, even sizes, flat ellipses and their tips. The four quadrants come
+  out together; they are collected apart and joined clockwise from the top, with repeats dropped. A
+  flat ellipse's 1-texel tips are spurs, so no path visits each texel once; the list jumps there.
+  Circles from 2 to 40 texels are closed 8-connected paths. One row or column is a line. The filled
+  ellipse fills each row from its leftmost to its rightmost outline texel (the shape is convex).
+- **Curve:** the cubic Bezier is sampled at twice its control polygon's length. Each sample is rounded
+  to its texel (`floor(v + 0.5)`) and joined to the previous one by a Bresenham line; then every repeat
+  is dropped (a bitmap over the points' bounds, so a looping curve also lists each texel once). The L
+  corners stay, as Aseprite's curve keeps them; `DtPixelPerfect` thins them if 3b wants that.
+- **Polygon:** scanlines at texel centres. A vertex sits at its texel's centre, so the test is on
+  integer coordinates: an edge counts for a row when it crosses it (half-open in y), and a row is
+  filled between the sorted crossings in pairs (even-odd: a pentagram's centre stays out). Then every
+  edge's Bresenham line is set, so a contour that is a line or a single point still paints.
+- **Flood:** a 4-connected explicit heap stack (a `DtPoints`), with `out` as the visited set, or a
+  scan of the whole region (global). Texels outside the image are never taken, even when the region's
+  rectangle reaches past the atlas.
+- **Blur:** the 3 × 3 neighbours that are in the region and in the image. Colour is Σ c·a / Σ a and
+  alpha is Σ a / n, in integers rounded half up. If every neighbour is transparent, the texel keeps
+  its own colour with alpha 0.
+- **Jumble** and **spray** use only a 32-bit integer hash (Chris Wellons' lowbias32), so a seed gives
+  the same texels on every platform; the test pins spray's output for seed 1. Jumble hashes the seed
+  with the texel's coordinates: a texel picks the same neighbour whatever the shape of the stamp, so
+  replaying a stroke split into different stamps gives the same pixels. Spray draws uniformly in the
+  disc by rejection from its square (24-bit uniforms, no `sin` / `cos`, whose rounding can differ
+  between libm builds), at most 64 tries a dot, then the centre.
+- **Selection operations** work in byte arithmetic: add = max, subtract = min(d, 255 − s),
+  intersect = min, clip = min with the region. They read src by atlas coordinates, so a src of another
+  rectangle (or an empty one) is safe. Shift works in 64-bit offsets, so a shift far past the mask is
+  empty instead of overflowing.
+- **Mask hash:** FNV-1a 64 of x, y, w, h (each as 32-bit little-endian) and then the bytes.
+
+**Header changes** (comments that say what the code does; no declaration changed):
+
+- Outlines and spray *append* to `out`.
+- `DtMaskCopy` frees dst first (dst must be a mask or `{0}`).
+- `DtMaskBounds` is inclusive.
+- `DtColorNear`: two texels of alpha 0 are near whatever their RGB (Aseprite's `color_equal`).
+- `DtFlood` needs `out`'s rectangle to be exactly the region's (otherwise false) and clears `out` first.
+- `DtBlur` and `DtJumble` leave the texels of `out` outside where ∩ region untouched; jumble's pick is a
+  hash of seed and texel.
+- `DtMaskShift`'s dst must not be its src.
+- The ellipse and curve comments say how their order and connectivity work.
+
+### Implementation notes: Aseprite round phase 4
+
+**Camera (`src/spectator.c`, §18.7).** `UpdateSpectator` handles the arrows and P first, then with
+`mouseNav` calls `MouseNav` and returns: no keyboard flight, no mouse look, no wheel speed, no G, and
+`vel` is zeroed (no glide). The rmbFly path below is the old code unchanged (the flight's frame moved
+into `FlightStep`, called from both paths). `NavPoint` casts the cursor's ray
+(`GetScreenToWorldRayEx` with `SpectatorCamera`, the window size) with `MS_Raycast`; over the sky it
+takes `navDist` (10 m before any pivot) and every pivot found sets `navDist`. Wheel: the camera moves
+along that ray by `d - d·0.8^n` (n notches, fractional too; toward is not taken closer than 0.05 m), and
+`navDist` becomes the new distance, so the point stays under the cursor. Orbit (`navDrag` 1, MMB without
+SHIFT): the pivot's coordinates in the camera's frame (right, up, forward) are kept while yaw and pitch
+change by 0.005 rad/px with the mouse-look signs (drag right turns right, the camera swings left around
+the pivot; pitch clamped ±1.55), so the pivot keeps its screen position also when the clamp bites. Pan
+(`navDrag` 2: SPACE held at an LMB press, or SHIFT at an MMB press): the camera moves by
+`(up·dy − right·dx)·k`, k = 2·depth·tan(fovy/2)/height with depth the pivot's distance along the view
+direction at the press. A drag starts only off the panel (`navBlocked`) and ends with its button; a
+press that starts one, a moved drag or a wheel step cancels a viewpoint flight.
+
+**Input (`src/input.c`).** `wheel <n>` (|n| ≤ 1000) sets the frame's wheel value, which
+`GetMouseWheelMove` returns for every call in that frame (as raylib); `click middle`, `down mmb` /
+`up mmb` use button 2.
+
+**Keys (`DrawModeUpdate`, §18.3).** Tool keys go through the drawkeys table (`ToolKeys`: the row whose
+SHIFT state matches, `DrawToolForKey` for the U / SHIFT+U cycles; I on the eyedropper toggles
+`pickTool`) and say "tool: <name>" in the message line. ESC: `ShapeCancel` (only `shapeDrag.on = false`
+for now, a TODO for phase 3b's restore), else `Leave` (spectator mode only; the warning says "ESC again").
+M / V / C / B no longer leave. CTRL+A, CTRL+D, CTRL+SHIFT+D, CTRL+SHIFT+I and ENTER call stubs
+(`SelectAll`, `Deselect`, `Reselect`, `SelectInvert`, `ShapeEnter`) that say "not yet: …" (ENTER is
+silent) until phase 3b. `nav` (SPACE or MMB down) replaces the old `flying`: no press starts a stroke
+and a stroke going on ends; RMB does nothing yet. An LMB press with a tool other than the pencil, the
+eraser or the bucket in whole-region mode says "not yet: <tool>" (`ToolWorks`; the bucket's default
+contiguous mode included, as it would otherwise stamp the pencil).
+
+**`main.c`.** `spec.rmbFly = editKeys`, `spec.mouseNav = drawKeys`, `spec.navBlocked` = the cursor is
+on the draw panel (false otherwise, set each frame); the cursor hides for RMB only in edit mode; R
+(back to the last request) doesn't act in draw mode (it is the blur tool there).
+
+**Verified** (`--view 1` on pine_forest, 1600 × 900, cursor at 800 600): `wheel 3` moves the eye from
+(0, 0, 48) to (0, −0.79, 43.99), 4.09 m along the cursor's ray = (1 − 0.8³) of a hit 8.38 m away;
+`wheel −3` brings it back exactly; over the sky the move is 4.88 m (10 m fallback); over the panel none.
+An MMB drag of (200, −100) px gives yaw 180° → 122.7°, pitch 2° → 30.6°, and the pivot projects to
+(799.8, 599.3) afterwards. SPACE + LMB and SHIFT + MMB drags of (200, −100) both move the eye to
+(−2.54, −1.27, 47.96): the pivot ends at (1000.0, 499.9) under the cursor. Edit mode's RMB flight gives
+the same yaw / pitch as HEAD and positions within the run-to-run spread of dt (`GetFrameTime`). The
+old pens' paint script keeps its hashes.
+
+**Left for others.** The panel still shows the five pens and "B leave" (`drawpanel.c`, phase 2), and
+the HUD line names the stamp pen, not the tool (`DrawModeDrawHud`); `docs/user-guide.md`'s draw-mode
+keys are the phase-6 docs pass.
+
+### Implementation notes: Aseprite round phase 3b (the tools in draw mode)
+
+What `src/drawmode.c` does with the rasterisers of phase 3a (§18.2, §18.4, §18.5, §18.10).
+
+**A step is its input.** `PaintStep` gained the tool and its options: the tool, pixel-perfect, `color`
+(the start colour: fg, or bg with RMB) and `color2` (the gradient's end), the bucket mode and
+tolerance, radial, a seed, the shape's points in atlas texels on `regions[shapeRegion]`, the move's
+`dx dy`, and a copy of the selection mask with its region (`selOn`). `StepRender` draws a whole step
+from that input onto its tiles' start pixels. A rebase's replay (`ReplayStep`) calls it. A shape's
+preview calls it every frame its points change, after `StepRestore` has put the tiles back to their
+start pixels and cleared their coverage. The end of the shape calls it once more. The old pens
+(pencil without pixel-perfect, eraser, the whole-region fill) still stamp their samples one by one
+live, and `StepRender` stamps them the same way. `/tmp/aseprite-pens.paint` keeps bark
+`3ee2d93c88894cf3` and forest_floor `167823aeb5bd64f5`.
+
+**Compositing (§7.1).** Every texel goes through the max-coverage rule of `ApplyTexel` (or its twin
+`ApplyValue`), always from the stroke's start pixels. `StampTexel` and `StampValue` clip to the region
+and, when the step's selection is on that region, multiply the coverage by the mask.
+
+- The gradient, the bucket and the filled shapes composite source-over with the colour's alpha.
+- Blur, jumble and the move replace the start pixel, lerped by coverage. Blur runs `DtBlur` on the 3 × 3
+  start pixels in the region (`FilterTexel`, `StartPx`: a touched tile's undo copy, else the atlas).
+  Jumble picks the neighbour with `DtTexelHash(seed, x, y)`, a function added to `drawtools.h` that
+  `DtJumble` now uses too, so the pick never depends on the stamp.
+- The move ignores the selection's clip: the selection is what moves. Where moved texels land they
+  replace the pixels; texels they left, where nothing landed, become transparent. Afterwards the
+  selection is shifted by the same offset and clipped to its region.
+
+**The tools.**
+
+- Brush tools go through the old stroke path (`PressStroke`, `StrokeSegment`). The pencil, eraser,
+  blur and jumble stamp the brush.
+- The spray records each dot as an unjoined sample: per tick (1/60 s of held time, at most 8 a frame;
+  in a script, one per point) `DtSpray` gives `spraySpeed` dots in the disc of `sprayWidth`, seeded with
+  the step's seed (`dm->seed`, +1 per stroke) and the sample count.
+- Pixel-perfect (pencil, size 1): `StampProbe` only records samples, and `StrokeFrame` redraws the
+  stroke each frame. `RenderPixelPerfect` walks each joined run of samples as the size-1 footprint does
+  and applies `DtPixelPerfect`.
+- SHIFT+press with the pencil or eraser adds the last point they painted (kept by `StrokeEnd`, same
+  atlas and region) as an unjoined sample and joins the press to it.
+- Outline shapes (line, curve, rectangle, ellipse) stamp the brush at each texel of the outline. Filled
+  shapes (filled rectangle, filled ellipse, contour, polygon) set their mask's texels to the colour, with
+  no brush. The bucket floods the start pixels (`DtFlood`); its whole-region mode is the old fill.
+- A shape's points come from `ShapeTexel`. It uses the cursor's hit when the hit is on the shape's
+  region. Otherwise the ray goes through the plane of the last hit on the region (a box face's plane, or
+  a model's hit triangle, extended), and the point is clamped to the region's rectangle.
+- RMB paints with bg: the gradient runs bg → fg, the eraser erases the same, the selection tools ignore
+  RMB, and the eyedropper picks into bg. The eyedropper's screen mode only sets `screenWant`
+  (phase 5 reads the pixel).
+
+**Interaction (`Press`, `ShapeInput`, §18.3).**
+
+- Drag tools commit when their button comes up. SHIFT snaps lines to 45° and makes rectangles and
+  ellipses square and round.
+- Contour and lasso add a point each frame the cursor's texel changes.
+- Polygon and polygonal lasso add a point per click. They close on a click within one texel of the
+  first point, on a double click (0.4 s, same texel) or on ENTER (with 3 or more points).
+- The curve: drag a → b, then a click for c1 (the cursor moves it until then), then one for c2.
+  ENTER ends it: with no control point yet the curve is straight, after c1 it uses c2 = c1.
+- ESC drops a shape (`ShapeCancel` → `StrokeDrop`: the pixels go back and the step is released). A
+  rectangle that the shape's first point allocated is already in the history and stays: CTRL+Z removes
+  it.
+- ESC and ENTER reach a shape even while its stroke is open. A brush stroke ends when its own button
+  comes up (`strokeRmb`). A shape waits while SPACE or MMB is held.
+
+**The selection.**
+
+- `SelectionApply` combines a mask on a region with the selection: a selection on another region is
+  replaced, and the result is clipped to the region mask.
+- The marquees and lassos need paint under the press (`SurfaceRegion`: an entry must exist). They
+  preview their mask's outline (`SelectPreview`). The wand is `DtFlood` on the atlas.
+- CTRL+A, CTRL+D (kept for reselect), CTRL+SHIFT+D and CTRL+SHIFT+I work as in §18.5.
+- `SelectionValidate` drops the selection (and the kept one) when no active entry of its atlas still
+  starts at its region's corner and holds it; it runs after undo / redo and after a reload. Leaving
+  draw mode drops both.
+- The outline (`OutlineBuild`) follows the mask's border edges, merged into runs and mapped through the
+  entry onto the hit face, or onto every slot triangle the run crosses on a model. It is built only
+  when the selection or the scene version changes, and drawn in `UI_MODE_DRAW`. There are no marching
+  ants.
+
+**HUD and cursor.** The HUD line names the tool (the pencil with its brush, a size for the brush tools
+and the outline shapes, the spray's width) and the selection's extent. The brush footprint shows for
+the brush tools and the outline shapes. The spray shows its disc dashed, the whole-region bucket its
+outline, and every other tool a one-texel marker with a cross.
+
+**`drawmode.h` changes.**
+
+- New `DrawLines`.
+- `DrawSelection`: `lastHit`, `gen`, `outline`, `outlineGen`, `outlineVersion`, `outlineSet`.
+- `DrawShape`: `lastOn`, `down`, `clickTime`, `preview`, `outline`.
+- `DrawMode`: `seed`, `strokeRmb`, `sprayTime`, `ppDirty`, and `lastPaintSet` / `Region` / `Atlas` /
+  `Tx` / `Ty`.
+
+`drawtools.h`: `DtTexelHash`.
+
+**Verified** on a scratch copy of pine_forest. 24 tool scripts each paint a base (pixel look, a red
+band and a blue line), run the tool, then `print`, `undo`, `print`, `redo`, `print`. Every script gives
+the same hashes on two runs, undo brings back the base hash and redo the tool's hash. The selection
+scripts give the same selection hashes on two runs. Two `--input-script` runs drove the tools by mouse
+and keys (U, L with SHIFT, polygon with clicks and ENTER, the curve with two clicks, a marquee and an
+RMB pencil clipped to it, ESC on an ellipse, G with RMB, W, V, SHIFT+G, R, CTRL+Z, CTRL+D); their shots
+show the shapes where they were drawn, the selection outline and the HUD line.
+
+### Implementation notes: Aseprite round phase 5
+
+The screen eyedropper's read (§18.8) is `ReadScenePixel` in `src/main.c`: one `glReadPixels` of
+1 × 1, RGBA8, from a named framebuffer (bound as the read framebuffer, then 0 again), after
+`rlDrawRenderBatchActive`. The window position (top-down, screen units) is scaled to the
+framebuffer's size (a HiDPI back buffer is `GetRenderWidth/Height`) and flipped to GL's bottom-left
+row. The bytes are what `ReadTarget` hands the `--shot` PNG: R3D's output is already tonemapped
+sRGB in an RGBA8 target, so no conversion. A GL error (a multisampled offscreen framebuffer:
+`--bench-window`, which never has the draw mode) makes it `ok = false`.
+
+- **The frame loop:** right after the scene block (a fresh `DrawScene` into the window or the
+  `--shot` target, or the frame-reuse cache composited into it) and before the inspector overlay,
+  the designer overlay, the brush cursor and the HUD: `DrawModeScreenWanted` → read →
+  `DrawModeScreenPicked`. Fbo 0 for the window (a `--window-msaa` back buffer is resolved by the read
+  itself), the shot target's fbo in a shot. With frame reuse the target holds the composited cache,
+  the same pixels as a fresh frame.
+- **`--paint-script pick screen`:** `DrawMode.screenRead = ScreenRead`, with a `ScreenReadCtx` (the
+  camera the script gets, the target). With `--shot` (frame 10) it draws into the shot target, which
+  the frame then draws again; with `--apply-edits` (before the main loop) it loads a target of the
+  window's size on the first read, applies the main loop's environment first (map, quality, `--fx`)
+  and frees the target after the script. No HUD in either.
+- **Cost:** one 1 × 1 read (a pipeline sync) on the frame after a click; no read on any other frame.
+  `pick screen` costs one scene render per command.
+
+Checked on a scratch package (`--new-map`, a lit red wall, an emissive green one, auto exposure off):
+the read bytes equal the PNG's at 7 points per run (both walls, the sky, the ground, the corners,
+edge pixels either side of each wall's outline), also at `--shot-size 1000 700 --render-scale 0.5`,
+through the frame loop (`--draw-mode`, with and without `--frame-reuse`) and through `--apply-edits`
+(against a shot from the same camera). Every map's shots stayed pixel-identical.
 
 ### Implementation notes: paint layer phase 1 (the runtime)
 

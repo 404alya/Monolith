@@ -39,6 +39,14 @@ A stroke runs from LMB down to up.
 - The eraser lowers alpha. Fill fills the region at LMB down.
 - The stroke keeps its samples in atlas texels, so a rebase can replay it onto a PNG that changed on disk.
 
+## Tools, selection, kept state (Aseprite round)
+
+The tool on (`DrawMode.tool`, `drawkeys.h`) decides what LMB / RMB do ([painting.md](../painting.md) §18). The old pens are what a step's stamps do (`PenKind`; `DrawModeStampPen`): the pencil stamps its brush shape, the eraser the eraser, the bucket in whole-region mode the fill, all as before. Every other tool records its input in the step (tool, colours, options, seed, points in atlas texels, the selection it was clipped to) and `StepRender` draws the whole step from it: the shape preview redraws it each frame from the stroke's start tiles, and a rebase replays it. The rasterisers are pure (`drawtools.c`, unit-tested).
+
+The selection (`DrawSelection`) is a mask over one region's rectangle, editor state only (not in the history, never in the map), dropped when its region disappears and on leaving the mode; every painting tool on its region is clipped to it.
+
+The keys come from one table (`drawkeys.c`); the camera in draw mode is `Spectator.mouseNav` (`spectator.c`). The kept state goes through `DrawModeGetState` / `DrawModeSetState` / `DrawModeStateDiffers` to `drawsettings.c`'s `<package>/draw.ini`, which `main.c` loads with the map and writes a second after the last change. The screen eyedropper sets `screenWant`; `main.c` reads that one pixel of the scene image (before the HUD) on the next frame and calls `DrawModeScreenPicked`.
+
 ## Saving
 
 CTRL+S writes every live atlas with unsaved pixels and the unwraps the text uses, then the map (`MapEditSave`), then the licence records (`ASSETS.md` rows and `.asset.md` sidecars of the files it wrote first), then `MS_EditMarkSaved`, so the hot reload doesn't reload the editor's own writes.
