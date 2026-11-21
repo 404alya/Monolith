@@ -19,7 +19,7 @@ model <i> file <f> line <l> group <g> material <m|-1> origin <o> collide <c> sha
       position <3 hex> rotationDeg <3 hex> scale <3 hex> translation <3 hex> rotation <4 hex>
       bounds <6 hex> colliders <first> <count> slots <N=m,...|->
 collider <i> <6 hex>
-material <i> "<name>" line <l> shader "<path>" unlit <on|off> [draw_distance <off|hex>]
+material <i> "<name>" line <l> shader "<path>" unlit <on|off> [draw_distance <off|hex>] [collide off]
 light <i> <point|spot|dir> line <l> position <3 hex> direction <3 hex> color r g b energy <hex> range <hex> shadow <on|off> [clip <3 hex> <3 hex>]
 sun direction <3 hex> energy <hex> range <hex> shadow <on|off>
 ```

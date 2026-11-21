@@ -3049,6 +3049,12 @@ static bool ParseMaterial(Parser *P, Token *tok, int n)
             ONE_WORD();
             if (!OnOff(P, v[0], &on)) return false;
             D->noPrepass = !on;
+        } else if (strcmp(k, "collide") == 0) {
+            // `collide off`: its boxes don't block the player (grass, foliage); drawn and picked as usual
+            bool on;
+            ONE_WORD();
+            if (!OnOff(P, v[0], &on)) return false;
+            M->noCollide = !on;
         } else if (strcmp(k, "blend") == 0) {
             static const char *const BL[] = { "alpha", "additive", "add_alpha", "multiply", "premultiplied" };
             int e;
@@ -4030,7 +4036,7 @@ static bool ParseText(Parser *P, const char *text, int size)
 // (CmRead*) in ReadCompiled's list after the sections its records point into, and the matching
 // section writer (CmPut*). The layout goes into docs/compiled-map.md.
 
-#define CM_VERSION          8           // MS_COMPILED_VERSION: bump on any change to a record or section
+#define CM_VERSION          9           // MS_COMPILED_VERSION: bump on any change to a record or section
 #define CM_BYTE_ORDER       0x01020304u
 #define CM_NONE             0xFFFFFFFFu // a string field without a string
 #define CM_MAX_ENV          4096        // env records (the key tables have ~120 keys)
@@ -4078,6 +4084,7 @@ typedef struct {
 // paintFilter: TEX_* (`paint_filter`); pad2: 0. noPrepass: 0 or 1 (`prepass off`).
 // drawDistance: MS_Material.drawDistance (`draw_distance`: m, 0 auto, -1 off). paintGrid:
 // `paint_grid` (texels per metre; 0 none, -1 not set: the map's `env paint.grid` applies).
+// noCollide: 0 or 1 (`collide off`: MS_Material.noCollide).
 typedef struct {
     uint32_t name, shader, maps[MAP_COUNT];     // maps: albedo, normal, orm, emission
     int32_t line, shaderLine, mapLine[MAP_COUNT];
@@ -4093,6 +4100,7 @@ typedef struct {
     uint32_t noPrepass;
     float drawDistance;
     float paintGrid;
+    uint32_t noCollide;
 } CmMaterial;
 
 // A `paint` statement, its entity resolved to the object: material (CM_NONE: the model
@@ -4514,6 +4522,7 @@ static bool CmMaterialInRange(const CmMaterial *c)
            c->unlit <= 1 &&
            c->instanced <= 1 &&
            c->noPrepass <= 1 &&
+           c->noCollide <= 1 &&
            (c->drawDistance == 0.0f || c->drawDistance == -1.0f || (c->drawDistance > 0.0f && c->drawDistance <= 1e6f)) &&
            c->filter <= TEX_NEAREST &&
            c->pad == 0 &&
@@ -4540,6 +4549,7 @@ static void CmFillMaterial(const CmMaterial *c, MS_Material *M, MatDef *D)
     R3D_Material *m = &M->material;
     M->line = c->line;
     M->drawDistance = c->drawDistance;
+    M->noCollide = c->noCollide == 1;
     m->albedo.color = (Color){ c->albedo[0], c->albedo[1], c->albedo[2], c->albedo[3] };
     m->emission.color = (Color){ c->emission[0], c->emission[1], c->emission[2], c->emission[3] };
     m->emission.energy = c->emissionEnergy;
@@ -5395,7 +5405,7 @@ static void CmPutMaterials(CmWriter *W, const SceneData *d)
             .samplerFirst = W->count[CM_SAMPLERS], .samplerCount = (uint32_t)D->samplerCount,
             .uvFaces = { 255, 255, 255, 255, 255, 255 }, .filter = D->filter,
             .paintFilter = D->paintFilter, .noPrepass = D->noPrepass, .drawDistance = M->drawDistance,
-            .paintGrid = D->paintGrid,
+            .paintGrid = D->paintGrid, .noCollide = M->noCollide,
         };
         if (D->hasFaces) memcpy(c.uvFaces, D->uvFaces, sizeof(c.uvFaces));
         for (int k = 0; k < MAP_COUNT; k++) {
@@ -12544,6 +12554,8 @@ int MS_FirstCollision(const MS_Scene *s, BoundingBox a)
         }
         for (int k = nd->first; k < nd->first + nd->count; k++) {
             int i = d->colliderOrder[k];
+            // (a box of a `collide off` material never blocks)
+            if (i < d->boxCount && s->materials[s->boxRefs[i].material].noCollide) continue;
             if ((first < 0 || i < first) && Overlaps(a, s->colliders[i].min, s->colliders[i].max) &&
                 (i >= d->boxCount || !TurnedOf(d, i) || OverlapsTurned(a, TurnedOf(d, i)))) first = i;
         }

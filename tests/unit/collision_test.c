@@ -3,7 +3,8 @@
 // player walks up the 30 degree ramp onto the platform and stands on the slope, walks down it
 // without leaving the ground, and stops at the 45 degree yawed wall's true face (its AABB would
 // stop it more than 0.3 m earlier). Also MS_ColliderTop / MS_ColliderBottom on axis-aligned
-// colliders (exactly max.y / min.y) and MS_Raycast's turned face normal.
+// colliders (exactly max.y / min.y) and MS_Raycast's turned face normal. Last, a material with
+// `collide off` (a small map it writes into build/unit/): its box doesn't block but is still picked.
 //   ./build.sh test collision          (builds it with ASan + UBSan and runs it)
 //   collision_test <tests/rotated>
 #include "player.h"
@@ -123,6 +124,31 @@ int main(int argc, char **argv)
     Check(fabsf(h.dist - (float)(7.0 - 0.2 / s45)) < 1e-4f, "raycast distance to the face", h.dist, 7.0 - 0.2 / s45);
 
     MS_Unload(scene);
+
+    // `collide off` (docs/map-format.md 2.4): a material's boxes don't block, but are still picked.
+    // A small map written next to the test's other output: a solid slab, a grass blade on it.
+    char path[1100];
+    snprintf(path, sizeof(path), "%s/../../build/unit/collide_off.map", argv[1]);
+    FILE *f = fopen(path, "w");
+    if (!f) { fprintf(stderr, "collision_test: cannot write %s\n", path); return 1; }
+    fputs("monolith 3\n"
+          "material \"grass\" albedo 100 160 90 collide off\n"
+          "box -5 -1 -5 5 0 5\n"
+          "use \"grass\"\n"
+          "box -0.0625 0 -0.0625 0.0625 0.5 0.0625\n", f);
+    fclose(f);
+    scene = MS_Load(path, &(MS_LoadOptions){ .noGpu = true });
+    if (!scene) { fprintf(stderr, "collision_test: %s\n", MS_LastError()); MS_ClearError(); return 1; }
+    BoundingBox body = { { -0.3f, 0.001f, -0.3f }, { 0.3f, 1.75f, 0.3f } };
+    Check(scene->materials[1].noCollide && !scene->materials[0].noCollide, "collide off sets noCollide (grass only)",
+          scene->materials[1].noCollide, 1);
+    Check(!MS_Collides(scene, body), "the player stands in the collide-off blade", MS_FirstCollision(scene, body), -1);
+    body.min.y = -0.5f;
+    Check(MS_FirstCollision(scene, body) == 0, "the solid slab still collides", MS_FirstCollision(scene, body), 0);
+    h = MS_Raycast(scene, (Vector3){ 0, 0.25f, 3 }, (Vector3){ 0, 0, -1 }, 0.0f);
+    Check(h.obj.kind == MS_OBJ_BOX && h.obj.index == 1, "raycast still picks the collide-off blade", h.obj.index, 1);
+    MS_Unload(scene);
+
     printf("collision_test: %s (%d failed)\n", fails ? "FAILED" : "OK", fails);
     MS_ClearError();
     return fails ? 1 : 0;

@@ -33,7 +33,7 @@ Little-endian only, every field a fixed-width integer or an IEEE-754 `float`, ev
 | Offset | Type | Field |
 |---|---|---|
 | 0 | `u8[8]` | magic `89 4D 41 50 42 0D 0A 1A` (`\x89MAPB\r\n\x1a`: not text, and catches a file mangled by newline conversion) |
-| 8 | `u32` | binary-format version, `MS_COMPILED_VERSION` (8; see *Versions* below). Separate from the map format version `MS_FORMAT_VERSION`; bumped whenever a record or section changes |
+| 8 | `u32` | binary-format version, `MS_COMPILED_VERSION` (9; see *Versions* below). Separate from the map format version `MS_FORMAT_VERSION`; bumped whenever a record or section changes |
 | 12 | `u32` | header size (64) |
 | 16 | `u32` | byte-order tag `0x01020304` (a big-endian reader sees `0x04030201` and refuses the file) |
 | 20 | `u32` | map format version of the source (`MS_FORMAT_VERSION`, 3) |
@@ -54,7 +54,7 @@ Little-endian only, every field a fixed-width integer or an IEEE-754 `float`, ev
 | 1 | strings | the string table: NUL-terminated UTF-8, `count` bytes, first byte and last byte `0` | 1 |
 | 2 | boxes | `f32 min[3], max[3]; i32 line, prim, group, material, copy, part` | 48 |
 | 3 | groups | `u32 name` | 4 |
-| 4 | materials | names and paths (`name`, `shader`, `maps[4]`: albedo, normal, orm, emission), `i32 line, shaderLine, mapLine[4]`, `u8 albedo[4], emission[4]` (RGBA), `f32 emissionEnergy, normalScale, occlusion, roughness, metalness, specular, uvScale[2], uvOffset[2], alphaCutoff`, `i32 cull, transparency, blend, priority, wrap`, `u32 inherit, unlit, instanced`, `u32 uniformFirst, uniformCount, samplerFirst, samplerCount`, `u8 uvFaces[6], filter, pad` (the box face layout `uv_faces`, a cell per face +x −x +y −y +z −z, all 255 = none; `filter` 0 trilinear, 1 nearest; `pad` 0), `paint` (the paint atlas path, `paint`, or none), `u8 paintFilter, pad2[3]` (`paint_filter` 0 trilinear, 1 nearest; padding 0), `u32 noPrepass` (`prepass off` = 1, else 0), `f32 drawDistance` (`draw_distance` in m, 0 = auto, −1 = off), `f32 paintGrid` (`paint_grid` in texels per metre: −1 = not set, the map's `env paint.grid` applies; 0 = none; else 1..1024) | 176 |
+| 4 | materials | names and paths (`name`, `shader`, `maps[4]`: albedo, normal, orm, emission), `i32 line, shaderLine, mapLine[4]`, `u8 albedo[4], emission[4]` (RGBA), `f32 emissionEnergy, normalScale, occlusion, roughness, metalness, specular, uvScale[2], uvOffset[2], alphaCutoff`, `i32 cull, transparency, blend, priority, wrap`, `u32 inherit, unlit, instanced`, `u32 uniformFirst, uniformCount, samplerFirst, samplerCount`, `u8 uvFaces[6], filter, pad` (the box face layout `uv_faces`, a cell per face +x −x +y −y +z −z, all 255 = none; `filter` 0 trilinear, 1 nearest; `pad` 0), `paint` (the paint atlas path, `paint`, or none), `u8 paintFilter, pad2[3]` (`paint_filter` 0 trilinear, 1 nearest; padding 0), `u32 noPrepass` (`prepass off` = 1, else 0), `f32 drawDistance` (`draw_distance` in m, 0 = auto, −1 = off), `f32 paintGrid` (`paint_grid` in texels per metre: −1 = not set, the map's `env paint.grid` applies; 0 = none; else 1..1024), `u32 noCollide` (`collide off` = 1, else 0) | 180 |
 | 5 | uniforms | `u32 name, count; f32 v[4]` | 24 |
 | 6 | samplers | `u32 name, path; i32 line; u32 data` (1 = `data_sampler`) | 16 |
 | 7 | lights | `u32 type; f32 position[3], direction[3]; u8 color[4]; f32 energy, specular, range, falloff, inner, outer, fogEnergy; u32 shadow, clip; f32 clipMin[3], clipMax[3]; i32 ref[6]` | 116 |
@@ -72,9 +72,9 @@ Little-endian only, every field a fixed-width integer or an IEEE-754 `float`, ev
 
 **Turned boxes:** for a box with a box turn record, its `boxes` record holds the box **as written** (the two corners before the turn, ordered), not its world AABB; the reader rebuilds the turned-box record (centre, size, axes) and the AABB with the parser's own code, so the bits match a text load. Every other box is stored as its corners.
 
-**Versions:** the reader reads exactly one binary-format version, 8, and only files compiled from the current map format (3); the writer writes the same. Any other file is refused and nothing is loaded:
+**Versions:** the reader reads exactly one binary-format version, 9, and only files compiled from the current map format (3); the writer writes the same. Any other file is refused and nothing is loaded:
 
-- another binary-format version: `compiled map version 7; this runtime reads compiled map version 8: compile the map again`;
+- another binary-format version: `compiled map version 8; this runtime reads compiled map version 9: compile the map again`;
 - compiled from an older map format (every file an earlier monolith wrote): `compiled map of map format 2; this runtime reads map format 3: compile the map again`;
 - compiled from a newer map format: `compiled map of map format 4 is newer than this runtime (3): update monolith`.
 
@@ -104,7 +104,7 @@ A compiled file is input like any other. Before it trusts a byte, the reader che
 - every path package-relative (no absolute path, drive letter, backslash or `..`; the parser's own check), and the file present;
 - material 0 named `default`, statement keys unique and not 0, boxes, models and lights in map order, a map that makes at least one box or model.
 
-A file that fails any check is rejected with `<file>: <message>` (for example `forest.mapb: compiled map: section 'boxes' lies outside the file`, or `forest.mapb: compiled map version 9; this runtime reads compiled map version 8: compile the map again`) and nothing is loaded; a bad file never crashes the reader. Errors found later in the load (a texture that won't load) name the source map and line, as for a text load: `forest.map:41: cannot load the texture "textures/bark.png"`.
+A file that fails any check is rejected with `<file>: <message>` (for example `forest.mapb: compiled map: section 'boxes' lies outside the file`, or `forest.mapb: compiled map version 10; this runtime reads compiled map version 9: compile the map again`) and nothing is loaded; a bad file never crashes the reader. Errors found later in the load (a texture that won't load) name the source map and line, as for a text load: `forest.map:41: cannot load the texture "textures/bark.png"`.
 
 ## 4. API and detection
 

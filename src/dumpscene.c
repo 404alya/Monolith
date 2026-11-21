@@ -116,6 +116,7 @@ bool DumpScene(const MS_Scene *s, const char *path, bool diff)
         // (only when set, so the dumps of maps without the key stay as they were)
         if (m->drawDistance < 0.0f) fprintf(f, " draw_distance off");
         else if (m->drawDistance > 0.0f) fprintf(f, " draw_distance %a", m->drawDistance);
+        if (m->noCollide) fprintf(f, " collide off");
         fprintf(f, "\n");
     }
     for (int i = 0; i < s->lightCount; i++) {

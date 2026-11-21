@@ -203,6 +203,7 @@ use "name"
 | `cull back\|front\|none` | |
 | `transparency off\|prepass\|alpha` | |
 | `prepass on\|off` | Default on. `off`: this material is never drawn in the depth pre-pass, only once in the shading pass (for a cheap shader on very many triangles, where the pre-pass would only double the vertex cost). With R3D patch 28; upstream R3D always pre-passes, so the key changes nothing there. |
+| `collide on\|off` | Default on. `off`: the material's boxes don't block the player (`MS_Collides` / `MS_FirstCollision` skip them: grass, foliage, anything to walk through); they are still drawn, picked, cast shadows and hide other boxes' faces, and stay in `boxes[]` / `colliders[]` (`MS_Material.noCollide`). Models ignore it (their own `collide`). |
 | `draw_distance <m>\|auto\|off` | Default auto. Beyond this distance from the camera (to the bounds of a map cell's boxes of the material) the camera skips its boxes; their shadows stay. Multiplied by the detail distance setting (0 there: always drawn). `auto`: 400 × the size of its largest box (the square root of its largest face). `off`: always drawn. With R3D patch 30. |
 | `blend alpha\|additive\|add_alpha\|multiply\|premultiplied` | |
 | `unlit on\|off` | |

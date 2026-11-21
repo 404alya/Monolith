@@ -100,6 +100,8 @@ typedef struct {
     const char *shader;     // package-relative shader path, NULL = none
     float drawDistance;     // m (`draw_distance`): 0 = automatic (from the size of its boxes),
                             // < 0 = `off` (always drawn); see MS_RenderSettings.detailDistance
+    bool noCollide;         // `collide off`: its boxes don't block (MS_Collides / MS_FirstCollision skip
+                            // them); they stay in boxes[] and colliders[], are drawn, picked and cast shadows
 } MS_Material;
 
 // A model file (glTF/GLB, OBJ, FBX, DAE through R3D's importer), loaded once per map load
@@ -188,7 +190,8 @@ typedef struct {
     const MS_SlotMaterial *modelSlots;
     int modelSlotCount;
 
-    const BoundingBox *colliders;   // boxes first (same indices as boxes[]), then model colliders
+    const BoundingBox *colliders;   // boxes first (same indices as boxes[]), then model colliders; the boxes
+                                    // of a `collide off` material (MS_Material.noCollide) are here too
     int colliderCount;
 
     const MS_Material *materials;   // [0] = "default"
@@ -653,7 +656,7 @@ MS_Hit MS_Raycast(const MS_Scene *scene, Vector3 origin, Vector3 dir, float maxD
 bool MS_RaycastModel(const MS_Scene *scene, int model, Vector3 origin, Vector3 dir, float maxDist, MS_Hit *hit);
 
 // Strict overlap (touching is not a hit) of `box` with any collider (a turned box: its turned
-// shape, not its AABB)
+// shape, not its AABB). Boxes of a `collide off` material (MS_Material.noCollide) never collide.
 bool MS_Collides(const MS_Scene *scene, BoundingBox box);
 // The lowest index into scene->colliders that `box` strictly overlaps, -1 for none
 int MS_FirstCollision(const MS_Scene *scene, BoundingBox box);
