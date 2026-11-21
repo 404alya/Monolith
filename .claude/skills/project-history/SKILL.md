@@ -288,6 +288,19 @@ The 2026-11-09 entry above left this as the next round: one `clang` command comp
 - **Rejected:** lld (−0.15 s per link, a new dependency); a unity build (one TU: no parallelism, and every change recompiles everything); splitting `runtime/monolith_scene.c` (the remaining floor; a separate round, the developer's call); a shared header for the pool between `nob.c` and `examples/nob.c` (each program rebuilds itself only when its own source or nob.h changes, so a header would escape that check: the pool is copied, "keep in step").
 - **Known limits:** the stamps hold the compiler's name, not its version (as `xatlas.o.flags` did): after a compiler upgrade delete the `-obj` folders. The leak check's "binary out of date" test compares the binary with every source's mtime; a touched file that changes no object leaves the binary older, so the leak check runs `./build.sh lsan` again each time, which now costs ~0.2 s and changes nothing.
 
+## A model catalog instead of web searches (2026-11-20)
+
+Request sessions used to search Poly Haven, Kenney and Poly Pizza on the web for every model. The search was slow, gave different results each time, and repeated the licence check per request. Now `library/library.db` (Git LFS; `library/library.dump.txt` is its text twin, so changes show in git diffs) holds 16,842 models from Poly Haven, Kenney, Polyfork and Poly Pizza. Each row carries links, licence, file hash, measured facts and three short descriptions (shape, style, use) written from images. Search runs by meaning and by keywords: three Qwen3-Embedding-0.6B vectors per model, 512-dim int8 in sqlite-vec, plus FTS5, merged with RRF. Model files stay at their sources until a map uses one; `fetch_asset.py` then refuses a file whose hash differs. Design and measurements: `docs/model-library.md`.
+- **The tool is C** (`build/tools/library`) with SQLite, sqlite-vec and llama.cpp vendored and linked into that program only. monolith's build commands and symbols are unchanged. All network access stays in `fetch_asset.py`.
+- **Lessons the round paid for:**
+  - **Request sessions must name the object.** With 16,842 models, a description without the name ("two-wheeled pedal vehicle") finds the bicycle about half as often as the name does. The skills say so, and the RRF weights favour the keyword list (`1,0.5,1,3`): with equal weights, RRF fell below keywords alone.
+  - **`best-cos` alone can't say "nothing fits".** Objects missing from the catalog still score 0.48–0.59 against look-alikes of another kind. The deciding check is whether the top result's category is the object asked for.
+  - **Kenney's site disallows Claude's agents** (`robots.txt`) and gives only browser-signed zip links. The developer downloads the packs into a local cache (`MONOLITH_KENNEY_ZIPS`), and no agent fetches from kenney.nl.
+  - **Poly Pizza's free key allows 3,000 API requests a month**, and an exhausted quota answers HTTP 401, the same as a revoked key. A first sweep spent a key's month and saved nothing. Sweeps now have `--max-requests` and keep partial results.
+  - **Polyfork GLBs draw nothing as downloaded:** their VEC3 vertex colours are read with alpha 0. Overrides need `alpha_cutoff 0`; there is a `.claude/TODOs` entry for the importer.
+  - **Description agents need a hard check, not just a brief.** They wrote banned material words, upper-case categories, and once table codes ("PV") instead of sentences. `library ingest` refuses all of these, so a batch can't pass by accident.
+  - **Licences don't cover trademarks.** Poly Pizza holds fan copies of brands and real people under CC licences, so the skill forbids choosing them.
+
 ## The instruction files
 
 Superseded layouts, for reading old bundles, commits and notes; the current layout is `CLAUDE.md` + `.claude/skills/` + `docs/`.

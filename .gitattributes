@@ -1,2 +1,5 @@
 # Fold slop.nvim markers in GitHub diffs (still expandable on click).
 .slop/** linguist-generated=true
+
+# The model catalog (docs/model-library.md): binary, in Git LFS; library/library.dump.txt is its text twin for diffs.
+library/library.db filter=lfs diff=lfs merge=lfs -text

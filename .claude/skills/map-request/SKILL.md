@@ -89,3 +89,5 @@ Write it **last**, in one go. The editor picks it up as soon as it has a complet
 ## 5. Models and textures
 
 Before placing any model or texture, load the **`assets-and-licences`** skill. Never place a file whose licence isn't recorded.
+
+Models come from the **model catalog**, not from a web search: `build/tools/library search --shape "<name>: …" --use … --words "<name>"` (by meaning and words, with filters for style, triangles and size; always name the object), then `build/tools/library show <id>` and the fetch command it prints, which checks the file's hash. When no result is the object asked for (judge by its category and description; `best-cos` below 0.50 means nothing fits), don't search the web: list in `result.md` what you searched and the closest ids with their `best-cos`, and build from boxes if `MAP.md` allows. The `assets-and-licences` skill (§3) has the details per source.

@@ -263,6 +263,32 @@ static const char *SAN_TOOLS[] = {
     "bench-export-ab", "old-monolith", "stub-classifier",
 };
 
+// build/tools/library links the vendored SQLite, sqlite-vec and llama.cpp, so its sanitizer copy is built
+// apart from SAN_TOOLS: tools/library.c with the sanitizer, linked against the archive ./build.sh --tools
+// library makes (build/tools-obj/library/libvendor.a, not instrumented: only our code is), with the vendored
+// headers and libraries of nob.c's LIBRARY_INCLUDES / LIBRARY_LIBS (keep these in step).
+static bool CompileLibrarySanitized(const char *root, const char *binary, const char *san)
+{
+    Nob_Cmd cmd = {0};
+    nob_cmd_append(&cmd, "./build.sh", "--tools", "library");
+    int status = ToolRun(&cmd, (ToolIo){.out = "/dev/null"});
+    if (status != 0) {
+        nob_cmd_free(cmd);
+        return false;
+    }
+    nob_cmd_append(&cmd, ToolEnv("CC", "clang"), "-std=c11", "-Wall", "-Wextra", "-Wno-missing-field-initializers",
+                   "-g", "-O1", "-fno-omit-frame-pointer", nob_temp_sprintf("-fsanitize=%s", san),
+                   nob_temp_sprintf("-I%s/src/vendor/sqlite", root), nob_temp_sprintf("-I%s/src/vendor/sqlite-vec", root),
+                   nob_temp_sprintf("-I%s/src/vendor/llama.cpp/include", root),
+                   nob_temp_sprintf("-I%s/src/vendor/llama.cpp/ggml/include", root),
+                   nob_temp_sprintf("%s/tools/library.c", root),
+                   nob_temp_sprintf("%s/build/tools-obj/library/libvendor.a", root), "-o", binary, "-lstdc++", "-lm",
+                   "-lpthread");
+    status = ToolRun(&cmd, (ToolIo){0});
+    nob_cmd_free(cmd);
+    return status == 0;
+}
+
 // #endregion
 
 // #region Running one command (the script's Run)
@@ -463,6 +489,10 @@ int main(int argc, char **argv)
                 ToolDie(1, "building tools/%s.c failed", SAN_TOOLS[i]);
             }
         }
+        // the library tool: its vendored archive first (./build.sh --tools library, only what is stale)
+        if (!CompileLibrarySanitized(root, nob_temp_sprintf("%s/library", toolDir), san)) {
+            ToolDie(1, "building tools/library.c failed");
+        }
         // the paint unwrap test (tests/unit/paintunwrap_test.c) against the build's own xatlas object (the
         // build, nob.c, compiles it into <build folder>-obj/ with the same sanitizer), rebuilt when the test,
         // the unwrap, anything in runtime/ (folders included, as find listed them) or that object is newer
@@ -510,6 +540,8 @@ int main(int argc, char **argv)
         const char *bin = nob_temp_sprintf("%s/%s", toolDir, SAN_TOOLS[i]);
         if (access(bin, X_OK) != 0) ToolDie(1, "%s missing (run without --no-build)", bin);
     }
+    const char *LIBRARY = strdup(nob_temp_sprintf("%s/library", toolDir));
+    if (access(LIBRARY, X_OK) != 0) ToolDie(1, "%s missing (run without --no-build)", LIBRARY);
     const char *STUB = strdup(nob_temp_sprintf("%s/build/tools/stub-terminal", root));
     if (access(STUB, X_OK) != 0) {
         ToolDie(1, "build/tools/stub-terminal missing (run without --no-build, or ./build.sh --tools stub-terminal)");
@@ -1185,6 +1217,67 @@ int main(int argc, char **argv)
         const char *rmShim = strdup(nob_temp_sprintf("%s/shim/rm", td));
         if (symlink(tool[OLDM], rmShim) != 0) ToolErr("could not link %s: %s", rmShim, strerror(errno));
         RUN("tool-old-monolith-rm-shim", 0, rmShim, "-rf", nob_temp_sprintf("%s/nothing-here", td));
+    }
+
+    // The model catalog tool (build/tools/library) on scratch databases in tmp/library/ with the fixture
+    // tests/library/catalog.jsonl: ingest (new, unchanged, refused), embed with the stub embedder, search with
+    // filters, show for each source, pin, check, dump, eval, usage errors; a llama embed without the GGUF
+    // (exit 3); and, when the GGUF is on disk ($MONOLITH_EMBED_DIR or ~/.cache/monolith/embed), the real model
+    // on a second database: embed and a search.
+    ToolSay("running the library tool ...");
+    {
+        const char *lib = strdup(T("library"));
+        MkdirP(lib);
+        const char *fixture = strdup(nob_temp_sprintf("%s/tests/library/catalog.jsonl", root));
+        const char *db = strdup(nob_temp_sprintf("%s/stub.db", lib));
+        const char *bad = strdup(nob_temp_sprintf("%s/bad.jsonl", lib));
+        const char *queries = strdup(nob_temp_sprintf("%s/queries.jsonl", lib));
+        WriteText(bad, "{\"id\": \"polyhaven-x\", \"source\": \"polyhaven\", \"shape_desc\": \"A red box\", \"bogus\": 1}\nnot json\n",
+                  false);
+        WriteText(queries,
+                  "{\"q\": \"tree\", \"shape\": \"tall conifer\", \"words\": \"pine\", \"filters\": {\"max_tris\": 50000}, "
+                  "\"expect\": [\"kenney-nature-kit/tree_pineTallA\", \"polyhaven-pine_tree_01\"]}\n"
+                  "{\"q\": \"crate\", \"words\": \"crate\", \"expect\": [\"polyfork-crate-small\"]}\n",
+                  false);
+        RUN("library-usage", 2, LIBRARY, "--db", db);
+        RUN("library-ingest", 0, LIBRARY, "--db", db, "--now", "2026-11-20", "ingest", fixture);
+        RUN("library-ingest-same", 0, LIBRARY, "--db", db, "--now", "2026-11-21", "ingest", fixture);
+        RUN("library-ingest-refused", 1, LIBRARY, "--db", db, "ingest", bad);
+        RUN("library-check-no-vectors", 1, LIBRARY, "--db", db, "--embedder", "stub", "check");
+        RUN("library-embed-no-gguf", 3, "env", nob_temp_sprintf("MONOLITH_EMBED_DIR=%s", lib), LIBRARY, "--db", db, "embed");
+        RUN("library-embed-stub", 0, LIBRARY, "--db", db, "--embedder", "stub", "embed");
+        RUN("library-search", 0, LIBRARY, "--db", db, "--embedder", "stub", "search", "--shape", "tall conifer", "--style",
+            "flat facets", "--use", "forest edges", "--words", "pine tree", "--max-tris", "1000", "--max-size", "5",
+            "--style-tag", "lowpoly", "--style-tag", "photoscan", "--source", "kenney", "--source", "polyhaven",
+            "--weights", "1,0.5,1,2", "--limit", "5");
+        RUN("library-search-cc0", 0, LIBRARY, "--db", db, "--embedder", "stub", "search", "--words", "crate box", "--cc0-only");
+        RUN("library-search-usage", 2, LIBRARY, "--db", db, "search", "--max-tris", "10");
+        RUN("library-search-other-embedder", 1, LIBRARY, "--db", db, "search", "--shape", "tree");
+        RUN("library-show-polyhaven", 0, LIBRARY, "--db", db, "show", "polyhaven-pine_tree_01");
+        RUN("library-show-kenney", 0, LIBRARY, "--db", db, "show", "kenney-nature-kit/rock_largeA");
+        RUN("library-show-polyfork", 0, LIBRARY, "--db", db, "show", "polyfork-fox-base");
+        RUN("library-show-unknown", 1, LIBRARY, "--db", db, "show", "polyfork-nothing");
+        RUN("library-pin", 0, LIBRARY, "--db", db, "pin", "polyfork-fox-base",
+            "abababababababababababababababababababababababababababababababab");
+        RUN("library-pin-again", 1, LIBRARY, "--db", db, "pin", "polyfork-fox-base",
+            "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd");
+        RUN("library-check", 0, LIBRARY, "--db", db, "--embedder", "stub", "check");
+        RUN("library-dump", 0, LIBRARY, "--db", db, "dump");
+        RUN("library-eval", 0, LIBRARY, "--db", db, "--embedder", "stub", "eval", queries);
+        // the real model, when it is there (it is outside the repo: library/EMBEDDING.md)
+        const char *embedDir = getenv("MONOLITH_EMBED_DIR") && *getenv("MONOLITH_EMBED_DIR")
+                                   ? getenv("MONOLITH_EMBED_DIR")
+                                   : nob_temp_sprintf("%s/.cache/monolith/embed", ToolEnv("HOME", "/nonexistent"));
+        if (access(nob_temp_sprintf("%s/Qwen3-Embedding-0.6B-Q8_0.gguf", embedDir), R_OK) == 0) {
+            const char *real = strdup(nob_temp_sprintf("%s/llama.db", lib));
+            RUN("library-llama-ingest", 0, LIBRARY, "--db", real, "--now", "2026-11-20", "ingest", fixture);
+            RUN("library-llama-embed", 0, LIBRARY, "--db", real, "embed");
+            RUN("library-llama-search", 0, LIBRARY, "--db", real, "--timing", "search", "--shape", "tall conifer tree",
+                "--use", "forest edges");
+            RUN("library-llama-check", 0, LIBRARY, "--db", real, "check");
+        } else {
+            ToolSay("library: no GGUF in %s: the real-model runs are skipped (library/EMBEDDING.md)", embedDir);
+        }
     }
 
     // The examples (LSan mode only: they have no ASan build), each with --shot; 05 finds an entity by id

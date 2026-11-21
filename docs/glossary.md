@@ -8,6 +8,8 @@ Terms used across these pages, in alphabetical order.
 
 **Bundle:** the folder the editor writes for one request, `requests/<date>_<slug>/`: the prompt, screenshots, the camera, what the crosshair hit, the selection, the regions and the volumes, and later the result.
 
+**Catalog, model catalog** (`library/library.db`): a SQLite database in the repo with one row per model from Poly Haven, Kenney, Polyfork and Poly Pizza: its links, licence, file hash, measured facts and three short descriptions (shape, style, use) with their embeddings. Request sessions search it with `build/tools/library search` instead of searching the web; the model files stay at their sources until a map uses one ([model-library.md](model-library.md)).
+
 **Compiled map** (`<name>.mapb`): a map's text compiled by `monolith --compile` (and by `--export`) into fixed-size binary records. Games and the game-style examples load it; their runtime has no text parser. The `.map` text stays the source: edit it and compile again ([compiled-map.md](compiled-map.md)).
 
 **Classifier, AI classifier:** a small one-shot Claude run (`claude -p` on Fable, Opus as fallback, no tools) the editor starts for each request without an override, before it queues the bundle: it reads the request and its context and picks the tier ([request-queue.md](request-queue.md) "Models"). Not the coordinator and not one of its subagents.
@@ -41,6 +43,8 @@ Terms used across these pages, in alphabetical order.
 **R3D:** the renderer monolith uses, a deferred PBR renderer on top of raylib, vendored in `submodules/r3d`.
 
 **R3D pitfall N:** a numbered R3D behaviour found by debugging (fog in shadow turning black, clipped shadow casters, …), in `.claude/skills/lighting-fog-shadows/r3d-pitfalls.md`. Read it before changing lighting, fog or shadows.
+
+**RRF, reciprocal rank fusion:** how the catalog search merges its rankings (one per description vector, one by keywords): each model scores the sum of 1 / (60 + its rank) over the lists it appears in, so a model ranked well by several lists comes first ([model-library.md](model-library.md) §6).
 
 **Regions, snip mode:** rectangles dragged over the screen (key C in spectator mode) to point at an area rather than an object.
 

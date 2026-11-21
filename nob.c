@@ -1167,6 +1167,17 @@ static const char *TOOLS[] = {
     "leakcheck",         // every main code path under LeakSanitizer (CLAUDE.md: after every code change)
     "bench-export-ab",   // interleaved A/B benchmark pairs of two exports
     "old-monolith",      // builds monolith as it was at an older commit (the migrate-map skill)
+    "library",           // the model catalog library/library.db: ingest, embed, search (docs/model-library.md).
+                         // The only program that links vendored libraries (SQLite, sqlite-vec, llama.cpp):
+                         // BuildTools builds those into build/tools-obj/library/ first (LibraryVendor)
+};
+
+// The -I folders of tools/library.c (relative to the repo root): the headers of the vendored libraries it
+// calls. Used by its build (BuildLibraryTool, region "Tools") and its compile_commands.json entry; copied
+// (keep them in step) into the library unit test's entry in UNIT_TESTS below and the leak check's sanitizer
+// build of it (tools/leakcheck.c).
+static const char *LIBRARY_INCLUDES[] = {
+    "src/vendor/sqlite", "src/vendor/sqlite-vec", "src/vendor/llama.cpp/include", "src/vendor/llama.cpp/ggml/include",
 };
 
 // The unit tests in tests/unit/ (region "Unit tests" below runs them): one list for every test's sources and
@@ -1189,6 +1200,7 @@ static const char *TOOLS[] = {
 //   each      optional, NULL-terminated: the test runs once per item (printing "== <item>" before each),
 //             "{each}" in args is replaced by the item; the first failing run ends the test
 //   args      NULL-terminated arguments of the run ("{root}", "{out}" and "{each}" are replaced)
+//   libs      NULL-terminated link flags after -o <binary> (and after R3D's libraries): "-lstdc++"
 //   prepare   optional: runs before the compile (build helpers, copy data) and may append run arguments
 //             (they come first, before args); returns false when it failed (it prints why)
 // The flags are written in the order the old scripts gave them to the compiler: UNIT_FLAGS, then
@@ -1205,6 +1217,7 @@ struct UnitTest {
     const char **env;
     const char **each;
     const char **args;
+    const char **libs;
     bool (*prepare)(const UnitTest *t, const char *out, Nob_Cmd *run);
 };
 
@@ -1219,6 +1232,7 @@ static const char *UNIT_FLAGS[] = {
 static bool PrepareRunSh(const UnitTest *t, const char *out, Nob_Cmd *run);
 static bool PrepareCompiled(const UnitTest *t, const char *out, Nob_Cmd *run);
 static bool PreparePaintunwrap(const UnitTest *t, const char *out, Nob_Cmd *run);
+static bool PrepareLibrary(const UnitTest *t, const char *out, Nob_Cmd *run);
 
 // The tests. All but run_sh are the old scripts' (collision, compiled, export_strip, msg, paintunwrap,
 // parse_error), each with its script's flags, sources and run.
@@ -1294,6 +1308,20 @@ static const UnitTest UNIT_TESTS[] = {
         .sources = (const char *[]){"tests/unit/run_sh_test.c", NULL},
         .args = (const char *[]){"{out}", "{root}", NULL},
         .prepare = PrepareRunSh,
+    },
+    {
+        // tools/library.c (the model catalog), included whole by tests/unit/library_test.c and run in-process
+        // with the stub embedder on the fixture tests/library/: schema, ingest, search, show, the word list.
+        // Links the vendored SQLite, sqlite-vec and llama.cpp as build/tools-obj/library/libvendor.a, which
+        // PrepareLibrary builds (LibraryVendor: the same objects ./build.sh --tools library uses, without
+        // sanitizers: only our code is instrumented). The test writes its scratch databases into {out}.
+        .name = "library",
+        .sources = (const char *[]){"tests/unit/library_test.c", "build/tools-obj/library/libvendor.a", NULL},
+        .includes = (const char *[]){"src/vendor/sqlite", "src/vendor/sqlite-vec", "src/vendor/llama.cpp/include",
+                                     "src/vendor/llama.cpp/ggml/include", NULL},
+        .args = (const char *[]){"{out}", "{root}", NULL},
+        .libs = (const char *[]){"-lstdc++", "-lm", "-lpthread", NULL},
+        .prepare = PrepareLibrary,
     },
 };
 
@@ -1479,17 +1507,18 @@ static int CompareJobSource(const void *a, const void *b)
     return strcmp(sa ? sa : "", sb ? sb : "");
 }
 
-// Compiles every file of <sources> into its own object under <objDir> (the source's path below the repo root,
-// .c -> .o: build/linux-obj/src/main.o, build/linux-obj/runtime/monolith_scene.o), in parallel (RunPool, the
-// pool's size from PoolSize), and appends each object's path to <objects> in source order. <compile> is the
-// compiler and its flags in compiler order; each command is `<compile> -MMD -MF <obj>.d -c <source> -o <obj>`
-// (-MMD: the compiler writes the headers the source includes, system headers left out, as a make rule).
-// Only out-of-date objects compile: missing, older than their source or any header in their .d file, older
-// than nob.c (a change to the build program rebuilds everything, as for xatlas), or every object of the
-// folder when the compiler or flags differ from <objDir>/objects.flags (the stamp, written once every
-// object compiled with them). <what> names the build in messages and the summary.
-static void CompileObjects(const char *what, const Nob_Cmd *compile, const Nob_Cmd *sources, const char *objDir,
-                           Nob_Cmd *objects)
+// The out-of-date objects of one compile, as pool jobs (CompileObjects's first half; LibraryVendor collects
+// several folders into one pool). Every file of <sources> (a .c or .cpp file under the repo) has its own
+// object under <objDir> (the source's path below the repo root, extension -> .o: build/linux-obj/src/main.o,
+// build/linux-obj/runtime/monolith_scene.o), appended to <objects> in source order. <compile> is the compiler
+// and its flags in compiler order; each job is `<compile> -MMD -MF <obj>.d -c <source> -o <obj>` (-MMD: the
+// compiler writes the headers the source includes, system headers left out, as a make rule). Only out-of-date
+// objects get a job: missing, older than their source or any header in their .d file, older than nob.c (a
+// change to the build program rebuilds everything, as for xatlas), or every object of the folder when the
+// compiler or flags differ from <objDir>/objects.flags (the stamp, forgotten here and written by the caller
+// once every object compiled with them). Returns whether the flags changed (the caller then writes the stamp).
+static bool CollectCompileJobs(const Nob_Cmd *compile, const Nob_Cmd *sources, const char *objDir, Nob_Cmd *objects,
+                               PoolJobs *jobs)
 {
     const char *stamp = nob_temp_sprintf("%s/objects.flags", objDir);
     const char *stampText = StampText(compile);
@@ -1499,16 +1528,17 @@ static void CompileObjects(const char *what, const Nob_Cmd *compile, const Nob_C
     bool flagsChanged = !previous || strcmp(previous, stampText) != 0;
     if (flagsChanged) ForgetStamp(stamp);
 
-    PoolJobs jobs = {0};
     for (size_t i = 0; i < sources->count; i++) {
         const char *source = sources->items[i];
         const char *rel = RelativeToRoot(source);
         size_t n = strlen(rel);
-        if (n < 2 || strcmp(rel + n - 2, ".c") != 0 || rel[0] == '/') {
-            SayErr("build: %s: not a .c file under the repo", source);
+        // the extension's length: ".c" (monolith, SQLite, ggml's C files) or ".cpp" (llama.cpp)
+        size_t ext = n >= 2 && strcmp(rel + n - 2, ".c") == 0 ? 2 : n >= 4 && strcmp(rel + n - 4, ".cpp") == 0 ? 4 : 0;
+        if (ext == 0 || n == ext || rel[0] == '/') {
+            SayErr("build: %s: not a .c or .cpp file under the repo", source);
             Fail(1);
         }
-        const char *obj = nob_temp_sprintf("%s/%.*s.o", objDir, (int)(n - 2), rel);
+        const char *obj = nob_temp_sprintf("%s/%.*s.o", objDir, (int)(n - ext), rel);
         const char *dep = nob_temp_sprintf("%s.d", obj);
         nob_cmd_append(objects, obj);
         if (!MkdirP(nob_temp_dir_name(obj))) Fail(1);
@@ -1519,8 +1549,20 @@ static void CompileObjects(const char *what, const Nob_Cmd *compile, const Nob_C
         PoolJob job = {.label = nob_temp_sprintf("compile %s", rel)};
         nob_da_append_many(&job.cmd, compile->items, compile->count);
         nob_cmd_append(&job.cmd, "-MMD", "-MF", dep, "-c", source, "-o", obj);
-        nob_da_append(&jobs, job);
+        nob_da_append(jobs, job);
     }
+    return flagsChanged;
+}
+
+// Compiles every file of <sources> into its own object under <objDir> (CollectCompileJobs: which objects are
+// out of date, and where each goes), in parallel (RunPool, the pool's size from PoolSize), and appends each
+// object's path to <objects> in source order. <what> names the build in messages and the summary. The stamp
+// <objDir>/objects.flags is written once every object compiled with the current flags.
+static void CompileObjects(const char *what, const Nob_Cmd *compile, const Nob_Cmd *sources, const char *objDir,
+                           Nob_Cmd *objects)
+{
+    PoolJobs jobs = {0};
+    bool flagsChanged = CollectCompileJobs(compile, sources, objDir, objects, &jobs);
     if (jobs.count > 0) {
         // the largest sources start first (size stands in for compile time): the pool's wall time is bounded
         // by its longest command (runtime/monolith_scene.c), which would otherwise start last, in glob order.
@@ -1532,7 +1574,7 @@ static void CompileObjects(const char *what, const Nob_Cmd *compile, const Nob_C
         if (!RunPool(&jobs, nob_temp_sprintf("compile %s", what), size)) Fail(1);
     }
     nob_da_free(jobs);
-    if (flagsChanged && !WriteLine(stamp, stampText)) Fail(1);
+    if (flagsChanged && !WriteLine(nob_temp_sprintf("%s/objects.flags", objDir), StampText(compile))) Fail(1);
 }
 
 // Runs the link command <link> (it writes <binary>) unless <binary> is up to date: it exists, the command is
@@ -1942,7 +1984,12 @@ static int BuildLinux(int argc, char **argv)
             if (!IsRegularFile(source)) continue;
             ENTRY_BEGIN();
             nob_cmd_append(&e, Env("CC", "clang"), "-std=c11", "-Wall", "-Wextra",
-                           "-Wno-missing-field-initializers", "-O1", source);
+                           "-Wno-missing-field-initializers", "-O1");
+            // library: the vendored headers it includes (BuildLibraryTool)
+            for (size_t k = 0; strcmp(TOOLS[i], "library") == 0 && k < NOB_ARRAY_LEN(LIBRARY_INCLUDES); k++) {
+                nob_cmd_append(&e, nob_temp_sprintf("-I%s/%s", gRoot, LIBRARY_INCLUDES[k]));
+            }
+            nob_cmd_append(&e, source);
             ENTRY_END();
         }
 #undef ENTRY_BEGIN
@@ -1981,6 +2028,187 @@ static int BuildLinux(int argc, char **argv)
 // (TOOLS, the list of programs, is at the top of region "Build steps": the compile_commands.json writer
 // needs it too.)
 
+
+// The libraries tools/library.c links after the vendored archive: llama.cpp is C++ (its runtime library),
+// ggml and SQLite use libm and pthreads.
+static const char *LIBRARY_LIBS[] = {"-lstdc++", "-lm", "-lpthread"};
+
+// The release of llama.cpp vendored in src/vendor/llama.cpp/ (its README.md): the version and commit CMake
+// would write into the two headers it generates (ggml-version.h, llama-version.h), written here instead.
+#define LLAMA_CPP_VERSION "1.0.0"
+#define LLAMA_CPP_COMMIT "b1b770d90d94cad9e9ea5b993bdbc383a522fb28"
+
+// Writes <text> into <path> only when the file is missing or holds something else, so a generated header's
+// mtime (and with it every object that includes it, through its .d file) changes only when its content does.
+static void WriteIfChanged(const char *path, const char *text)
+{
+    Nob_String_Builder old = {0};
+    bool same = nob_read_entire_file(path, &old) && old.count == strlen(text) && memcmp(old.items, text, old.count) == 0;
+    nob_sb_free(old);
+    if (!same && !nob_write_entire_file(path, text, strlen(text))) Fail(1);
+}
+
+// The vendored libraries of tools/library.c, built into build/tools-obj/library/ (docs/model-library.md §10)
+// and packed into build/tools-obj/library/libvendor.a, whose path it returns (a temp string). Only this tool
+// and its unit test link them: the monolith build compiles src/*.c and runtime/*.c, which doesn't reach
+// src/vendor/, so monolith, the runtime, exports and examples are unchanged. Three groups, each a folder
+// with its own flags stamp (CollectCompileJobs), compiled together in one pool, only what is out of date:
+//   sqlite  the SQLite amalgamation (FTS5 on; no extension loading, so no dlopen) and sqlite-vec (linked into
+//           SQLite: SQLITE_CORE, registered by sqlite3_vec_init; no file-reading functions). C, portable.
+//   ggml-c  ggml's C files (core, quantisation, the CPU backend). C11 with GNU extensions, like upstream.
+//   cxx     the rest of ggml (backend, the registry with the CPU backend only, gguf, llamafile's sgemm) and
+//           libllama (src/*.cpp, src/models/*.cpp). C++17.
+// ggml and llama.cpp get -march=x86-64-v3 (AVX2, FMA, F16C, BMI2: what the GGML_* defines below announce,
+// as upstream's GGML_NATIVE=OFF build with those options would) and never -march=native, so the same text
+// gives the same vector on every x86-64-v3 machine with this build (docs/model-library.md §5). No OpenMP
+// (ggml's own thread pool), no GPU backend, no dynamic backend loading. Vendored code: -w (its warnings are
+// not ours), -O2, -DNDEBUG. CMake's two generated version headers are written into gen/.
+static const char *LibraryVendor(void)
+{
+    const char *objDir = nob_temp_sprintf("%s/build/tools-obj/library", gRoot);
+    const char *gen = nob_temp_sprintf("%s/gen", objDir);
+    const char *v = nob_temp_sprintf("%s/src/vendor", gRoot);
+    const char *llama = nob_temp_sprintf("%s/llama.cpp", v);
+    if (!MkdirP(gen)) Fail(1);
+
+    // the headers CMake would generate from ggml/src/ggml-version.h.in and src/llama-version.h.in
+    WriteIfChanged(nob_temp_sprintf("%s/ggml-version.h", gen),
+                   "#pragma once\n\n#define GGML_VERSION \"" LLAMA_CPP_VERSION "\"\n#define GGML_COMMIT  \""
+                   LLAMA_CPP_COMMIT "\"\n");
+    WriteIfChanged(nob_temp_sprintf("%s/llama-version.h", gen),
+                   "#pragma once\n\n#define LLAMA_VERSION \"" LLAMA_CPP_VERSION "\"\n#define LLAMA_COMMIT  \""
+                   LLAMA_CPP_COMMIT "\"\n");
+
+    const char *cc = Env("CC", "clang");
+    const char *cxx = Env("CXX", "clang++");
+
+    // sqlite: -DSQLITE_ENABLE_FTS5 (the keyword index), -DSQLITE_OMIT_LOAD_EXTENSION (no extensions loaded
+    // from files: sqlite-vec is linked in), -DSQLITE_DQS=0 (a double-quoted word is never taken for a string),
+    // -DSQLITE_CORE (sqlite-vec built as part of SQLite, not as a loadable extension), -DSQLITE_VEC_STATIC (no
+    // export attribute), -DSQLITE_VEC_OMIT_FS (no SQL functions that read files)
+    Nob_Cmd sqlC = {0}, sqlSrc = {0};
+    nob_cmd_append(&sqlC, cc, "-std=gnu11", "-w", "-O2", "-DNDEBUG", "-DSQLITE_ENABLE_FTS5",
+                   "-DSQLITE_OMIT_LOAD_EXTENSION", "-DSQLITE_DQS=0", "-DSQLITE_CORE", "-DSQLITE_VEC_STATIC",
+                   "-DSQLITE_VEC_OMIT_FS", nob_temp_sprintf("-I%s/sqlite", v));
+    nob_cmd_append(&sqlSrc, nob_temp_sprintf("%s/sqlite/sqlite3.c", v), nob_temp_sprintf("%s/sqlite-vec/sqlite-vec.c", v));
+
+    // ggml and llama.cpp share their defines and include folders: the POSIX level upstream sets on Linux, the
+    // scheduler's copies (its default), the CPU backend registered statically (GGML_USE_CPU), llamafile's
+    // matrix kernels and the CPU weight repacking (upstream's defaults in a llama.cpp build), the instruction
+    // sets of x86-64-v3, and the generated headers before the sources' own folders
+    Nob_Cmd defs = {0};
+    nob_cmd_append(&defs, "-w", "-O2", "-DNDEBUG", "-march=x86-64-v3", "-D_XOPEN_SOURCE=600", "-D_GNU_SOURCE",
+                   "-DGGML_SCHED_MAX_COPIES=4", "-DGGML_USE_CPU", "-DGGML_USE_LLAMAFILE", "-DGGML_USE_CPU_REPACK",
+                   "-DGGML_SSE42", "-DGGML_F16C", "-DGGML_FMA", "-DGGML_BMI2", "-DGGML_AVX", "-DGGML_AVX2",
+                   nob_temp_sprintf("-I%s", gen), nob_temp_sprintf("-I%s/ggml/include", llama),
+                   nob_temp_sprintf("-I%s/ggml/src", llama), nob_temp_sprintf("-I%s/ggml/src/ggml-cpu", llama),
+                   nob_temp_sprintf("-I%s/include", llama), nob_temp_sprintf("-I%s/src", llama));
+
+    // ggml-c: ggml's C sources (ggml-base's and the CPU backend's, with its x86 kernels)
+    Nob_Cmd ggmlC = {0}, ggmlSrc = {0};
+    nob_cmd_append(&ggmlC, cc, "-std=gnu11");
+    nob_da_append_many(&ggmlC, defs.items, defs.count);
+    const char *ggmlCFiles[] = {"ggml.c", "ggml-alloc.c", "ggml-quants.c", "ggml-cpu/ggml-cpu.c", "ggml-cpu/quants.c",
+                                "ggml-cpu/arch/x86/quants.c"};
+    for (size_t i = 0; i < NOB_ARRAY_LEN(ggmlCFiles); i++) {
+        nob_cmd_append(&ggmlSrc, nob_temp_sprintf("%s/ggml/src/%s", llama, ggmlCFiles[i]));
+    }
+
+    // cxx: ggml's C++ sources (upstream's CMake lists for ggml-base, ggml and the CPU backend on x86 with
+    // llamafile's sgemm; no GPU backend, no CPU feature-detection variants), then libllama: every src/*.cpp
+    // (upstream's LLAMA_CORE_SOURCES) and src/models/*.cpp (one file per model architecture), in glob order
+    Nob_Cmd cxxC = {0}, cxxSrc = {0};
+    nob_cmd_append(&cxxC, cxx, "-std=c++17");
+    nob_da_append_many(&cxxC, defs.items, defs.count);
+    const char *ggmlCxxFiles[] = {
+        "ggml.cpp", "ggml-backend.cpp", "ggml-backend-meta.cpp", "ggml-opt.cpp", "ggml-threading.cpp", "gguf.cpp",
+        "ggml-backend-dl.cpp", "ggml-backend-reg.cpp", "ggml-cpu/ggml-cpu.cpp", "ggml-cpu/repack.cpp",
+        "ggml-cpu/hbm.cpp", "ggml-cpu/traits.cpp", "ggml-cpu/amx/amx.cpp", "ggml-cpu/amx/mmq.cpp",
+        "ggml-cpu/tiled/tiled.cpp", "ggml-cpu/tiled/tiled-kernel.cpp", "ggml-cpu/binary-ops.cpp",
+        "ggml-cpu/unary-ops.cpp", "ggml-cpu/vec.cpp", "ggml-cpu/ops.cpp", "ggml-cpu/arch/x86/repack.cpp",
+        "ggml-cpu/llamafile/sgemm.cpp",
+    };
+    for (size_t i = 0; i < NOB_ARRAY_LEN(ggmlCxxFiles); i++) {
+        nob_cmd_append(&cxxSrc, nob_temp_sprintf("%s/ggml/src/%s", llama, ggmlCxxFiles[i]));
+    }
+    AppendGlob(&cxxSrc, nob_temp_sprintf("%s/src/*.cpp", llama));
+    AppendGlob(&cxxSrc, nob_temp_sprintf("%s/src/models/*.cpp", llama));
+
+    // the three groups' out-of-date objects, compiled in one pool (the largest first, as in CompileObjects)
+    Nob_Cmd objects = {0};
+    PoolJobs jobs = {0};
+    const char *sqlDir = nob_temp_sprintf("%s/sqlite", objDir);
+    const char *ggmlDir = nob_temp_sprintf("%s/ggml-c", objDir);
+    const char *cxxDir = nob_temp_sprintf("%s/cxx", objDir);
+    bool sqlNew = CollectCompileJobs(&sqlC, &sqlSrc, sqlDir, &objects, &jobs);
+    bool ggmlNew = CollectCompileJobs(&ggmlC, &ggmlSrc, ggmlDir, &objects, &jobs);
+    bool cxxNew = CollectCompileJobs(&cxxC, &cxxSrc, cxxDir, &objects, &jobs);
+    if (jobs.count > 0) {
+        qsort(jobs.items, jobs.count, sizeof *jobs.items, CompareJobSource);
+        Say("compiling %zu of %zu files of the library tool's vendored code (SQLite, sqlite-vec, llama.cpp) ...",
+            jobs.count, objects.count);
+        if (!RunPool(&jobs, "compile library vendored code", PoolSize())) Fail(1);
+    }
+    nob_da_free(jobs);
+    // the stamps, now that every object of a group whose flags changed has compiled with them
+    if (sqlNew && !WriteLine(nob_temp_sprintf("%s/objects.flags", sqlDir), StampText(&sqlC))) Fail(1);
+    if (ggmlNew && !WriteLine(nob_temp_sprintf("%s/objects.flags", ggmlDir), StampText(&ggmlC))) Fail(1);
+    if (cxxNew && !WriteLine(nob_temp_sprintf("%s/objects.flags", cxxDir), StampText(&cxxC))) Fail(1);
+
+    // the archive: packed again (the old one removed first, so no member of an older list stays) when it is
+    // missing or older than an object or nob.c. `ar rcsD`: insert the members, create the archive, write the
+    // symbol index, deterministic (no timestamps, owners or modes in the members' headers)
+    const char *archive = nob_temp_sprintf("%s/libvendor.a", objDir);
+    bool stale = !IsRegularFile(archive) || NewerThan(nob_temp_sprintf("%s/nob.c", gRoot), archive);
+    for (size_t i = 0; i < objects.count && !stale; i++) stale = NewerThan(objects.items[i], archive);
+    if (stale) {
+        ForgetStamp(archive);
+        Nob_Cmd ar = {0};
+        nob_cmd_append(&ar, Env("AR", "ar"), "rcsD", archive);
+        nob_da_append_many(&ar, objects.items, objects.count);
+        if (!RunTimed(&ar, "archive library vendored code (libvendor.a)", (Output){0})) Fail(1);
+        nob_cmd_free(ar);
+    }
+    nob_cmd_free(sqlC);
+    nob_cmd_free(sqlSrc);
+    nob_cmd_free(defs);
+    nob_cmd_free(ggmlC);
+    nob_cmd_free(ggmlSrc);
+    nob_cmd_free(cxxC);
+    nob_cmd_free(cxxSrc);
+    nob_cmd_free(objects);
+    return archive;
+}
+
+// Builds build/tools/library (tools/library.c with the vendored archive from LibraryVendor) when it is
+// missing or older than its source, tools/tool.h, nob.h, the archive or nob.c (whose lists hold its flags).
+// The flags are ToolCommand's plus the vendored headers (LIBRARY_INCLUDES); the archive and LIBRARY_LIBS
+// follow the source. Like the other tools: into a temporary file, renamed into place. Returns whether it
+// compiled.
+static bool BuildLibraryTool(const char *source, const char *binary, const char *header, const char *nobH)
+{
+    const char *archive = LibraryVendor();
+    if (IsRegularFile(binary) && !NewerThan(source, binary) && !NewerThan(header, binary) &&
+        !NewerThan(nobH, binary) && !NewerThan(archive, binary) &&
+        !NewerThan(nob_temp_sprintf("%s/nob.c", gRoot), binary)) {
+        return false;
+    }
+    const char *tmp = nob_temp_sprintf("%s.tmp.%ld", binary, (long)getpid());
+    Nob_Cmd cmd = {0};
+    nob_cmd_append(&cmd, Env("CC", "clang"), "-std=c11", "-Wall", "-Wextra", "-Wno-missing-field-initializers", "-O1");
+    for (size_t i = 0; i < NOB_ARRAY_LEN(LIBRARY_INCLUDES); i++) {
+        nob_cmd_append(&cmd, nob_temp_sprintf("-I%s/%s", gRoot, LIBRARY_INCLUDES[i]));
+    }
+    nob_cmd_append(&cmd, "-o", tmp, source, archive);
+    nob_da_append_many(&cmd, LIBRARY_LIBS, NOB_ARRAY_LEN(LIBRARY_LIBS));
+    if (!RunTimed(&cmd, nob_temp_sprintf("compile %s", RelativeToRoot(source)), (Output){0})) Fail(1);
+    nob_cmd_free(cmd);
+    if (rename(tmp, binary) != 0) {
+        SayErr("build.sh: could not move %s into place: %s", RelativeToRoot(binary), strerror(errno));
+        Fail(1);
+    }
+    return true;
+}
 
 // Where a tool's binary goes: build/run-sh.o for run-sh, else build/tools/<name>.
 static const char *ToolBinary(const char *name)
@@ -2031,6 +2259,14 @@ static int BuildTools(int argc, char **argv)
         if (!IsRegularFile(source)) {
             SayErr("build.sh: --tools: %s is missing", RelativeToRoot(source));
             Fail(1);
+        }
+        // library: its vendored libraries first, then its own compile and link (BuildLibraryTool)
+        if (strcmp(names.items[i], "library") == 0) {
+            if (BuildLibraryTool(source, binary, header, nobH)) {
+                Say("built: %s", RelativeToRoot(binary));
+                built++;
+            }
+            continue;
         }
         // up to date: the binary exists and nothing it is built from is newer
         if (IsRegularFile(binary) && !NewerThan(source, binary) && !NewerThan(header, binary) &&
@@ -2279,6 +2515,17 @@ static bool PreparePaintunwrap(const UnitTest *t, const char *out, Nob_Cmd *run)
     return true;
 }
 
+// library: the vendored archive the test links (LibraryVendor, region "Tools": the objects ./build.sh --tools
+// library uses, built when stale).
+static bool PrepareLibrary(const UnitTest *t, const char *out, Nob_Cmd *run)
+{
+    (void)t;
+    (void)out;
+    (void)run;
+    (void)LibraryVendor();
+    return true;
+}
+
 // `s` with every "{root}", "{out}" and "{each}" replaced (a temp string); `each` may be NULL.
 static const char *UnitSubst(const char *s, const char *out, const char *each)
 {
@@ -2314,6 +2561,7 @@ static Nob_Cmd UnitCompileCommand(const UnitTest *t, const char *out, const char
         nob_cmd_append(&cmd, nob_temp_sprintf("-L%s/lib", libDir), "-lr3d", "-lraylib", "-lassimp",
                        "-lzlibstatic", "-lstdc++", "-lGL", "-lm", "-lpthread", "-ldl");
     }
+    for (const char **l = t->libs; l && *l; l++) nob_cmd_append(&cmd, *l);
     return cmd;
 }
 

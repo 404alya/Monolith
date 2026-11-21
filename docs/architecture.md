@@ -26,6 +26,7 @@ Reference maps: `maps/monolith/` (the default: brutalist concrete, boxes only, o
 | Windowing / input | raylib 5.5 (bundled with R3D, static) |
 | Renderer | **R3D** 0.10.x (Bigfoot71/r3d): deferred PBR; shadows, SSAO, SSIL, SSGI, SSR, fog, volumetric fog, bloom, tonemapping, procedural sky, IBL, instancing, surface shaders |
 | Assimp | R3D's model importer (glTF/GLB, OBJ, FBX, DAE); `--inspect-model` calls it directly |
+| Model catalog | `build/tools/library` only ([code/library.md](code/library.md), [model-library.md](model-library.md)), never monolith, the runtime, exports or the examples: **SQLite** 3.54.1 amalgamation with FTS5 (`src/vendor/sqlite/`, public domain), **sqlite-vec** v0.1.9 (`src/vendor/sqlite-vec/`, MIT / Apache 2.0), **llama.cpp** v1.0.0 (`src/vendor/llama.cpp/`: libllama and ggml with the CPU backend only, MIT) running Qwen3-Embedding-0.6B (`library/EMBEDDING.md`, outside the repo). Built by `nob.c`'s `LibraryVendor` into `build/tools-obj/library/` with `-w`, `-march=x86-64-v3`; each folder's `README.md` has the URL, tag, commit, hashes and flags |
 | OpenGL | 3.3 core. `libGL` / `opengl32` linked only for `glEnable` (`MS_InitRenderer`, R3D pitfall 2), `glFinish` (`--headless`) and `glGetString` (`bench.c`), declared by hand |
 | Platform | Editor: Linux (X11/GLFW) with the i3 window manager (sway through the same commands); nothing else is supported. Exports, the runtime and the examples: Linux and Windows x86_64 (cross-compiled with MinGW-w64), other platforms untested. Elsewhere the editor is a view-only build (`MONOLITH_EDITING` 0 in `src/common.h`, keyed on `__linux__`; today `build/win/monolith.exe`, on Windows or under wine): benchmark, view, debug; the editing and request keys and flags are refused at their entry points (`src/main.c` header, "View-only build"), and `launcher.c` / `import.c` are left out of that build (`nob.c`; stubs in their headers) |
 | Tested on | Linux (CachyOS) with an NVIDIA RTX 4050 Laptop GPU (driver 615.71) and a GTX 1660 Ti desktop; strict-GLSL problems were found on an AMD RX 9060 XT (§6). Any OpenGL 3.3 GPU should work; performance numbers in this repo always name their machine |
@@ -63,7 +64,10 @@ monolith/
 │                                #   profile.c (CPU profiles with perf of ./build.sh profile, which builds it: build/linux-profile/profile);
 │                                #   stub-terminal.c, stub-coordinator.c, test-coordinator.c (launcher tests);
 │                                #   bench-export-ab.c (A/B bench pairs of two exports, through the harness's bench mode);
-│                                #   todo.c, ai-todo.c (the two task lists, TODOs and .claude/TODOs, through submodules/simple-todo)
+│                                #   todo.c, ai-todo.c (the two task lists, TODOs and .claude/TODOs, through submodules/simple-todo);
+│                                #   library.c (the model catalog library/library.db: ingest, embed, search, show, pin, check, dump, eval)
+├── library/                     # the model catalog: README.md (for people), EMBEDDING.md (the embedding model); library.db (Git LFS)
+│                                #   and its review dump library.dump.txt when built (docs/model-library.md)
 ├── examples/                    # 01_minimal (+ scene/), 02_existing_project, 03_live_editing, 05_entities,
 │                                #   nob.c (§4.3; run by ./build.sh examples)
 ├── tests/examples/harness.h     # test build of the examples: --shot in a hidden window, --bench (headless bench) (§4.3)
@@ -71,7 +75,9 @@ monolith/
 ├── tests/unit/                  # compiled_test.c: the compiled-map reader under corruption (ASan + UBSan);
 │                                #   parse_error_test.c: the parser's messages, long and cut (ASan + UBSan);
 │                                #   export_strip_test.c: the exported runtime has no text parser;
-│                                #   paintunwrap_test.c: the paint unwrap (xatlas) on synthetic meshes and every model (ASan + UBSan)
+│                                #   paintunwrap_test.c: the paint unwrap (xatlas) on synthetic meshes and every model (ASan + UBSan);
+│                                #   library_test.c: the model catalog tool with the stub embedder (ASan + UBSan)
+├── tests/library/               # catalog.jsonl: an invented catalog fixture, three rows per source (library_test, leakcheck)
 ├── tests/profile/               # perf.txt + bench.md: a cut-down real profile and bench report (leakcheck runs tools/profile.c on them)
 ├── export/, requests/, benchmark/   # gitignored: F9 exports, request bundles, --bench reports
 ├── src/                         # the editor, one module per concern (§4)
@@ -96,7 +102,8 @@ monolith/
 │   ├── ui.c, font_*.h           # editor UI: embedded fonts, type scale, colour tokens, text / panel / key-hint helpers (look: ui-design.md)
 │   ├── png.c                    # PNG writer for --shot and request images (zlib level 1, ~4x faster than ExportImage)
 │   ├── glibc_compat.c           # Linux only: old glibc symbol versions (build and run)
-│   └── vendor/                  # third-party code: xatlas/ (unmodified C++, MIT; the paint unwrap), nob/ (nob.h, only its `va_list` names changed; the build program's and the tools' library, and in monolith `classifier.c`'s process start; MIT / public domain)
+│   └── vendor/                  # third-party code: xatlas/ (unmodified C++, MIT; the paint unwrap), nob/ (nob.h, only its `va_list` names changed; the build program's and the tools' library, and in monolith `classifier.c`'s process start; MIT / public domain);
+│                                #   sqlite/ (amalgamation, public domain), sqlite-vec/ (MIT / Apache 2.0), llama.cpp/ (libllama + ggml CPU backend, MIT): unmodified, only build/tools/library links them
 ├── submodules/r3d/              # vendored R3D; local fixes in patches.md
 └── submodules/simple-todo/      # git submodule: Simple-Todo, the task lists' CLI (prebuilt todo.o, x86-64 Linux; not part of the build or an export)
 ```
@@ -322,6 +329,7 @@ The repo's small programs are C11 on the vendored nob.h, one file each, like the
 | `tools/bench-export-ab.sh` | `tools/bench-export-ab.c` | `build/tools/bench-export-ab` | `benchmarking` |
 | `tools/old-monolith.sh` | `tools/old-monolith.c` (its `rm` / `rmdir` / `unlink` stand-ins that only log are the same binary, called by those names) | `build/tools/old-monolith` | `migrate-map` |
 | (new) | `tools/run-sh.c` | `build/run-sh.o` | the `PreToolUse` hook in `.claude/settings.json`: every shell command of a Claude session |
+| (new) | `tools/library.c` (links the vendored SQLite, sqlite-vec and llama.cpp: [code/library.md](code/library.md); rebuilds itself through `./build.sh --tools library`, `ToolInitBuilt`) | `build/tools/library` | request sessions choosing a model (`docs/model-library.md` §9), building the catalog, the leak check, `./build.sh test library` |
 
 **Call sites:** `tools/<name>.sh [args]` becomes `build/tools/<name> [args]`; `examples/build.sh [mode]` becomes `./build.sh examples [mode]`; `tests/unit/<name>_test.sh` becomes `./build.sh test <name>`; `MONOLITH_TERMINAL=tools/stub-terminal.sh` becomes `MONOLITH_TERMINAL=build/tools/stub-terminal`, `MONOLITH_CLAUDE=tools/stub-coordinator.sh` becomes `MONOLITH_CLAUDE=build/tools/stub-coordinator`. Output text, modes, arguments, environment variables, exit codes and files written are those of the scripts; only a message's `<name>.sh:` prefix and the usage text name the program instead.
 

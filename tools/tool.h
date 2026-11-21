@@ -39,6 +39,9 @@ static const char *gToolName = "tool";
 static const char *gToolRoot = NULL;
 // The program's own path (absolute), set by ToolInit; what ToolInit re-executes after a rebuild.
 static const char *gToolSelf = NULL;
+// Set by ToolInitBuilt: the program links more than its own file (vendored libraries that nob.c builds), so
+// its rebuild is `./build.sh --tools <name>`, not ToolCompileCommand.
+static bool gToolViaBuild = false;
 
 // "<name>: <text>\n" on stdout (the scripts' plain `echo "name: ..."`).
 NOB_PRINTF_FORMAT(1, 2) static inline void ToolSay(const char *fmt, ...)
@@ -478,15 +481,32 @@ static inline void ToolRebuildSelf(char **argv, const char *source)
     for (size_t i = 0; i < NOB_ARRAY_LEN(deps); i++) stale = stale || ToolNewer(deps[i], gToolSelf);
     if (!stale) return;
 
-    const char *tmp = nob_temp_sprintf("%s.tmp.%ld", gToolSelf, (long)getpid());
-    Nob_Cmd cmd = {0};
-    ToolCompileCommand(&cmd, src, tmp);
-    // the compiler's messages go to stderr, so they never mix into a program's stdout (which callers parse)
-    int status = ToolRun(&cmd, (ToolIo){.outToErr = true});
-    nob_cmd_free(cmd);
-    if (status != 0 || rename(tmp, gToolSelf) != 0) {
-        ToolErr("warning: tools/%s.c changed but did not compile; running the old build", source);
-        return;
+    if (gToolViaBuild) {
+        // ToolInitBuilt: the build program compiles it (and whatever vendored code is stale) into a
+        // temporary file and renames it over the binary, like the compile below; its output goes to stderr
+        Nob_Cmd cmd = {0};
+        nob_cmd_append(&cmd, nob_temp_sprintf("%s/build.sh", gToolRoot), "--tools", source);
+        int status = ToolRun(&cmd, (ToolIo){.outToErr = true});
+        nob_cmd_free(cmd);
+        // still older than a source after a successful build: running it again would loop, so go on as is
+        bool still = false;
+        for (size_t i = 0; i < NOB_ARRAY_LEN(deps); i++) still = still || ToolNewer(deps[i], gToolSelf);
+        if (status != 0 || still) {
+            ToolErr("warning: tools/%s.c changed but ./build.sh --tools %s did not rebuild it; running the old build",
+                    source, source);
+            return;
+        }
+    } else {
+        const char *tmp = nob_temp_sprintf("%s.tmp.%ld", gToolSelf, (long)getpid());
+        Nob_Cmd cmd = {0};
+        ToolCompileCommand(&cmd, src, tmp);
+        // the compiler's messages go to stderr, so they never mix into a program's stdout (which callers parse)
+        int status = ToolRun(&cmd, (ToolIo){.outToErr = true});
+        nob_cmd_free(cmd);
+        if (status != 0 || rename(tmp, gToolSelf) != 0) {
+            ToolErr("warning: tools/%s.c changed but did not compile; running the old build", source);
+            return;
+        }
     }
     fflush(NULL);
     execv(gToolSelf, argv);
@@ -506,6 +526,16 @@ static inline void ToolInit(char **argv, const char *name, const char *source)
     gToolRoot = ToolFindRoot(self);
     if (!gToolRoot) ToolDie(1, "can't find the repo root (no build.sh and nob.c above %s)", self);
     ToolRebuildSelf(argv, source);
+}
+
+// ToolInit for a program that links more than its own file (build/tools/library: SQLite, sqlite-vec and
+// llama.cpp, which nob.c builds from src/vendor/): `name` is also its source's name, and when tools/<name>.c,
+// this header or nob.h is newer than the binary, the rebuild runs `./build.sh --tools <name>` instead of a
+// one-file compile, then runs the new binary in place of this process as ToolRebuildSelf does.
+static inline void ToolInitBuilt(char **argv, const char *name)
+{
+    gToolViaBuild = true;
+    ToolInit(argv, name, name);
 }
 
 // #endregion

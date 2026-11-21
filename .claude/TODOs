@@ -12,3 +12,4 @@
 14170958598076717712 - idea: in-game key to queue /migrate-map for an old map Game shows only the message now (project-history 2026-11-12); a key would queue it as a bundle
 8206249550474795487 - bug: street-lamp glint on road pops in when turning voxel-test spawn eye -16 1.77 5.5: yaw 90 vs 100 pitch -15, lamp highlight near -14 0 2 appears; old map too
 7487551374798314199 - bug: CC=gcc ./build.sh warns in launcher.c, mapedit.c gcc 16: -Wformat-truncation launcher.c:83,91; -Wmaybe-uninitialized mapedit.c:3347. clang is clean
+4352264781601761688 - bug: Polyfork GLBs draw nothing (VEC3 COLOR_0 alpha = 0) R3D/assimp import; workaround alpha_cutoff 0 on the override. docs/model-library.md §12

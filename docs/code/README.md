@@ -49,6 +49,7 @@ These pages are not part of an export: the exported `monolith_scene.c` / `.h`, `
 | [old-monolith.md](old-monolith.md) | `tools/old-monolith.c`: build an older monolith |
 | [todo.md](todo.md) | `tools/todo.c`: the developer's task list |
 | [ai-todo.md](ai-todo.md) | `tools/ai-todo.c`: the AI's task list |
+| [library.md](library.md) | `tools/library.c`: the model catalog: ingest, embed, search, show, pin, check, dump, eval |
 | [fetch_asset.md](fetch_asset.md) | `tools/fetch_asset.py`: licence-safe asset downloads |
 | [record_asset.md](record_asset.md) | `tools/record_asset.py`: recording an asset's provenance |
 | [normalize_model.md](normalize_model.md) | `tools/normalize_model.py`: normalising a model in Blender |

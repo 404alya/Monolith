@@ -22,7 +22,7 @@ The sections run in this order; each is marked "Section" in `main()`.
 1. **Build** (incremental):
    - monolith's sanitizer build (`./build.sh lsan` or `debug`) when a source is newer than the binary;
    - the examples' (`./build.sh examples lsan`, LSan mode only);
-   - the profiling tool (`tools/profile.c`), `run-sh.o` and every program of `build/tools/`, with the same sanitizer, into the build folder;
+   - the profiling tool (`tools/profile.c`), `run-sh.o` and every program of `build/tools/`, with the same sanitizer, into the build folder (`library` after `./build.sh --tools library`, linked against its vendored archive `build/tools-obj/library/libvendor.a`, which is not instrumented: only our code is);
    - the paint unwrap test, against the build's own xatlas object;
    - the real `build/tools/stub-terminal` (`./build.sh --tools stub-terminal`) when it is missing.
 2. **Output folder:** `build/leakcheck/<YYYYmmddHHMMSS>/` with `logs/` (kept; `build/` is not committed) and `tmp/` (shots, exports, scratch copies: trashed at the end). `build/leakcheck/latest` points at it.
@@ -86,7 +86,8 @@ Every run uses a hidden window (`--shot`, `--dump-*`, ...) or none: nothing appe
   - `todo` / `ai-todo`: `list` and refused arguments in a scratch copy of the repo root (their lists are copies; only where `submodules/simple-todo` is checked out);
   - `stub-coordinator` and `test-coordinator` in that scratch root (they stop at their first check: no queue program, no monolith);
   - `bench-export-ab --summarize` on hand-made reports;
-  - `old-monolith` with bad arguments and as its `rm` stand-in.
+  - `old-monolith` with bad arguments and as its `rm` stand-in;
+  - `library` on scratch databases with the fixture `tests/library/catalog.jsonl`: ingest (new, unchanged, refused), `embed` with the stub embedder and without the GGUF (exit 3), `search` with every filter and weights, `show` for each source, `pin`, `check`, `dump`, `eval` and usage errors; and, when the GGUF is in `$MONOLITH_EMBED_DIR` or `~/.cache/monolith/embed/`, the real model on a second database (ingest, embed, search, check), else a line saying those runs were skipped.
 
 **What it never runs:** a real benchmark (beside `--bench`), a real old build, a real coordinator.
 
