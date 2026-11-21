@@ -323,6 +323,25 @@ A usage limit stopped the queue silently: the coordinator sat at Claude Code's `
 - **The editor stops the old coordinator through a pid file** (`requests/.coordinator/pid`, written by the lock wrapper, checked against `/proc/<pid>/cmdline`), not the i3 mark: the editor that sees the limit is often not the one that started the coordinator, and the tests have no window.
 - **Not proven on a real limit:** the hook's firing and the exact texts come from Claude Code's documentation (2.1.330). `docs/troubleshooting.md` says how to check it the first time a limit is hit.
 
+## Single-sampled windows everywhere: the black window on Intel (2026-11-21)
+
+A friend's exported viewer (Windows, Intel HD Graphics Gen11, driver 31.0.101.2140, GL 3.3, 1600 × 900) showed a black window while it stood still, and the picture while it was dragged. The first round added GL error checks to the runtime (`MS_LogGLErrors`, opt-in `MS_BeginGLDebugOutput`) and one-setting-each window switches to the viewer, and ruled out what could be checked here: R3D never blits into the window (FXAA draws its final image, only the debug output modes blit), the GL state left for raylib is clean, alpha is 1. The friend's six runs of `hysteria` (85 144 boxes):
+
+| Run | Switches | Window | Black when still |
+|---|---|---|---|
+| 1 | `--gl-debug` | 4× MSAA | yes |
+| 2 | `--no-msaa` | single-sampled | no |
+| 3 | `--vsync` | 4× MSAA | yes |
+| 4 | `--fps 60` | 4× MSAA | yes |
+| 5 | `--finish` | 4× MSAA | yes |
+| 6 | `--no-msaa --vsync` | single-sampled | no |
+
+No GL error in any run (after `InitWindow`, after `R3D_Init`, after the first frames), and Intel's own `GL_KHR_debug` output was silent during the frames (run 1: only a fragment-shader recompile note, and the two known `GL_INVALID_VALUE` at unload: R3D deletes a surface shader program three times). So the driver presents a 4x multisampled default framebuffer black; the frame itself is right. The driver's internals can't be checked from here: the evidence is that the window kind alone switches the symptom.
+- **The fix is the default, not a workaround in the frame:** the viewer and the examples open a single-sampled window, as the editor has since the pass-trimming round (`--window-msaa`, 2026-10-11). R3D anti-aliases its own image (FXAA), so window MSAA only ever smoothed the overlay text; the scene image is the same (every map's shots and the examples' shots pixel-identical). Fixing the default reaches every program and every map on the runtime, not only one export.
+- **Kept:** `--msaa` in the viewer as an opt-in (documented as black on that driver), and the diagnostic switches (`--vsync`, `--fps`, `--finish`, `--gl-debug`) and GL error log, which cost nothing and serve the next driver report. Vsync stays off: it didn't change the black window.
+- **Not this round:** the ~8 fps (79 frames in 10 s) and 2.7–3.5 s first frame on Gen11 (`.claude/TODOs`).
+- **Confirmed:** the friend ran the fixed export (single-sampled by default) and the window no longer went black (2026-11-21). The `--msaa` control run's result wasn't reported separately.
+
 ## The instruction files
 
 Superseded layouts, for reading old bundles, commits and notes; the current layout is `CLAUDE.md` + `.claude/skills/` + `docs/`.

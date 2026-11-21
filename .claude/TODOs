@@ -13,3 +13,7 @@
 8206249550474795487 - bug: street-lamp glint on road pops in when turning voxel-test spawn eye -16 1.77 5.5: yaw 90 vs 100 pitch -15, lamp highlight near -14 0 2 appears; old map too
 7487551374798314199 - bug: CC=gcc ./build.sh warns in launcher.c, mapedit.c gcc 16: -Wformat-truncation launcher.c:83,91; -Wmaybe-uninitialized mapedit.c:3347. clang is clean
 4352264781601761688 - bug: Polyfork GLBs draw nothing (VEC3 COLOR_0 alpha = 0) R3D/assimp import; workaround alpha_cutoff 0 on the override. docs/model-library.md §12
+17599017450732350487 - bug: R3D frees a surface shader's program 3 times (union) r3d_shader.c:2150 deletes via every view of the union (r3d_shader.h:1252); GL_INVALID_VALUE x2 at MS_Unload
+12462439965726584186 - bug: R3D binds texture 0 to unused shadow samplers (GL UB) NVIDIA debug id 131222 on maps without spot/omni lights: spot/omni sampler2DShadow bound to 0 in R3D_End
+15039732413042825224 - task: 2.1 s first frame on Intel Gen11 (hysteria export) friend's log 2026-11-21, docs/troubleshooting.md black window; out of the black-window round's scope
+15032994480672881141 - task: ~8 fps on Intel Gen11 (hysteria export, 1600x900) friend's log 2026-11-21: 79 frames in 10 s; project-history 'Single-sampled windows everywhere'

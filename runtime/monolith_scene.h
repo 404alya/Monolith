@@ -313,7 +313,26 @@ void MS_SetInitHints(const MS_Scene *scene);
 // plane would be clipped and their shadows pop as the camera turns; with depth clamp they
 // are flattened onto the near plane instead (R3D never touches this state). Side effect:
 // geometry closer than the camera's near plane (1 cm) is clamped rather than cut away.
+// It also logs the window framebuffer's sample count and any GL error left by the window and
+// R3D_Init (MS_LogGLErrors), and the scene logs the GL errors of its load and first frames.
 void MS_InitRenderer(void);
+
+// GL errors: logs each pending glGetError code with TraceLog at `logLevel` ("monolith_scene:
+// GL error <where>: GL_INVALID_OPERATION (0x0502)"), or "GL errors <where>: none", and returns
+// how many there were. GL keeps only the first error of each kind until it is read, so `where`
+// names everything since the previous check ("after the first frames", "in the last 10 s").
+int MS_LogGLErrors(int logLevel, const char *where);
+
+// GL debug output through TraceLog (opt-in, for a driver that misbehaves): GL_KHR_debug, else
+// GL_ARB_debug_output, synchronous, every severity but notifications. getProc is the window
+// library's GL loader (glfwGetProcAddress, SDL_GL_GetProcAddress): the runtime doesn't load GL
+// functions itself. Each message id is logged its first 3 times ("monolith_scene: GL debug:
+// error, high, api, id 1282: ..."). raylib opens a non-debug context, where a driver may report
+// less than in a debug one. Returns 0: on with GL_KHR_debug, 1: on with GL_ARB_debug_output,
+// 2: the driver has neither (logged). MS_EndGLDebugOutput turns it off and frees its list of
+// seen ids: call it before CloseWindow.
+unsigned char MS_BeginGLDebugOutput(void *(*getProc)(const char *name));
+void MS_EndGLDebugOutput(void);
 
 #ifdef MONOLITH_EDITOR
 // ======================================================================================

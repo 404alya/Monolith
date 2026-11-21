@@ -85,7 +85,8 @@ int main(int argc, char **argv)
     const char *package = argc > 1 && argv[1][0] != '-' ? argv[1] : TextFormat("%sscene", GetApplicationDirectory());
     MS_Scene *peek = MS_Load(package, &(MS_LoadOptions){ .noGpu = true });
     if (!peek) { puts(MS_LastError()); MS_ClearError(); return 1; }
-    SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE);
+    // No FLAG_MSAA_4X_HINT: some drivers present a 4x multisampled window black (Intel Gen11, Windows)
+    SetConfigFlags(FLAG_WINDOW_RESIZABLE);
     InitWindow(1280, 720, "my game");
     SetTargetFPS(60);
     MS_SetInitHints(peek);                          // monolith

@@ -59,6 +59,18 @@ R3D_Begin(camera);
 R3D_End();
 ```
 
+### GL errors and debug output
+
+Neither the runtime nor R3D checks GL errors per call, so a call that a stricter driver rejects would leave nothing in the log. Three checks write the answer to the log (`MS_LogGLErrors`, a `glGetError` loop: `monolith_scene: GL errors <where>: none`, or one `GL error <where>: GL_INVALID_OPERATION (0x0502)` line per kind of error):
+
+- `MS_InitRenderer` logs the window framebuffer's sample count (`window framebuffer: 4x multisampled` / `single-sampled`) and the errors left by opening the window and `R3D_Init`;
+- `MS_PushLights` logs the errors of the load and the first two frames, once per load, after the `first frames after the load` line;
+- a program can call `MS_LogGLErrors(level, where)` itself (the exported viewer does after `InitWindow` and, with `--gl-debug`, every 10 s).
+
+`MS_BeginGLDebugOutput(getProc)` (opt-in) sends the driver's `GL_KHR_debug` (else `GL_ARB_debug_output`) messages to `TraceLog`, synchronously, without notifications, each message id at most 3 times (`monolith_scene: GL debug: error, high, api, id 1282: …`); `getProc` is the window library's GL loader (`glfwGetProcAddress`), because the runtime loads no GL functions of its own. It returns 0 (KHR), 1 (ARB) or 2 (neither, logged). raylib opens a non-debug context, where a driver may report less. `MS_EndGLDebugOutput` unhooks it and frees the list of seen ids (before `CloseWindow`).
+
+What a clean run shows today: no GL errors, plus two `GL_INVALID_VALUE` from `glDeleteProgram` at `MS_Unload` with debug output on (R3D deletes a surface shader's program through every view of a union, `r3d_shader.c` `r3d_shader_custom_free`; harmless, in the AI's TODO list), and on NVIDIA performance notes and an "undefined behaviour" note about the spot / omni shadow samplers bound to texture 0 on maps without such lights.
+
 ### Ownership
 
 - Scene contents are read-only for callers.

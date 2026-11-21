@@ -9166,14 +9166,204 @@ bool MS_Compile(const char *mapPath, const char *outPath)
 #endif
 
 // Declared by hand rather than via <GL/gl.h> / <windows.h> (which clash with raylib). On
-// Windows x64 there is a single calling convention, so this matches opengl32.dll.
+// Windows x64 there is a single calling convention, so these match opengl32.dll (which exports
+// the GL 1.1 functions; newer ones come from the window library's loader: MS_BeginGLDebugOutput).
 #define MS_GL_DEPTH_CLAMP 0x864F
+#define MS_GL_SAMPLES 0x80A9
 extern void glEnable(unsigned int cap);
+extern void glDisable(unsigned int cap);
+extern unsigned int glGetError(void);
+extern void glGetIntegerv(unsigned int pname, int *data);
 
 void MS_InitRenderer(void)
 {
     glEnable(MS_GL_DEPTH_CLAMP);
+    // What the window's framebuffer is (a multisampled one is resolved by the driver at the
+    // swap), and whether opening it or R3D_Init left a GL error: for logs from other machines
+    int samples = 0;
+    glGetIntegerv(MS_GL_SAMPLES, &samples);
+    if (samples > 1) TraceLog(LOG_INFO, "monolith_scene: window framebuffer: %dx multisampled", samples);
+    else TraceLog(LOG_INFO, "monolith_scene: window framebuffer: single-sampled");
+    MS_LogGLErrors(LOG_INFO, "after the window and R3D_Init");
 }
+
+// The name of a glGetError code
+static const char *GLErrorName(unsigned int e)
+{
+    switch (e) {
+    case 0x0500: return "GL_INVALID_ENUM";
+    case 0x0501: return "GL_INVALID_VALUE";
+    case 0x0502: return "GL_INVALID_OPERATION";
+    case 0x0503: return "GL_STACK_OVERFLOW";
+    case 0x0504: return "GL_STACK_UNDERFLOW";
+    case 0x0505: return "GL_OUT_OF_MEMORY";
+    case 0x0506: return "GL_INVALID_FRAMEBUFFER_OPERATION";
+    case 0x0507: return "GL_CONTEXT_LOST";
+    default:     return "unknown GL error";
+    }
+}
+
+int MS_LogGLErrors(int logLevel, const char *where)
+{
+    // GL holds one flag per kind of error, so a handful of reads empties it; the cap stops a
+    // lost or missing context, where some drivers return an error on every call
+    enum { MAX_READS = 16 };
+    int n = 0;
+    unsigned int e;
+    while (n < MAX_READS && (e = glGetError()) != 0) {
+        TraceLog(logLevel, "monolith_scene: GL error %s: %s (0x%04X)", where, GLErrorName(e), e);
+        n++;
+    }
+    if (n == MAX_READS) TraceLog(logLevel, "monolith_scene: GL errors %s: stopped reading after %d", where, n);
+    if (n == 0) TraceLog(LOG_INFO, "monolith_scene: GL errors %s: none", where);
+    return n;
+}
+
+// #region GL debug output
+
+// GL_KHR_debug / GL_ARB_debug_output, loaded through the caller's getProc. The callback has
+// GLAPIENTRY's convention, which on Windows x64 (the only Windows target) is the plain one.
+typedef void (*MS_GLDebugProc)(unsigned int source, unsigned int type, unsigned int id, unsigned int severity,
+                               int length, const char *message, const void *user);
+typedef void (*MS_GLDebugCallbackFn)(MS_GLDebugProc callback, const void *user);
+typedef void (*MS_GLDebugControlFn)(unsigned int source, unsigned int type, unsigned int severity, int count,
+                                    const unsigned int *ids, unsigned char enabled);
+typedef const unsigned char *(*MS_GLGetStringiFn)(unsigned int name, unsigned int index);
+
+// The ids seen so far (a message is logged its first MS_GL_DEBUG_REPEATS times), and the
+// loaded entry point MS_EndGLDebugOutput unhooks with. GL runs on one thread: plain statics.
+#define MS_GL_DEBUG_REPEATS 3
+typedef struct { unsigned int id, source, type; int count; } GLDebugSeen;
+typedef struct {
+    GLDebugSeen *seen; int seenCount, seenCap;
+    MS_GLDebugCallbackFn callback;
+    bool khr;                           // GL_KHR_debug (else ARB: no GL_DEBUG_OUTPUT switch)
+} GLDebugState;
+static GLDebugState glDebug;
+
+static const char *GLDebugSourceName(unsigned int s)
+{
+    switch (s) {
+    case 0x8246: return "api";
+    case 0x8247: return "window system";
+    case 0x8248: return "shader compiler";
+    case 0x8249: return "third party";
+    case 0x824A: return "application";
+    default:     return "other source";
+    }
+}
+
+static const char *GLDebugTypeName(unsigned int t)
+{
+    switch (t) {
+    case 0x824C: return "error";
+    case 0x824D: return "deprecated";
+    case 0x824E: return "undefined behaviour";
+    case 0x824F: return "portability";
+    case 0x8250: return "performance";
+    case 0x8268: return "marker";
+    case 0x8269: return "push group";
+    case 0x826A: return "pop group";
+    default:     return "other";
+    }
+}
+
+static const char *GLDebugSeverityName(unsigned int s)
+{
+    switch (s) {
+    case 0x9146: return "high";
+    case 0x9147: return "medium";
+    case 0x9148: return "low";
+    default:     return "notification";
+    }
+}
+
+// The driver's message: logged (errors as warnings) unless its id was already logged
+// MS_GL_DEBUG_REPEATS times. Runs inside the GL call that caused it (synchronous output).
+static void GLDebugMessage(unsigned int source, unsigned int type, unsigned int id, unsigned int severity,
+                           int length, const char *message, const void *user)
+{
+    (void)length; (void)user;
+    if (severity == 0x826B) return;     // notifications (ARB has no switch for them)
+    GLDebugSeen *seen = NULL;
+    for (int i = 0; i < glDebug.seenCount && !seen; i++) {
+        GLDebugSeen *s = &glDebug.seen[i];
+        if (s->id == id && s->source == source && s->type == type) seen = s;
+    }
+    if (!seen) {
+        seen = MS_PUSH(glDebug.seen, glDebug.seenCount, glDebug.seenCap);
+        if (!seen) return;              // out of memory: drop the message
+        *seen = (GLDebugSeen){ .id = id, .source = source, .type = type };
+    }
+    if (seen->count >= MS_GL_DEBUG_REPEATS) return;
+    seen->count++;
+    TraceLog(type == 0x824C ? LOG_WARNING : LOG_INFO, "monolith_scene: GL debug: %s, %s, %s, id %u: %s%s",
+             GLDebugTypeName(type), GLDebugSeverityName(severity), GLDebugSourceName(source), id,
+             message ? message : "",
+             seen->count == MS_GL_DEBUG_REPEATS ? " (further messages with this id are not logged)" : "");
+}
+
+// Whether the context lists the extension (core profiles list them one by one with glGetStringi)
+static bool GLHasExtension(MS_GLGetStringiFn getStringi, const char *name)
+{
+    int count = 0;
+    glGetIntegerv(0x821D, &count);      // GL_NUM_EXTENSIONS
+    for (int i = 0; i < count; i++) {
+        const unsigned char *ext = getStringi(0x1F03, (unsigned int)i);     // GL_EXTENSIONS
+        if (ext && strcmp((const char *)ext, name) == 0) return true;
+    }
+    return false;
+}
+
+unsigned char MS_BeginGLDebugOutput(void *(*getProc)(const char *name))
+{
+    MS_EndGLDebugOutput();
+    // Entry points are only trusted when the context names the extension (or GL 4.3, where
+    // KHR_debug is core): wglGetProcAddress can return a pointer for functions it lacks
+    int major = 0, minor = 0;
+    glGetIntegerv(0x821B, &major);      // GL_MAJOR_VERSION
+    glGetIntegerv(0x821C, &minor);      // GL_MINOR_VERSION
+    MS_GLGetStringiFn getStringi = getProc ? (MS_GLGetStringiFn)getProc("glGetStringi") : NULL;
+    bool khr = getStringi && (major > 4 || (major == 4 && minor >= 3) || GLHasExtension(getStringi, "GL_KHR_debug"));
+    bool arb = !khr && getStringi && GLHasExtension(getStringi, "GL_ARB_debug_output");
+    MS_GLDebugCallbackFn callback = NULL;
+    MS_GLDebugControlFn control = NULL;
+    if (khr) {
+        callback = (MS_GLDebugCallbackFn)getProc("glDebugMessageCallback");
+        control = (MS_GLDebugControlFn)getProc("glDebugMessageControl");
+    } else if (arb) {
+        callback = (MS_GLDebugCallbackFn)getProc("glDebugMessageCallbackARB");
+        control = (MS_GLDebugControlFn)getProc("glDebugMessageControlARB");
+    }
+    if (!callback) {
+        TraceLog(LOG_INFO, "monolith_scene: GL debug output: not available (the driver has neither GL_KHR_debug "
+                           "nor GL_ARB_debug_output)");
+        return 2;
+    }
+
+    if (khr) glEnable(0x92E0);          // GL_DEBUG_OUTPUT (off by default in a non-debug context)
+    glEnable(0x8242);                   // GL_DEBUG_OUTPUT_SYNCHRONOUS: the callback runs in the failing call
+    callback(GLDebugMessage, NULL);
+    if (control && khr) control(0x1100, 0x1100, 0x826B, 0, NULL, 0);    // (any source, any type) notifications off
+    glDebug.callback = callback;
+    glDebug.khr = khr;
+    TraceLog(LOG_INFO, "monolith_scene: GL debug output: on (%s, GL %d.%d)", khr ? "GL_KHR_debug" : "GL_ARB_debug_output",
+             major, minor);
+    return khr ? 0 : 1;
+}
+
+void MS_EndGLDebugOutput(void)
+{
+    if (glDebug.callback) {
+        glDebug.callback(NULL, NULL);
+        if (glDebug.khr) glDisable(0x92E0);
+        glDisable(0x8242);
+    }
+    free(glDebug.seen);
+    glDebug = (GLDebugState){ 0 };
+}
+
+// #endregion
 
 void MS_SetInitHints(const MS_Scene *s)
 {
@@ -11944,8 +12134,12 @@ bool MS_PushLights(MS_Scene *s, Camera3D camera, float aspect)
         p->firstFrames = 0;
     } else if (p->firstFrames < 2) {
         p->firstFrameMs[p->firstFrames++] = (now - p->frameStart) * 1000.0;
-        if (p->firstFrames == 2)
+        if (p->firstFrames == 2) {
             TraceLog(LOG_INFO, "monolith_scene: first frames after the load %.1f + %.1f ms", p->firstFrameMs[0], p->firstFrameMs[1]);
+            // Once per load: neither the runtime nor R3D checks GL errors per call, so a call a
+            // driver rejects would otherwise leave no trace in the log
+            MS_LogGLErrors(LOG_WARNING, "in the load and the first frames");
+        }
     }
     p->frameStart = now;
     p->viewPos = camera.position;

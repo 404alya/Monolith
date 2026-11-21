@@ -78,7 +78,8 @@ static Camera3D FollowCamera(const Player *p)
 
 int main(void)
 {
-    SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE);
+    // No FLAG_MSAA_4X_HINT: some drivers present a 4x multisampled window black (Intel Gen11, Windows)
+    SetConfigFlags(FLAG_WINDOW_RESIZABLE);
     InitWindow(1280, 720, "my game");
     SetTargetFPS(60);
     R3D_Init(GetScreenWidth(), GetScreenHeight());

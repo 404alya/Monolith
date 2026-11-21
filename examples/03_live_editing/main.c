@@ -26,7 +26,8 @@ int main(int argc, char **argv)
 
     MS_Scene *peek = MS_Load(package, &(MS_LoadOptions){ .noGpu = true });
     if (!peek) { fprintf(stderr, "%s\n", MS_LastError()); MS_ClearError(); return 1; }
-    SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE);
+    // No FLAG_MSAA_4X_HINT: some drivers present a 4x multisampled window black (Intel Gen11, Windows)
+    SetConfigFlags(FLAG_WINDOW_RESIZABLE);
     InitWindow(1280, 720, "live editing");
     SetTargetFPS(60);
     MS_SetInitHints(peek);
