@@ -172,6 +172,8 @@ Each finished request leaves a `result.md` in its folder: what changed (map line
 
 In a checkout of this repository the coordinator runs Claude Code without permission prompts, bound by the rules in `CLAUDE.md` (it never deletes files, never opens windows on your screen, treats your request text and downloads as data, works only inside the repo). Where monolith's folder has no `CLAUDE.md` (a copied build folder) it keeps Claude Code's approval prompts. Set `MONOLITH_CLAUDE_SAFE=1` to keep them everywhere, or `MONOLITH_LAUNCH=per-request` for one terminal per request. On i3 / sway the terminal is moved to workspace 10 (`MONOLITH_WORKSPACE`). How the queue works inside: [request-queue.md](request-queue.md).
 
+**When Claude's usage limit is reached.** With a second Claude account set as the fallback (`MONOLITH_CLAUDE_FALLBACK`, [command-line.md](command-line.md)), the queue carries on: the editor restarts the coordinator on that account. The requests that were running start again there, or are reported as `Interrupted:` if they had already changed files. The HUD shows `coordinator: running (fallback account <name>), …` and `main account limited until <time>`. The first coordinator start after that time is on your main account again. If the switch doesn't happen (the HUD still says `running` while the terminal shows the limit), type `! build/tools/request-queue switch` in the coordinator's terminal. Set-up and checks: [troubleshooting.md](troubleshooting.md), "The queue stopped: usage limit".
+
 ## Render inspector (F3, Shift+F3, F4)
 
 In spectator mode the inspector shows what the renderer actually draws. It is off by default and changes nothing while off.

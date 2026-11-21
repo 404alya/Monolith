@@ -22,10 +22,15 @@ What to answer (default: `default`):
 | `outside` | Valid JSON whose tier is `opus` (outside the schema); exit 0. |
 | `fail` | A message on stderr; exit 1. |
 | `slow` | Sleeps 600 s before answering (the editor's timeout must kill it). |
+| `limit` | Claude Code's result for a run at the usage limit: `is_error: true`, `result` = `You've hit your session limit · resets 3:45pm`; exit 1. |
+
+### `MONOLITH_STUB_LIMITED=<label>[,<label>…]`
+
+Answers `limit` whatever the mode when its `MONOLITH_ACCOUNT` (`main` when unset) is in the list: the accounts that have "reached their usage limit" ([request-queue.md](../request-queue.md), "Usage limit and the fallback account").
 
 ### `MONOLITH_STUB_CLASSIFIER_LOG=<file>`, else `MONOLITH_STUB_LOG=<file>`
 
-Appends what it was given to `<file>`: a line `stub-classifier argv:`, one argument per line (each prefixed with `  arg: `), then `stub-classifier stdin:` and the input as it came.
+Appends what it was given to `<file>`: a line `stub-classifier account: <MONOLITH_ACCOUNT or -> config: <CLAUDE_CONFIG_DIR or ->`, a line `stub-classifier argv:`, one argument per line (each prefixed with `  arg: `), then `stub-classifier stdin:` and the input as it came.
 
 It appends, so a stub terminal that replaces `MONOLITH_STUB_LOG` later in the same test doesn't hide it: give the classifier its own file with `MONOLITH_STUB_CLASSIFIER_LOG` when both run.
 
@@ -34,7 +39,7 @@ It appends, so a stub terminal that replaces `MONOLITH_STUB_LOG` later in the sa
 | Code | When |
 |---|---|
 | 0 | Answers, `garbage`, `outside`, `slow` when it is not killed. |
-| 1 | `fail`, or an unknown mode. |
+| 1 | `fail`, `limit` (also through `MONOLITH_STUB_LIMITED`), or an unknown mode. |
 
 ## Called by
 

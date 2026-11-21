@@ -249,6 +249,7 @@ typedef struct {
     char *tier, *reason;
     char *model;            // the modelUsage key with the most output tokens
     double modelTokens;
+    Nob_String_Builder text;    // the "result" string and the "errors" strings, one per line (error text)
 } Answer;
 
 static void FreeAnswer(Answer *a)
@@ -256,6 +257,7 @@ static void FreeAnswer(Answer *a)
     free(a->tier);
     free(a->reason);
     free(a->model);
+    nob_sb_free(a->text);
 }
 
 // A string value into a heap string (NULL on a malformed one)
@@ -328,6 +330,28 @@ static bool ReadModelUsage(Json *j, Answer *a)
     return JsonEat(j, '}');
 }
 
+// A string value appended to a->text as one line (the result text, an entry of errors[])
+static bool ReadText(Json *j, Answer *a)
+{
+    if (a->text.count) a->text.items[a->text.count - 1] = '\n';   // (the previous line's NUL)
+    return JsonString(j, &a->text);
+}
+
+// "errors": [ "...", ... ] (Claude Code's error result): every string into a->text; other values skipped
+static bool ReadErrors(Json *j, Answer *a)
+{
+    JsonWs(j);
+    if (j->p < j->end && *j->p != '[') return JsonValue(j);
+    j->p++;
+    if (JsonEat(j, ']')) return true;
+    do {
+        JsonWs(j);
+        bool ok = j->p < j->end && *j->p == '"' ? ReadText(j, a) : JsonValue(j);
+        if (!ok) return false;
+    } while (JsonEat(j, ','));
+    return JsonEat(j, ']');
+}
+
 // The whole result object. False: not a JSON object (or a malformed one).
 static bool ReadAnswer(const char *text, size_t len, Answer *a)
 {
@@ -345,6 +369,8 @@ static bool ReadAnswer(const char *text, size_t len, Answer *a)
             ok = true;
         } else if (strcmp(key.items, "structured_output") == 0) ok = ReadStructured(&j, a);
         else if (strcmp(key.items, "modelUsage") == 0) ok = ReadModelUsage(&j, a);
+        else if (strcmp(key.items, "result") == 0 && j.p < j.end && *j.p == '"') ok = ReadText(&j, a);
+        else if (strcmp(key.items, "errors") == 0) ok = ReadErrors(&j, a);
         else ok = JsonValue(&j);
         nob_sb_free(key);
         if (!ok) return false;
@@ -354,18 +380,57 @@ static bool ReadAnswer(const char *text, size_t len, Answer *a)
     return j.p == j.end;
 }
 
-// The process exited with status 0: read classifier.json and finish the run
-static void ReadResult(Classifier *c)
+// Claude Code's text for a usage limit ("You've hit your session limit · resets 3:45pm", "weekly
+// limit", "Opus limit", "usage limit reached", "rate limit"), in any case: one of those words, or
+// "limit" with "resets". Not any "limit reached" (a context or output-token limit is no reason to
+// change accounts). The documented result subtypes have no usage-limit value, so the text is all
+// there is (docs/request-queue.md, "Usage limit and the fallback account").
+static bool IsLimitText(const char *text)
+{
+    if (!text) return false;
+    size_t n = strlen(text);
+    char *low = malloc(n + 1);
+    if (!low) return false;
+    for (size_t i = 0; i <= n; i++) low[i] = (char)tolower((unsigned char)text[i]);
+    static const char *const WORDS[] = { "usage limit", "session limit", "weekly limit", "opus limit", "sonnet limit", "rate limit" };
+    bool limit = strstr(low, "limit") && strstr(low, "resets");
+    for (size_t i = 0; i < sizeof(WORDS) / sizeof(WORDS[0]) && !limit; i++) limit = strstr(low, WORDS[i]) != NULL;
+    free(low);
+    return limit;
+}
+
+// The process ended (exited 0 when exitOk; else `status` says how, for the reason): read
+// classifier.json and finish the run. A failed `claude -p` still prints its result object, so the
+// file is read either way: a usage limit is told apart from other failures by its text.
+static void ReadResult(Classifier *c, bool exitOk, int status)
 {
     char *path = MonoStrf("%sclassifier.json", c->dir);
     Nob_String_Builder sb = { 0 };
     bool read = path && nob_read_entire_file(path, &sb);
     free(path);
-    if (!read) { Fail(c, "no classifier.json"); return; }
-    nob_sb_append_null(&sb);
     Answer a = { 0 };
-    bool json = ReadAnswer(sb.items, sb.count - 1, &a);
+    bool json = false;
+    if (read) {
+        nob_sb_append_null(&sb);
+        json = ReadAnswer(sb.items, sb.count - 1, &a);
+    }
     nob_sb_free(sb);
+    if (json && a.isError && a.text.count && IsLimitText(a.text.items)) {
+        free(c->limitText);
+        c->limitText = MS_StrDup(a.text.items);
+        c->limited = true;
+        Fail(c, "the account's usage limit was reached");
+        FreeAnswer(&a);
+        return;
+    }
+    if (!exitOk) {
+        if (WIFEXITED(status)) Fail(c, "exit %d; see classifier.log", WEXITSTATUS(status));
+        else if (WIFSIGNALED(status)) Fail(c, "killed by signal %d", WTERMSIG(status));
+        else Fail(c, "ended with status %d", status);
+        FreeAnswer(&a);
+        return;
+    }
+    if (!read) { Fail(c, "no classifier.json"); FreeAnswer(&a); return; }
     int tier = -1;
     for (int t = 0; t < 3 && a.tier; t++) if (strcmp(a.tier, TIER_WORDS[t]) == 0) tier = t;
     if (!json) Fail(c, "the answer is not JSON");
@@ -421,20 +486,11 @@ static bool WriteInput(const char *path, const ClassifierQuery *q)
     return fclose(f) == 0 && ok;
 }
 
-unsigned char ClassifierStart(Classifier *c, const ClassifierQuery *q, const char *dir, const char *program,
-                              const char *promptFile)
+// Starts the run on <c->dir>classifier-input.txt (written already): the clock, the timeout, the
+// process. 0: started; 1: failed (c is done)
+static unsigned char Run(Classifier *c, const char *const *pre, int preCount, const char *program, const char *promptFile)
 {
-    ClassifierFree(c);
-    c->start = Now();
-    c->tier = 1;
-    c->seconds = -1.0;
-    char *end = NULL;
-    double timeout = strtod(EnvOr("MONOLITH_CLASSIFIER_TIMEOUT", "30"), &end);
-    c->timeout = end && *end == 0 && timeout > 0.0 ? timeout : DEFAULT_TIMEOUT;
-    if (!(c->dir = MS_StrDup(dir))) { Fail(c, "out of memory"); return 1; }
-    gamePid = getpid();
-    nob_set_log_handler(NobLog);
-
+    const char *dir = c->dir;
     char *in = MonoStrf("%sclassifier-input.txt", dir);
     char *out = MonoStrf("%sclassifier.json", dir);
     char *err = MonoStrf("%sclassifier.log", dir);
@@ -442,9 +498,9 @@ unsigned char ClassifierStart(Classifier *c, const ClassifierQuery *q, const cha
     Nob_Procs procs = { 0 };
     unsigned char result = 1;
     if (!in || !out || !err) { Fail(c, "out of memory"); goto done; }
-    if (!WriteInput(in, q)) { Fail(c, "cannot write %s", in); goto done; }
     if (!promptFile || !FileExists(promptFile)) { Fail(c, "no prompt file %s", promptFile ? promptFile : "(none)"); goto done; }
 
+    for (int i = 0; i < preCount; i++) nob_cmd_append(&cmd, pre[i]);
     nob_cmd_append(&cmd, program, "-p",
                    "--model", EnvOr("MONOLITH_CLASSIFIER_MODEL", "fable"),
                    "--fallback-model", EnvOr("MONOLITH_CLASSIFIER_FALLBACK", "opus"),
@@ -465,6 +521,49 @@ done:
     free(out);
     free(err);
     return result;
+}
+
+// The result fields back to "running", the clock and the timeout from now
+static void Reset(Classifier *c)
+{
+    c->start = Now();
+    c->tier = 1;
+    c->seconds = -1.0;
+    c->done = c->ok = c->limited = c->timedOut = false;
+    c->termAt = c->killAt = 0.0;
+    free(c->model);
+    c->model = NULL;
+    free(c->limitText);
+    c->limitText = NULL;
+    MsgFree(&c->reason);
+    char *end = NULL;
+    double timeout = strtod(EnvOr("MONOLITH_CLASSIFIER_TIMEOUT", "30"), &end);
+    c->timeout = end && *end == 0 && timeout > 0.0 ? timeout : DEFAULT_TIMEOUT;
+}
+
+unsigned char ClassifierStart(Classifier *c, const ClassifierQuery *q, const char *dir, const char *const *pre,
+                              int preCount, const char *program, const char *promptFile)
+{
+    ClassifierFree(c);
+    Reset(c);
+    if (!(c->dir = MS_StrDup(dir))) { Fail(c, "out of memory"); return 1; }
+    gamePid = getpid();
+    nob_set_log_handler(NobLog);
+    char *in = MonoStrf("%sclassifier-input.txt", dir);
+    bool written = in && WriteInput(in, q);
+    if (!in) Fail(c, "out of memory");
+    else if (!written) Fail(c, "cannot write %s", in);
+    free(in);
+    return written ? Run(c, pre, preCount, program, promptFile) : 1;
+}
+
+unsigned char ClassifierRestart(Classifier *c, const char *const *pre, int preCount, const char *program, const char *promptFile)
+{
+    if (!c->done || !c->dir) return 1;
+    Reset(c);
+    gamePid = getpid();
+    nob_set_log_handler(NobLog);
+    return Run(c, pre, preCount, program, promptFile);
 }
 
 unsigned char ClassifierPoll(Classifier *c)
@@ -496,10 +595,7 @@ unsigned char ClassifierPoll(Classifier *c)
     }
     c->pid = 0;
     if (c->timedOut) Fail(c, "no answer after %.0f s", c->timeout);
-    else if (WIFEXITED(status) && WEXITSTATUS(status) == 0) ReadResult(c);
-    else if (WIFEXITED(status)) Fail(c, "exit %d; see classifier.log", WEXITSTATUS(status));
-    else if (WIFSIGNALED(status)) Fail(c, "killed by signal %d", WTERMSIG(status));
-    else Fail(c, "ended with status %d", status);
+    else ReadResult(c, WIFEXITED(status) && WEXITSTATUS(status) == 0, status);
     return 1;
 }
 
@@ -535,6 +631,7 @@ void ClassifierFree(Classifier *c)
     if (!c->done && c->pid > 0) ClassifierKill(c, "stopped");
     free(c->dir);
     free(c->model);
+    free(c->limitText);
     MsgFree(&c->reason);
     memset(c, 0, sizeof(*c));
 }

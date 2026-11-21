@@ -393,7 +393,7 @@ In `--submit`, `--type` and `--classify` text, a literal `\n` becomes a new line
 
 **`--model-picker-key <enter|close>`.** Once the thumbnails are rendered, presses ENTER (place the selected model at the crosshair's point, as at the cursor; the shot follows 20 frames later, so it must equal `--apply-edits` of the `add` the log prints) or ESC (closed; the shot is that frame). Exit 1 if ENTER is refused.
 
-**`--classify "text"`.** Runs the launcher's model choice for this prompt and prints it (tier, model, classifier, classifier model, reason, seconds, source), then exits without opening a window: the overrides, else the AI classifier (one `claude -p` on Fable, Opus as fallback; `launcher.c` "Model choice", `classifier.c`, [classifier.md](classifier.md)), run to its end. Context: the loaded map (its objects, `MAP.md`), the `--select` lines, the `--region` and `--volume` counts and a crosshair hit.
+**`--classify "text"`.** Runs the launcher's model choice for this prompt and prints it (tier, model, classifier, classifier model, `classifier account` only with `MONOLITH_CLAUDE_FALLBACK`, reason, seconds, source), then exits without opening a window: the overrides, else the AI classifier (one `claude -p` on Fable, Opus as fallback; `launcher.c` "Model choice", `classifier.c`, [classifier.md](classifier.md)), run to its end. Context: the loaded map (its objects, `MAP.md`), the `--select` lines, the `--region` and `--volume` counts and a crosshair hit.
 
 ## Environment
 
@@ -403,6 +403,7 @@ Read by `launcher.c` ([launcher.md](launcher.md)), except the driver variables a
 |---|---|
 | `MONOLITH_LAUNCH` | `coordinator` (default: one coordinator session takes every request from a queue, [request-queue.md](../request-queue.md)) or `per-request` (a new terminal with its own Claude Code session per request, as before) |
 | `MONOLITH_COORDINATOR_MODEL` | the coordinator's model (default sonnet) |
+| `MONOLITH_CLAUDE_FALLBACK` / `MONOLITH_CLAUDE_ENV` / `MONOLITH_LIMIT_RETRY` | the usage-limit fallback accounts, the main account's assignments, the seconds an unknown reset counts ([command-line.md](../command-line.md), [request-queue.md](../request-queue.md) "Usage limit") |
 | `MONOLITH_TERMINAL` | terminal to open for Claude Code: program name or path + optional args, e.g. `"kitty --single-instance"` |
 | `TERMINAL` | used if `MONOLITH_TERMINAL` is unset; else the first of alacritty, kitty, foot, wezterm, xterm in `PATH`. In an AI agent's shell (`CLAUDECODE` / `AI_AGENT`) no terminal opens unless `MONOLITH_TERMINAL` is set (a stub) or `MONOLITH_ALLOW_WINDOW`: the request stays queued |
 | `MONOLITH_CLAUDE_ARGS` | extra Claude Code flags, split on whitespace (default none), after `--allow-dangerously-skip-permissions --dangerously-skip-permissions --model <name>`, on the coordinator's (per-request: the request's) command line; a `--model` in them replaces the chosen model (both the coordinator's and the one recorded for each request) |

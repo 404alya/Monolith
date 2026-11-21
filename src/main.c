@@ -1205,6 +1205,7 @@ static int Run(int argc, char **argv)
             printf("tier: %s\nmodel: %s%s\nclassifier: %s\nclassifier model: %s\nreason: %s\n", ModelTierName(c.tier), c.name,
                    c.addFlag ? "" : " (from MONOLITH_CLAUDE_ARGS, no --model added)", c.classifier ? c.classifier : "?",
                    c.classifierModel[0] ? c.classifierModel : "-", MsgText(&c.reason));
+            if (c.classifierAccount[0]) printf("classifier account: %s\n", c.classifierAccount);     // (only with MONOLITH_CLAUDE_FALLBACK)
             if (c.seconds >= 0.0) printf("seconds: %.2f\n", c.seconds);
             else printf("seconds: -\n");
             printf("source: %s\nprompt: %s\n", c.source, text + c.promptSkip);

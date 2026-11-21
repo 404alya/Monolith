@@ -26,6 +26,31 @@ static void Answer(const char *tier, const char *model, const char *reason)
            tier, model, tier, reason);
 }
 
+// Whether $MONOLITH_ACCOUNT ("main" when unset, as for a session without a fallback) is in the
+// comma-separated list MONOLITH_STUB_LIMITED: that account has "reached its usage limit"
+static bool Limited(void)
+{
+    const char *list = ToolEnv("MONOLITH_STUB_LIMITED", "");
+    const char *account = ToolEnv("MONOLITH_ACCOUNT", "main");
+    size_t n = strlen(account);
+    for (const char *p = list; *p;) {
+        size_t len = strcspn(p, ",");
+        if (len == n && strncmp(p, account, n) == 0) return true;
+        p += len;
+        if (*p == ',') p++;
+    }
+    return false;
+}
+
+// Claude Code's result object for a run stopped by the usage limit (is_error, the limit text), exit 1
+static int LimitAnswer(void)
+{
+    printf("{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"duration_ms\":3,\"num_turns\":1,"
+           "\"result\":\"You\u2019ve hit your session limit \u00b7 resets 3:45pm\",\"session_id\":\"stub\",\"total_cost_usd\":0,"
+           "\"usage\":{\"input_tokens\":0,\"output_tokens\":0},\"modelUsage\":{},\"permission_denials\":[]}\n");
+    return 1;
+}
+
 int main(int argc, char **argv)
 {
     ToolInit(argv, "stub-classifier", "stub-classifier");
@@ -44,6 +69,7 @@ int main(int argc, char **argv)
     if (log) {
         FILE *f = fopen(log, "ab");
         if (f) {
+            fprintf(f, "stub-classifier account: %s config: %s\n", ToolEnv("MONOLITH_ACCOUNT", "-"), ToolEnv("CLAUDE_CONFIG_DIR", "-"));
             fprintf(f, "stub-classifier argv:\n");
             for (int i = 0; i < argc; i++) fprintf(f, "  arg: %s\n", argv[i]);
             fprintf(f, "stub-classifier stdin:\n");
@@ -57,6 +83,7 @@ int main(int argc, char **argv)
 
     const char *mode = ToolEnv("MONOLITH_STUB_CLASSIFIER", "default");
     const char *model = ArgAfter(argc, argv, "--model");
+    if (strcmp(mode, "limit") == 0 || Limited()) return LimitAnswer();
     if (strcmp(mode, "fast") == 0 || strcmp(mode, "default") == 0 || strcmp(mode, "heavy") == 0) {
         Answer(mode, model, "stub answer: caf\\u00e9\\nnext line");
     } else if (strcmp(mode, "fallback") == 0) {

@@ -1,6 +1,6 @@
 # `src/launcher.c`: request bundles, the request queue and coordinator, polling for `result.md`
 
-A submitted request becomes a self-contained folder `requests/<YYYY-MM-DD_HHMMSS>_<slug>/`: `view.png`, `view-marked.png`, `region-<n>.png` per screen region, `request.md`, `request.json` (bundle format 6, `.claude/skills/map-request/bundle-reference.md`).
+A submitted request becomes a self-contained folder `requests/<YYYY-MM-DD_HHMMSS>_<slug>/`: `view.png`, `view-marked.png`, `region-<n>.png` per screen region, `request.md`, `request.json` (bundle format 7, `.claude/skills/map-request/bundle-reference.md`).
 
 The model is chosen per request (fast / default / heavy tier): by an override, else by the AI classifier, one `claude -p` per request run in the background (regions "Model choice" and "Classifying", `src/classifier.c`, [classifier.md](classifier.md)). `request.md`, `request.json` and `state` are written once it has answered.
 
@@ -59,6 +59,15 @@ Every session starts with `--allow-dangerously-skip-permissions --dangerously-sk
 ### Model
 
 Per request the AI classifier (`MONOLITH_CLASSIFIER*`, [request-queue.md](../request-queue.md) "Models"), or the overrides `MONOLITH_MODEL` and an `@tier` prompt prefix; `MONOLITH_MODEL_FAST` / `_DEFAULT` / `_HEAVY` name the tiers (region "Model choice"). The coordinator passes it to the request's subagent. The coordinator's own model: `MONOLITH_COORDINATOR_MODEL`.
+
+### Accounts (usage-limit fallback)
+
+Region "Accounts"; [request-queue.md](../request-queue.md) "Usage limit and the fallback account". `AccountsInit` reads `MONOLITH_CLAUDE_ENV` (main) and `MONOLITH_CLAUDE_FALLBACK` (the fallbacks; `;` between accounts) once into a heap list of `Account`s: label (`main`, else the last part of its `CLAUDE_CONFIG_DIR`, else `fallback-<n>`), its `NAME=value` words (`~/` expanded), `program=`, its config dir (only for the same-account warning: nothing is read from it). A malformed variable is dropped as a whole, with `accountWarn` as the HUD line. While a fallback exists (`AccountsActive`):
+- `AccountChoose` picks the first account whose newest line in `requests/.coordinator/limit` has a reset time in the past (`AccountsRefresh`; unknown reset = `MONOLITH_LIMIT_RETRY` s), else the one that resets first. Used by `StartCoordinator`, per-request `Launch` and `StartClassifier`.
+- `Launch` and the classifier put `env MONOLITH_ACCOUNT=<label> NAME=value …` before `claude` (`AccountWords`, in the argv built before the fork), and `Launch` adds `--settings` with the `StopFailure` hook (`LIMIT_HOOK_SETTINGS`), which runs `build/tools/request-queue limit --hook`.
+- `StartCoordinator` writes `requests/.coordinator/account` (`<label> <time>`) and adds `Account: <label> (…)` as the prompt's last line.
+- `CoordinatorLimitCheck` (from `CoordinatorCheck`, every 2 s): a limit line for the running coordinator's account that is newer than its start → SIGTERM to the wrapper's process group (pid from `requests/.coordinator/pid`, written by `COORDINATOR_WRAPPER`, checked against `/proc/<pid>/cmdline`), SIGKILL after 3 s, `StartCoordinator` once the lock is free.
+- `ClassifierFallback`: a classifier run that failed on the limit (`Classifier.limited`) marks its account (`error=classifier`, the reset from `ParseReset`) and runs again on the next account (`ClassifierRestart`); `ModelChoice.classifierAccount` records the account (`request.json` `model.classifierAccount`, the `Model:` line).
 
 ### Extra Claude Code flags
 

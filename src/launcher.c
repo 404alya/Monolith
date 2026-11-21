@@ -23,6 +23,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <strings.h>  // strncasecmp
 #include <unistd.h>
 extern char **environ;
 
@@ -333,6 +334,464 @@ static const char *const COLLIDE_NAMES[] = { "aabb", "none", "box" };
 // #endregion
 
 // ======================================================================================
+// #region Accounts (MONOLITH_CLAUDE_ENV, MONOLITH_CLAUDE_FALLBACK; docs/request-queue.md "Usage limit")
+// ======================================================================================
+// accounts[0] is main: the environment the editor inherited, plus MONOLITH_CLAUDE_ENV's assignments.
+// accounts[1..] are the fallbacks of MONOLITH_CLAUDE_FALLBACK (';' between accounts, space-separated
+// NAME=value words and an optional program=<path> per account; a leading ~/ is $HOME). A session on
+// an account with assignments runs as `env NAME=value ... claude ...` (built before the fork). Only
+// while a fallback exists: every session gets MONOLITH_ACCOUNT=<label>, the coordinator and the
+// per-request terminals the StopFailure hook (LIMIT_HOOK_SETTINGS) that appends to the limit marker
+// requests/.coordinator/limit, and AccountChoose picks the first account not limited. Nothing is
+// read from or written into any account's config dir: CLAUDE_CONFIG_DIR is only a value passed on.
+
+static bool FindProgram(const char *name, char *out, int outSize);
+static bool FindClaude(char *out, int outSize);
+
+#define LIMIT_RETRY_DEFAULT 3600    // seconds an unknown reset time counts (MONOLITH_LIMIT_RETRY)
+
+// One account: its assignments, its program, and what the limit marker says about it
+typedef struct {
+    char *label;                // "main", the last part of its CLAUDE_CONFIG_DIR, or "fallback-<n>" (heap)
+    char **assign;              // "NAME=value" words, ~/ expanded (heap strings, heap array)
+    int assignCount, assignCap;
+    char *accountWord;          // "MONOLITH_ACCOUNT=<label>" (heap)
+    char *program;              // program=<path> (heap), NULL: the claude FindClaude finds
+    char *configDir;            // the CLAUDE_CONFIG_DIR it runs with, for the same-account check (heap)
+    time_t limitAt;             // the newest marker line's time for it (0 = none)
+    time_t sessionLimitAt;      // ... of a line a session wrote (not error=classifier): only these stop a coordinator
+    time_t limitedUntil;        // its reset (or limitAt + MONOLITH_LIMIT_RETRY); 0 = not limited
+} Account;
+
+static Account *accounts;       // heap; [0] = main (AccountsInit)
+static int accountCount, accountCap;
+static bool accountsInit;
+static char envProgram[4096];   // the env program (FindProgram("env"))
+static MonoMsg accountWarn;     // a malformed variable, or main and a fallback being one account ("" = none)
+
+// The StopFailure hook added with --settings while a fallback exists. Hook entries merge with the
+// project's .claude/settings.json (its run-sh PreToolUse hook stays); the hook's stdin is data:
+// request-queue takes only the error word and a reset time from it.
+static const char LIMIT_HOOK_SETTINGS[] =
+    "{\"hooks\":{\"StopFailure\":[{\"matcher\":\"rate_limit|billing_error\",\"hooks\":[{\"type\":\"command\","
+    "\"command\":\"\\\"$CLAUDE_PROJECT_DIR\\\"/build/tools/request-queue limit --hook\"}]}]}}";
+
+static void FreeAccount(Account *a)
+{
+    free(a->label);
+    for (int i = 0; i < a->assignCount; i++) free(a->assign[i]);
+    free(a->assign);
+    free(a->accountWord);
+    free(a->program);
+    free(a->configDir);
+    memset(a, 0, sizeof(*a));
+}
+
+static void AccountsFree(void)
+{
+    for (int i = 0; i < accountCount; i++) FreeAccount(&accounts[i]);
+    free(accounts);
+    accounts = NULL;
+    accountCount = accountCap = 0;
+    accountsInit = false;
+    MsgFree(&accountWarn);
+}
+
+// A fallback is configured: the marker, the hook and the account choice are in use
+static bool AccountsActive(void)
+{
+    return accountCount > 1;
+}
+
+// value with a leading "~/" (or a bare "~") as $HOME/...; heap string, NULL when out of memory
+// or $HOME is unset for a value that needs it (MS_SetError says which)
+static char *ExpandHome(const char *value)
+{
+    if (value[0] != '~' || (value[1] && value[1] != '/')) return MS_StrDup(value);
+    const char *home = getenv("HOME");
+    if (!home || !*home) { MS_SetError("'%s': HOME is not set", value); return NULL; }
+    char *s = MonoStrf("%s%s", home, value + 1);
+    if (!s) MS_SetError("out of memory");
+    return s;
+}
+
+// NAME of NAME=value: [A-Z_][A-Z0-9_]*, and not MONOLITH_ACCOUNT (the editor sets that one)
+static bool ValidName(const char *s, size_t len)
+{
+    if (!len || isdigit((unsigned char)s[0])) return false;
+    for (size_t i = 0; i < len; i++) if (!(isupper((unsigned char)s[i]) || isdigit((unsigned char)s[i]) || s[i] == '_')) return false;
+    return !(len == 16 && strncmp(s, "MONOLITH_ACCOUNT", 16) == 0);
+}
+
+// The words of one account (text[0..len)) into a. False: malformed or out of memory (MS_SetError)
+static bool ParseAccount(const char *text, size_t len, Account *a)
+{
+    char *copy = malloc(len + 1);
+    if (!copy) return MS_SetError("out of memory");
+    memcpy(copy, text, len);
+    copy[len] = 0;
+    ArgList w;
+    bool ok = SplitArgs(copy, &w);
+    free(copy);
+    if (!ok) return MS_SetError("out of memory");
+    for (int i = 0; i < w.count && ok; i++) {
+        const char *t = w.tok[i], *eq = strchr(t, '=');
+        if (!eq || !eq[1]) { ok = MS_SetError("'%s' is not NAME=value", t); break; }
+        if (eq - t == 7 && strncmp(t, "program", 7) == 0) {
+            free(a->program);
+            ok = (a->program = ExpandHome(eq + 1)) != NULL;
+            continue;
+        }
+        if (!ValidName(t, (size_t)(eq - t))) { ok = MS_SetError("'%.*s' is not a variable name ([A-Z_][A-Z0-9_]*)", (int)(eq - t), t); break; }
+        char *value = ExpandHome(eq + 1);
+        char *word = value ? MonoStrf("%.*s=%s", (int)(eq - t), t, value) : NULL;
+        char **slot = word ? MS_PUSH(a->assign, a->assignCount, a->assignCap) : NULL;
+        if (!slot) {
+            if (value) MS_SetError("out of memory");
+            free(word);
+            ok = false;
+        } else *slot = word;
+        free(value);
+    }
+    FreeArgs(&w);
+    return ok;
+}
+
+// The value a's assignments give `name`, or NULL
+static const char *AccountValue(const Account *a, const char *name)
+{
+    size_t n = strlen(name);
+    for (int i = 0; i < a->assignCount; i++)
+        if (strncmp(a->assign[i], name, n) == 0 && a->assign[i][n] == '=') return a->assign[i] + n + 1;
+    return NULL;
+}
+
+// The config dir a session on a runs with: its own CLAUDE_CONFIG_DIR, else the inherited one, else
+// ~/.claude; without a trailing '/'. Heap string (NULL: out of memory)
+static char *ConfigDirOf(const Account *a)
+{
+    const char *v = AccountValue(a, "CLAUDE_CONFIG_DIR");
+    if (!v) v = getenv("CLAUDE_CONFIG_DIR");
+    char *dir = v && *v ? MS_StrDup(v) : MonoStrf("%s/.claude", getenv("HOME") ? getenv("HOME") : "");
+    size_t n = dir ? strlen(dir) : 0;
+    while (n > 1 && dir[n - 1] == '/') dir[--n] = 0;
+    return dir;
+}
+
+// a's label (index i): main, else the last part of its CLAUDE_CONFIG_DIR, else fallback-<i>; only
+// [A-Za-z0-9._-], made unique against the labels before it
+static bool LabelAccount(Account *a, int i)
+{
+    const char *dir = i ? AccountValue(a, "CLAUDE_CONFIG_DIR") : NULL;
+    char *label = NULL;
+    if (!i) label = MS_StrDup("main");
+    else if (dir) {
+        size_t n = strlen(dir);
+        while (n > 1 && dir[n - 1] == '/') n--;
+        size_t s = n;
+        while (s > 0 && dir[s - 1] != '/') s--;
+        label = n > s ? MonoStrf("%.*s", (int)(n - s), dir + s) : MonoStrf("fallback-%d", i);
+    } else label = MonoStrf("fallback-%d", i);
+    if (!label) return false;
+    for (char *c = label; *c; c++) if (!isalnum((unsigned char)*c) && *c != '.' && *c != '_' && *c != '-') *c = '_';
+    bool taken = false;
+    for (int k = 0; k < i; k++) taken |= strcmp(accounts[k].label, label) == 0;
+    if (taken) {
+        char *u = MonoStrf("%s-%d", label, i);
+        free(label);
+        if (!(label = u)) return false;
+    }
+    a->label = label;
+    a->accountWord = MonoStrf("MONOLITH_ACCOUNT=%s", label);
+    a->configDir = ConfigDirOf(a);
+    return a->accountWord && a->configDir;
+}
+
+// Reads MONOLITH_CLAUDE_ENV and MONOLITH_CLAUDE_FALLBACK once. A malformed variable is ignored as a
+// whole (accountWarn names it); out of memory leaves only main.
+static void AccountsInit(void)
+{
+    if (accountsInit) return;
+    accountsInit = true;
+    Account *main = MS_PUSH(accounts, accountCount, accountCap);
+    if (!main) return;
+    memset(main, 0, sizeof(*main));
+    const char *menv = getenv("MONOLITH_CLAUDE_ENV");
+    if (menv && *menv && !ParseAccount(menv, strlen(menv), main)) {
+        MsgSetf(&accountWarn, "MONOLITH_CLAUDE_ENV ignored: %s", MS_LastError());
+        FreeAccount(main);
+    }
+    if (!LabelAccount(main, 0)) { FreeAccount(main); accountCount = 0; return; }
+    const char *fb = getenv("MONOLITH_CLAUDE_FALLBACK");
+    bool envFound = FindProgram("env", envProgram, sizeof(envProgram));
+    if (!envFound) envProgram[0] = 0;
+    if (!envFound && main->assignCount) {
+        MsgSetStatic(&accountWarn, "MONOLITH_CLAUDE_ENV ignored: no env program in PATH");
+        for (int k = 0; k < main->assignCount; k++) free(main->assign[k]);
+        main->assignCount = 0;
+    }
+    if (!fb || !*fb) goto done;
+    if (!envFound) {
+        MsgSetStatic(&accountWarn, "MONOLITH_CLAUDE_FALLBACK ignored: no env program in PATH");
+        goto done;
+    }
+    for (const char *p = fb; ; ) {
+        const char *semi = strchr(p, ';');
+        size_t len = semi ? (size_t)(semi - p) : strlen(p);
+        size_t blank = strspn(p, " \t");
+        if (blank < len) {          // (an empty part, e.g. after a trailing ';', is skipped)
+            Account *a = MS_PUSH(accounts, accountCount, accountCap);
+            if (!a) { MS_SetError("out of memory"); break; }
+            memset(a, 0, sizeof(*a));
+            if (!ParseAccount(p, len, a) || !LabelAccount(a, accountCount - 1)) {
+                MsgSetf(&accountWarn, "MONOLITH_CLAUDE_FALLBACK ignored: %s", MS_LastError());
+                while (accountCount > 1) FreeAccount(&accounts[--accountCount]);
+                goto done;
+            }
+        }
+        if (!semi) break;
+        p = semi + 1;
+    }
+    for (int i = 1; i < accountCount; i++)
+        if (strcmp(accounts[i].configDir, accounts[0].configDir) == 0 && !MsgText(&accountWarn)[0])
+            MsgSetf(&accountWarn, "MONOLITH_CLAUDE_FALLBACK: %s uses the same config dir as main (%s): it is the same account",
+                    accounts[i].label, accounts[0].configDir);
+done:
+    if (MsgText(&accountWarn)[0]) TraceLog(LOG_WARNING, "monolith: %s", MsgText(&accountWarn));
+    if (accountCount > 1) {
+        for (int i = 0; i < accountCount; i++)
+            TraceLog(LOG_INFO, "monolith: account %d: %s (config dir %s%s%s)", i, accounts[i].label, accounts[i].configDir,
+                     accounts[i].program ? ", program " : "", accounts[i].program ? accounts[i].program : "");
+    }
+}
+
+// "YYYY-MM-DDTHH:MM:SS" (local time) into a time_t; 0 when it isn't one
+static time_t ParseStamp(const char *s)
+{
+    struct tm tm = { 0 };
+    int n = 0;
+    if (sscanf(s, "%4d-%2d-%2dT%2d:%2d:%2d%n", &tm.tm_year, &tm.tm_mon, &tm.tm_mday, &tm.tm_hour, &tm.tm_min, &tm.tm_sec, &n) != 6 || n != 19)
+        return 0;
+    tm.tm_year -= 1900;
+    tm.tm_mon -= 1;
+    tm.tm_isdst = -1;
+    time_t t = mktime(&tm);
+    return t < 0 ? 0 : t;
+}
+
+static void FormatStamp(time_t t, char *out, int outSize)
+{
+    struct tm *tm = localtime(&t);
+    if (!tm || !strftime(out, outSize, "%Y-%m-%dT%H:%M:%S", tm)) snprintf(out, outSize, "0000-00-00T00:00:00");
+}
+
+// A reset time for people: "15:45" today, else "Mon 15:45"
+static const char *ResetText(time_t t)
+{
+    static char buf[32];
+    time_t now = time(NULL);
+    struct tm a = { 0 }, b = { 0 };
+    localtime_r(&t, &a);
+    localtime_r(&now, &b);
+    bool today = a.tm_year == b.tm_year && a.tm_yday == b.tm_yday;
+    if (!strftime(buf, sizeof(buf), today ? "%H:%M" : "%a %H:%M", &a)) snprintf(buf, sizeof(buf), "?");
+    return buf;
+}
+
+// The reset time in Claude Code's limit text ("resets 3:45pm", "resets Mon 12:00am", "resets 3pm",
+// "resets 15:45"): the next such local time after `at`; 0 when the text has none. The same rules as
+// ResetFromText in tools/request-queue.c (the hook's text): keep the two in step.
+static time_t ParseReset(const char *text, time_t at)
+{
+    static const char *const DAYS[] = { "sun", "mon", "tue", "wed", "thu", "fri", "sat" };
+    for (const char *p = text; p && *p; p++) {
+        if (strncasecmp(p, "resets", 6) != 0) continue;
+        const char *q = p + 6;
+        while (*q == ' ' || *q == '\t') q++;
+        if (strncasecmp(q, "at ", 3) == 0) q += 3;
+        int wday = -1;
+        for (int d = 0; d < 7; d++)
+            if (wday < 0 && strncasecmp(q, DAYS[d], 3) == 0) {
+                wday = d;
+                q += 3;
+                while (isalpha((unsigned char)*q)) q++;         // (Monday, Mon)
+                while (*q == ' ' || *q == ',') q++;
+            }
+        if (!isdigit((unsigned char)*q)) continue;
+        int hour = 0, minute = 0;
+        while (isdigit((unsigned char)*q)) hour = hour * 10 + (*q++ - '0');
+        if (*q == ':' && isdigit((unsigned char)q[1])) {
+            q++;
+            while (isdigit((unsigned char)*q)) minute = minute * 10 + (*q++ - '0');
+        }
+        while (*q == ' ') q++;
+        bool pm = strncasecmp(q, "pm", 2) == 0, am = strncasecmp(q, "am", 2) == 0;
+        if (pm || am) {
+            if (hour < 1 || hour > 12) continue;
+            hour = hour % 12 + (pm ? 12 : 0);
+        }
+        if (hour > 23 || minute > 59) continue;
+        struct tm tm = { 0 };
+        localtime_r(&at, &tm);
+        tm.tm_hour = hour;
+        tm.tm_min = minute;
+        tm.tm_sec = 0;
+        tm.tm_isdst = -1;
+        for (int k = 0; k < 8; k++) {           // today, else the next day (that weekday) after `at`
+            struct tm c = tm;
+            c.tm_mday += k;
+            c.tm_isdst = -1;
+            time_t t = mktime(&c);
+            if (t > at && (wday < 0 || c.tm_wday == wday)) return t;
+        }
+    }
+    return 0;
+}
+
+// MONOLITH_LIMIT_RETRY: seconds an unknown reset time counts (default an hour)
+static long LimitRetry(void)
+{
+    char *end = NULL;
+    const char *v = getenv("MONOLITH_LIMIT_RETRY");
+    long s = v && *v ? strtol(v, &end, 10) : 0;
+    return v && *v && end && !*end && s > 0 ? s : LIMIT_RETRY_DEFAULT;
+}
+
+static int AccountByLabel(const char *label, size_t len)
+{
+    for (int i = 0; i < accountCount; i++) if (strlen(accounts[i].label) == len && strncmp(accounts[i].label, label, len) == 0) return i;
+    return -1;
+}
+
+// The value after " key=" in a marker line (up to the next blank), or NULL; *len its length
+static const char *MarkerField(const char *line, const char *key, size_t *len)
+{
+    size_t k = strlen(key);
+    for (const char *p = strchr(line, ' '); p; p = strchr(p + 1, ' '))
+        if (strncmp(p + 1, key, k) == 0 && p[1 + k] == '=') {
+            p += 2 + k;
+            *len = strcspn(p, " \n");
+            return p;
+        }
+    return NULL;
+}
+
+// Reads requests/.coordinator/limit into every account's limitAt / limitedUntil: the last line for
+// an account wins (lines are appended in time order). Lines for labels no account has are skipped.
+static void AccountsRefresh(void)
+{
+    if (!AccountsActive()) return;
+    for (int i = 0; i < accountCount; i++) accounts[i].limitAt = accounts[i].sessionLimitAt = accounts[i].limitedUntil = 0;
+    char *path = MonoStrf("%slimit", coordDir);
+    FILE *f = path ? fopen(path, "rb") : NULL;
+    free(path);
+    if (!f) return;
+    char *text = NULL;
+    size_t size = 0, cap = 0;
+    char buf[4096];
+    for (size_t n; (n = fread(buf, 1, sizeof(buf), f)) > 0; size += n) {
+        if (size + n + 1 > cap) {
+            size_t want = (size + n + 1) * 2;
+            char *grown = realloc(text, want);
+            if (!grown) break;
+            text = grown;
+            cap = want;
+        }
+        memcpy(text + size, buf, n);
+    }
+    if (fclose(f) != 0) TraceLog(LOG_WARNING, "monolith: %slimit: %s", coordDir, strerror(errno));
+    if (!text) return;
+    text[size < cap ? size : cap - 1] = 0;
+    long retry = LimitRetry();
+    for (char *line = text; *line; ) {
+        char *nl = strchr(line, '\n');
+        if (nl) *nl = 0;
+        size_t alen = 0, rlen = 0;
+        const char *acc = MarkerField(line, "account", &alen), *reset = MarkerField(line, "reset", &rlen);
+        time_t at = ParseStamp(line);
+        int i = acc ? AccountByLabel(acc, alen) : -1;
+        if (i >= 0 && at) {
+            time_t until = reset ? ParseStamp(reset) : 0;
+            accounts[i].limitAt = at;
+            accounts[i].limitedUntil = until ? until : at + retry;
+            // A classifier limit (Fable / Opus) needn't be the coordinator's (Sonnet): it only steers
+            // the next start (AccountChoose), it never stops a running coordinator
+            size_t elen = 0;
+            const char *err = MarkerField(line, "error", &elen);
+            if (!(err && elen == 10 && strncmp(err, "classifier", 10) == 0)) accounts[i].sessionLimitAt = at;
+        }
+        if (!nl) break;
+        line = nl + 1;
+    }
+    free(text);
+}
+
+// The account for a new session (coordinator, per-request terminal, classifier run): the first in the
+// order main, fallback 1, ... that isn't limited now; with every one limited, the one that resets
+// first. 0 without a fallback.
+static int AccountChoose(void)
+{
+    AccountsInit();
+    if (!AccountsActive()) return 0;
+    AccountsRefresh();
+    time_t now = time(NULL);
+    int soonest = 0;
+    for (int i = 0; i < accountCount; i++) {
+        if (accounts[i].limitedUntil <= now) return i;
+        if (accounts[i].limitedUntil < accounts[soonest].limitedUntil) soonest = i;
+    }
+    return soonest;
+}
+
+// Appends a line to the limit marker for account i (the editor's own: error=classifier)
+static void AccountMarkLimited(int i, time_t reset, const char *error)
+{
+    char stamp[32], resetText[32] = "unknown";
+    FormatStamp(time(NULL), stamp, sizeof(stamp));
+    if (reset) FormatStamp(reset, resetText, sizeof(resetText));
+    char *line = MonoStrf("%s account=%s reset=%s error=%s\n", stamp, accounts[i].label, resetText, error);
+    char *path = MonoStrf("%slimit", coordDir);
+    MakeDirectory(coordDir);
+    int fd = path ? open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644) : -1;
+    bool ok = fd >= 0 && line && write(fd, line, strlen(line)) == (ssize_t)strlen(line);
+    if (fd >= 0 && close(fd) != 0) ok = false;
+    if (!ok) TraceLog(LOG_WARNING, "monolith: cannot append to %slimit", coordDir);
+    else TraceLog(LOG_INFO, "monolith: usage limit on %s (resets %s), %s", accounts[i].label, resetText, error);
+    free(line);
+    free(path);
+}
+
+// How many words AccountWords adds for account i (at most)
+static int AccountWordCount(int i)
+{
+    return accountCount ? 2 + accounts[i].assignCount : 0;
+}
+
+// The words before the program for account i: `env [MONOLITH_ACCOUNT=<label>] NAME=value ...`, or
+// none (the inherited environment). Pointers into the account (valid until AccountsFree).
+static int AccountWords(int i, char **out)
+{
+    if (!accountCount || (!AccountsActive() && !accounts[i].assignCount)) return 0;
+    int n = 0;
+    out[n++] = envProgram;
+    if (AccountsActive()) out[n++] = accounts[i].accountWord;
+    for (int k = 0; k < accounts[i].assignCount; k++) out[n++] = accounts[i].assign[k];
+    return n;
+}
+
+// The claude program for account i: MONOLITH_CLAUDE (tests) first, then the account's program=, then
+// FindClaude's search
+static bool ClaudeFor(int i, char *out, int outSize)
+{
+    const char *env = getenv("MONOLITH_CLAUDE");
+    if (env && *env) return FindProgram(env, out, outSize);
+    if (accountCount && accounts[i].program) return FindProgram(accounts[i].program, out, outSize);
+    return FindClaude(out, outSize);
+}
+
+// #endregion
+
+// ======================================================================================
 // #region Model choice
 // ======================================================================================
 //
@@ -461,7 +920,7 @@ static bool AgentShell(void);
 
 // Which classifier program runs, if any. 0: run `out`; 1: off (*why: a literal); 2: not found
 // (*why: a literal; logged with the name)
-static unsigned char ClassifierProgram(char *out, int outSize, const char **why)
+static unsigned char ClassifierProgram(int account, char *out, int outSize, const char **why)
 {
     const char *env = getenv("MONOLITH_CLASSIFIER");
     if (env && strcmp(env, "off") == 0) { *why = "classifier off (MONOLITH_CLASSIFIER=off)"; return 1; }
@@ -473,19 +932,44 @@ static unsigned char ClassifierProgram(char *out, int outSize, const char **why)
     }
     // An AI agent's shell never starts a real Claude run by accident (tests name the stub)
     if (AgentShell()) { *why = "classifier off (an AI agent's shell: set MONOLITH_CLASSIFIER)"; return 1; }
-    if (FindClaude(out, outSize)) return 0;
+    if (ClaudeFor(account, out, outSize)) return 0;
     *why = "AI classifier failed (claude not found in PATH or ~/.local/bin)";
     return 2;
 }
 
-// Starts the classifier for one request: 0 = running (poll c); 1 = decided at once (m is final:
-// off, not found, or the start failed)
-static unsigned char StartClassifier(Classifier *c, ModelChoice *m, const ModelQuery *q, const char *dir)
+// The classifier's command for account i: the account's env words (heap array of pointers into the
+// account, *count of them) and its program. False: no program (*why) or out of memory (*why NULL)
+static bool ClassifierCommand(int i, char ***words, int *count, char *program, int programSize, const char **why)
+{
+    *words = NULL;
+    *count = 0;
+    *why = NULL;
+    if (ClassifierProgram(i, program, programSize, why) != 0) return false;
+    if (!(*words = malloc(sizeof(char *) * (AccountWordCount(i) + 1)))) return false;
+    *count = AccountWords(i, *words);
+    return true;
+}
+
+// The account that ran the classifier into the choice (classifierAccount): its label while a fallback
+// is configured, else ""
+static void ModelAccount(ModelChoice *m, int account)
+{
+    snprintf(m->classifierAccount, sizeof(m->classifierAccount), "%s", AccountsActive() ? accounts[account].label : "");
+}
+
+// Starts the classifier for one request on AccountChoose's account (*account): 0 = running (poll c);
+// 1 = decided at once (m is final: off, not found, or the start failed)
+static unsigned char StartClassifier(Classifier *c, ModelChoice *m, const ModelQuery *q, const char *dir, int *account)
 {
     char program[4096];
     const char *why = NULL;
-    if (ClassifierProgram(program, sizeof(program), &why) != 0) {
+    char **words = NULL;
+    int wordCount = 0;
+    *account = AccountChoose();
+    if (!ClassifierCommand(*account, &words, &wordCount, program, sizeof(program), &why)) {
+        if (!why) why = "AI classifier failed (out of memory)";
         ModelWithout(m, strncmp(why, "classifier off", 14) == 0 ? "off" : "failed", why);
+        free(words);
         return 1;
     }
     char *promptFile = MonoStrf("%stools/classifier-prompt.md", rootDir);
@@ -494,9 +978,49 @@ static unsigned char StartClassifier(Classifier *c, ModelChoice *m, const ModelQ
         .boxes = q->boxes, .models = q->models, .brief = q->brief,
         .selected = q->selected, .regions = q->regions, .volumes = q->volumes, .hit = q->hit,
     };
-    unsigned char r = ClassifierStart(c, &cq, dir, program, promptFile);
+    unsigned char r = ClassifierStart(c, &cq, dir, (const char *const *)words, wordCount, program, promptFile);
     free(promptFile);
-    if (r != 0) ModelFromClassifier(m, c);      // 1: failed to start (c is done)
+    free(words);
+    if (r != 0) {                               // 1: failed to start (c is done)
+        ModelFromClassifier(m, c);
+        ModelAccount(m, *account);
+    }
+    return r;
+}
+
+// A finished run that failed on its account's usage limit: the account is marked limited (the
+// marker, error=classifier, the reset time from Claude Code's text) and the run starts again on the
+// next account that isn't (*account). Every other failure stays a failure. 0: running again; 1: not
+// (c is final; with every account limited its reason says so)
+static unsigned char ClassifierFallback(Classifier *c, int *account)
+{
+    if (!c->done || !c->limited || !AccountsActive()) return 1;
+    AccountMarkLimited(*account, ParseReset(c->limitText, time(NULL)), "classifier");
+    int next = AccountChoose();
+    if (next == *account || accounts[next].limitedUntil > time(NULL)) {
+        MsgSetStatic(&c->reason, "AI classifier failed (the usage limit was reached on every account)");
+        TraceLog(LOG_WARNING, "monolith: classifier: usage limit on every account, default tier");
+        return 1;
+    }
+    // The limited run's answer stays next to the new one: classifier-<label>-limit.json
+    char *from = MonoStrf("%sclassifier.json", c->dir);
+    char *to = MonoStrf("%sclassifier-%s-limit.json", c->dir, accounts[*account].label);
+    if (from && to && rename(from, to) != 0) TraceLog(LOG_WARNING, "monolith: classifier: rename %s: %s", from, strerror(errno));
+    free(from);
+    free(to);
+    char program[4096];
+    const char *why = NULL;
+    char **words = NULL;
+    int wordCount = 0;
+    unsigned char r = 1;
+    char *promptFile = MonoStrf("%stools/classifier-prompt.md", rootDir);
+    if (ClassifierCommand(next, &words, &wordCount, program, sizeof(program), &why)) {
+        TraceLog(LOG_INFO, "monolith: classifier: usage limit on %s, running it again on %s", accounts[*account].label, accounts[next].label);
+        r = ClassifierRestart(c, (const char *const *)words, wordCount, program, promptFile);
+        *account = next;
+    }
+    free(words);
+    free(promptFile);
     return r;
 }
 
@@ -1015,7 +1539,7 @@ static void WriteVolumesMd(FILE *f, const Bundle *B)
 static void WriteRequestMdBody(FILE *f, const Bundle *B)
 {
     const DesignRequest *r = B->req;
-    fprintf(f, "Request `%s`, submitted %s from the monolith map designer. Bundle format 6: besides the "
+    fprintf(f, "Request `%s`, submitted %s from the monolith map designer. Bundle format 7: besides the "
                "crosshair hit and the selected objects it may contain **screen regions** the developer "
                "dragged over the frame and **volumes**, boxes marked in world space (see *Screen regions* and "
                "*Volumes* below and `.claude/skills/map-request/bundle-reference.md`).\n\n", B->id, B->created);
@@ -1329,7 +1853,7 @@ static void WriteVolumesJson(FILE *f, const DesignRequest *r)
 static void WriteRequestJsonParts(FILE *head, FILE *f, const Bundle *B)
 {
     const DesignRequest *r = B->req;
-    fprintf(head, "{\n  \"format\": 6,\n  \"id\": "); JsonStr(head, B->id);
+    fprintf(head, "{\n  \"format\": 7,\n  \"id\": "); JsonStr(head, B->id);
     fprintf(head, ",\n  \"slug\": "); JsonStr(head, B->slug);
     fprintf(head, ",\n  \"created\": "); JsonStr(head, B->created);
     fprintf(head, ",\n  \"instructions\": ");
@@ -1544,9 +2068,11 @@ static bool RenderBundleText(const Bundle *B, BundleText *t)
 // claude-fable-5-2 in 2.4 s: <reason>)", "(default tier: <reason>)"
 static void MdModelChoice(FILE *f, const ModelChoice *m)
 {
+    bool other = m->classifierAccount[0] && strcmp(m->classifierAccount, "main") != 0;
     if (m->classifier && strcmp(m->classifier, "ai") == 0)
-        fprintf(f, "(%s tier, chosen by the AI classifier %s in %.1f s: %s)", ModelTierName(m->tier),
-                m->classifierModel[0] ? m->classifierModel : "(model unknown)", m->seconds, MsgText(&m->reason));
+        fprintf(f, "(%s tier, chosen by the AI classifier %s%s%s in %.1f s: %s)", ModelTierName(m->tier),
+                m->classifierModel[0] ? m->classifierModel : "(model unknown)", other ? " on " : "", other ? m->classifierAccount : "",
+                m->seconds, MsgText(&m->reason));
     else fprintf(f, "(%s tier: %s)", ModelTierName(m->tier), MsgText(&m->reason));
 }
 
@@ -1557,6 +2083,8 @@ static void JsonModelChoice(FILE *f, const ModelChoice *m)
     fprintf(f, ", \"override\": %s, \"source\": \"%s\"", m->override ? "true" : "false", m->source);
     fprintf(f, ", \"classifier\": \"%s\", \"classifierModel\": ", m->classifier ? m->classifier : "failed");
     if (m->classifierModel[0]) JsonStr(f, m->classifierModel); else fputs("null", f);
+    fprintf(f, ", \"classifierAccount\": ");
+    if (m->classifierAccount[0]) JsonStr(f, m->classifierAccount); else fputs("null", f);
     fprintf(f, ", \"seconds\": ");
     if (m->seconds >= 0.0) fprintf(f, "%.2f", m->seconds); else fputs("null", f);
     fprintf(f, " }");
@@ -1644,6 +2172,14 @@ static struct {
     int alive;                  // last lock test: 1 = running, 0 = not, -1 = not tested yet
     float checkTimer;
     double confirmUntil;        // CTRL+SHIFT+K with requests open: second press until then
+    // the usage-limit switch (region "Coordinator and queue", CoordinatorLimitCheck)
+    int account;                // the running coordinator's account (accounts[]; the account file)
+    time_t handled;             // the newest limit line already acted on (its time)
+    bool switching;             // the old coordinator is being stopped; a new one starts once the lock is free
+    int switchFrom, switchTo;   // accounts[] of the old and the next coordinator
+    double switchTime;          // clockTime of the SIGTERM
+    bool killSent;              // SIGKILL followed
+    bool stuck;                 // limited, but its pid is unknown: the developer closes it by hand
 } coord = { .alive = -1 };
 
 // Its window's i3 / sway mark: fixed, so a restarted editor can still close it through the WM
@@ -1714,6 +2250,7 @@ static MonoMsg eventNote;
 static bool eventFresh, eventWarn;
 
 static void FlushPending(void);
+static void AccountsFree(void);
 
 const char *LauncherNote(void)
 {
@@ -1732,6 +2269,7 @@ void LauncherShutdown(void)
     free(children);
     children = NULL;
     childCount = childCap = 0;
+    AccountsFree();
 }
 
 // Is this child of ours still running? Reaps it (and marks its requests exited) if not.
@@ -1864,6 +2402,7 @@ void LauncherUpdate(float dt)
 
 // HUD line of the coordinator; NULL when there is nothing to say
 static const char *CoordinatorLine(Color *c);
+static const char *AccountLine(Color *c);
 
 int LauncherDrawHud(int x, int y)
 {
@@ -1873,6 +2412,15 @@ int LauncherDrawHud(int x, int y)
     const char *coordText = CoordinatorLine(&cc);
     if (coordText) {
         UiHudMark(coordText, x, y, step, size, cc);
+        rows++;
+    }
+    // The accounts' line (a malformed MONOLITH_CLAUDE_FALLBACK, a limited account), while the
+    // launcher shows anything at all
+    bool listed = coordText != NULL;
+    for (int i = 0; i < reqCount && !listed; i++) listed = Listed(&reqs[i]);
+    const char *accText = listed ? AccountLine(&cc) : NULL;
+    if (accText) {
+        UiHudMark(accText, x, y + rows * step, step, size, cc);
         rows++;
     }
     long below = 1L << 30;      // walk the list from the newest request down
@@ -2138,19 +2686,24 @@ static void MarkAndMove(const char *title, const char *mark)
 // it), without passing the descriptor on, so a background process claude leaves behind can't
 // keep the lock alive. A second coordinator started within moments (two quick submits) finds
 // the lock taken after 2 s, says so and exits.
+// Once it holds the lock it writes its pid to requests/.coordinator/pid (next to the lock), so the
+// editor can stop a coordinator at its usage limit even when an earlier editor run started it
+// (CoordinatorLimitCheck).
 static const char COORDINATOR_WRAPPER[] =
     "exec 9>>\"$0\" || exit 1\n"
     "if ! flock -w 2 9; then echo 'monolith: a request coordinator is already running; this window closes in 5 s'; sleep 5; exit 0; fi\n"
+    "echo $$ > \"${0%lock}pid\"\n"
     "\"$@\" 9>&-\n"
     "st=$?\n"
     "if [ $st -ne 0 ]; then echo \"monolith: the coordinator exited with status $st; this window closes in 30 s\"; sleep 30; fi\n"
     "exit $st\n";
 
-// Opens a terminal titled `title` running claude [flags] [--model model] [extra] prompt in the
-// repo root; lock != NULL: the coordinator, wrapped in COORDINATOR_WRAPPER with that lock file.
-// mark: the i3 / sway mark for its window (MarkAndMove). Fills t (pid, mark).
+// Opens a terminal titled `title` running [env words of the account] claude [flags] [--settings
+// <the limit hook>] [--model model] [extra] prompt in the repo root; lock != NULL: the coordinator,
+// wrapped in COORDINATOR_WRAPPER with that lock file. account: an index into accounts[] (region
+// "Accounts"; 0 = main). mark: the i3 / sway mark for its window (MarkAndMove). Fills t (pid, mark).
 static bool Launch(const char *title, const char *mark, const char *prompt, const char *model, const char *lock,
-                   TermWindow *t)
+                   int account, TermWindow *t)
 {
     if (AgentShellRefuses()) return false;
     // Terminal: env override (program + extra args) or the first known one in PATH
@@ -2189,8 +2742,11 @@ static bool Launch(const char *title, const char *mark, const char *prompt, cons
     char **argv = NULL;
     bool ok = false;
     char claude[4096];
-    if (!FindClaude(claude, sizeof(claude))) {
-        MS_SetError("claude not found in PATH or ~/.local/bin (or MONOLITH_CLAUDE)");
+    AccountsInit();
+    if (account < 0 || account >= accountCount) account = 0;
+    if (!ClaudeFor(account, claude, sizeof(claude))) {
+        if (accountCount && accounts[account].program) MS_SetError("program '%s' of account %s not found", accounts[account].program, accounts[account].label);
+        else MS_SetError("claude not found in PATH or ~/.local/bin (or MONOLITH_CLAUDE)");
         goto fail;
     }
     // Request sessions delete only with `gio trash` (CLAUDE.md): a session without gio can't follow the
@@ -2211,7 +2767,7 @@ static bool Launch(const char *title, const char *mark, const char *prompt, cons
     char **extra = args.tok;
     int extraCount = args.count;
     // (allocated before the fork: the child may only call async-signal-safe functions)
-    argv = malloc(sizeof(char *) * (termCount + 8 + 4 + SKIP_PERMISSION_COUNT + 2 + extraCount + 4));
+    argv = malloc(sizeof(char *) * (termCount + 8 + 4 + AccountWordCount(account) + SKIP_PERMISSION_COUNT + 2 + 2 + extraCount + 4));
     if (!argv) { MS_SetError("out of memory"); goto fail; }
     int n = 0;
     for (int i = 0; i < termCount; i++) argv[n++] = termTok[i];
@@ -2220,9 +2776,11 @@ static bool Launch(const char *title, const char *mark, const char *prompt, cons
     if (ts->dirFlag) { argv[n++] = (char *)ts->dirFlag; argv[n++] = dir; }
     if (ts->exec) argv[n++] = (char *)ts->exec;
     if (lock) { argv[n++] = "/bin/sh"; argv[n++] = "-c"; argv[n++] = (char *)COORDINATOR_WRAPPER; argv[n++] = (char *)lock; }
+    n += AccountWords(account, argv + n);
     argv[n++] = claude;
     bool skip = SkipPermissions();
     for (int i = 0; i < SKIP_PERMISSION_COUNT && skip; i++) argv[n++] = (char *)SKIP_PERMISSION_FLAGS[i];
+    if (AccountsActive()) { argv[n++] = "--settings"; argv[n++] = (char *)LIMIT_HOOK_SETTINGS; }
     if (model) { argv[n++] = "--model"; argv[n++] = (char *)model; }
     for (int i = 0; i < extraCount; i++) argv[n++] = extra[i];
     argv[n++] = (char *)prompt;
@@ -2274,7 +2832,8 @@ static bool Launch(const char *title, const char *mark, const char *prompt, cons
     t->exited = false;
     t->killStage = 0;
     TrackChild(pid);
-    TraceLog(LOG_INFO, "monolith: launched %s (pid %d) for '%s'", termPath, (int)pid, title);
+    if (AccountsActive()) TraceLog(LOG_INFO, "monolith: launched %s (pid %d) for '%s' on account %s", termPath, (int)pid, title, accounts[account].label);
+    else TraceLog(LOG_INFO, "monolith: launched %s (pid %d) for '%s'", termPath, (int)pid, title);
     // (keep the mark free of quotes in any case)
     snprintf(t->mark, sizeof(t->mark), "%s", mark);
     for (char *c = t->mark; *c; c++) if (!isalnum((unsigned char)*c) && *c != '-' && *c != '_') *c = '_';
@@ -2619,10 +3178,122 @@ static int OpenQueueRequests(void)
     return n;
 }
 
+static unsigned char StartCoordinator(void);
+
+// requests/.coordinator/account ("<label> <YYYY-MM-DDTHH:MM:SS>", written by StartCoordinator): the
+// running coordinator's account (0 = main, also when the file is missing or names no account of
+// ours) and its start (*started; 0 = unknown)
+static int CoordinatorAccount(time_t *started)
+{
+    *started = 0;
+    char *path = MonoStrf("%saccount", coordDir);
+    FILE *f = path ? fopen(path, "rb") : NULL;
+    free(path);
+    if (!f) return 0;
+    char line[256] = "";
+    if (!fgets(line, sizeof(line), f)) line[0] = 0;
+    if (fclose(f) != 0) TraceLog(LOG_WARNING, "monolith: %saccount: %s", coordDir, strerror(errno));
+    size_t len = strcspn(line, " \n");
+    int i = AccountByLabel(line, len);
+    if (line[len] == ' ') *started = ParseStamp(line + len + 1);
+    return i < 0 ? 0 : i;
+}
+
+// The pid in requests/.coordinator/pid (COORDINATOR_WRAPPER), if it is still that wrapper: its
+// /proc/<pid>/cmdline names our lock file. 0 when unknown.
+static pid_t CoordinatorPid(void)
+{
+    char path[1400], lock[1300];
+    snprintf(path, sizeof(path), "%spid", coordDir);
+    snprintf(lock, sizeof(lock), "%slock", coordDir);
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    long pid = 0;
+    if (fscanf(f, "%ld", &pid) != 1) pid = 0;
+    if (fclose(f) != 0) TraceLog(LOG_WARNING, "monolith: %s: %s", path, strerror(errno));
+    if (pid <= 1) return 0;
+    snprintf(path, sizeof(path), "/proc/%ld/cmdline", pid);
+    if (!(f = fopen(path, "rb"))) return 0;
+    // cmdline: NUL-separated words; one of them must be the lock path
+    bool ours = false;
+    char word[1300];
+    int n = 0;
+    for (int ch; (ch = fgetc(f)) != EOF; ) {
+        if (ch) { if (n < (int)sizeof(word) - 1) word[n++] = (char)ch; continue; }
+        word[n] = 0;
+        ours |= strcmp(word, lock) == 0;
+        n = 0;
+    }
+    if (fclose(f) != 0) TraceLog(LOG_WARNING, "monolith: %s: %s", path, strerror(errno));
+    return ours ? (pid_t)pid : 0;
+}
+
+// SIGTERM / SIGKILL to the coordinator wrapper's process group (the terminal started it as a session
+// of its own: the wrapper, claude and its shells), else to the wrapper alone
+static void SignalCoordinator(pid_t pid, int sig)
+{
+    if (kill(-pid, sig) != 0 && kill(pid, sig) != 0)
+        TraceLog(LOG_WARNING, "monolith: cannot signal the coordinator (pid %d): %s", (int)pid, strerror(errno));
+    else TraceLog(LOG_INFO, "monolith: %s sent to the coordinator (pid %d)", sig == SIGKILL ? "SIGKILL" : "SIGTERM", (int)pid);
+}
+
+// The usage-limit switch (docs/request-queue.md, "Usage limit and the fallback account"), every
+// lock test while a fallback is configured: a limit line for the running coordinator's account that is
+// newer than its start stops it (SIGTERM, SIGKILL after CLOSE_GRACE s); once the lock is free a new one
+// starts on AccountChoose's account, and request-queue start recovers what the old one held.
+static void CoordinatorLimitCheck(int alive)
+{
+    AccountsRefresh();
+    if (coord.switching) {
+        if (!alive) {
+            coord.switching = false;
+            coord.killSent = false;
+            // (the HUD's coordinator and account lines say it from now on; the event note is the
+            // classifier's)
+            coord.startTime = clockTime - COORD_START_TIME - 1.0;   // (the old one is gone: not "starting" any more)
+            StartCoordinator();
+            TraceLog(LOG_INFO, "monolith: usage limit on %s: the coordinator restarted on %s", accounts[coord.switchFrom].label,
+                     accounts[coord.account].label);
+        } else if (!coord.killSent && clockTime - coord.switchTime > CLOSE_GRACE) {
+            pid_t pid = CoordinatorPid();
+            if (pid > 0) SignalCoordinator(pid, SIGKILL);
+            coord.killSent = true;
+        }
+        return;
+    }
+    if (alive != 1) { coord.stuck = false; return; }
+    time_t started;
+    int acc = CoordinatorAccount(&started);
+    coord.account = acc;
+    const Account *a = &accounts[acc];
+    if (!a->sessionLimitAt || a->sessionLimitAt < started || a->sessionLimitAt <= coord.handled) return;
+    coord.handled = a->sessionLimitAt;
+    // Only to an account that isn't limited: with every account limited, switching to the one that
+    // resets first would stop and start coordinators in turn, each new limit line moving its reset
+    int next = AccountChoose();
+    if (next == acc || accounts[next].limitedUntil > time(NULL)) {
+        TraceLog(LOG_WARNING, "monolith: usage limit on %s, and every other account is limited too: the coordinator stays", a->label);
+        return;
+    }
+    pid_t pid = CoordinatorPid();
+    if (pid <= 0) {
+        coord.stuck = true;
+        TraceLog(LOG_WARNING, "monolith: usage limit on %s, but the coordinator's pid is unknown: close its terminal by hand", a->label);
+        return;
+    }
+    TraceLog(LOG_INFO, "monolith: usage limit on %s: stopping the coordinator, the next one runs on %s", a->label, accounts[next].label);
+    SignalCoordinator(pid, SIGTERM);
+    coord.switching = true;
+    coord.stuck = false;
+    coord.switchFrom = acc;
+    coord.switchTo = next;
+    coord.switchTime = clockTime;
+}
+
 static void CoordinatorCheck(void)
 {
     if (!QueueMode()) return;
-    bool relevant = coord.tried || coord.alive == 1;
+    bool relevant = coord.tried || coord.alive == 1 || coord.switching;
     for (int i = 0; i < reqCount && !relevant; i++) relevant = Listed(&reqs[i]) && reqs[i].queue;
     if (!relevant) return;
     coord.checkTimer -= POLL_INTERVAL;
@@ -2631,6 +3302,27 @@ static void CoordinatorCheck(void)
     int alive = CoordinatorAlive();
     if (alive != coord.alive) TraceLog(LOG_INFO, "monolith: coordinator %s", alive ? "running" : "not running");
     coord.alive = alive;
+    AccountsInit();
+    if (AccountsActive()) CoordinatorLimitCheck(alive);
+}
+
+// The accounts' HUD line, NULL for none: a malformed setting, or which accounts are limited
+static const char *AccountLine(Color *c)
+{
+    if (MsgText(&accountWarn)[0]) { *c = UI_WARN; return MsgText(&accountWarn); }
+    if (!AccountsActive()) return NULL;
+    time_t now = time(NULL);
+    int limited = 0, soonest = -1;
+    for (int i = 0; i < accountCount; i++)
+        if (accounts[i].limitedUntil > now) {
+            limited++;
+            if (soonest < 0 || accounts[i].limitedUntil < accounts[soonest].limitedUntil) soonest = i;
+        }
+    if (!limited) return NULL;
+    *c = UI_WARN;
+    if (limited == accountCount) return TextFormat("all accounts limited; %s resets %s", accounts[soonest].label, ResetText(accounts[soonest].limitedUntil));
+    if (accounts[0].limitedUntil > now) return TextFormat("main account limited until %s", ResetText(accounts[0].limitedUntil));
+    return TextFormat("%s limited until %s", accounts[soonest].label, ResetText(accounts[soonest].limitedUntil));
 }
 
 static const char *CoordinatorLine(Color *c)
@@ -2647,9 +3339,18 @@ static const char *CoordinatorLine(Color *c)
     }
     if (!listed) return NULL;
     *c = UI_TEXT;
+    if (coord.switching) {
+        *c = UI_WARN;
+        return TextFormat("coordinator: usage limit on %s: restarting on %s ...", accounts[coord.switchFrom].label, accounts[coord.switchTo].label);
+    }
+    if (coord.alive == 1 && coord.stuck) {
+        *c = UI_WARN;
+        return TextFormat("coordinator: usage limit on %s; can't stop it from here: close its terminal (CTRL+SHIFT+K)", accounts[coord.account].label);
+    }
     if (coord.alive == 1) {
-        if (!queued && !running) return "coordinator: running, idle";
-        return TextFormat("coordinator: running, %d queued, %d running", queued, running);
+        const char *on = AccountsActive() && coord.account > 0 ? TextFormat(" (fallback account %s)", accounts[coord.account].label) : "";
+        if (!queued && !running) return TextFormat("coordinator: running%s, idle", on);
+        return TextFormat("coordinator: running%s, %d queued, %d running", on, queued, running);
     }
     if (CoordinatorStarting()) return "coordinator: starting ...";
     *c = UI_WARN;
@@ -2696,14 +3397,44 @@ static unsigned char StartCoordinator(void)
     coord.alive = 0;
     coord.checkTimer = 0.0f;
 
-    char title[200], prompt[1600];
+    char title[200];
     CoordinatorTitle(title, sizeof(title));
-    snprintf(prompt, sizeof(prompt), "You are the monolith request coordinator. Read .claude/skills/coordinator/SKILL.md in the repository root "
-                                     "and follow it exactly. Requests folder: %s", requestsDir);
+    int account = AccountChoose();
+    char *prompt = MonoStrf("You are the monolith request coordinator. Read .claude/skills/coordinator/SKILL.md in the repository root "
+                            "and follow it exactly. Requests folder: %s", requestsDir);
+    if (prompt && AccountsActive()) {
+        // One line for the developer: which account, and why not main
+        char *more = account == 0 ? MonoStrf("%s\nAccount: main", prompt)
+                   : accounts[0].limitedUntil > time(NULL)
+                       ? MonoStrf("%s\nAccount: %s (the main account's usage limit was reached; it resets %s)", prompt,
+                                  accounts[account].label, ResetText(accounts[0].limitedUntil))
+                       : MonoStrf("%s\nAccount: %s", prompt, accounts[account].label);
+        free(prompt);
+        prompt = more;
+    }
+    if (!prompt) {
+        coord.failed = true;
+        MsgSetStatic(&coord.failedLine, "coordinator: not started: out of memory (the requests stay queued)");
+        MsgSetStatic(&note, "the coordinator could not start: out of memory; the request stays queued");
+        return 1;
+    }
+    if (AccountsActive()) {
+        // requests/.coordinator/account: which account runs and since when (CoordinatorAccount)
+        char stamp[32], path[1300];
+        FormatStamp(time(NULL), stamp, sizeof(stamp));
+        snprintf(path, sizeof(path), "%saccount", coordDir);
+        char *line = MonoStrf("%s %s\n", accounts[account].label, stamp);
+        if (!line || !WriteText(path, line)) TraceLog(LOG_WARNING, "monolith: cannot write %s", path);
+        free(line);
+        coord.account = account;
+        coord.stuck = false;
+    }
     TermWindow t = { 0 };
     char mark[160] = "";
     snprintf(mark, sizeof(mark), "%s", coord.term.mark);
-    if (!Launch(title, mark, prompt, CoordinatorModel(), lock, &t)) {
+    bool launched = Launch(title, mark, prompt, CoordinatorModel(), lock, account, &t);
+    free(prompt);
+    if (!launched) {
         coord.failed = true;
         MsgSetf(&coord.failedLine, "coordinator: not started: %s (the requests stay queued)", MS_LastError());
         MsgSetf(&note, "the coordinator could not start: %s; the request stays queued", MS_LastError());
@@ -2816,6 +3547,7 @@ unsigned char LauncherCloseCoordinator(void)
 typedef struct {
     long seq;                   // its OpenRequest (seq)
     Classifier run;
+    int account;                // the account it runs on (accounts[]; region "Accounts")
     ModelChoice model;          // the overrides' findings; the tier once the run is done
     BundleText text;            // the bundle without its model, rendered at submit time
 } Pending;
@@ -2867,7 +3599,9 @@ static void PollClassifiers(void)
 {
     for (int i = 0; i < pendingCount; ) {
         if (ClassifierPoll(&pending[i].run) == 0) { i++; continue; }     // 0: still running
+        if (ClassifierFallback(&pending[i].run, &pending[i].account) == 0) { i++; continue; }    // 0: again, on the next account
         ModelFromClassifier(&pending[i].model, &pending[i].run);
+        ModelAccount(&pending[i].model, pending[i].account);
         FinishPending(i);       // (the last entry moves into i)
     }
 }
@@ -2878,6 +3612,7 @@ static void FlushPending(void)
     while (pendingCount > 0) {
         ClassifierKill(&pending[0].run, "editor quit while classifying");
         ModelFromClassifier(&pending[0].model, &pending[0].run);
+        ModelAccount(&pending[0].model, pending[0].account);
         FinishPending(0);
     }
     free(pending);
@@ -2898,6 +3633,7 @@ static unsigned char CancelClassifying(OpenRequest *q)
         Pending *p = &pending[i];
         ClassifierKill(&p->run, "cancelled while classifying");
         ModelFromClassifier(&p->model, &p->run);
+        ModelAccount(&p->model, p->account);
         if (!WriteBundleFiles(q->dir, q->slug, &p->text, &p->model))
             TraceLog(LOG_WARNING, "monolith: cannot write the request bundle %s (disk full?)", q->dir);
         DropPending(i);
@@ -2939,14 +3675,21 @@ void LauncherClassify(const ModelQuery *q, ModelChoice *out)
     }
     char *dir = MonoStrf("%s/", tmpl);
     Classifier c = { 0 };
-    if (dir && StartClassifier(&c, out, q, dir) == 0) {     // 0: running
-        ClassifierWait(&c);
+    int account = 0;
+    if (dir && StartClassifier(&c, out, q, dir, &account) == 0) {     // 0: running
+        do ClassifierWait(&c); while (ClassifierFallback(&c, &account) == 0);   // (again on the next account after a limit)
         ModelFromClassifier(out, &c);
+        ModelAccount(out, account);
     } else if (!dir) ModelWithout(out, "failed", "AI classifier failed (out of memory)");
     ClassifierFree(&c);
     static const char *const FILES[] = { "classifier-input.txt", "classifier.json", "classifier.log" };
     for (int k = 0; k < 3; k++) {
         char *f = MonoStrf("%s/%s", tmpl, FILES[k]);
+        if (f) unlink(f);
+        free(f);
+    }
+    for (int i = 0; i < accountCount; i++) {        // (a limited run's answer, ClassifierFallback)
+        char *f = MonoStrf("%s/classifier-%s-limit.json", tmpl, accounts[i].label);
         if (f) unlink(f);
         free(f);
     }
@@ -2973,7 +3716,9 @@ static void RequestPrompt(const char *id, char *out, int outSize)
 static void NoteModel(const ModelChoice *m)
 {
     if (!m->classifier || strcmp(m->classifier, "override") == 0) return;
-    if (strcmp(m->classifier, "ai") == 0) MsgAppendf(&note, " (AI: %s)", MsgText(&m->reason));
+    bool other = m->classifierAccount[0] && strcmp(m->classifierAccount, "main") != 0;
+    if (strcmp(m->classifier, "ai") == 0 && other) MsgAppendf(&note, " (AI on %s: %s)", m->classifierAccount, MsgText(&m->reason));
+    else if (strcmp(m->classifier, "ai") == 0) MsgAppendf(&note, " (AI: %s)", MsgText(&m->reason));
     else MsgAppendf(&note, " (%s)", MsgText(&m->reason));
 }
 
@@ -2999,7 +3744,7 @@ static unsigned char FinishBundle(OpenRequest *q, const BundleText *t, const Mod
         RequestTitle(q->id, q->slug, title, sizeof(title));
         snprintf(mark, sizeof(mark), "_monolith_%s", q->id);
         RequestPrompt(q->id, prompt, sizeof(prompt));
-        q->term.launched = Launch(title, mark, prompt, m->addFlag ? m->name : NULL, NULL, &q->term);
+        q->term.launched = Launch(title, mark, prompt, m->addFlag ? m->name : NULL, NULL, AccountChoose(), &q->term);
         if (!q->term.launched) {
             MS_SetError("launch failed: %s. Bundle kept: %s", MS_LastError(), q->dir);
             TraceLog(LOG_WARNING, "monolith: %s", MS_LastError());
@@ -3104,10 +3849,11 @@ unsigned char LauncherSubmit(const DesignRequest *req, Image view, Image marked)
 
     // No override: the AI classifier decides, and LauncherUpdate finishes the bundle when it has
     mq.package = BaseName(B.package);
-    if (decided == 1 && StartClassifier(&run, &model, &mq, dir) == 0) {     // 0: running
+    int account = 0;
+    if (decided == 1 && StartClassifier(&run, &model, &mq, dir, &account) == 0) {     // 0: running
         Pending *p = MS_PUSH(pending, pendingCount, pendingCap);
         if (p) {
-            *p = (Pending){ .seq = q->seq, .run = run, .model = model, .text = text };
+            *p = (Pending){ .seq = q->seq, .run = run, .account = account, .model = model, .text = text };
             memset(&run, 0, sizeof(run));       // (now the entry's)
             memset(&model, 0, sizeof(model));
             memset(&text, 0, sizeof(text));

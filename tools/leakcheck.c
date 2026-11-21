@@ -583,6 +583,12 @@ int main(int argc, char **argv)
     unsetenv("MONOLITH_CLASSIFIER_MODEL");
     unsetenv("MONOLITH_CLASSIFIER_FALLBACK");
     unsetenv("MONOLITH_CLASSIFIER_TIMEOUT");
+    // nor the developer's accounts: the runs with a fallback set their own (and their own requests folder)
+    unsetenv("MONOLITH_CLAUDE_FALLBACK");
+    unsetenv("MONOLITH_CLAUDE_ENV");
+    unsetenv("MONOLITH_ACCOUNT");
+    unsetenv("MONOLITH_STUB_LIMITED");
+    unsetenv("MONOLITH_LIMIT_RETRY");
 
     ToolSay("running monolith (%s build) ...", gMode);
     RUN("dump-boxes", 0, M, "--dump-boxes", T("boxes.txt"));
@@ -1005,6 +1011,25 @@ int main(int argc, char **argv)
     RUN("submit-classifier-fail", 0, "env", reqEnv, termEnv, nob_temp_sprintf("MONOLITH_STUB_LOG=%s", T("stub3.txt")),
         "MONOLITH_STUB_CLASSIFIER=fail", "MONOLITH_LAUNCH=per-request", "MONOLITH_WORKSPACE=", M, "--shot", T("s6.png"),
         "--view", "2", "--submit", "leakcheck: classifier fails", "--submit-wait", "1");
+    // The usage-limit fallback (docs/request-queue.md, "Usage limit and the fallback account"), in a requests
+    // folder of its own (the limit marker): a classified submit whose classifier hits the limit on main and
+    // answers on the fallback (the coordinator then starts on the fallback: env words, --settings, the account
+    // file), --classify with two fallbacks (main and the first limited), every account limited, and a
+    // malformed MONOLITH_CLAUDE_FALLBACK (ignored with a warning)
+    const char *limitReq = nob_temp_sprintf("MONOLITH_REQUESTS_DIR=%s", T("requests-limit"));
+    const char *fbOne = nob_temp_sprintf("MONOLITH_CLAUDE_FALLBACK=CLAUDE_CONFIG_DIR=%s", T("fallback-config"));
+    const char *fbTwo = nob_temp_sprintf("MONOLITH_CLAUDE_FALLBACK=CLAUDE_CONFIG_DIR=%s; CLAUDE_CONFIG_DIR=%s program=claude",
+                                         T("fallback-config"), T("fallback-two"));
+    RUN("submit-limit-fallback", 0, "env", limitReq, termEnv, fbOne, "MONOLITH_STUB_LIMITED=main",
+        "MONOLITH_STUB_CLASSIFIER=heavy", "MONOLITH_WORKSPACE=", M, "--shot", T("s7.png"), "--view", "2", "--submit",
+        "leakcheck: classifier limit", "--submit-wait", "1");
+    RUN("classify-limit-two", 0, "env", nob_temp_sprintf("MONOLITH_REQUESTS_DIR=%s", T("requests-limit-two")), fbTwo,
+        "MONOLITH_STUB_LIMITED=main,fallback-config", M, "--classify", "leakcheck: limit on two accounts");
+    RUN("classify-limit-all", 0, "env", nob_temp_sprintf("MONOLITH_REQUESTS_DIR=%s", T("requests-limit-all")), fbOne,
+        "MONOLITH_STUB_LIMITED=main,fallback-config", M, "--classify", "leakcheck: limit everywhere");
+    RUN("classify-fallback-malformed", 0, "env", nob_temp_sprintf("MONOLITH_REQUESTS_DIR=%s", T("requests-limit-bad")),
+        "MONOLITH_CLAUDE_FALLBACK=lower=x", "MONOLITH_CLAUDE_ENV=CLAUDE_CONFIG_DIR=~/.claude", M, "--classify",
+        "leakcheck: malformed fallback");
     RUN("export-default", 0, M, "--export", T("export-default"));
     RUN("export-models", 0, M, "--export", T("export-models"), "--map", "tests/models");
 
@@ -1158,6 +1183,19 @@ int main(int argc, char **argv)
         RUN("tool-request-queue-wait", 0, "env", rqEnv, tool[RQ], "wait", "--timeout", "5");
         RUN("tool-request-queue-wait-timeout", 3, "env", rqEnv, tool[RQ], "wait", "--timeout", "1");
         RUN("tool-request-queue-bad-id", 2, "env", rqEnv, tool[RQ], "claim", "../x");
+        // the usage limit: the hook's JSON on stdin (a reset time in its text), a subagent's report, the manual
+        // switch, and both without MONOLITH_ACCOUNT (no fallback: exit 1)
+        const char *hookJson = strdup(nob_temp_sprintf("%s/hook.json", td));
+        WriteText(hookJson,
+                  "{\"hook_event_name\":\"StopFailure\",\"error\":\"rate_limit\",\"error_details\":\"429 Too Many "
+                  "Requests\",\"last_assistant_message\":\"You\\u2019ve hit your weekly limit \\u00b7 resets Mon 12:00am\"}\n",
+                  false);
+        RUN_STDIN("tool-request-queue-limit-hook", 0, hookJson, "env", rqEnv, "MONOLITH_ACCOUNT=main", tool[RQ], "limit",
+                  "--hook");
+        RUN("tool-request-queue-limit", 0, "env", rqEnv, "MONOLITH_ACCOUNT=main", tool[RQ], "limit");
+        RUN("tool-request-queue-switch", 0, "env", rqEnv, "MONOLITH_ACCOUNT=.claude-personal", tool[RQ], "switch");
+        RUN("tool-request-queue-limit-none", 1, "env", rqEnv, "MONOLITH_ACCOUNT=", tool[RQ], "limit");
+        RUN("tool-request-queue-switch-none", 1, "env", rqEnv, "MONOLITH_ACCOUNT=", tool[RQ], "switch");
 
         // A scratch repo root for the programs that act on the repo itself (todo / ai-todo write the lists in the
         // root; stub-coordinator and test-coordinator start the queue and the editor from it): a folder with

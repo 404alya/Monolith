@@ -41,11 +41,14 @@ On stdout, which the stub terminal appends to its `MONOLITH_STUB_RUN` file: one 
 
 ```
 HH:MM:SS.mmm stub-coordinator: started (pid <pid>), args: <count>
+HH:MM:SS.mmm stub-coordinator: account=<MONOLITH_ACCOUNT or -> config=<CLAUDE_CONFIG_DIR or -> prompt-account-line=yes|no
+HH:MM:SS.mmm stub-coordinator: --settings <json>          (only when it was given --settings)
 (request-queue start's own output)
 HH:MM:SS.mmm start <id> <package>[ [code]]
 HH:MM:SS.mmm end <id>
 HH:MM:SS.mmm cancelled <id>[ (queued)]
 HH:MM:SS.mmm wait <id> (code request: waits until it is alone)
+HH:MM:SS.mmm stub-coordinator: usage limit reached (account <label>)
 ```
 
 `request-queue`'s error messages (stderr) land there too.
@@ -56,6 +59,7 @@ HH:MM:SS.mmm wait <id> (code request: waits until it is alone)
 |---|---|
 | `MONOLITH_STUB_WORK` | Seconds a worker "works" (default 3; fractions allowed, like `sleep`'s). |
 | `MONOLITH_REQUESTS_DIR` | The requests folder (also read by `request-queue`); default `<repo>/requests`. |
+| `MONOLITH_STUB_LIMITED` / `MONOLITH_STUB_COORD_LIMIT` | The usage limit (the coordinator skill §6a): when its `MONOLITH_ACCOUNT` (`main` when unset) is in the comma-separated `MONOLITH_STUB_LIMITED`, `MONOLITH_STUB_COORD_LIMIT` seconds after its start it stops its workers, runs `request-queue limit --hook` with a StopFailure JSON on stdin (written to `<requests>/.coordinator/stub-hook.json`), and then only waits, holding the lock, as a session at its limit does, until it is killed. |
 
 ## Running and exit status
 

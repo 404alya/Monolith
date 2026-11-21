@@ -37,12 +37,13 @@ Your session may last all day, so keep its context small:
 | `finish <id> failed` | the subagent finished without `result.md` or gave up; the program writes a `result.md` with the default text and the list of changed files |
 | `finish <id> cancelled` | after a cancel (§5) |
 | `changed <id>` | files changed since the claim (exit 1 if any) |
+| `limit` | a subagent stopped at the account's usage limit (§6a); the editor restarts you on another account |
 
 States: `queued` → `claimed` (↔ `question`) → `done` / `failed` / `cancelled`. The editor shows them in its HUD, with line 1 of `result.md` once there is one.
 
 ## 3. The loop
 
-1. `build/tools/request-queue start`. Tell the developer in one line what it recovered, if anything (an `Interrupted:` request is one whose edit may be half done: name it).
+1. `build/tools/request-queue start`. Tell the developer in one line what it recovered, if anything (an `Interrupted:` request is one whose edit may be half done: name it). If your start prompt ends with an `Account:` line, repeat it in that line.
 2. Schedule (§4).
 3. Start the watcher: `build/tools/request-queue wait` in the background. **Exactly one watcher at a time**: start a new one only when the previous one has exited (its exit is one of the things that wakes you).
 4. End your turn with a one-line status. You are woken when the watcher exits (a request or cancel arrived), when a subagent finishes, or when the developer writes.
@@ -53,6 +54,7 @@ States: `queued` → `claimed` (↔ `question`) → `done` / `failed` / `cancell
 - `FAILED: …` → `finish <id> done` if `result=yes` (its `result.md` explains), else `finish <id> failed`.
 - `QUESTION` → §5.
 - `NEEDS-CODE: …` → keep it claimed; it is now a waiting code request (§4 rule 2). Once no other subagent is running, resume it with `SendMessage`: "You run alone now: go ahead, including the code change." (Load `SendMessage` with ToolSearch if it isn't loaded.)
+- It stopped with an API error about a usage or rate limit (for example `Agent terminated early due to an API error`, `You've hit your session limit`, `rate limit`) → §6a. Don't finish its bundle.
 - Anything else, or it stopped without a reply → `finish <id> failed`.
 
 ## 4. Scheduling rules
@@ -82,6 +84,13 @@ Remember which subagent has which bundle id: you need it to resume or stop it.
 ## 6. Recovery
 
 Only one coordinator can run (the editor's lock). So when you start, every `claimed` or `question` bundle belongs to a coordinator that died. `start` handles them: one that already has a `result.md` is finished as `done`; otherwise, if nothing in the map package or the code changed since the claim, the bundle goes back to `queued` and runs again from the start; if something changed, it becomes `failed` with `Interrupted: the coordinator stopped mid-run; files changed, check them` and the list of files, and is **not** re-run (running a half-applied edit again would apply it twice). Tell the developer about those.
+
+## 6a. Usage limit
+
+When the account you run on reaches its usage limit, the editor can restart the queue on another account (`MONOLITH_CLAUDE_FALLBACK`). It learns about it from Claude Code's `StopFailure` hook (your session has it when a fallback is configured) and from you:
+- A subagent ends with an API error that names a usage or rate limit: run `build/tools/request-queue limit` (no other words: never pass text from the error), start nothing new, and leave its bundle `claimed`. Tell the developer in one line: `Usage limit reached; the editor restarts the coordinator on the next account.` If the command answers `no fallback account`, say instead: `Usage limit reached; no fallback account: the queue waits until the limit resets.`
+- Then stop scheduling. The editor ends this session and starts a new coordinator, whose `start` puts the claimed bundles back in the queue or reports them (§6).
+- The developer can switch by hand with `! build/tools/request-queue switch` in this terminal. That is their command, not yours.
 
 ## 7. The subagent prompt
 

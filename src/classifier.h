@@ -31,6 +31,8 @@ typedef struct {
     bool done;
     int tier;                   // 0 fast, 1 default, 2 heavy (the launcher's ModelTier order)
     bool ok;                    // true: the AI answered within the schema; false: failed (default tier)
+    bool limited;               // failed because the account reached its usage limit (IsLimitText)
+    char *limitText;            // then: Claude Code's error text (result / errors[]), heap, for the reset time
     char *model;                // the model that answered (from modelUsage), heap; NULL if unknown
     MonoMsg reason;             // the AI's one-line reason (plain ASCII, <= 200 bytes), or why it failed
     double seconds;             // from the start to the answer (or the failure)
@@ -38,19 +40,27 @@ typedef struct {
 
 #if MONOLITH_EDITING
 
-// Writes <dir>classifier-input.txt from q (dir ends in '/') and starts `program` on it with the
-// fixed arguments (--model $MONOLITH_CLASSIFIER_MODEL / fable, --fallback-model, --safe-mode, no
+// Writes <dir>classifier-input.txt from q (dir ends in '/') and starts `pre[0..preCount-1]` +
+// `program` on it (pre: the account's `env NAME=value ...` words, none for the inherited
+// environment; launcher.c region "Accounts") with the fixed arguments (--model $MONOLITH_CLASSIFIER_MODEL / fable, --fallback-model, --safe-mode, no
 // tools, JSON schema, --system-prompt-file promptFile), stdout to <dir>classifier.json, stderr to
 // <dir>classifier.log. Never blocks on the child. Returns
 //   0: started (poll it with ClassifierPoll)
 //   1: not started: c is done already, failed (c->reason says why: the input file, the prompt
 //      file, the start)
-unsigned char ClassifierStart(Classifier *c, const ClassifierQuery *q, const char *dir, const char *program,
-                              const char *promptFile);
+unsigned char ClassifierStart(Classifier *c, const ClassifierQuery *q, const char *dir, const char *const *pre,
+                              int preCount, const char *program, const char *promptFile);
+
+// Runs a finished run again on the input it already wrote (<dir>classifier-input.txt), with another
+// command (another account: launcher.c's usage-limit fallback); the result fields are reset.
+// classifier.json and classifier.log are written anew. 0: started; 1: not (c is done, failed)
+unsigned char ClassifierRestart(Classifier *c, const char *const *pre, int preCount, const char *program,
+                                const char *promptFile);
 
 // Checks the run once, without waiting (waitpid WNOHANG); sends SIGTERM after the timeout and
 // SIGKILL 2 s later. Returns 0: still running; 1: done (the result fields are set: an answer
-// within the schema, or a failure with its reason).
+// within the schema, or a failure with its reason; `limited` when that failure was the account's
+// usage limit, read from classifier.json whatever the exit status).
 unsigned char ClassifierPoll(Classifier *c);
 
 // Stops a running classifier (SIGTERM, up to 1 s for it to go, then SIGKILL; reaped) and marks

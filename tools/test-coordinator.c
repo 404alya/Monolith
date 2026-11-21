@@ -250,6 +250,13 @@ static char *Submit(const char *map, const char *text, const char **extra, size_
                     q = strchr(q, ':');
                     if (q && q[1] == ' ') p = q + 2;
                 }
+            } else if (pass == 1 && strncmp(l, "submit: ok: request classifying [", 33) == 0) {
+                // a classified submit: "... classifying [n]: <id>" (the id ends the line)
+                const char *q = strstr(l + 33, "]: ");
+                if (q) {
+                    id = strndup(q + 3, strcspn(q + 3, " "));
+                    if (!*id) { free(id); id = NULL; }
+                }
             } else if (pass == 1 && strncmp(l, "submit: ok: request sent (", 26) == 0) {
                 // [^)]* then "): "
                 const char *q = strchr(l + 26, ')');
@@ -538,6 +545,13 @@ int main(int argc, char **argv)
     unsetenv("MONOLITH_STUB_LOG");
     unsetenv("MONOLITH_CLAUDE_ARGS");
     unsetenv("MONOLITH_MODEL");
+    // the developer's accounts stay out (sections 7 and 8 set their own)
+    unsetenv("MONOLITH_CLAUDE_FALLBACK");
+    unsetenv("MONOLITH_CLAUDE_ENV");
+    unsetenv("MONOLITH_ACCOUNT");
+    unsetenv("MONOLITH_STUB_LIMITED");
+    unsetenv("MONOLITH_STUB_COORD_LIMIT");
+    unsetenv("MONOLITH_LIMIT_RETRY");
     const char *rootSlash = nob_temp_sprintf("%s/", gToolRoot);
     size_t rootLen = strlen(rootSlash);
 
@@ -764,6 +778,325 @@ int main(int argc, char **argv)
         Ok("per-request terminal got the old prompt; no state file");
     } else {
         Bad("per-request mode (see %s)", argvLog);
+    }
+
+    // 7. the usage limit: the coordinator on main hits it, the editor restarts it on the fallback account
+    Echo("7. usage limit: the coordinator restarts on the fallback account; after the reset the next start uses main");
+    {
+        // a requests folder of its own (no marker or coordinator of the sections before), the developer's
+        // CLAUDE_CONFIG_DIR out of the way (main = the inherited environment)
+        gR = strdup(nob_temp_sprintf("%s/requests-limit", gT));
+        gLog = strdup(nob_temp_sprintf("%s/.coordinator/log", gR));
+        ToolMkdirP(gR);
+        const char *fbDir = strdup(nob_temp_sprintf("%s/fallback-config", gT));
+        const char *out7 = strdup(nob_temp_sprintf("%s/coordinator-limit.out", gT));
+        SavedEnv e1 = SetEnvFor("MONOLITH_REQUESTS_DIR", gR);
+        SavedEnv e2 = SetEnvFor("MONOLITH_CLAUDE_FALLBACK", nob_temp_sprintf("CLAUDE_CONFIG_DIR=%s", fbDir));
+        SavedEnv e3 = SetEnvFor("MONOLITH_STUB_LIMITED", "main");
+        SavedEnv e4 = SetEnvFor("MONOLITH_STUB_COORD_LIMIT", "6");  // (both claimed by then)
+        SavedEnv e5 = SetEnvFor("MONOLITH_LIMIT_RETRY", "14");
+        SavedEnv e6 = SetEnvFor("MONOLITH_STUB_RUN", out7);
+        SavedEnv e7 = SetEnvFor("MONOLITH_STUB_WORK", "12");  // (the limit comes in the middle of L1's work)
+        char *oldConfig = getenv("CLAUDE_CONFIG_DIR") ? strdup(getenv("CLAUDE_CONFIG_DIR")) : NULL;
+        unsetenv("CLAUDE_CONFIG_DIR");
+        int opened0 = Opened();
+
+        char *L1 = Submit(A, "[edit] test limit touched on map a", NULL, 0);
+        char *L2 = Submit(B, "test limit b1 untouched", NULL, 0);  // (b1 < b2: ids of one second sort by slug)
+        const char *waitLimit[] = {"--submit-wait", "30"};
+        char *L3 = Submit(B, "test limit b2 queued", waitLimit, 2);
+        const char *out3 = strdup(nob_temp_sprintf("%s/submit-%d.out", gT, gN));
+        const char *s7[] = {L1, L2, L3};
+        if (!WaitFor(60, AllFinal, s7, 3)) Bad("requests not finished after 60 s");
+        Show(s7, 3);
+        if (Opened() == opened0 + 2) Ok("two coordinators: main, then the fallback");
+        else Bad("%d terminals opened in this section (want 2)", Opened() - opened0);
+        if (FileHas(out7, Contains, "stub-coordinator: account=main config=- prompt-account-line=yes") &&
+            FileHas(out7, Contains, nob_temp_sprintf("stub-coordinator: account=fallback-config config=%s prompt-account-line=yes", fbDir))) {
+            Ok("the first ran on main, the second with CLAUDE_CONFIG_DIR=%s", fbDir + rootLen);
+        } else {
+            Bad("the coordinators' accounts (see %s)", out7);
+        }
+        if (FileHas(out7, Contains, "--settings {\"hooks\":{\"StopFailure\":[{\"matcher\":\"rate_limit|billing_error\"")) {
+            Ok("the coordinator got the StopFailure hook (--settings)");
+        } else {
+            Bad("no --settings with the StopFailure hook (see %s)", out7);
+        }
+        const char *marker = nob_temp_sprintf("%s/.coordinator/limit", gR);
+        if (FileHas(marker, Contains, " account=main reset=") && FileHas(marker, Contains, " error=rate_limit")) {
+            char *h = Head1(marker);
+            Ok("limit marker: %s", h);
+            free(h);
+        } else {
+            Bad("no limit line for main in %s", marker);
+        }
+        if (FileHas(out3, Contains, "usage limit on main: the coordinator restarted on fallback-config")) {
+            Ok("the editor restarted the coordinator (usage limit on main: ... fallback-config)");
+        } else {
+            Bad("the editor's log has no restart line (see %s)", out3);
+        }
+        {
+            const char *result = nob_temp_sprintf("%s/%s/result.md", gR, L1 ? L1 : "");
+            char *h = Head1(result);
+            if (StateIs(L1 ? L1 : "", "failed") &&
+                strcmp(h, "Interrupted: the account's usage limit was reached; restarted on fallback-config; files changed, check them") == 0 &&
+                FileHas(result, Contains, "stub-edit.txt")) {
+                Ok("touched %s was reported: %s", L1, h);
+            } else {
+                char *s = StateOf(L1 ? L1 : "");
+                Bad("%s: %s: %s", L1 ? L1 : "", s, h);
+                free(s);
+            }
+            free(h);
+        }
+        if (FileHas(gLog, Contains, nob_temp_sprintf("requeued %s", L2 ? L2 : "")) && StateIs(L2 ? L2 : "", "done")) {
+            Ok("untouched %s was requeued and ran on the fallback", L2);
+        } else {
+            Bad("%s was not requeued and done", L2 ? L2 : "");
+        }
+        if (StateIs(L3 ? L3 : "", "done")) Ok("queued %s ran on the fallback", L3);
+        else Bad("%s not done", L3 ? L3 : "");
+
+        // back to main: the fallback coordinator stops (here: killed), main's reset time passes, the next
+        // start uses main (MONOLITH_STUB_LIMITED empty: main answers again)
+        char *pg7 = LastGroup();
+        KillGroup(pg7);
+        free(pg7);
+        if (!WaitFor(10, LockFree, NULL, 0)) Bad("the lock is still held");
+        {
+            char *h = Head1(marker);
+            struct tm tm = {0};
+            time_t at = strptime(h, "%Y-%m-%dT%H:%M:%S", &tm) ? (tm.tm_isdst = -1, mktime(&tm)) : time(NULL);
+            free(h);
+            double left = (double)(at + 15 - time(NULL));
+            if (left > 0) {
+                Echo("  (waiting %.0f s for main's reset time, MONOLITH_LIMIT_RETRY=14)", left);
+                Sleep(left);
+            }
+        }
+        RestoreEnv(e3);
+        SavedEnv e3b = SetEnvFor("MONOLITH_STUB_LIMITED", "");
+        char *L4 = Submit(B, "test limit back on main", NULL, 0);
+        const char *s7b[] = {L4};
+        if (!WaitFor(30, AllFinal, s7b, 1)) Bad("not finished after 30 s");
+        char *last = FindLine(out7, Contains, "stub-coordinator: account=", true);
+        if (StateIs(L4 ? L4 : "", "done") && last && strstr(last, "account=main ")) Ok("after the reset the next coordinator ran on main");
+        else Bad("after the reset: %s", last ? last : "(no start line)");
+        free(last);
+        pg7 = LastGroup();
+        KillGroup(pg7);
+        free(pg7);
+        if (!WaitFor(10, LockFree, NULL, 0)) Bad("the lock is still held");
+
+        // the hook's reset time: "resets 3:45pm" is read by request-queue limit --hook
+        {
+            const char *rq = nob_temp_sprintf("%s/requests-hook", gT);
+            ToolMkdirP(rq);
+            const char *in = nob_temp_sprintf("%s/hook.json", gT);
+            FILE *f = fopen(in, "wb");
+            if (f) {
+                fputs("{\"hook_event_name\":\"StopFailure\",\"error\":\"rate_limit\",\"last_assistant_message\":\"You've hit your session limit \\u00b7 resets 3:45pm\"}\n", f);
+                if (fclose(f) != 0) ToolErr("%s: %s", in, strerror(errno));
+            }
+            SavedEnv h1 = SetEnvFor("MONOLITH_REQUESTS_DIR", rq);
+            SavedEnv h2 = SetEnvFor("MONOLITH_ACCOUNT", "main");
+            Nob_Cmd cmd = {0};
+            nob_cmd_append(&cmd, ToolProgram("request-queue"), "limit", "--hook");
+            ToolRun(&cmd, (ToolIo){.in = in, .out = "/dev/null"});
+            nob_cmd_free(cmd);
+            RestoreEnv(h2);
+            RestoreEnv(h1);
+            char *h = Head1(nob_temp_sprintf("%s/.coordinator/limit", rq));
+            if (strstr(h, " account=main reset=") && strstr(h, "T15:45:00 error=rate_limit")) Ok("hook text \"resets 3:45pm\": %s", h);
+            else Bad("hook marker line: %s", h);
+            free(h);
+        }
+
+        // every account limited: main -> the fallback once, then it stays (no back-and-forth)
+        {
+            gR = strdup(nob_temp_sprintf("%s/requests-limit-all", gT));
+            gLog = strdup(nob_temp_sprintf("%s/.coordinator/log", gR));
+            ToolMkdirP(gR);
+            SavedEnv a = SetEnvFor("MONOLITH_REQUESTS_DIR", gR);
+            SavedEnv b = SetEnvFor("MONOLITH_STUB_LIMITED", "main,fallback-config");
+            SavedEnv c = SetEnvFor("MONOLITH_STUB_COORD_LIMIT", "2");
+            int opened1 = Opened();
+            const char *waitAll[] = {"--submit-wait", "16"};
+            char *Z = Submit(A, "test every account limited", waitAll, 2);
+            const char *outZ = nob_temp_sprintf("%s/submit-%d.out", gT, gN);
+            if (Opened() == opened1 + 2 && FileHas(outZ, Contains, "every other account is limited too: the coordinator stays")) {
+                Ok("every account limited: one switch to the fallback, then the coordinator stays");
+            } else {
+                Bad("every account limited: %d terminals (want 2; see %s)", Opened() - opened1, outZ);
+            }
+            char *pgZ = LastGroup();
+            KillGroup(pgZ);
+            free(pgZ);
+            if (!WaitFor(10, LockFree, NULL, 0)) Bad("the lock is still held");
+            free(Z);
+            RestoreEnv(c);
+            RestoreEnv(b);
+            RestoreEnv(a);
+        }
+
+        RestoreEnv(e3b);
+        RestoreEnv(e7);
+        RestoreEnv(e6);
+        RestoreEnv(e5);
+        RestoreEnv(e4);
+        RestoreEnv(e2);
+        RestoreEnv(e1);
+        if (oldConfig) setenv("CLAUDE_CONFIG_DIR", oldConfig, 1);
+        free(oldConfig);
+    }
+
+    // 8. the classifier: a usage limit on main runs it again on the fallback; other failures don't
+    Echo("8. the classifier on a usage limit: once more on the fallback account; every account limited: default tier");
+    {
+        const char *stubClassifier = strdup(ToolProgram("stub-classifier"));
+        const char *fbDir = strdup(nob_temp_sprintf("%s/fallback-config", gT));
+        char *oldConfig = getenv("CLAUDE_CONFIG_DIR") ? strdup(getenv("CLAUDE_CONFIG_DIR")) : NULL;
+        unsetenv("CLAUDE_CONFIG_DIR");
+        SavedEnv c1 = SetEnvFor("MONOLITH_CLASSIFIER", stubClassifier);
+        // one case: its own requests folder (the marker) and classifier log; returns the --classify output path
+        // fallback "set": one fallback account (fallback-config); "two": two (fallback-config;fallback-two)
+        struct {
+            const char *name, *fallback, *mode, *limited;
+        } cases[] = {
+            {"limit-main", "set", "heavy", "main"},
+            {"limit-all", "set", "heavy", "main,fallback-config"},
+            {"other-error", "set", "fail", ""},
+            {"no-fallback", "", "limit", ""},
+            {"two-fallbacks", "two", "heavy", "main,fallback-config"},
+            {"two-all", "two", "heavy", "main,fallback-config,fallback-two"},
+        };
+        enum { CASES = sizeof cases / sizeof cases[0] };
+        const char *fbTwo = strdup(nob_temp_sprintf("%s/fallback-two", gT));
+        const char *outs[CASES], *logs[CASES], *dirs[CASES];
+        for (int k = 0; k < CASES; k++) {
+            dirs[k] = strdup(nob_temp_sprintf("%s/requests-classify-%s", gT, cases[k].name));
+            logs[k] = strdup(nob_temp_sprintf("%s/classifier-%s.log", gT, cases[k].name));
+            outs[k] = strdup(nob_temp_sprintf("%s/classify-%s.out", gT, cases[k].name));
+            ToolMkdirP(dirs[k]);
+            SavedEnv a = SetEnvFor("MONOLITH_REQUESTS_DIR", dirs[k]);
+            const char *fb = !*cases[k].fallback ? ""
+                             : strcmp(cases[k].fallback, "two") == 0 ? nob_temp_sprintf("CLAUDE_CONFIG_DIR=%s; CLAUDE_CONFIG_DIR=%s", fbDir, fbTwo)
+                                                                     : nob_temp_sprintf("CLAUDE_CONFIG_DIR=%s", fbDir);
+            SavedEnv b = SetEnvFor("MONOLITH_CLAUDE_FALLBACK", fb);
+            SavedEnv c = SetEnvFor("MONOLITH_STUB_CLASSIFIER", cases[k].mode);
+            SavedEnv d = SetEnvFor("MONOLITH_STUB_LIMITED", cases[k].limited);
+            SavedEnv e = SetEnvFor("MONOLITH_STUB_CLASSIFIER_LOG", logs[k]);
+            Nob_Cmd cmd = {0};
+            nob_cmd_append(&cmd, gGame, "--map", A, "--classify", "test classifier limit");
+            ToolRun(&cmd, (ToolIo){.out = outs[k], .errToOut = true});
+            nob_cmd_free(cmd);
+            RestoreEnv(e);
+            RestoreEnv(d);
+            RestoreEnv(c);
+            RestoreEnv(b);
+            RestoreEnv(a);
+        }
+        // (a) main limited: the fallback answers
+        if (FileHas(outs[0], Exactly, "tier: heavy") && FileHas(outs[0], Exactly, "classifier: ai") &&
+            FileHas(outs[0], Exactly, "classifier account: fallback-config") &&
+            FileHas(logs[0], Contains, "stub-classifier account: main config: -") &&
+            FileHas(logs[0], Contains, nob_temp_sprintf("stub-classifier account: fallback-config config: %s", fbDir)) &&
+            FileHas(nob_temp_sprintf("%s/.coordinator/limit", dirs[0]), Contains, " account=main reset=")) {
+            Ok("limit on main: the fallback answered (heavy, classifier account fallback-config; main marked limited)");
+        } else {
+            Bad("limit on main (see %s, %s)", outs[0], logs[0]);
+        }
+        // (b) every account limited: default tier, the reason says so
+        if (FileHas(outs[1], Exactly, "tier: default") && FileHas(outs[1], Exactly, "classifier: failed") &&
+            FileHas(outs[1], Exactly, "reason: AI classifier failed (the usage limit was reached on every account)")) {
+            Ok("limit on every account: default tier, \"the usage limit was reached on every account\"");
+        } else {
+            Bad("limit on every account (see %s)", outs[1]);
+        }
+        // (c) another error: no second run, no marker
+        int runs = 0;
+        {
+            char *text = Slurp(logs[2]);
+            for (char *p = strstr(text, "stub-classifier argv:"); p; p = strstr(p + 1, "stub-classifier argv:")) runs++;
+            free(text);
+        }
+        struct stat stc;
+        if (runs == 1 && FileHas(outs[2], Exactly, "classifier: failed") &&
+            stat(nob_temp_sprintf("%s/.coordinator/limit", dirs[2]), &stc) != 0) {
+            Ok("another failure: one run, no retry, no marker");
+        } else {
+            Bad("another failure: %d runs (see %s)", runs, outs[2]);
+        }
+        // (d) no fallback configured: the limit is an ordinary failure, no account fields
+        if (FileHas(outs[3], Exactly, "reason: AI classifier failed (the account's usage limit was reached)") &&
+            !FileHas(outs[3], StartsWith, "classifier account:") && !FileHas(logs[3], Contains, "account: main")) {
+            Ok("no fallback: the limit fails as before (default tier), no MONOLITH_ACCOUNT");
+        } else {
+            Bad("no fallback (see %s, %s)", outs[3], logs[3]);
+        }
+        // (f) two fallbacks, tried in order: main and the first limited, the second answers; all three
+        // limited: default tier
+        if (FileHas(outs[4], Exactly, "tier: heavy") && FileHas(outs[4], Exactly, "classifier account: fallback-two") &&
+            FileHas(logs[4], Contains, "stub-classifier account: main ") &&
+            FileHas(logs[4], Contains, "stub-classifier account: fallback-config ") &&
+            FileHas(logs[4], Contains, nob_temp_sprintf("stub-classifier account: fallback-two config: %s", fbTwo))) {
+            Ok("two fallbacks: main, then fallback-config, then fallback-two answered");
+        } else {
+            Bad("two fallbacks (see %s, %s)", outs[4], logs[4]);
+        }
+        if (FileHas(outs[5], Exactly, "reason: AI classifier failed (the usage limit was reached on every account)")) {
+            Ok("two fallbacks, all three limited: default tier");
+        } else {
+            Bad("two fallbacks, all limited (see %s)", outs[5]);
+        }
+        // (e) a submit (the classifier polled by the frame loop): the bundle records the account, and the
+        // coordinator starts on the fallback (the classifier marked main limited)
+        {
+            gR = strdup(nob_temp_sprintf("%s/requests-classify-submit", gT));
+            ToolMkdirP(gR);
+            const char *outE = strdup(nob_temp_sprintf("%s/coordinator-classify.out", gT));
+            SavedEnv a = SetEnvFor("MONOLITH_REQUESTS_DIR", gR);
+            SavedEnv b = SetEnvFor("MONOLITH_CLAUDE_FALLBACK", nob_temp_sprintf("CLAUDE_CONFIG_DIR=%s", fbDir));
+            SavedEnv c = SetEnvFor("MONOLITH_STUB_CLASSIFIER", "fast");
+            SavedEnv d = SetEnvFor("MONOLITH_STUB_LIMITED", "main");
+            SavedEnv e = SetEnvFor("MONOLITH_STUB_CLASSIFIER_LOG", nob_temp_sprintf("%s/classifier-submit.log", gT));
+            SavedEnv f = SetEnvFor("MONOLITH_STUB_RUN", outE);
+            const char *waitE[] = {"--submit-wait", "3"};
+            char *E1 = Submit(A, "test classifier limit submit", waitE, 2);
+            const char *json = nob_temp_sprintf("%s/%s/request.json", gR, E1 ? E1 : "");
+            const char *md = nob_temp_sprintf("%s/%s/request.md", gR, E1 ? E1 : "");
+            if (FileHas(json, Contains, "\"classifierAccount\": \"fallback-config\"") && FileHas(json, Contains, "\"format\": 7") &&
+                FileHas(md, Contains, " on fallback-config in ") && FileHas(md, Contains, "(fast tier, chosen by the AI classifier")) {
+                Ok("submit: the bundle says the fallback classified it (request.json classifierAccount, request.md Model line)");
+            } else {
+                Bad("submit: the bundle's model fields (see %s)", json);
+            }
+            if (FileHas(outE, Contains, "stub-coordinator: account=fallback-config ")) Ok("its coordinator started on the fallback");
+            else Bad("its coordinator's account (see %s)", outE);
+            const char *sE[] = {E1};
+            WaitFor(20, AllFinal, sE, 1);
+            char *pgE = LastGroup();
+            KillGroup(pgE);
+            free(pgE);
+            if (!WaitFor(10, LockFree, NULL, 0)) Bad("the lock is still held");
+            free(E1);
+            RestoreEnv(f);
+            RestoreEnv(e);
+            RestoreEnv(d);
+            RestoreEnv(c);
+            RestoreEnv(b);
+            RestoreEnv(a);
+            free((char *)outE);
+        }
+        free((char *)fbTwo);
+        for (int k = 0; k < CASES; k++) {
+            free((char *)outs[k]);
+            free((char *)logs[k]);
+            free((char *)dirs[k]);
+        }
+        RestoreEnv(c1);
+        if (oldConfig) setenv("CLAUDE_CONFIG_DIR", oldConfig, 1);
+        free(oldConfig);
     }
 
     Echo("--- coordinator output: %s/coordinator.out, queue log: %s", gT + rootLen,

@@ -9,6 +9,7 @@
 #include <dirent.h>
 #include <fnmatch.h>
 #include <locale.h>
+#include <strings.h>
 #include <wchar.h>
 
 // #region State: the folders, small file helpers
@@ -797,6 +798,205 @@ static int Changed(const char *d, Nob_String_Builder *out)
 
 // #endregion
 
+// #region The usage limit (docs/request-queue.md, "Usage limit and the fallback account")
+
+// The value of the top-level string key `key` in a JSON text (the StopFailure hook's stdin), unescaped
+// just enough for matching words and a time (\" \\ \n \t; \uXXXX becomes a blank). Heap string, or NULL
+// when the key is missing. The text is data: only the error word and a reset time are taken from it.
+static char *JsonField(const char *json, const char *key)
+{
+    const char *want = nob_temp_sprintf("\"%s\"", key);
+    for (const char *p = strstr(json, want); p; p = strstr(p + 1, want)) {
+        const char *q = p + strlen(want);
+        while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r') q++;
+        if (*q != ':') continue;
+        q++;
+        while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r') q++;
+        if (*q != '"') return NULL;
+        Nob_String_Builder sb = {0};
+        for (q++; *q && *q != '"'; q++) {
+            if (*q != '\\') { nob_da_append(&sb, *q); continue; }
+            q++;
+            if (!*q) break;
+            if (*q == 'n' || *q == 't' || *q == 'r') nob_da_append(&sb, ' ');
+            else if (*q == 'u') {
+                nob_da_append(&sb, ' ');
+                for (int i = 0; i < 4 && q[1]; i++) q++;
+            } else nob_da_append(&sb, *q);
+        }
+        nob_sb_append_null(&sb);
+        return sb.items;
+    }
+    return NULL;
+}
+
+// The reset time in Claude Code's limit text ("resets 3:45pm", "resets Mon 12:00am", "resets 3pm",
+// "resets 15:45"): the next such local time after `at`; 0 when the text has none. The same rules as
+// ParseReset in src/launcher.c (the classifier's text): keep the two in step.
+static time_t ResetFromText(const char *text, time_t at)
+{
+    static const char *const DAYS[] = {"sun", "mon", "tue", "wed", "thu", "fri", "sat"};
+    for (const char *p = text; p && *p; p++) {
+        if (strncasecmp(p, "resets", 6) != 0) continue;
+        const char *q = p + 6;
+        while (*q == ' ' || *q == '\t') q++;
+        if (strncasecmp(q, "at ", 3) == 0) q += 3;
+        int wday = -1;
+        for (int d = 0; d < 7; d++) {
+            if (wday < 0 && strncasecmp(q, DAYS[d], 3) == 0) {
+                wday = d;
+                q += 3;
+                while (isalpha((unsigned char)*q)) q++;  // (Monday, Mon)
+                while (*q == ' ' || *q == ',') q++;
+            }
+        }
+        if (!isdigit((unsigned char)*q)) continue;
+        int hour = 0, minute = 0;
+        while (isdigit((unsigned char)*q)) hour = hour * 10 + (*q++ - '0');
+        if (*q == ':' && isdigit((unsigned char)q[1])) {
+            q++;
+            while (isdigit((unsigned char)*q)) minute = minute * 10 + (*q++ - '0');
+        }
+        while (*q == ' ') q++;
+        bool pm = strncasecmp(q, "pm", 2) == 0, am = strncasecmp(q, "am", 2) == 0;
+        if (pm || am) {
+            if (hour < 1 || hour > 12) continue;
+            hour = hour % 12 + (pm ? 12 : 0);
+        }
+        if (hour > 23 || minute > 59) continue;
+        struct tm tm;
+        localtime_r(&at, &tm);
+        tm.tm_hour = hour;
+        tm.tm_min = minute;
+        tm.tm_sec = 0;
+        for (int k = 0; k < 8; k++) {  // today, else the next day (that weekday) after `at`
+            struct tm c = tm;
+            c.tm_mday += k;
+            c.tm_isdst = -1;
+            time_t t = mktime(&c);
+            if (t > at && (wday < 0 || c.tm_wday == wday)) return t;
+        }
+    }
+    return 0;
+}
+
+// The session's account: $MONOLITH_ACCOUNT (the editor sets it while a fallback is configured), only
+// [A-Za-z0-9._-]. Heap string, or NULL when unset.
+static char *Account(void)
+{
+    const char *v = getenv("MONOLITH_ACCOUNT");
+    if (!v || !*v) return NULL;
+    char *a = strdup(v);
+    if (!a) ToolDie(1, "out of memory");
+    for (char *c = a; *c; c++) {
+        if (!isalnum((unsigned char)*c) && *c != '.' && *c != '_' && *c != '-') *c = '_';
+    }
+    return a;
+}
+
+// Limit <error> [reset]: appends "<time> account=<label> reset=<time|unknown> error=<error>" to
+// .coordinator/limit, logs it and says what happens next. The editor reads the marker (launcher.c,
+// AccountsRefresh / CoordinatorLimitCheck) and restarts the coordinator on the next account.
+static void MarkLimit(const char *account, const char *error, time_t reset)
+{
+    char *now = Now();
+    char *resetText = reset ? LocalTime("%Y-%m-%dT%H:%M:%S", (struct timespec){reset, 0}) : strdup("unknown");
+    const char *line = nob_temp_sprintf("%s account=%s reset=%s error=%s\n", now, account, resetText, error);
+    WriteFile(nob_temp_sprintf("%s/limit", gCo), line, strlen(line), true);
+    Log("limit %s %s (resets %s)", account, error, resetText);
+    printf("limit: %s marked limited (%s, resets %s); the editor restarts the coordinator on the next account\n", account,
+           error, resetText);
+    free(resetText);
+    free(now);
+}
+
+// `limit [--hook]`: --hook = from the StopFailure hook, the hook's JSON on stdin (its `error` word, and a
+// reset time from `last_assistant_message` / `error_details`); without it the coordinator reports a
+// subagent stopped by the limit (error=subagent, reset unknown). Without MONOLITH_ACCOUNT (no fallback
+// configured) it says so and exits 1: nobody would act on the marker.
+static int LimitCommand(bool hook)
+{
+    char *account = Account();
+    if (!account) {
+        printf("limit: no fallback account (the editor sets MONOLITH_ACCOUNT only with MONOLITH_CLAUDE_FALLBACK): nothing to switch to\n");
+        return 1;
+    }
+    const char *error = "subagent";
+    time_t reset = 0;
+    char *word = NULL;
+    if (hook) {
+        Nob_String_Builder in = {0};
+        char buf[4096];
+        for (;;) {
+            ssize_t n = read(STDIN_FILENO, buf, sizeof buf);
+            if (n < 0 && errno == EINTR) continue;
+            if (n <= 0 || in.count > (1u << 20)) break;  // (a hook's stdin is small; cap it anyway)
+            nob_sb_append_buf(&in, buf, (size_t)n);
+        }
+        nob_sb_append_null(&in);
+        word = JsonField(in.items, "error");
+        // the error word as an identifier only ([a-z_]), else "unknown"
+        bool ok = word && *word;
+        for (char *c = word; ok && *c; c++) ok = (*c >= 'a' && *c <= 'z') || *c == '_';
+        error = ok ? word : "unknown";
+        const char *keys[] = {"last_assistant_message", "error_details"};
+        for (size_t k = 0; k < NOB_ARRAY_LEN(keys) && !reset; k++) {
+            char *text = JsonField(in.items, keys[k]);
+            reset = ResetFromText(text, time(NULL));
+            free(text);
+        }
+        nob_sb_free(in);
+    }
+    MarkLimit(account, error, reset);
+    free(word);
+    free(account);
+    return 0;
+}
+
+// `switch`: the developer's manual switch (`! build/tools/request-queue switch` in the coordinator
+// terminal): the running account counts as limited (error=manual, reset unknown).
+static int SwitchCommand(void)
+{
+    char *account = Account();
+    if (!account) {
+        printf("switch: no fallback account (MONOLITH_CLAUDE_FALLBACK is not set for the editor): nothing to switch to\n");
+        return 1;
+    }
+    MarkLimit(account, "manual", 0);
+    free(account);
+    return 0;
+}
+
+// The newest line of .coordinator/limit: its time (0 = none). Recover uses it to word a stop caused by
+// the limit.
+static time_t LastLimit(void)
+{
+    Nob_String_Builder sb = {0};
+    time_t at = 0;
+    if (ReadFile(nob_temp_sprintf("%s/limit", gCo), &sb)) {
+        nob_sb_append_null(&sb);
+        for (char *line = sb.items; *line;) {
+            char *nl = strchr(line, '\n');
+            struct tm tm = {0};
+            char *end = strptime(line, "%Y-%m-%dT%H:%M:%S", &tm);
+            // (a classifier's line, error=classifier, never stopped a coordinator: not counted)
+            bool classifier = nl ? memmem(line, (size_t)(nl - line), " error=classifier", 17) != NULL
+                                 : strstr(line, " error=classifier") != NULL;
+            if (end && *end == ' ' && !classifier) {
+                tm.tm_isdst = -1;
+                time_t t = mktime(&tm);
+                if (t > at) at = t;
+            }
+            if (!nl) break;
+            line = nl + 1;
+        }
+    }
+    nob_sb_free(sb);
+    return at;
+}
+
+// #endregion
+
 // #region State changes
 
 // Finish <bundle dir> <done|failed|cancelled> [summary]: the end of a request. Already final: says so and
@@ -866,6 +1066,7 @@ static void Finish(const char *d, const char *to, const char *summary)
 // changed files, and not re-run (a half-applied edit run twice would apply twice).
 static void Recover(void)
 {
+    time_t limitAt = LastLimit();  // a limit line newer than a claim: that stop was the usage limit
     Nob_File_Paths dirs = BundleDirs();
     int n = 0;
     for (size_t i = 0; i < dirs.count; i++) {
@@ -875,12 +1076,23 @@ static void Recover(void)
         if (strcmp(s, "claimed") == 0 || strcmp(s, "question") == 0) {
             n++;
             Nob_String_Builder ignored = {0};
+            struct stat claim;
+            time_t claimAt = stat(nob_temp_sprintf("%s/claim.txt", d), &claim) == 0 ? claim.st_mtime : 0;
             if (IsNonEmpty(nob_temp_sprintf("%s/result.md", d))) {
                 Finish(d, "done", "");
             } else if (Changed(d, &ignored) == 0) {
                 SetState(d, "queued");
                 Log("requeued %s (the previous coordinator stopped; nothing had changed)", Base(d));
                 printf("%s: %s -> queued (the previous coordinator stopped before it changed anything)\n", Base(d), s);
+            } else if (limitAt && claimAt && limitAt >= claimAt) {
+                // the editor restarted the coordinator on another account (its usage limit)
+                char *account = Account();
+                const char *why = nob_temp_sprintf("Interrupted: the account's usage limit was reached; restarted on %s; files changed, check them",
+                                                   account ? account : "the next account");
+                char *summary = strdup(why);
+                Finish(d, "failed", summary);
+                free(summary);
+                free(account);
             } else {
                 Finish(d, "failed", "Interrupted: the coordinator stopped mid-run; files changed, check them");
             }
@@ -1021,11 +1233,20 @@ static void Usage(void)
           "  build/tools/request-queue recover              (part of start) claimed bundles without\n"
           "                                                 result.md: nothing changed since the claim ->\n"
           "                                                 queued again; else failed + reported\n"
+          "  build/tools/request-queue limit [--hook]       the account's usage limit: append a line to\n"
+          "                                                 .coordinator/limit (--hook: the StopFailure\n"
+          "                                                 hook's JSON on stdin; without: a subagent hit it).\n"
+          "                                                 The editor restarts the coordinator on the next\n"
+          "                                                 account (MONOLITH_CLAUDE_FALLBACK)\n"
+          "  build/tools/request-queue switch               the manual switch: the running account counts\n"
+          "                                                 as limited (type `! build/tools/request-queue\n"
+          "                                                 switch` in the coordinator terminal)\n"
           "\n"
           "State file: one line \"<state> <YYYY-MM-DDTHH:MM:SS> <writer>\"; readers use the first word.\n"
           "Bundles without a state file (older ones, per-request mode, one still being written) are\n"
           "never touched. Folder: $MONOLITH_REQUESTS_DIR (tests) or <repo>/requests; the coordinator's\n"
-          "own files are in <folder>/.coordinator/ (lock: held by the editor's wrapper; seen; log).\n"
+          "own files are in <folder>/.coordinator/ (lock: held by the editor's wrapper; pid; seen; log;\n"
+          "limit and account: the usage-limit marker and the running coordinator's account).\n"
           "Never deletes anything (no rm): files are replaced by rename.\n",
           stdout);
 }
@@ -1152,6 +1373,16 @@ int main(int argc, char **argv)
         free(d);
     } else if (strcmp(cmd, "recover") == 0) {
         Recover();
+    } else if (strcmp(cmd, "limit") == 0) {
+        int st = LimitCommand(strcmp(a1, "--hook") == 0);
+        free(gCo);
+        free(gDir);
+        return st;
+    } else if (strcmp(cmd, "switch") == 0) {
+        int st = SwitchCommand();
+        free(gCo);
+        free(gDir);
+        return st;
     } else {
         Usage();
         return 2;

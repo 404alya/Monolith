@@ -31,6 +31,7 @@ typedef struct {
     const char *source;     // "classifier", "prompt", "MONOLITH_MODEL" or "MONOLITH_CLAUDE_ARGS"
     const char *classifier; // "ai", "failed", "off" or "override" (NULL while the classifier runs)
     char classifierModel[72];   // the model that answered (classifier "ai"), else ""
+    char classifierAccount[64]; // the account the classifier ran on (its label) while a fallback is configured, else ""
     double seconds;         // the classifier's time from start to answer; < 0: none
     bool addFlag;           // false: MONOLITH_CLAUDE_ARGS already has --model, don't add one
     int promptSkip;         // bytes at the start of the prompt taken by the @token (+ blanks)

@@ -216,6 +216,53 @@ static pid_t StartWorker(const char *id, const char *pkg, bool edit, double work
     return pid;
 }
 
+// Whether $MONOLITH_ACCOUNT ("main" when unset) is in the comma-separated MONOLITH_STUB_LIMITED: this
+// "account" has reached its usage limit (the same rule as stub-classifier's)
+static bool Limited(void)
+{
+    const char *list = ToolEnv("MONOLITH_STUB_LIMITED", "");
+    const char *account = ToolEnv("MONOLITH_ACCOUNT", "main");
+    size_t n = strlen(account);
+    for (const char *p = list; *p;) {
+        size_t len = strcspn(p, ",");
+        if (len == n && strncmp(p, account, n) == 0) return true;
+        p += len;
+        if (*p == ',') p++;
+    }
+    return false;
+}
+
+// The usage limit, as a real coordinator meets it (the coordinator skill, §6a): its subagents stop
+// (SIGTERM to the workers), Claude Code's StopFailure hook runs `request-queue limit --hook` with the
+// hook's JSON on stdin (no reset time in the text: the editor counts MONOLITH_LIMIT_RETRY), and the
+// session waits at its prompt, holding the lock, until the editor stops it.
+static void HitLimit(void)
+{
+    char t[32];
+    printf("%s stub-coordinator: usage limit reached (account %s)\n", T(t), ToolEnv("MONOLITH_ACCOUNT", "main"));
+    for (size_t i = 0; i < gWorkers.count; i++) {
+        if (gWorkers.items[i].pid > 0 && Alive(gWorkers.items[i].pid)) kill(gWorkers.items[i].pid, SIGTERM);
+    }
+    const char *requests = ToolEnv("MONOLITH_REQUESTS_DIR", nob_temp_sprintf("%s/requests", gToolRoot));
+    char *hookIn = strdup(nob_temp_sprintf("%s/.coordinator/stub-hook.json", requests));
+    const char *json = "{\"hook_event_name\":\"StopFailure\",\"error\":\"rate_limit\",\"error_details\":\"429 Too Many Requests\","
+                       "\"last_assistant_message\":\"You've hit your session limit\"}\n";
+    FILE *f = fopen(hookIn, "wb");
+    if (f) {
+        fputs(json, f);
+        if (fclose(f) != 0) ToolErr("%s: %s", hookIn, strerror(errno));
+    }
+    Nob_Cmd cmd = {0};
+    nob_cmd_append(&cmd, gQueue, "limit", "--hook");
+    ToolRun(&cmd, (ToolIo){.in = hookIn});
+    nob_cmd_free(cmd);
+    free(hookIn);
+    for (;;) {
+        ReapChildren();
+        nanosleep(&(struct timespec){1, 0}, NULL);
+    }
+}
+
 int main(int argc, char **argv)
 {
     ToolInit(argv, "stub-coordinator", "stub-coordinator");
@@ -228,10 +275,25 @@ int main(int argc, char **argv)
     char t[32];
 
     printf("%s stub-coordinator: started (pid %ld), args: %d\n", T(t), (long)getpid(), argc - 1);
+    // which account it runs on (the editor's env words: MONOLITH_ACCOUNT, the fallback's CLAUDE_CONFIG_DIR)
+    printf("%s stub-coordinator: account=%s config=%s prompt-account-line=%s\n", T(t), ToolEnv("MONOLITH_ACCOUNT", "-"),
+           ToolEnv("CLAUDE_CONFIG_DIR", "-"), argc > 1 && strstr(argv[argc - 1], "\nAccount: ") ? "yes" : "no");
+    for (int i = 1; i + 1 < argc; i++) {
+        if (strcmp(argv[i], "--settings") == 0) printf("%s stub-coordinator: --settings %s\n", T(t), argv[i + 1]);
+    }
+    // MONOLITH_STUB_COORD_LIMIT=<s>: on an account in MONOLITH_STUB_LIMITED, the limit comes s seconds in
+    double limitAfter = Limited() ? strtod(ToolEnv("MONOLITH_STUB_COORD_LIMIT", "0"), NULL) : 0.0;
+    struct timespec started;
+    clock_gettime(CLOCK_MONOTONIC, &started);
     Queue(false, "start", NULL, NULL, NULL);
 
     for (;;) {
         ReapChildren();
+        if (limitAfter > 0.0) {
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            if ((double)(now.tv_sec - started.tv_sec) + (now.tv_nsec - started.tv_nsec) / 1e9 >= limitAfter) HitLimit();
+        }
         Row *rows;
         size_t count;
         char **prompts;
