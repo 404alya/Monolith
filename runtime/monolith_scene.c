@@ -12224,7 +12224,6 @@ int MS_FindEntity(const MS_Scene *s, MS_EntityId id)
 }
 
 // #endregion
-
 #ifdef MONOLITH_EDITOR
 // ======================================================================================
 // #region Public API: writing the environment (editor)
@@ -12285,7 +12284,6 @@ bool MS_WriteEnvironment(const MS_Scene *s, FILE *f)
 }
 
 // #endregion
-
 // ======================================================================================
 // #region Public API: package files (editor: --export, hot reload)
 // ======================================================================================
