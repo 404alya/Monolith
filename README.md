@@ -45,6 +45,8 @@ The output folder is self-contained: copy or zip it as it is. You need an OpenGL
 ./build/linux/monolith --map maps/my_level      # ... and open it
 ```
 
+In Claude Code in this repository, `/new-map my_level a foggy pine forest at dusk` does the second step and also writes the map's brief and sets its sky, sun, fog and ground colour from the description.
+
 Without `--map` monolith opens its default map, `maps/monolith`, which is kept outside this repository: on a fresh clone it says `cannot load the map`, so always pass `--map`. Press **TAB** for spectator mode, aim, and press **Enter** to type a request. The [user guide](docs/user-guide.md) explains the keys, the request list and what to expect.
 
 ## Setting up requests

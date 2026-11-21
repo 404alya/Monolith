@@ -12,7 +12,7 @@
 
 ## Starting
 
-**`cannot load the map`.** Without `--map` monolith opens `maps/monolith`, which is not in this repository. Start with `--map maps/pine_forest`, or create a map with `--new-map <name>`.
+**`cannot load the map`.** Without `--map` monolith opens `maps/monolith`, which is not in this repository. Start with `--map maps/pine_forest`, or create a map with `--new-map <name>` (or `/new-map <name> [description]` in Claude Code).
 
 **`map format N is older than this monolith (3)`.** The map was written for an earlier monolith, which read another map format; this one reads only the current format. Run `/migrate-map <package>` in Claude Code in this repository (the message names the map): it rewrites the map to the current format, proves the result identical against a build of the last monolith that read the old format, and keeps the original as `<name>.map.v<N>`. If it refuses, its report says why, and the map is left as it was ([map-format.md](map-format.md) §1.3). A map without a `monolith N` line at the top counts as format 1.
 

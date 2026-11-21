@@ -314,6 +314,14 @@ Lessons:
 - **"On the grid already" by size ratio was wrong:** phase 2's *Fit to grid* moved paint texel for texel when the rectangle was within a quarter of its cells, which distorted paint made at 16..26 texels/m. The rule is now one texel either way (a box moved by a fraction of a texel); anything else is resampled.
 - **Verify with picks, not eyes:** low-contrast surfaces (concrete) hide a 0.6-texel offset; the verifiers picked both sides of every painted edge and checked a grid line lies between them (hundreds of edges per case, the box's own frame for turned boxes).
 
+## `/new-map`: a skill on top of `--new-map` (2026-11-21)
+
+Starting a map took three steps by hand: `--new-map <name>`, filling in the `MAP.md` template (or a first request that writes it), then building. `/new-map <name> [description]` (`.claude/skills/new-map/`) makes it one: it runs `--new-map`, writes the brief from the description, sets the `env` lines and the `"default"` material to the mood, and shows one `--shot` per viewpoint.
+- **A skill on top of the flag, not new C:** the template stays in one place (`src/newmap.c`), and the parts that need judgement (the brief, the mood) are the AI's job through the deterministic path (map text, a dump, shots). A skill rather than `.claude/commands/` so it also loads from plain words ("make me a new map of …").
+- **Decided not to:** build a layout (the first request does that, through the editor, where the developer can point; offered as an option); add models, textures, lights or materials (one `"default"` material keeps the first request's edits small); work around a refusal of `--new-map` (no other name, no trashing an existing folder); delete a half-made package (the developer decides); run through the request queue (it runs in the developer's own session).
+- **Left for a code round if wanted:** a `--new-map` option for a preset look, or another template.
+- **Found by the trial run:** `volumetricFog.enabled off` (and `--off 1`) leaves the ground around the eye without sunlight on any map, so a "no fog" map keeps volumetric fog on at zero density (`.claude/TODOs`). The *Night* recipe sets `ambientSky.skyTopColor`, which the template doesn't write out, so the skill may add `ambientSky.*` lines.
+
 ## A fallback Claude account for the usage limit (2026-11-21)
 
 A usage limit stopped the queue silently: the coordinator sat at Claude Code's `You've hit your session limit · resets …` holding the lock, and the HUD said "running" until the reset. Now `MONOLITH_CLAUDE_FALLBACK` names one or more other accounts (`;` between them), and the queue continues there. Design: `docs/request-queue.md` §5, "Usage limit and the fallback account".
