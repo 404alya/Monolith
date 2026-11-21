@@ -815,6 +815,22 @@ int main(int argc, char **argv)
               "dab uv id 3:0 0 0.5 0.5\nundo\nredo\nsave\nprint\n",
               false);
     RUN("paint-rot", 0, M, "--map", T("paint-rot"), "--apply-edits", "/dev/null", "--paint-script", T("paint-rot.txt"));
+    // The paint grid (docs/painting.md 17): tests/models painted without a grid (a box face, a Kenney model
+    // unwrapped at the density) and saved, then given `env paint.grid 24`: Fit to grid on both (hovered: the
+    // box's entry is resampled onto its cells), a first stroke on a face's grid cells, a face group grown to
+    // its cells, undo, save; then the panel's Grid section on it
+    CopyTree("tests/models", T("paint-grid"));
+    WriteText(T("paint-grid1.txt"), "pixel on\ncolor 30 60 230 255\npen square\nsize 3\nstroke px 720 380 880 380\npen round\n"
+                                    "dab px 1000 520\nsave\nprint\n", false);
+    RUN("paint-grid-before", 0, M, "--shot", T("paintgrid1.png"), "--view", "1", "--map", T("paint-grid"), "--paint-script",
+        T("paint-grid1.txt"));
+    WriteText(T("paint-grid/models.map"), "env paint.grid 24\n", true);
+    WriteText(T("paint-grid2.txt"), "hover px 720 380\nresize\nhover px 1000 520\nresize\npen square\nsize 1\n"
+                                    "stroke px 600 600 1000 640\nfaces 0 0 1 1 2 2\nundo\nprint\nsave\nprint\n", false);
+    RUN("paint-grid", 0, M, "--shot", T("paintgrid2.png"), "--view", "1", "--map", T("paint-grid"), "--paint-script",
+        T("paint-grid2.txt"));
+    RUN("draw-panel-grid", 0, M, "--shot", T("drawpanel5.png"), "--view", "1", "--map", T("paint-grid"), "--shot-hud",
+        "--draw-panel", "density", "--cursor", "800", "380");
     RUN("draw-mode-hud", 0, M, "--shot", T("drawmode.png"), "--view", "1", "--map", T("paint-models"), "--shot-hud",
         "--draw-mode", "--cursor", "800", "600");
     WriteText(T("paint-input.txt"),

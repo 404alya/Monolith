@@ -125,6 +125,20 @@ int main(int argc, char **argv)
                 "bad fog mode 'fuzzy' (expected disabled linear exp2 exp)");
     ExpectExact("short-format", "monolith 99\n", 1, "map format 99 is newer than this monolith (3): update monolith");
 
+    // The paint grid (docs/painting.md 17.1): 0 or 1..1024 texels per metre, on a material and map-wide
+    ExpectExact("paint-grid-low", "monolith 3\nmaterial \"a\" paint_grid 0.5\nbox 0 0 0 1 1 1\n", 2,
+                "paint_grid must be 0 (none) or 1..1024 texels per metre");
+    ExpectExact("paint-grid-high", "monolith 3\nmaterial \"a\" paint_grid 2000\nbox 0 0 0 1 1 1\n", 2,
+                "paint_grid must be 0 (none) or 1..1024 texels per metre");
+    ExpectExact("paint-grid-none", "monolith 3\nmaterial \"a\" paint_grid\nbox 0 0 0 1 1 1\n", 2,
+                "material key 'paint_grid' takes 1 number");
+    ExpectExact("env-paint-grid-low", "monolith 3\nenv paint.grid 0.25\nbox 0 0 0 1 1 1\n", 2,
+                "paint.grid must be 0 (none) or 1..1024 texels per metre");
+    ExpectExact("env-paint-grid-high", "monolith 3\nenv paint.grid 1025\nbox 0 0 0 1 1 1\n", 2,
+                "paint.grid must be >= 0 and <= 1024");
+    ExpectExact("env-paint-grid-negative", "monolith 3\nenv paint.grid -1\nbox 0 0 0 1 1 1\n", 2,
+                "paint.grid must be >= 0 and <= 1024");
+
     // The format line: exactly the current format (3). Without one a file is format 1, reported at
     // its first statement; a file of only comments has nothing to migrate
     ExpectOlder("format-none", "# an old map\n\nbox 0 0 0 1 1 1\n", 3, 1);

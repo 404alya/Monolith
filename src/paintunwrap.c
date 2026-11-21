@@ -1,10 +1,11 @@
-// Paint unwrap of a model file with xatlas (docs/painting.md 4.5; interface: paintunwrap.h)
+// Paint unwrap of a model file with xatlas (docs/painting.md 4.5, 17.5; interface: paintunwrap.h)
 //
 // Per slot (in the order the slots first appear among the meshes) one xatlas atlas holds all of
 // the slot's meshes: ComputeCharts with the default chart options (the mesh's own UVs only as a
-// seam hint), then PackCharts into one R x R domain (R = texelsHint) with 2 texels of padding and
-// bilinear borders. xatlas packs a fixed resolution into as many atlases as it needs, so the
-// texels per unit start at its own estimate for R and shrink until everything fits into one.
+// seam hint), then one PackCharts at the caller's texels per unit into a single atlas of whatever
+// size that needs (resolution 0), 2 texels of padding and bilinear borders. Charts land on whole
+// texels; the slot's square is the atlas's larger side, so one paint texel of a rectangle that size
+// is one texel of the pack (the paint grid's texel size, 17.5).
 // xatlas can leave folds inside a chart (scanned meshes: a few triangles whose paint UVs overlap
 // others of the same chart), so the result is checked exactly (unorm16 triangles, separating axes
 // on a grid) and every overlapping triangle becomes a chart of its own (an xatlas material group
@@ -14,6 +15,7 @@
 #include "paintunwrap.h"
 #include "vendor/xatlas/xatlas_c.h"
 #include <errno.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,11 +25,7 @@
 // #region Paint unwrap
 // ======================================================================================
 
-#define UNWRAP_PADDING 2            // texels between charts at the texelsHint resolution
-#define UNWRAP_MIN_TEXELS 16
-#define UNWRAP_MAX_TEXELS 4096
-#define UNWRAP_SHRINK 0.9f          // texels per unit, per repack that needed a second atlas
-#define UNWRAP_MAX_REPACKS 80       // (0.9^80 ~ 2e-4 of the estimate: far below any real need)
+#define UNWRAP_PADDING 2            // texels between charts (texels of the pack: the slot's square)
 #define UNWRAP_MAX_PASSES 8         // unwraps of a slot while folds overlap (each splits them off)
 
 static void FreeUnwrap(MS_PaintUnwrap *u)
@@ -78,7 +76,7 @@ static bool CheckInput(const PaintUnwrapInput *m, int i)
     return true;
 }
 
-// A paint UV coordinate (texels of the R x R domain) as unorm16
+// A paint UV coordinate (texels of the r x r square) as unorm16
 static unsigned short ToUnorm16(float texels, float r)
 {
     float t = texels / r;
@@ -86,31 +84,31 @@ static unsigned short ToUnorm16(float texels, float r)
     return (unsigned short)(t * 65535.0f + 0.5f);
 }
 
-// Packs the charts into one r x r atlas: xatlas's estimate first (single atlas, any size), then
-// fixed r x r packs with fewer texels per unit until one atlas holds every chart
-static bool PackIntoOne(xatlasAtlas *atlas, int r)
+// Packs the charts at texelsPerUnit into one atlas of whatever size that needs (xatlas: resolution
+// 0); *side the larger of its two sides (0: nothing to place)
+static bool PackAt(xatlasAtlas *atlas, float texelsPerUnit, int *side)
 {
     xatlasPackOptions pack;
     xatlasPackOptionsInit(&pack);
     pack.padding = UNWRAP_PADDING;
     pack.bilinear = true;
-    pack.resolution = (uint32_t)r;
-    pack.texelsPerUnit = 0.0f;              // estimate for r (no limit on the atlas size)
+    pack.resolution = 0;
+    pack.texelsPerUnit = texelsPerUnit;
     xatlasPackCharts(atlas, &pack);
+    *side = 0;
     if (atlas->chartCount == 0) return true;   // (only degenerate triangles: nothing to place)
-    float tpu = atlas->texelsPerUnit;
-    if (!(tpu > 0.0f)) {
-        MS_SetError("paint unwrap: xatlas found no texel scale (no charts?)");
+    if (atlas->atlasCount != 1 || atlas->width == 0 || atlas->height == 0) {
+        MS_SetError("paint unwrap: xatlas packed the charts into %u atlases of %u x %u", atlas->atlasCount, atlas->width,
+                    atlas->height);
         return false;
     }
-    for (int i = 0; i < UNWRAP_MAX_REPACKS; i++) {
-        pack.texelsPerUnit = tpu;
-        xatlasPackCharts(atlas, &pack);
-        if (atlas->atlasCount == 1 && atlas->width == (uint32_t)r && atlas->height == (uint32_t)r) return true;
-        tpu *= UNWRAP_SHRINK;
+    if (atlas->width > PAINTUNWRAP_MAX_SIDE || atlas->height > PAINTUNWRAP_MAX_SIDE) {
+        MS_SetError("paint unwrap: the charts need %u x %u texels at %g texels per unit (the most is %d)", atlas->width,
+                    atlas->height, (double)texelsPerUnit, PAINTUNWRAP_MAX_SIDE);
+        return false;
     }
-    MS_SetError("paint unwrap: the charts don't fit into one %d x %d domain", r, r);
-    return false;
+    *side = (int)(atlas->width > atlas->height ? atlas->width : atlas->height);
+    return true;
 }
 
 // Frees the output meshes of list[0..count) (before a new pass writes them)
@@ -125,10 +123,11 @@ static void ClearSlot(const int *list, int count, MS_PaintUnwrap *out)
     }
 }
 
-// One xatlas run over the meshes list[0..count) (all of one slot) into out->meshes[list[k]].
-// faceGroup[k] (NULL: all 0) keeps faces of different groups out of each other's charts.
-static bool UnwrapPass(const PaintUnwrapInput *meshes, const int *list, int count, uint32_t *const *faceGroup, int r,
-                       MS_PaintUnwrap *out)
+// One xatlas run over the meshes list[0..count) (all of one slot) into out->meshes[list[k]], packed
+// at texelsPerUnit into a square of *side texels (paint UV = pack texels / side). faceGroup[k]
+// (NULL: all 0) keeps faces of different groups out of each other's charts.
+static bool UnwrapPass(const PaintUnwrapInput *meshes, const int *list, int count, uint32_t *const *faceGroup,
+                       float texelsPerUnit, MS_PaintUnwrap *out, int *side)
 {
     xatlasAtlas *atlas = xatlasCreate();
     if (!atlas) {
@@ -136,6 +135,7 @@ static bool UnwrapPass(const PaintUnwrapInput *meshes, const int *list, int coun
         return false;
     }
     bool ok = false;
+    *side = 0;
     int *added = malloc(sizeof(int) * (size_t)(count > 0 ? count : 1));    // atlas mesh -> input mesh
     int addedCount = 0;
     if (!added) {
@@ -174,7 +174,7 @@ static bool UnwrapPass(const PaintUnwrapInput *meshes, const int *list, int coun
     xatlasChartOptions charts;
     xatlasChartOptionsInit(&charts);
     xatlasComputeCharts(atlas, &charts);
-    if (!PackIntoOne(atlas, r)) goto done;
+    if (!PackAt(atlas, texelsPerUnit, side)) goto done;
     if (atlas->meshCount != (uint32_t)addedCount) {
         MS_SetError("paint unwrap: xatlas returned %u meshes for %d", atlas->meshCount, addedCount);
         goto done;
@@ -207,8 +207,8 @@ static bool UnwrapPass(const PaintUnwrapInput *meshes, const int *list, int coun
             }
             o->source[v] = xv->xref;
             bool charted = xv->atlasIndex >= 0;     // (-1: a degenerate triangle's vertex)
-            o->uv[2 * v] = charted ? ToUnorm16(xv->uv[0], (float)r) : 0;
-            o->uv[2 * v + 1] = charted ? ToUnorm16(xv->uv[1], (float)r) : 0;
+            o->uv[2 * v] = charted && *side > 0 ? ToUnorm16(xv->uv[0], (float)*side) : 0;
+            o->uv[2 * v + 1] = charted && *side > 0 ? ToUnorm16(xv->uv[1], (float)*side) : 0;
         }
         for (uint32_t i = 0; i < xm->indexCount; i++) {
             if (xm->indexArray[i] >= xm->vertexCount) {
@@ -367,8 +367,10 @@ done:
 }
 
 // Unwraps one slot: a pass, then while folds overlap, each overlapping triangle becomes a chart of
-// its own (an xatlas material group of its own) and the slot is unwrapped again
-static bool UnwrapSlot(const PaintUnwrapInput *meshes, const int *list, int count, int r, MS_PaintUnwrap *out)
+// its own (an xatlas material group of its own) and the slot is unwrapped again; *side the last
+// pass's square
+static bool UnwrapSlot(const PaintUnwrapInput *meshes, const int *list, int count, float texelsPerUnit, MS_PaintUnwrap *out,
+                       int *side)
 {
     uint32_t **group = calloc((size_t)(count > 0 ? count : 1), sizeof(uint32_t *));
     bool **flag = calloc((size_t)(count > 0 ? count : 1), sizeof(bool *));
@@ -382,7 +384,7 @@ static bool UnwrapSlot(const PaintUnwrapInput *meshes, const int *list, int coun
     if (!ok) MS_SetError("paint unwrap: out of memory");
     for (int pass = 0; ok; pass++) {
         ClearSlot(list, count, out);
-        ok = UnwrapPass(meshes, list, count, pass ? group : NULL, r, out);
+        ok = UnwrapPass(meshes, list, count, pass ? group : NULL, texelsPerUnit, out, side);
         if (!ok) break;
         int folds = FindOverlaps(meshes, list, count, out, flag);
         if (folds == 0) break;
@@ -404,16 +406,40 @@ static bool UnwrapSlot(const PaintUnwrapInput *meshes, const int *list, int coun
     return ok;
 }
 
-bool PaintUnwrapMeshes(const PaintUnwrapInput *meshes, int meshCount, int texelsHint, MS_PaintUnwrap *out)
+// The 3D (model units) area of the meshes list[0..count): its square root times the texels
+// per unit is the least side their charts can take
+static double SlotArea3D(const PaintUnwrapInput *meshes, const int *list, int count)
+{
+    double area = 0.0;
+    for (int k = 0; k < count; k++) {
+        const PaintUnwrapInput *m = &meshes[list[k]];
+        for (int t = 0; t < TriangleCorners(m) / 3; t++) {
+            const float *a = CornerPosition(m, t, 0), *b = CornerPosition(m, t, 1), *c = CornerPosition(m, t, 2);
+            double e[2][3];
+            for (int i = 0; i < 3; i++) { e[0][i] = (double)b[i] - a[i]; e[1][i] = (double)c[i] - a[i]; }
+            double cx = e[0][1] * e[1][2] - e[0][2] * e[1][1], cy = e[0][2] * e[1][0] - e[0][0] * e[1][2];
+            double cz = e[0][0] * e[1][1] - e[0][1] * e[1][0];
+            area += 0.5 * sqrt(cx * cx + cy * cy + cz * cz);
+        }
+    }
+    return area;
+}
+
+bool PaintUnwrapMeshes(const PaintUnwrapInput *meshes, int meshCount, float texelsPerUnit, MS_PaintUnwrap *out, int *sides,
+                       int sideCount)
 {
     memset(out, 0, sizeof(*out));
+    for (int k = 0; sides && k < sideCount; k++) sides[k] = -1;
     if (meshCount < 0 || (meshCount > 0 && !meshes)) {
         MS_SetError("paint unwrap: no meshes");
         return false;
     }
+    if (!(texelsPerUnit > 0.0f) || !isfinite(texelsPerUnit)) {
+        MS_SetError("paint unwrap: %g texels per unit", (double)texelsPerUnit);
+        return false;
+    }
     for (int i = 0; i < meshCount; i++)
         if (!CheckInput(&meshes[i], i)) return false;
-    int r = texelsHint < UNWRAP_MIN_TEXELS ? UNWRAP_MIN_TEXELS : texelsHint > UNWRAP_MAX_TEXELS ? UNWRAP_MAX_TEXELS : texelsHint;
 
     // Quiet (warnings would go to stdout) and the C library's allocator
     xatlasSetPrint(NULL, false);
@@ -436,7 +462,18 @@ bool PaintUnwrapMeshes(const PaintUnwrapInput *meshes, int meshCount, int texels
             list[count++] = j;
             done[j] = true;
         }
-        ok = UnwrapSlot(meshes, list, count, r, out);
+        // (a slot far too large for a paint rectangle at this texel size is refused before xatlas
+        // builds its bit images)
+        double least = sqrt(SlotArea3D(meshes, list, count)) * texelsPerUnit;
+        if (least > PAINTUNWRAP_MAX_SIDE) {
+            MS_SetError("paint unwrap: slot %d needs more than %.0f texels a side at %g texels per unit (the most is %d)",
+                        meshes[i].slot, least, (double)texelsPerUnit, PAINTUNWRAP_MAX_SIDE);
+            ok = false;
+            break;
+        }
+        int side = 0;
+        ok = UnwrapSlot(meshes, list, count, texelsPerUnit, out, &side);
+        if (ok && sides && meshes[i].slot < sideCount) sides[meshes[i].slot] = side;
     }
     free(done);
     free(list);
@@ -484,9 +521,11 @@ static bool HashFile(const char *path, unsigned long long *hash)
     return ok;
 }
 
-bool PaintUnwrapModelFile(const MS_Scene *scene, int file, int texelsHint, MS_PaintUnwrap *out)
+bool PaintUnwrapModelFileAt(const MS_Scene *scene, int file, float texelsPerUnit, MS_PaintUnwrap *out, int *sides,
+                            int sideCount)
 {
     memset(out, 0, sizeof(*out));
+    for (int k = 0; sides && k < sideCount; k++) sides[k] = -1;
     if (!scene || file < 0 || file >= scene->modelFileCount) {
         MS_SetError("paint unwrap: no model file %d", file);
         return false;
@@ -538,7 +577,7 @@ bool PaintUnwrapModelFile(const MS_Scene *scene, int file, int texelsHint, MS_Pa
             .slot = slot < 0 ? 0 : slot,
         };
     }
-    if (ok) ok = PaintUnwrapMeshes(in, meshCount, texelsHint, out);
+    if (ok) ok = PaintUnwrapMeshes(in, meshCount, texelsPerUnit, out, sides, sideCount);
     if (ok) {
         size_t size = strlen(scene->root) + strlen(mf->path) + 1;
         char *full = malloc(size);
@@ -546,6 +585,7 @@ bool PaintUnwrapModelFile(const MS_Scene *scene, int file, int texelsHint, MS_Pa
         if (!full || !HashFile(full, &out->fileHash)) {
             MS_SetError("paint unwrap: can't read %s%s", scene->root, mf->path);
             FreeUnwrap(out);
+            for (int k = 0; sides && k < sideCount; k++) sides[k] = -1;
             ok = false;
         }
         free(full);

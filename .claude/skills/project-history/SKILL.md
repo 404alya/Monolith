@@ -301,6 +301,19 @@ Request sessions used to search Poly Haven, Kenney and Poly Pizza on the web for
   - **Description agents need a hard check, not just a brief.** They wrote banned material words, upper-case categories, and once table codes ("PV") instead of sentences. `library ingest` refuses all of these, so a batch can't pass by accident.
   - **Licences don't cover trademarks.** Poly Pizza holds fan copies of brands and real people under CC licences, so the skill forbids choosing them.
 
+## The paint grid (2026-11-21)
+
+The developer: "the pixel-style drawing doesn't align with any model's pixel resolution in the scenes." Paint had a texel grid of its own (64 texels/m from the panel, from each face's corner, stretched by `ceil`, clamped to 2048 per face), while every pixel-look map draws on a world grid (the monolith map's shaders at 24 texels/m, `floor(P · u_px)`; voxel-test's textures and voxel cells at 5 cm). So painted pixel art never met the bricks or the paint on the next box; the developer showed it on the slot machine's sign. Design and notes: `docs/painting.md` §17.
+- **The grid is declared, not read from shaders:** `u_px` / `u_size` are a map's own uniforms (the level is data), so the map says it: `env paint.grid <texels per metre>` and a material's `paint_grid` (wins; 0 = none). Both pass through the world origin (every map's grid does). Without either, paint behaves as before; `--new-map` writes 0 and its `MAP.md` template and the `map-editing` skill ask pixel-look maps to set it.
+- **Where the face's sub-range lives:** in the paint table, not in the map text and not in the vertices. A grid face's table texel holds the face's own extent in the atlas, so the face's 0..1 lands on its grid cells; the `paint` statement's `w h` became the cells, the vertex stage kept one `texelFetch`, and merged, instanced and model data didn't change. The half-texel clamp moved to the vertex stage (cell bounds), which also took `textureSize` out of the per-pixel work.
+- **The developer decided** (2026-11-21): both keys, the material's wins; a turned box uses its own axes through the origin turned with it; face groups share a rectangle without stretching (each face from its own first cell); models get the grid's texel size through an unwrap, not a world-projected paint path; materials without a grid keep the free density.
+- **Palette UVs are not a texel grid.** The only model in `maps/` whose own UVs passed the old paint test (`sedan.glb`) maps every triangle to a point or line of its palette (density 0): a size-1 line covered the whole hood. Own UVs now count only when their texel density is even across the slot; every model in `maps/` is unwrapped for paint, at the grid's texels per metre times the instance's scale.
+
+Lessons:
+- **A face that starts on a grid line isn't, in float** (0.35 m at 20/m is 6.99999988 texels): cell counts and the shader's clamp share one margin (1/256 texel), or a face gains a texel the clamp then reads.
+- **"On the grid already" by size ratio was wrong:** phase 2's *Fit to grid* moved paint texel for texel when the rectangle was within a quarter of its cells, which distorted paint made at 16..26 texels/m. The rule is now one texel either way (a box moved by a fraction of a texel); anything else is resampled.
+- **Verify with picks, not eyes:** low-contrast surfaces (concrete) hide a 0.6-texel offset; the verifiers picked both sides of every painted edge and checked a grid line lies between them (hundreds of edges per case, the box's own frame for turned boxes).
+
 ## The instruction files
 
 Superseded layouts, for reading old bundles, commits and notes; the current layout is `CLAUDE.md` + `.claude/skills/` + `docs/`.

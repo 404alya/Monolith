@@ -175,7 +175,7 @@ The draw mode (`drawmode.c`, `drawpanel.c`; [drawmode.md](drawmode.md), [paintin
 | TAB | hide the panel |
 | B / ESC (and M, V, C) | leave; with unsaved edits the first B only says so |
 
-The panel is docked left: target, pen, colour sliders / hex / recent colours, texels per metre + Resize to density + Pixel look + Clear paint, the box's face groups + Apply.
+The panel is docked left: target, pen, colour sliders / hex / recent colours, texels per metre + Resize to density + Pixel look + Clear paint (on a material with a paint grid: the grid line + Fit to grid, no slider), the box's face groups + Apply.
 
 The first stroke on a face or model slot gives it a rectangle in its material's atlas (`textures/paint/<material>.png`): a `paint` statement, the material's `paint` key, the line's id, one live edit. A model whose UVs can't carry paint is unwrapped first (a `.paintuv` sidecar). Strokes are undone with CTRL+Z in the same history as the edits. CTRL+S writes the atlases and unwraps (and their `ASSETS.md` rows and sidecars), then the map.
 

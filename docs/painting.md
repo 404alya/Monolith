@@ -157,6 +157,8 @@ material "concrete" shader "shaders/concrete.glsl" ... paint "textures/paint/con
 - **A model's own material** has no line to put the key on. Its atlas is named by the entries
   themselves (§4.2, `own`) and is always `textures/paint/<model file name>_s<N>.png`, the file name kept
   to letters, digits, `-`, `_`. Its filter is `paint_filter` written on the entry.
+- `paint_grid <texels per metre>` (and the map-wide `env paint.grid`): the grid the material's paint
+  texels lie on (§17.1).
 
 ### 4.2 The `paint` statement
 
@@ -171,7 +173,8 @@ paint own 41:0 slot 0 0 0 256 256 paint_filter nearest
 - `paint "<material>" <entity> <faces> <x> <y> <w> <h>` for a box: `<entity>` is `N:i` (the line's
   `id N`, the box's index within the line, as `select` writes it); `<faces>` a comma-separated list of
   `+x -x +y -y +z -z` (the box's own axes for a turned box), at least one; `x y w h` the rectangle
-  in texels of the material's atlas.
+  in texels of the material's atlas. On a material with a paint grid, `w h` are at least the cells its
+  faces cover, and each face maps onto the rectangle from its own first grid cell (§17.2, §17.3).
 - `paint "<material>" <entity> slot <N> <x> <y> <w> <h>` for a model instance: slot N of the model file
   drawn with `<material>` (its override). `paint own <entity> slot <N> …` when the slot is drawn with
   the model's own material, optionally followed by `paint_filter nearest`.
@@ -246,7 +249,8 @@ void fragment() {
   doesn't `discard`, and the pre-pass eligibility depends only on `alpha_cutoff`, depth and stencil
   state (R3D patch 6).
 - **Sampling:** `ms_uv` is clamped half a texel inside the rectangle, so level 0 never reads the
-  border. The atlas is uploaded premultiplied (filtering transparent texels adds no dark fringe); the
+  border (since the paint-grid round: inside the texels the face covers, with the bounds computed in
+  the vertex stage, §17.2). The atlas is uploaded premultiplied (filtering transparent texels adds no dark fringe); the
   PNG keeps straight alpha.
 
 ### 4.4 Paint keys in vertices and instances
@@ -271,8 +275,10 @@ read them in its vertex stage, without new draws:
 - The bone channels are free on every mesh the runtime makes and on every unskinned model (R3D
   binds them always and reads them only for skinned draws). Skinned files are refused (§3.4).
 - **The paint table** is one RGBA32F texture per scene, 1024 texels wide, as many rows as needed,
-  bound to every paint shader. Texel `key` holds the rectangle normalised to its atlas (u0 v0 u1 v1).
-  It changes when entries or atlas sizes change (a small upload), never during a stroke.
+  bound to every paint shader. Texel `key` holds the rectangle normalised to its atlas (u0 v0 u1 v1);
+  for a box face on a paint grid, the face's own extent in the atlas instead (§17.2), so the face's 0..1
+  lands on its grid cells. It changes when entries, atlas sizes, a grid or a painted box change (a
+  small upload), never during a stroke.
 - **Precision:** the face corners (0 and 1) and the keys are exact; a model's paint UV has 16 bits
   (1/16 texel of a 4096 atlas). The rectangle is float32. R3D's half-float texture coordinate is not
   used for paint.
@@ -346,14 +352,20 @@ them (§8.2).
 
 ### 5.2 Size of a rectangle
 
+On a material with a **paint grid** the sizes are the grid's (§17.2–§17.5, §17.7); the rules below are
+for materials without one.
+
 The **density** `ρ` (texels per metre, the panel's *Density*, default 64):
 
 - **A box face group**: `w = ceil(ρ · a)`, `h = ceil(ρ · b)` for the largest face of the group (`a`
   along the face's u, `b` along its v), each clamped to 4..2048. A face smaller than the rectangle in
   one axis stretches over it. pine_forest's ground (a 572 m face) at 64 texels/m is clamped to 2048: 28
   cm texels, said on the panel; the ground itself is untouched (`uv_scale 286` keeps its look).
-- **A model slot**: a square of `clamp(pow2ceil(ρ · sqrt(A)), 16, 2048)`, `A` the world surface area
-  of the slot's triangles in this instance.
+- **A model slot**: since the paint-grid round the rules of §17.4 / §17.5 with the density in the grid's
+  place: the square of the slot's unwrap made at ρ texels per metre (an unwrap from an earlier session:
+  the square another entry of the file's slot has, else `ceil(ρ · sqrt(A / a))`, `A` the slot's world
+  area in this instance, `a` its share of the paint domain), at most 2048 (a larger unwrap is made
+  again at a lower density). Before the round: `clamp(pow2ceil(ρ · sqrt(A)), 16, 2048)`.
 - The panel's *Resize to density* (§5.3) gives an entry a new rectangle.
 
 ### 5.3 Changing an entry
@@ -384,7 +396,8 @@ the **paint coordinate**:
   (own or unwrap, §4.5), interpolated. A slot that needs an unwrap that doesn't exist yet gives
   `paintUv` −1 −1 (the first stroke makes the unwrap, then casts again).
 - `paintEntry`: the active entry of that face or slot in that material, or −1. The texel is the
-  rectangle's `x + floor(u · w)`, `y + floor(v · h)` (row 0 at `v = 0`).
+  rectangle's `x + floor(u · w)`, `y + floor(v · h)` (row 0 at `v = 0`); on a paint grid
+  `x + floor(paintTexel.x)`, `y + floor(paintTexel.y)` (§17.6).
 
 A model's own UVs can't overlap where they are used for paint (§4.5), so a stroke never shows up in
 two places any more.
@@ -542,6 +555,10 @@ A text edit whose only differences are `paint` statements and `paint` / `paint_f
 **cheap live edit**: it must not re-upload the scene. Phase 1 adds it to `LiveMaterialPlan`:
 
 - `paint` statements are not part of any material's look hash; the parser keeps a hash of them.
+  The paint grid's keys (§17.1) are paint keys too: `paint_grid` is left out of a material's shape and
+  paintless hashes like `paint_filter`, and an `env paint.grid` line goes into the paint statements'
+  hash instead of the look hashes, so a change of either rebuilds the paint table only (one upload; a
+  material whose entries all start or stop drawing because of it gets its alias again, as below).
 - A material whose only change is its `paint` / `paint_filter` keys, or whose set of active entries
   went from none to some (or back), is rebuilt as a "changed" material (kind 1 of the first round's
   plan): its shader alias becomes the paint shader (compiled once per shader file and load, then
@@ -682,8 +699,10 @@ As in the first round (its implementation notes give the layout), except:
    atlas 1024×512, 96×64 at 0 0", "model barrel.glb slot 1: crate atlas, a new 512² rectangle", "the
    first stroke adds 96×64 to concrete's atlas", or the refusal in `UI_ERROR` (§3.4). No shared switch.
 2. **Pen**, 3. **Colour**: unchanged.
-4. **Density** (was *Canvas*): texels / m, the texel size the target's paint has (or will have; "the
-   rectangle is clamped to 2048" when it is), *Resize to density* (§5.3), *Pixel look* (the atlas's
+4. **Density** (was *Canvas*; **Grid** on a material with a paint grid, §17.7: "follows the grid of
+   concrete: 24 texels/m (4.2 cm)", no slider, *Fit to grid* for *Resize*; without a grid the slider
+   under "concrete has no paint grid: 64 texels/m from the panel"): texels / m, the texel size the
+   target's paint has (or will have; "the rectangle is clamped to 2048" when it is), *Resize to density* (§5.3), *Pixel look* (the atlas's
    `paint_filter`: `EDIT_MATERIAL_SET` on the material, or every `paint own` entry of an own atlas), and
    *Clear paint* (§5.3).
 5. **Faces** (boxes): the six faces, each with a group number button (0..5); faces with the same
@@ -751,6 +770,219 @@ time, through the lead.
 - **The unwrap of a large model** blocks the frame after its note (3.2 s for `rock_face_01.glb`): a
   worker thread would need copies of the mesh data.
 - **The eyedropper** renders the view once more per click (R3D's albedo output mode).
+
+## 17. The paint grid
+
+The paint-grid round (2026-11-21). Before it, new paint had a texel grid of its own: `ceil(ρ · side)`
+texels per face at the panel's density (64 texels/m), starting at the face's corner (§5.2). The maps
+draw their pixels on other grids, so painted pixel art never lined up with a wall's bricks or with the
+paint on the next box. Measured on scratch copies (the round's "before" shots):
+
+- voxel-test's bricks are 1/20 m texels on a world grid (`voxel.glsl`: texture texels and colour cells at
+  multiples of 5 cm). Paint was 1/64 m; the 44 m wall band above a pier was clamped to 2048 texels
+  (46.5/m), so even the paint on two neighbouring boxes didn't meet.
+- the monolith map's concrete is 1/24 m texels on a world grid (`floor(P · u_px)`, `u_px 24`; the baked
+  tiles' 97 m offset is a whole number of texels). Paint was 1/64 m from the box corner, and box
+  corners such as x −28.1 lie between the concrete's texel edges.
+- the only model in `maps/` whose own UVs pass the paint test (§4.5), `sedan.glb`, has **palette UVs**:
+  its 512² colormap is a colour palette, every face maps into a sliver of one swatch, and a size-1 line
+  covers the whole front of the hood. Its paint texels already were its texture texels.
+
+The developer's decisions (2026-11-21):
+
+1. **Where a grid is declared**: per material and map-wide, the material's wins. A material without
+   either keeps today's free density. Each map's `MAP.md` records its grid.
+2. **Box grid frame**: the world grid for axis-aligned boxes; a turned box's own axes for a turned box,
+   through the world origin turned with it.
+3. **Face groups**: shared without stretching (§17.3).
+4. **Model slots**: own UVs only when their texels are even across the slot (not a palette); every
+   other slot gets an unwrap at the grid's texel size (§17.5). No world-projected paint.
+5. **A material without a grid**: today's free density.
+
+### 17.1 The keys
+
+```
+env paint.grid 24
+material "concrete" shader "shaders/concrete.glsl" ... paint_grid 24
+material "neon" ... paint_grid 0
+```
+
+- `paint_grid <texels per metre>` on a material: its paint grid, 1..1024 texels per metre, or `0` for
+  none (the map's default doesn't apply to it).
+- `env paint.grid <texels per metre>`: the default of every material without `paint_grid`, and of
+  every model slot drawn with its own material (which has no line for the key). `0`, the built-in
+  default, means none.
+- The grid always passes through the world origin (every map in `maps/` draws its pixels so). An
+  origin argument can be added later without changing what these keys mean.
+- Both are paint keys (§9.2): like `paint` / `paint_filter` they are not part of a material's look,
+  and a map without paint draws exactly as before whatever they say. A map that has them but no
+  `paint` statement is pixel-identical to the same map without them.
+- New keys of the current format (3): no version bump. A material's grid is stored in the compiled
+  map (`CmMaterial.paintGrid`, float32: −1 not set, 0 none, else texels per metre; `CM_VERSION` + 1);
+  `paint.grid` is an env key of an existing type (stored by name).
+- `MS_PaintGridOf(scene, material)` gives the grid a material's paint follows (texels per metre, 0:
+  none); material −1 gives the map's `paint.grid` (a model's own material).
+
+### 17.2 Box faces on the grid
+
+A face's **grid coordinate** along its u axis is `g = ρ · (s · c)`: `c` the world coordinate along the
+axis the face's u runs on (a turned box: the coordinate along its own axis through the world origin,
+`dot(axis, P)`), `s` = ±1 the direction of u on that face as R3D's unit cube maps it (§6: +x runs
+along −z, −x along +z, ±y and +z along +x, −z along −x; v along +y on the side faces, −z on +y and
++z on −y). The same along v. A face from `g0` to `g1`:
+
+- covers the **cells** `floor(g0) .. ceil(g1)` (`ceil(g1) − floor(g0)` texels, at least 1), and
+- its 0..1 maps onto them so that texel `k` of the rectangle is cell `floor(g0) + k`: the face's u = 0
+  lies `g0 − floor(g0)` texels into the first texel, u = 1 at `g1 − floor(g0)`.
+
+So paint texels have the grid's size and their edges lie on the grid's lines, on every face of every
+box of the material, and texel `k` of one face meets texel `0` of the next box where the boxes meet.
+A box that moves keeps its paint on its own cells (the first cell is found again from where the box
+is now), so a move by a fraction of a texel moves the paint by whole texels.
+
+**Where the sub-range lives**: the runtime computes it from the box and the grid into the paint table
+(§4.4). The `paint` statement is unchanged; its `w h` are texels of the atlas as before, now the cells
+the entry covers. A table texel holds the **face's own extent** in the atlas (u0 v0 u1 v1 normalised:
+`(x + g0 − floor(g0)) / atlasW` … `(x + g1 − floor(g0)) / atlasW`) instead of the whole rectangle, so
+the vertex stage stays one `texelFetch` and the mesh, instance and key layouts don't change: merged
+boxes keep their 0/1 corner UVs, instanced boxes their unit-cube mapping, and a merged cell is rebuilt
+only when a key changes, as before. An entry on a grid without its faces' cells (`w` or `h` smaller
+than the cells of one of its faces, because the box grew) is **inactive**, logged: `paint: 120:0 +x
+covers 12x8 cells of the grid, more than its 10x8 rectangle; inactive`. A larger rectangle is fine (the
+face uses its lower-left part). Without a grid, the table holds the rectangle as before.
+
+**The clamp**: the fragment stage keeps its samples half a texel inside the texels the face covers.
+With the face's extent in the table, those are `floor(u0 · W) + ½ … ceil(u1 · W) − ½` (W the atlas
+width; the same along v), computed **in the vertex stage** into a second flat output, `ms_clamp`, from
+the rectangle and `textureSize(ms_paint, 0)` (a vertex-stage texture query, no fetch).
+
+**On a cell edge** (phase 1's choice): a box side written on a grid line is a float that lies a hair
+off it (0.35 m at 20 texels / m is 6.99999988 texels). Grid coordinates within 1/256 texel of a cell
+edge count as on it, in both places: the runtime's first and last cells are `floor(g0 + 1/256)` and
+`ceil(g1 − 1/256)` (a face that starts a hair before the edge maps its 0 onto the edge, `g0 −
+floor(g0)` clamped at 0), and the clamp is `floor(u0 · W + 1/256) + ½ … ceil(u1 · W − 1/256) − ½`, so
+float error in the table (about 2.4e-4 texels in a 4096 atlas) never moves a face into the texel before
+its first. Coordinates beyond ~4 km at 24 texels / m (or ~100 m at 1024) carry more float error than
+that margin. Without a grid
+it is `rect ± ½ texel` as before, so today's paint draws identically. The fragment stage then does one
+`clamp`, one `mix` and one sample, with no `textureSize` of its own (it had one per pixel).
+
+### 17.3 Face groups
+
+Faces in one entry share one rectangle (§3.2). On a grid every face has cells of its own: the
+rectangle is as large as the group's largest face in cells (along u and v separately), and each face
+maps onto it from **its own first cell** (§17.2), showing the lower-left part it covers. Nothing is
+stretched and nothing is refused; opposite faces of a box (same cells, mirrored as R3D maps them)
+show the same texels mirrored, as before.
+
+### 17.4 Model slots with their own texels
+
+A slot's own UVs carry paint when they pass §4.5's test **and** their texels are even across the slot:
+the texel density of each triangle (`sqrt(uv area · texels / model-space area)`, the albedo texture's
+texels) is within 25 % of the slot's area-weighted mean over at least 90 % of the slot's model-space
+area. Palette UVs fail it (their triangles map into a sliver of a swatch: densities near 0, widely
+spread), and so does any UV set without a texture grid worth following. The texture's texels per side
+scale every triangle's density alike, so the test needs only the UVs and the model-space positions
+(`sqrt(uv area / model-space area)`): the game build decides it like the editor, without the texture. Such a slot is
+`MS_PAINTUV_NEEDS_UNWRAP` (§17.5), on a material with or without a grid: palette UVs never gave
+usable paint.
+
+A slot with even own UVs gets a rectangle of its **albedo texture's size** (the texture of the material
+it is drawn with: its own material's albedo map, or an override's `albedo_map` with `uv_scale 1 1` and
+`uv_offset 0 0`), halved until each side is at most 2048 (then a paint texel is 2 × 2 texture texels,
+still on their edges). Paint texel = texture texel. Without such a texture (a flat colour override,
+tiled `uv_scale`): the square `ceil(ρ · sqrt(A / a))` (A the slot's world area in that instance, a its
+share of the 0..1 domain; ρ the grid, else the panel's density), so the texels have the grid's size.
+`MS_PaintSlotTexels(scene, material, file, slot, &w, &h)` gives the texture's size (false: none).
+
+### 17.5 Unwrapped slots
+
+Tiled, overlapping, palette or missing UVs get the generated unwrap (§4.5) at the grid's texel size:
+xatlas packs at `texelsPerUnit = ρ · s` (ρ the grid of the material the slot is drawn with, else the
+panel's density; s the painted instance's scale, the largest of its three) with charts on whole texels
+and a 2-texel padding, at whatever square size that needs (no shrinking to fit a hint any more). The
+rectangle is that square: one paint texel per grid texel on that instance. Other instances of the file
+use the same unwrap (it is per file), so their texels are the grid's size times their scale over the
+first one's (the panel's texel line says so: "slot 1: a texel is about 31.0 mm (...): the unwrap was
+made at scale 9.52"). The sidecar's format doesn't change; `PaintUnwrapModelFileAt(scene, file, texelsPerUnit, out, sides, sideCount)`
+returns each slot's square side (`sides[slot]`, the rectangle a first stroke allocates). Texel size
+matches; the lines don't follow a world grid (the developer's decision 4). A slot whose square would
+pass 2048 texels on a grid is refused ("x.glb slot 1 needs a 2400x2400 rectangle at the grid's 20
+texels/m (scale 9.5); the most is 2048"); without a grid the unwrap is made again at a lower density
+(the free density's clamp, up to three tries).
+
+### 17.6 Picking (§6)
+
+`MS_SurfaceHit` gains `paintGrid` (the grid of `material`, texels per metre; 0: none) and, for a box
+on a grid, `paintTexel` (the hit in texels from the face's first cell: `g − floor(g0)` along u and v)
+and `paintCellsW` / `paintCellsH` (the cells the face covers: the size a first stroke gives a new
+rectangle). On a grid `paintTexel` is where the hit lies between the face's 0 and 1 as the paint table
+maps them, so the texel it names is the one drawn there. The
+draw mode's texel is `rect.x + floor(paintTexel.x)`, `rect.y + floor(paintTexel.y)`. Without a grid
+`paintTexel` is `paintUv · (w, h)` of the entry, as before. `MS_BoxFaceCells(scene, box, face, ρ, &w,
+&h, &offset)` gives any face's cells and the position of its u = v = 0 corner in the first cell (0..1
+texels): the panel's face groups size a rectangle with it.
+
+### 17.7 Draw mode and the panel
+
+- **New rectangles** on a grid: a box face group gets the cells of §17.3 (clamped to 2048; a larger
+  face is refused for that group: "face +y covers 3072 texels of the grid (24/m); the most is 2048", so
+  a rectangle never stretches); a model slot §17.4 / §17.5. Without a grid: §5.2 as before.
+- **Strokes** on a grid face: a sample's texel is the hit's `paintTexel` from the face's first cell
+  (§17.6), and its stamps clip to the **face's cells** (at most the rectangle: the lower-left part the
+  face shows), so a stroke on the smaller face of a group never paints texels only the larger one
+  shows; *fill* fills those cells. A stroke still stays on the box of its LMB down (onto its other faces
+  as before): across two boxes it is two strokes, whose texels meet on the grid.
+- **Face groups** (§5.3) on a grid: a group that now covers more cells than its kept rectangle grows to
+  them (the paint moved texel for texel, so what its faces showed stays); a split gets the group's
+  cells, with the source's paint copied texel for texel.
+- **The panel's *Density*** becomes "**Grid**" on a grid: "follows the grid of concrete: 24 texels/m
+  (4.2 cm)" (an own material: "follows the map's grid"), no density slider. Without a grid the slider
+  stays, under "concrete has no paint grid: 64 texels/m from the panel". *Resize to density* becomes
+  ***Fit to grid*** on a grid: the entry gets a rectangle of its cells, its paint moved texel for texel
+  when the old rectangle already was on the grid (nothing to resample), else resampled nearest; without
+  a grid it is *Resize to density* as before. **"Was on the grid"** (phase 2's choice): the old
+  rectangle differs from the cells by at most one texel along each axis (made on the grid, the box
+  moved by a fraction of a texel since, so the paint stays on its own cells); a rectangle made at
+  another density before the grid was declared (64/m against a 20/m grid: 3.2 times) is resampled,
+  so its whole painting survives instead of the lower-left part the grid shows. A model slot is always
+  resampled (its paint domain spans the whole rectangle). An entry that a grid made inactive (its
+  rectangle smaller than its face's cells) can be fitted (and cleared) from the panel: the target line
+  says "its paint (map line N, 10x15) is smaller than the face's 24x36 cells of the grid: Fit to grid".
+- **The brush** is in texels of the rectangle, so size 1 is one grid texel; the cursor maps the
+  footprint through the face's grid mapping (§17.2), so its outline lies on the surface's texel lines.
+- **The target line** names the grid: "box line 120 #3, face +z: concrete atlas 1024², 53×84 cells at 0 0
+  (24/m)".
+- **`--paint-script`**: `resize` fits to the grid on a grid material (no new name); `print` adds `grid
+  <ρ>` per atlas's material and the face's cells per entry (`cells WxH`, a box on a grid) and each
+  unwrap's texels per unit, scale and sides; `hover` adds the grid line, and `faces`, `resize`, `clear`
+  and `pixel` then act on the hovered surface (as the panel acts on its target: also on an inactive
+  entry no stroke can reach).
+
+### 17.8 What stays the same
+
+- A map without `paint` statements runs nothing new (§1); the keys of §17.1 change nothing without
+  them. A painted material on no grid draws exactly as before (the table holds its rectangle, the
+  clamp is the same numbers, only computed in the vertex stage).
+- One `texelFetch` in the vertex stage (plus one `textureSize`, a query); per pixel one test, one clamp,
+  one mix, one sample. Phase 3 measures it (exported game, N = 10, 100, 1000 entries).
+- Paint is a layer: no shader, texture or model file of a map changes; the unwrap still never changes a
+  model file.
+
+### 17.9 Open
+
+- Surface shaders that coarsen their grid with distance (monolith's `PxScale`) show coarser texels far
+  away; paint keeps the finest grid (its mipmaps do the minification).
+- Turned boxes: a world-space shader projects the world grid onto the dominant plane, which no
+  box-frame grid can follow (decision 2).
+- Unwrapped models: texel size only, and only at the scale of the instance the unwrap was made for.
+- **Fit to grid's "on the grid"** is decided by size (within one texel of the cells; a box resized since is resampled), and on a
+  model slot whose unwrap came from an earlier session it resamples onto the formula's square while the
+  charts keep their layout (§17.7; the phase 2 notes).
+- **Faces longer than 2048 grid texels** are refused (85 m at 24/m: the monolith map's ground and its
+  megastructure facades). Before the round they stretched over 2048 texels. A **window** (a rectangle
+  covering cells `o .. o + w` of a face, `o` written in the `paint` statement, the paint stage testing
+  the window) would lift it at one more compare per pixel; not in this round.
 
 ## Implementation notes
 
@@ -1123,6 +1355,275 @@ for builds without `MS_PATCHED_R3D`). Verified: both repros 0 pixels; every map 
 `tests/models`, `tests/rotated` against the round's base: dumps identical, 49 shot pairs 0 pixels;
 alpha-0 entries on every kind (the verifiers' packages, monolith's six shader surfaces, pine_forest's
 ground and a Kenney tree): 0 pixels; leak check and `--asan` clean.
+
+### Implementation notes: paint grid phase 1 (the runtime)
+
+What the paint-grid round's phase 1 built in `runtime/monolith_scene.c/.h` (§17.1–§17.4, §17.6), and
+the choices it made where §17 left them open.
+
+- **Keys** (§17.1): `paint_grid` in `ParseMaterial` (`MatDef.paintGrid`, −1 when not set, so the map's
+  value applies; a number, `0` or 1..1024, fractions allowed: "paint_grid must be 0 (none) or 1..1024
+  texels per metre"). `paint.grid` is a `DEF_KEYS` entry (`EnvDef.paintGrid`, `T_F`, built-in 0), its
+  range in `ENV_RANGES` (0..1024) plus a check in `CheckEnvValue` for 0 < v < 1, shared with compiled
+  maps; `MS_WriteEnvironment` writes it under `# Paint` (so `--new-map`'s template gains
+  `env paint.grid 0`). `CmMaterial.paintGrid` (f32 at the end, 176-byte record, `CM_VERSION` 8),
+  checked by `CmMaterialInRange` (−1, 0 or 1..1024); `tests/unit/compiled_test.c` (`MAT_SIZE` 176, four
+  bad values, 24 loads) and `parse_error_test.c` (six messages). `PaintGridOf(d, m)` is the one place
+  that resolves a material's grid (`MS_PaintGridOf` calls it).
+- **Live edits**: `paint_grid` is a paint key (out of the shape and paintless hashes, so a change is
+  plan 0: no material rebuilt), and `HashLook` puts an `env paint.grid` line into `paintHash` instead of
+  the look hashes, so a change of either is not a full upload: the edit's `PaintUpload` makes the new
+  table (one upload); merged cells and instance buffers stay (the keys don't depend on the grid).
+  `PaintSigSame` is unchanged: the paint shader doesn't depend on the grid; a grid that makes every entry
+  of a material start or stop drawing changes `painted`, which it already compares. Measured (a scratch
+  harness on the examples' editor runtime, `MS_EditSetText`, since the edit language has no `env`
+  command): `paint_grid 24` added to the painted concrete, `env paint.grid` 24 → 12: `full 0`, 0
+  materials rebuilt, 1 table upload, 0 of 351 ranges rebuilt; 24 → 48 (every entry too small, inactive):
+  2 materials re-aliased, 2 ranges rebuilt.
+- **Cells** (`BoxFaceSpan`, region "Small helpers: the paint layer", game build too): per face the axis
+  and direction of u and v (`FACE_U_AXIS` / `FACE_U_SIGN`, `FACE_V_*`, §17.2's table, the same mapping
+  as `CubeFaceUv`), the box's range along it in double (`BoxAxisRange`: its min / max, or for a turned box
+  `dot(axis, centre) ± size / 2`), then the first cell, where the face's 0 and 1 lie and the cell count.
+  **On a cell edge** within 1/256 texel (`PAINT_GRID_EPS`, §17.2): `floor(g0 + ε)`, `ceil(g1 − ε)`, the
+  face's 0 clamped to its first cell's start; the paint stage's clamp uses the same 1/256.
+- **Activity** (`PaintResolve`): after the existing checks, every face of a box entry on a grid must fit
+  its rectangle, else `PAINT_GRID_CELLS` (`PaintDef.gridFace`, `gridW`, `gridH`), logged with the one
+  face: `map:line: paint: 120:0 +x covers 12x8 cells of the grid, more than its 10x8 rectangle; inactive`.
+- **Table** (`PaintKeys`): for each face of a box entry on a grid, `(x + frac) / W, (y + frac_v) / H,
+  (x + end) / W, (y + end_v) / H` (double, stored float); without a grid the rectangle as before; models
+  always the rectangle.
+- **The stage**: `PAINT_STAGE_VERT` adds `MS_INTERP(flat) out vec4 ms_clamp`, `ms_clamp = vec4(floor(r.xy
+  * S + 1/256) + ½, ceil(r.zw * S − 1/256) − ½) / S.xyxy` with `S = textureSize(ms_paint, 0)`, under the
+  same `!DEPTH && !DEPTH_CUBE` guard as the fetch; the fragment stage clamps to it and has no
+  `textureSize` any more. For a whole rectangle on a power-of-two atlas the bounds are bit for bit the old
+  `rect ± ½ texel` (every operand is exact). Generated sizes (comment-stripped source + stage):
+  tower_ruin 14 287 bytes (was 14 118), poster_var 12 347, concrete 9 598, the empty shader ~1.9 KB; the
+  generated sources of all 21 shader files (`maps/monolith`'s 19, `tests/models`' stripes, voxel-test's
+  voxel) and of the empty shader pass `glslangValidator` in nine variants
+  (vertex, vertex DEPTH, vertex FORWARD, fragment, DEPTH, DEPTH_CUBE, FORWARD, GEOMETRY +
+  GEOMETRY_PREPASS, UNLIT; STAGE_* and the template's bone and position attributes defined).
+- **Even texels** (§17.4, `UvTexelsEven`, called by `OwnUvKind` before the raster): no texture needed (its
+  size scales every triangle alike); model-space positions; degenerate triangles skipped. Every model
+  file of `maps/` and `tests/models` is `MS_PAINTUV_NEEDS_UNWRAP`: `sedan.glb` (the one that passed
+  before) has a mean density of exactly 0 (all 2026 triangles map to a point or a line of its palette:
+  it never had paintable UVs); `rock_face_01.glb` is even (94.6 %) but still fails the overlap raster;
+  `lantern.glb` (the only Kenney file in 0..1) 15.7 %; the other Kenney files leave 0..1.
+- **`MS_PaintSlotTexels`**: only for a slot whose UVs are `PUV_OWN` (a file with an unwrap uses it for
+  every slot, so its texels aren't the texture's); the texture is the override's `albedo_map` (its PNG
+  header: no decode), the model's own albedo texture for the own material or an override with `inherit
+  albedo`; `uv_scale 1 1`, `uv_offset 0 0` on the material the slot shows; a 1 × 1 texture doesn't count.
+  No slot in `maps/` qualifies, so it is untested on real data.
+- **Picking** (§17.6): `paintGrid` for boxes and models; on a grid `paintTexel` = where the hit lies
+  between the face's 0 and 1 as the table maps them (`frac + faceUv · (end − frac)`) and
+  `paintCellsW/H`; otherwise `paintUv · (w, h)` of the hit's entry. `--pick` / `--pick-at` print `paint
+  grid ρ texel u v cells w×h` at the end of the `surface` line.
+- **Not done here** (phase 2): the draw mode's sizes, *Fit to grid*, the panel, the unwrap at a texel size
+  (§17.5, §17.7); `MS_BoxFaceCells` and `MS_PaintSlotTexels` are its interface.
+- **Verification** (against the build before the round): every map in `maps/` (monolith, pine_forest,
+  voxel-test), `tests/models`, `tests/rotated`: `--dump-boxes` and `--dump-scene` identical, 71 shots 0
+  changed pixels (viewpoints, yaw sweeps, monolith's three heights and steep view, `--reload-test`), the
+  reference pick the same hit; the same maps with `env paint.grid 24` and `paint_grid` 20 / 0 / 1024 on
+  three materials but no paint: 54 shots 0 pixels, dumps identical; alpha-0 entries on a grid on every
+  box kind (merged with and without a shader, merged turned, a `stairs` step, `repeat` copies, instanced,
+  instanced turned) against the same package without paint: 20 shots 0 pixels; painted packages without a
+  grid (1024² and 2048 × 2304 atlases) against the build before: 7 shots 0 pixels. Alignment (checker
+  atlases, alpha 150, cells and transparent cells): voxel-test's brick red at `paint_grid 20` across the
+  pier `2:0` and the band `1:0` above it and around the pier's edge (+z, −x): every transparent cell
+  shows one brick texel, the checker runs on across both boxes; monolith's broken pillar (concrete, `env
+  paint.grid 24`, −x and −z of both boxes, the corner at x −28.1 lies 0.6 texels into a cell) and the
+  slot machine's topper sign (play yellow, +x): the painted cells' edges lie on the sign's yellow cells'
+  edges in the developer's view. Compiled round trip (the five maps and three painted grid packages):
+  compiled twice byte-identical, `--dump-boxes`, `--dump-scene`, `--dump-entities` equal, 44 shots 0
+  pixels. Live: `--edit-script` `material-set "concrete" paint_grid 24` against `--apply-edits`: 3 shots 0
+  pixels; `MS_EditSetText` of `paint_grid` added, `env paint.grid` 24 → 12 and 24 → 48 against fresh
+  loads: 6 shots 0 pixels. `./build.sh`, `--win`, `examples`, `examples test`: 0 warnings; the runtime
+  with and without `MONOLITH_EDITOR` and `MS_PATCHED_R3D`: 0 warnings; `./build.sh test compiled`,
+  `parse_error`, `export_strip` pass; `build/tools/leakcheck` and `--asan`: OK (and the ASan build on the
+  grid packages, the pick and a live edit: no sanitizer report but the NVIDIA driver's 366 bytes).
+
+### Implementation notes: paint grid phase 2 (draw mode, the panel, the unwrap)
+
+What phase 2 of the paint-grid round built in `src/drawmode.c/.h`, `src/drawpanel.c/.h`,
+`src/paintunwrap.c/.h`, `src/newmap.c`, `tests/unit/paintunwrap_test.c` and `tools/leakcheck.c`
+(§17.4–§17.7), and the choices it made where §17 left them open (§17 now says what was settled). No
+runtime, R3D, map-format or `mapedit.c` change: *Fit to grid* is `EDIT_PAINT_SET`, like *Resize*.
+
+- **New rectangles** (`Resolve`, `StrokeSample`): a box face on a grid gets its cells (`BoxGroupCells`
+  over `MS_BoxFaceCells`: per axis the group's largest face's), refused above 2048 along an axis
+  (`Resolve` code 9: "face +y covers 3072 texels of the grid (24/m); the most is 2048"). A model slot
+  (`SlotSize`): `MS_PaintSlotTexels` (halved until 2048) when it gives a size; else the square of the
+  file's unwrap made this session; else the square another entry of the same file and slot has (an
+  unwrap from a sidecar: its square isn't stored, §4.5's format didn't change); else `ceil(ρ · sqrt(A /
+  a))`. Before its unwrap exists a slot shows an estimate, `1.35 ρ sqrt(A)` (xatlas fills ~55 % of a
+  square), marked `~` on the panel and the HUD. ρ is the grid, else the panel's density (`RhoOf`), so
+  **without a grid model slots changed too** (task item 1): they unwrap at the density and take the
+  unwrap's square instead of `clamp(pow2ceil(ρ sqrt(A)), 16, 2048)` at a texel hint (§5.2); boxes
+  without a grid are exactly as before.
+- **Strokes**: a sample on a grid face is `E.x + u0 + u (u1 − u0)` (`FaceGridCells`: the face's first
+  cell offset and end from `MS_BoxFaceCells` plus `ρ` × the face's extent, clamped to its cells: the same
+  numbers as the runtime's `paintTexel`, within 1/256 texel at a cell edge). Its region (the stamps'
+  clip, and what *fill* fills) is the **face's cells**, at most the rectangle (§17.7). A `--paint-script`
+  `uv` hit (`UvHit`) gets `paintGrid`, `paintTexel` and `paintCellsW/H` the same way. A face a stroke goes
+  onto that can't take paint (code 9, an inactive entry) is skipped with its refusal, the stroke goes on.
+- **Fit to grid** (`ActResize` on a grid, `MoveEntry`): the rectangle becomes the cells (a box group) or
+  the slot's square (`SlotFitSize`: §17.4 / §17.5 without the "another entry" step). **"Was on the
+  grid"** is decided by size (§17.7): within one texel of the cells along both axes the paint moves
+  texel for texel (a rectangle made on the grid whose box moved: the paint stays on its cells; the
+  lead replaced phase 2's ratio rule, "within a quarter", after the verifier found that it moved paint
+  made at 16..26 texels/m before a 20/m grid texel for texel, distorting it or dropping texels); else it is resampled nearest (made at a density before the grid; with
+  texel for texel the 64/m paint of a 77×116 rectangle fell wholly outside the 24×36 cells the grid
+  shows, so all of it was lost). Model slots are always resampled. An entry a grid made inactive
+  (`GridTooSmall`: its rectangle smaller than its face's cells, `Resolve` code 10, "its paint (map line
+  N, 10x15) is smaller than the face's 24x36 cells of the grid: Fit to grid") can be fitted and cleared
+  from the panel (`DrawModePanelAction` lets *resize* and *clear* through for code 10).
+- **Face groups** (`ActFaces`) on a grid: a kept entry whose group now covers more cells than its
+  rectangle grows to them (`MoveEntry`, texel for texel, amended onto the same step); a split gets the
+  group's cells with the source's lower-left texels; a group with a face above 2048 cells is refused.
+- **The unwrap** (`PaintUnwrapMeshes(meshes, n, texelsPerUnit, out, sides, sideCount)`,
+  `PaintUnwrapModelFileAt`; `PaintUnwrapModelFile`, `PAINTUNWRAP_TEXELS` and the repacking are gone):
+  one `PackCharts` per pass with `resolution 0`, `texelsPerUnit` fixed, padding 2, bilinear borders;
+  the slot's square is the larger side of the single atlas xatlas makes, paint UV = pack texels / side
+  (charts start on whole texels; 2 texels apart at the square's own size). A slot whose `sqrt(3D area) ·
+  texelsPerUnit` passes 4096 is refused before xatlas (`PAINTUNWRAP_MAX_SIDE`), as is a pack larger than
+  that. The guarantees stay (no overlap, triangle order, deterministic, the fold passes). The draw mode
+  (`EnsureUnwrap(dm, model, slot, material)`) unwraps at `ρ ×` the instance's largest scale; a square
+  above 2048 is refused on a grid ("x.glb slot 1 needs a 2400x2400 rectangle at the grid's 20 texels/m
+  (scale 9.5); the most is 2048") and made again at a lower density without one (three tries).
+  `DrawUnwrap` keeps the texels per unit, the scale and the sides; the panel's texel line adds "the
+  unwrap was made at scale 9.52" on an instance of another scale.
+- **The panel** (`SectionDensity`, `DensityButtons`): "Grid" with `DrawTarget.gridLine` ("follows the
+  grid of concrete: 24 texels/m (4.2 cm)"; own material: "follows the map's grid: …"), the texel line,
+  *Fit to grid*, *Pixel look*, *Clear paint*; without a grid "Density" with the line "concrete has no
+  paint grid: 64 texels/m from the panel" over the slider. `DrawTarget.grid` and `fitOk` are set by
+  `TargetText`; `DrawTextKey` gained the grid and the density. Target line: "concrete's atlas 256×256:
+  24×36 cells at 0 0 (20/m)", "the first stroke makes concrete's atlas with 27×43 cells (24/m)"; texel
+  line "face -z: a texel will be 41.7 mm, on the grid (27×43 cells)"; HUD "…, grid 24/m".
+- **The brush cursor**: `TexelToSurface` maps rectangle texels to the face through `u0 .. u1` / `v0 ..
+  v1` (`DrawGeom` gained them, `grid`, `cellsW/H`, `estimate`), so a size-1 square's outline is the
+  surface texel the dab paints (checked in a shot: the outline encloses the painted texel exactly);
+  *fill* outlines the hit face's cells on every face of the entry, through each face's own cells.
+- **`--paint-script`**: `print` adds `grid <ρ>` per atlas, `cells WxH` per box entry on a grid and each
+  unwrap's texels per unit, scale and sides; `hover` adds the grid line and makes the hovered surface the
+  one `faces`, `resize`, `clear` and `pixel` act on (an inactive entry can't be stroked; `resize` fits).
+- **Smaller**: `STAGE_BYTES` (the shader-length heuristic of §3.4) 1800 → 2000 (phase 1's stage is ~1.9
+  KB); `DRAW_SLOT_MIN` and `SlotRectSide` are gone; `--new-map`'s `MAP.md` template has a *Paint grid*
+  line under *Style and mood*; the `map-editing` skill's rule: a map with a pixel look sets `env
+  paint.grid` (or a material's `paint_grid`) and records it in `MAP.md`.
+- **Leak check**: `paint-grid-before` / `paint-grid` (tests/models painted without a grid and saved, then
+  `env paint.grid 24`: *Fit to grid* on a box entry and on a model slot, a first stroke on grid cells, a
+  face group grown, undo, save) and `draw-panel-grid`.
+
+**The unwrap's times** (`tests/unit/paintunwrap_test.c` built at `-O2` against the editor's xatlas
+object, one unwrap; each model at `400 / sqrt(its area)` texels per unit, so its largest square is some
+hundred texels; machine A: RTX 4050 Laptop, Ryzen 7 7435HS; all: overlap 0, footprints 0, gaps > 2
+texels, deterministic, sidecar round trip identical; "density" = the charts' texel area over the 3D area
+× texels per unit²):
+
+| Input | Triangles | Vertices in → out | Charts | Largest side | Density | Time (was) |
+|---|---:|---:|---:|---:|---:|---:|
+| `sedan.glb` | 2032 | 2718 → 2780 | 120 | 549 | 1.020 | 26 ms (201) |
+| `campfire.glb` | 641 | 1048 → 1050 | 168 | 382 | 1.02–1.04 | 24 ms (130) |
+| `lantern.glb` | 264 | 338 → 364 | 62 | 575 | 1.019 | 16 ms (170) |
+| `log.glb` | 200 | 312 → 312 | 64 | 383 | 1.02–1.03 | 10 ms (61) |
+| `rock_face_01.glb` | 10000 | 5803 → 9578 | 777 | 619 | 1.034 | 1980 ms (3188) |
+| `rock_largeA.glb` / `D` | 80 | 146 → 146 | 23 / 22 | 485 / 436 | 1.00–1.01 | 9 / 10 ms (125 / 132) |
+| `stump_old.glb` | 120 | 208 → 212 | 42 | 505 | 1.012 | 8 ms (33) |
+| `tent.glb` | 352 | 518 → 586 | 82 | 444 | 1.02–1.06 | 17 ms (140) |
+| `tree_pineDefaultA.glb` | 230 | 392 → 392 | 51 | 519 | 1.01–1.02 | 13 ms (159) |
+| `tree_pineRoundC.glb` | 206 | 342 → 342 | 64 | 517 | 1.013 | 13 ms (156) |
+| `tree_pineSmallA.glb` | 164 | 280 → 280 | 53 | 497 | 1.01–1.02 | 11 ms (125) |
+| `tree_pineTallA.glb` / `B` | 78 | 136 → 136 | 32 | 524 / 515 | 1.01–1.03 | 9 / 9 ms (131 / 143) |
+| `tree_pineTallC.glb` / `D` | 98 | 156 → 156 | 33 | 552 / 527 | 1.01–1.02 | 12 / 12 ms (149 / 159) |
+
+In the editor (`-O2`): `tree_pineTallD.glb` at bark's `paint_grid 20` × scale 9.52 = 190 texels per
+unit: 7 ms, slot 1 (the trunk) 199² texels; `sedan.glb` at the map's grid 20, scale 1: 13 ms, 165².
+
+**Verification** (machine A; scripts, logs and images in the session's scratch folder `agent2/`):
+
+1. **Pens on the grid** (scratch copies: the monolith map with `env paint.grid 24`, voxel-test with `env
+   paint.grid 20`; green paint with *Pixel look*; effects 3–5 off; every painted edge picked on both
+   sides with `--pick-at`, `measure.py`: an edge is on the grid when a grid line of either axis lies
+   between its two picks, ±0.1 texel for the 1 mm pick rounding and FXAA): voxel-test's brick wall, the
+   band `1:0` and the pier `2:0` below it (round 1 strokes on each box at the same column, square / soft /
+   round 1 and round 3 dabs, a 600 px stroke): 400 of 400 edges on the grid (max 0.04 texel off a line;
+   pairs across the two boxes' shared edge, which isn't a grid line, left out); runs 1 texel wide for
+   every size-1 pen, 3 for round 3; fill + eraser (1 and 3): 147 of 147; around the pier's corner (`-x`
+   onto `+z`, one stroke each with round and square 1): `-x` 80 of 80, `+z` 57 of 57 where the light is
+   even (where a warm light washes the green out the mask's edge moves). The monolith map's concrete,
+   head-on on the broken pillar's `-z` (the shard `box -28.1 3.53 …` and the pillar under it, the same
+   pens): 273 of 273 (the boxes' edge at y 3.53 = 84.72 texels lies inside a cell: each box paints its
+   part of that cell); around the pillar's corner (`-z` onto `-x`, looking up 25°): `-x` 149 of 149; on
+   `-z`, seen at a grazing angle (9 mm per pixel), the edges lie up to half a texel off: the atlas's mip
+   level 1 at that angle (§17.9), not the mapping (the head-on shot of the same face is on the grid). The
+   slot machine's topper sign (play yellow, `+x`, the developer's view): 342 of 342; fill + eraser: every
+   hole is one of the sign's own yellow cells (the 27 "off" edges are anti-aliased pixels of the sign's
+   silhouette whose picks hit the facade behind it). Images:
+   `agent2/pairs/vox-pier.png`, `vox-corner.png`, `mono-concrete-headon.png`, `mono-pillar-corner.png`,
+   `mono-sign.png`, `mono-sign-fill.png` (before: the phase 1 build on the package without the grid at 64
+   texels/m; after: this build on the grid).
+2. **Model slots**: pine_forest's `tree_pineTallD.glb` (bark `paint_grid 20`, scale 9.52): an 8 × 8
+   square dab measures 50.9 mm a texel on the screen (the painted pixels' world area / 64), the panel
+   says 49.5 mm (before: 10.2 mm, a 512² rectangle); the sedan in a pine_forest copy (`env paint.grid
+   20`, its own material, now unwrapped): 52.1 mm on the screen, 47.6 mm on the panel (before: 8.2 mm).
+   Every pen at size 1 and round 3 on both (`agent2/pairs/tree.png`, `sedan.png`); the texel lines
+   follow the charts, not a world grid (decision 4).
+3. **Paint stays a layer** (a scratch package with grid materials `pg` / `pgi` at `paint_grid 20`: a
+   merged box, a turned box, a `stairs` step, a `repeat` copy, an instanced and an instanced turned box, a
+   Kenney tree's slot 0 drawn with `pg`): an alpha-0 first stroke on each (all seven allocate): 0 changed
+   pixels at the tree's camera and the five viewpoints, live and after save + reload (12 shots); all
+   seven undone, then save: the map's bytes identical, no `textures/paint/`, no `.paintuv`, `ASSETS.md`
+   identical, the shot 0 pixels; real paint saved and reloaded: 0 pixels against the live shot;
+   `--apply-edits` of the seven `paint-add` ops (atlases and sidecar copied in first) gives the bytes of
+   the live script's save, and its shot 0 pixels. The minimal diff: each painted material gains
+   ` paint "textures/paint/<m>.png" paint_filter nearest`, each painted line `id N `, and the file
+   `# paint (draw mode)` with seven sorted `paint` lines.
+4. **Without a grid nothing changes** (boxes): ten scripts (the monolith map's pillar, corner, fill and
+   sign, voxel-test's pier, fill and corner, the kinds package's six boxes at two views) on the packages
+   without grids, against the phase 1 build: the same rectangles, the same atlas pixel hashes, 0 changed
+   pixels in all ten shots.
+5. **Fit to grid**: a 64/m rectangle (77×116) on voxel-test's pier, the grid declared afterwards (active,
+   showing its lower-left 24×36): fitted to 24×36, resampled; a 8/m one (10×15, inactive: code 10 on
+   hover) fitted to 24×36, resampled, drawing again; a grid rectangle (24×36) whose box then moved 2 cm
+   (25×36 cells, inactive): fitted texel for texel, the paint on the same world cells as before the
+   move (`agent2/shots/fitC-pair.png`); undo of a fit: 0 pixels against before it. Face groups: `+x`
+   (30×30) grouped with `+z` (41×30 cells) grew to 41×30 in place (pixels unchanged); split again: `+z`
+   got 41×30 with a copy.
+6. **Unpainted maps unchanged**: every map in `maps/` (monolith, pine_forest, voxel-test),
+   `tests/models`, `tests/rotated` against the round's base build: `--dump-boxes` identical (5 of 5),
+   every viewpoint and three yaws: 38 shot pairs, 0 changed pixels.
+7. **Panel**: `--draw-panel density --shot-hud` on the concrete pillar with the grid
+   (`agent2/shots/panel/density-grid.png`: "Grid", "follows the grid of concrete: 24 texels/m (4.2 cm)",
+   *Fit to grid*) and without (`density-nogrid.png`: "Density", "concrete has no paint grid: 64 texels/m
+   from the panel", the slider); the whole panel `all-grid.png`; the brush cursor over painted dabs
+   `cur-dab-zoom.png`.
+8. `./build.sh`, `--win`, `examples`, `examples test`: 0 warnings; `./build.sh test paintunwrap`,
+   `compiled`, `parse_error`, `export_strip` pass; `build/tools/leakcheck` and `--asan`: `leakcheck: OK:
+   zero leaks of ours` (with the new `paint-grid-before`, `paint-grid`, `draw-panel-grid` runs).
+
+**Open**: *Fit to grid* on a model slot whose unwrap (from a sidecar) was made at another texel size
+resamples onto `ceil(ρ sqrt(A / a))` but keeps the unwrap's chart layout, so its 2-texel padding shrinks
+with the square (a fresh unwrap would move the file's other entries' paint); the one-texel rule
+is a heuristic (a box resized by more than a texel since its paint was made is resampled, not moved); the estimate before an unwrap can be far off for thin slots (the pine
+trunk: ~142², made 199²); a grazing view of a grid face shows mip level 1 (§17.9); the square of an unwrap
+read from a sidecar isn't known (another entry's, else the formula).
+
+### Implementation notes: paint grid phase 3 (cost) and the lead's merge
+
+- **Cost** (machine A, RTX 4050 Laptop, driver 615.71.09; full runs, 3 interleaved pairs; numbers and
+  method in `.claude/skills/benchmarking/measurements.md`, "The paint grid"): the painted monolith map
+  with N = 10, 100, 1000 painted concrete faces, the exported game before the round (no grid) against
+  after it (`env paint.grid 24`): median of paired differences −0.28 %, +1.04 %, −0.15 % (means −0.11 %,
+  +2.54 % with one outlier pair, +0.33 %). The editor's per-pass table at N = 1000: geometry pass +0.001 ms
+  (0.463 ms). Within noise: the clamp in the vertex stage costs nothing measurable.
+- **Fixes at the merge** (the phase 2 verifier's findings): without a grid a model slot whose file was
+  unwrapped for another slot is clamped to 2048 like any rectangle (`SlotSize`); *Fit to grid* moves
+  paint texel for texel only within one texel of the cells (was "within a quarter", which distorted paint
+  made at 16..26 texels/m); `--paint-script`'s `hover` no longer changes what `pixel` acts on; the panel
+  shows *Fit to grid* only on a target with an entry. From phase 1's verifier: `ms_clamp`'s upper bound is
+  never below its lower one (a face thinner than 1/256 texel starting on a cell edge; GLSL's `clamp` is
+  undefined then).
+- **The maps**: `maps/monolith` declares `env paint.grid 24`, voxel-test `env paint.grid 20`, each recorded
+  in its `MAP.md`; identical box dumps and 0 changed pixels at every viewpoint.
 
 ## Implementation notes of the first round (canvases and the shader bake, replaced)
 

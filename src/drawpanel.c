@@ -2,9 +2,9 @@
 // wide, in the ui.h look. From top to bottom: Target (the surface the cursor rested on last, what
 // paint there goes into or why it can't be painted), Pen (five pens, size, hardness), Colour
 // (R G B A, a swatch, the hex field, the recent colours), Density (texels per metre, the texel size
-// there, Resize to density, Pixel look, Clear paint) and Faces (boxes only: the face groups of the
-// box's paint). The target, its rectangle and its lines come from the draw mode (dm->target); the
-// actions act on it.
+// there, Resize to density, Pixel look, Clear paint; "Grid" with Fit to grid and no slider when the
+// target's material has a paint grid) and Faces (boxes only: the face groups of the box's paint).
+// The target, its rectangle and its lines come from the draw mode (dm->target); the actions act on it.
 //
 // One layout function serves three passes: a measure pass (the height, no widget runs), the input
 // pass (DrawPanelUpdate, before the draw mode reads the mouse: the widgets change the DrawMode,
@@ -360,10 +360,44 @@ static void SectionColor(Ctx *c)
     c->y += 22 + GAP;
 }
 
+// The Density / Grid section's buttons: resize (Resize to density, or Fit to grid on a grid), Pixel
+// look, Clear paint
+static void DensityButtons(Ctx *c, const char *resize, bool resizeShown)
+{
+    DrawMode *dm = c->dm;
+    int bw = (c->w - GAP) / 2;
+    // (Fit to grid only on a target with an entry, DrawTarget.fitOk; its place stays, so the panel
+    // doesn't move under the cursor)
+    if (resizeShown && Button(c, (Rectangle){ (float)c->x, (float)c->y, (float)bw, BUTTON_H }, resize, false)) c->act = DRAWPANEL_ACT_RESIZE;
+    // (the target atlas's filter when it has one; else what new atlases get)
+    bool pixel = PixelLookShown(dm);
+    if (Button(c, (Rectangle){ (float)(c->x + bw + GAP), (float)c->y, (float)(c->w - bw - GAP), BUTTON_H }, "Pixel look", pixel)) {
+        dm->pixelLook = !pixel;
+        c->act = DRAWPANEL_ACT_PIXEL_LOOK;
+    }
+    c->y += BUTTON_H + GAP;
+    if (Button(c, (Rectangle){ (float)c->x, (float)c->y, (float)bw, BUTTON_H }, "Clear paint", false)) c->act = DRAWPANEL_ACT_CLEAR;
+    c->y += BUTTON_H + GAP;
+}
+
+// The target's paint follows a paint grid (docs/painting.md 17.7): the section is "Grid", no density
+static bool TargetGrid(const DrawMode *dm) { return TargetSet(dm) && dm->target.grid > 0.0f && dm->target.gridLineSet; }
+
 static void SectionDensity(Ctx *c)
 {
     DrawMode *dm = c->dm;
-    Header(c, "Density", NULL);
+    bool grid = TargetGrid(dm);
+    Header(c, grid ? "Grid" : "Density", NULL);
+    // What the target's texels follow: "follows the grid of concrete: 24 texels/m (4.2 cm)", or "concrete
+    // has no paint grid: 64 texels/m from the panel" over the slider
+    if (TargetSet(dm) && dm->target.gridLineSet)
+        c->y += Wrapped(c, MsgText(&dm->target.gridLine), UI_S, grid ? UI_TEXT : UI_DIM, 2) + GAP - 1;
+    if (grid) {
+        // The texel size there (its rectangle's or the one its first stroke gets) and Fit to grid
+        if (dm->target.texelSet) c->y += Wrapped(c, MsgText(&dm->target.texel), UI_S, UI_DIM, 2) + GAP - 1;
+        DensityButtons(c, "Fit to grid", dm->target.fitOk);
+        return;
+    }
     // Texels per metre of new paint: the slider over log2 (8 .. 512: 64 in the middle)
     Rectangle sr, fr;
     Row(c, "Texels / m", LABEL_W, UI_TEXT, &sr, &fr);
@@ -377,17 +411,7 @@ static void SectionDensity(Ctx *c)
     const char *texel = TargetSet(dm) && dm->target.ok && dm->target.texelSet ? MsgText(&dm->target.texel)
                       : TextFormat("new paint: a texel is about %.1f mm", 1000.0f / d);
     c->y += Wrapped(c, texel, UI_S, UI_DIM, 2) + GAP - 1;
-    int bw = (c->w - GAP) / 2;
-    if (Button(c, (Rectangle){ (float)c->x, (float)c->y, (float)bw, BUTTON_H }, "Resize to density", false)) c->act = DRAWPANEL_ACT_RESIZE;
-    // (the target atlas's filter when it has one; else what new atlases get)
-    bool pixel = PixelLookShown(dm);
-    if (Button(c, (Rectangle){ (float)(c->x + bw + GAP), (float)c->y, (float)(c->w - bw - GAP), BUTTON_H }, "Pixel look", pixel)) {
-        dm->pixelLook = !pixel;
-        c->act = DRAWPANEL_ACT_PIXEL_LOOK;
-    }
-    c->y += BUTTON_H + GAP;
-    if (Button(c, (Rectangle){ (float)c->x, (float)c->y, (float)bw, BUTTON_H }, "Clear paint", false)) c->act = DRAWPANEL_ACT_CLEAR;
-    c->y += BUTTON_H + GAP;
+    DensityButtons(c, "Resize to density", true);
 }
 
 // faces[] with the numbers closed up in order (0 2 2 5 -> 0 1 1 2)

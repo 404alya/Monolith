@@ -8,15 +8,18 @@
 //
 //   paintunwrap_test [--scene <package>] [--scratch <dir>] <model file>...
 //
-// Checks per input, each slot on its own: the triangles keep their order and count (new vertex
-// sources give back the input's index of every corner), every source and index is valid, no
+// Every input is unwrapped at a fixed texel size (docs/painting.md 17.5): the synthetic meshes at
+// 64 texels per unit, a model at 400 / sqrt(its area) (its largest slot then some hundred texels a
+// side). Checks per input, each slot on its own: the triangles keep their order and count (new
+// vertex sources give back the input's index of every corner), every source and index is valid, no
 // texel centre of a 1024 x 1024 raster is covered by two triangles (exact integer raster with a
 // top-left rule, so neighbours sharing an edge never both count), the charts (connected triangles)
-// are at least 2 empty texels apart at the texelsHint resolution (conservative raster), and two
-// runs give the same bytes. With --scratch, each unwrap is written with MS_PaintUnwrapWrite and
-// read back with MS_PaintUnwrapRead (skipped while those are the runtime's phase-0 stubs). With
-// --scene, PaintUnwrapModelFile on every model file of the loaded package must give the same bytes
-// as the direct unwrap of that file (skipped while MS_ModelMeshData is a stub).
+// are at least 2 empty texels apart in the slot's own square (conservative raster at its side),
+// the texel size holds (the charts' area in texels over the slot's 3D area x texels per unit^2,
+// printed as "density"; xatlas keeps each chart's area, so near 1), and two runs give the same
+// bytes. With --scratch, each unwrap is written with MS_PaintUnwrapWrite and read back with
+// MS_PaintUnwrapRead. With --scene, PaintUnwrapModelFileAt on every model file of the loaded package
+// must give the same bytes and sides as the direct unwrap of that file.
 #define _POSIX_C_SOURCE 199309L     // clock_gettime
 #include "monolith_scene.h"
 #include "paintunwrap.h"
@@ -27,9 +30,13 @@
 #include <string.h>
 #include <time.h>
 
-#define TEXELS 1024             // texelsHint of every unwrap here (the editor's PAINTUNWRAP_TEXELS)
+#define SYNTH_TPU 64.0f         // texels per unit of the synthetic meshes
+#define MODEL_TEXELS 400.0      // a model's texels per unit: this over the square root of its area
+#define MAX_SLOTS 256           // sides[] of an unwrap here
 #define OVERLAP_RES 1024        // the texel-centre raster of the overlap check
-#define MIN_GAP 2               // empty texels between two charts at TEXELS
+#define MIN_GAP 2               // empty texels between two charts in the slot's square
+#define DENSITY_LO 0.8          // the charts' texel area over the 3D area x tpu^2 (xatlas keeps
+#define DENSITY_HI 1.25         // each chart's area; rounding to whole texels adds a little)
 
 static int failures;
 
@@ -140,11 +147,10 @@ static void RasterCentres(const unsigned short *a, const unsigned short *b, cons
         }
 }
 
-// Conservative raster at TEXELS: every texel whose square touches the triangle gets `chart`
-// (or -1 when another chart is there already: footprints overlap)
-static void RasterChart(const unsigned short *a, const unsigned short *b, const unsigned short *c, int chart, int *owner)
+// Conservative raster at the slot's side R: every texel whose square touches the triangle gets
+// `chart` (or -1 when another chart is there already: footprints overlap)
+static void RasterChart(const unsigned short *a, const unsigned short *b, const unsigned short *c, int chart, int *owner, int R)
 {
-    const int R = TEXELS;
     double p[3][2];
     const unsigned short *v[3] = { a, b, c };
     for (int i = 0; i < 3; i++) { p[i][0] = v[i][0] / 65535.0 * R; p[i][1] = v[i][1] / 65535.0 * R; }
@@ -189,19 +195,34 @@ static int CompareKeys(const void *a, const void *b)
 
 typedef struct {
     int charts, triangles, overlap, coincident, footprintOverlap, minGap;  // minGap: MIN_GAP + 1 = "more"
+    double uvArea, area3d;      // the charts' area in texels of the square, the slot's 3D area
 } SlotStats;
 
-// The checks of one slot: overlap of texel centres, chart footprints and their gaps
-static SlotStats CheckSlot(const MS_PaintUnwrap *u, const PaintUnwrapInput *in, int slot)
+// The 3D area of an input triangle (its first corner)
+static double Area3D(const PaintUnwrapInput *m, int corner)
 {
-    SlotStats st = { 0, 0, 0, 0, 0, MIN_GAP + 1 };
+    const float *p[3];
+    for (int c = 0; c < 3; c++) p[c] = &m->positions[3 * InputIndex(m, corner + c)];
+    double e[2][3];
+    for (int i = 0; i < 3; i++) { e[0][i] = (double)p[1][i] - p[0][i]; e[1][i] = (double)p[2][i] - p[0][i]; }
+    double cx = e[0][1] * e[1][2] - e[0][2] * e[1][1], cy = e[0][2] * e[1][0] - e[0][0] * e[1][2];
+    double cz = e[0][0] * e[1][1] - e[0][1] * e[1][0];
+    return 0.5 * sqrt(cx * cx + cy * cy + cz * cz);
+}
+
+// The checks of one slot (its square: side R texels): overlap of texel centres, chart footprints and
+// their gaps, the texel size
+static SlotStats CheckSlot(const MS_PaintUnwrap *u, const PaintUnwrapInput *in, int slot, int R)
+{
+    SlotStats st = { 0, 0, 0, 0, 0, MIN_GAP + 1, 0.0, 0.0 };
+    if (R < 1) R = 1;
     int triangles = 0;
     for (int m = 0; m < u->meshCount; m++) if (u->meshes[m].slot == slot) triangles += u->meshes[m].indexCount / 3;
     CentreRaster cr = {
         in, u, malloc(sizeof(int) * (size_t)(triangles + 1)), malloc(sizeof(int) * (size_t)(triangles + 1)),
         calloc((size_t)OVERLAP_RES * OVERLAP_RES, sizeof(int)), calloc((size_t)OVERLAP_RES * OVERLAP_RES, 1),
     };
-    int *owner = calloc((size_t)TEXELS * TEXELS, sizeof(int));
+    int *owner = calloc((size_t)R * R, sizeof(int));
     if (!cr.triMesh || !cr.triIndex || !cr.first || !cr.flag || !owner) {
         FAIL("out of memory");
         free(cr.triMesh); free(cr.triIndex); free(cr.first); free(cr.flag); free(owner);
@@ -244,11 +265,13 @@ static SlotStats CheckSlot(const MS_PaintUnwrap *u, const PaintUnwrapInput *in, 
             int tri = st.triangles++;
             cr.triMesh[tri] = m;
             cr.triIndex[tri] = t;
+            st.area3d += Area3D(&in[m], t);
             if (Area2(a, b, c) == 0 || Degenerate3D(&in[m], t)) continue;
+            st.uvArea += fabs((double)Area2(a, b, c)) * 0.5 / (65535.0 * 65535.0) * (double)R * R;
             int r = Find(parent, base + (int)o->indices[t]);
             if (chartOf[r] < 0) chartOf[r] = charts++;
             RasterCentres(a, b, c, tri, &cr);
-            RasterChart(a, b, c, chartOf[r], owner);
+            RasterChart(a, b, c, chartOf[r], owner, R);
         }
         base += o->vertexCount;
     }
@@ -261,16 +284,16 @@ static SlotStats CheckSlot(const MS_PaintUnwrap *u, const PaintUnwrapInput *in, 
         st.overlap += cr.flag[i] == 2;
         st.coincident += cr.flag[i] == 1;
     }
-    for (int y = 0; y < TEXELS; y++)
-        for (int x = 0; x < TEXELS; x++) {
-            int c = owner[y * TEXELS + x];
+    for (int y = 0; y < R; y++)
+        for (int x = 0; x < R; x++) {
+            int c = owner[y * R + x];
             if (c < 0) { st.footprintOverlap++; continue; }
             if (c == 0) continue;
             for (int dy = -MIN_GAP; dy <= MIN_GAP; dy++)
                 for (int dx = -MIN_GAP; dx <= MIN_GAP; dx++) {
                     int nx = x + dx, ny = y + dy;
-                    if (nx < 0 || ny < 0 || nx >= TEXELS || ny >= TEXELS) continue;
-                    int d = owner[ny * TEXELS + nx];
+                    if (nx < 0 || ny < 0 || nx >= R || ny >= R) continue;
+                    int d = owner[ny * R + nx];
                     if (d == 0 || d == c) continue;
                     int gap = (abs(dx) > abs(dy) ? abs(dx) : abs(dy)) - 1;
                     if (gap < st.minGap) st.minGap = gap;
@@ -301,16 +324,21 @@ static bool SameUnwrap(const MS_PaintUnwrap *a, const MS_PaintUnwrap *b)
 
 static const char *scratchDir;
 
-// Unwraps `in` twice and checks everything; name labels the output line
-static void Check(const char *name, const PaintUnwrapInput *in, int meshCount)
+// Unwraps `in` twice at tpu texels per unit and checks everything; name labels the output line
+static void Check(const char *name, const PaintUnwrapInput *in, int meshCount, float tpu)
 {
     MS_PaintUnwrap u, again;
+    int sides[MAX_SLOTS], sides2[MAX_SLOTS];
     double t0 = Now();
-    bool ok = PaintUnwrapMeshes(in, meshCount, TEXELS, &u);
+    bool ok = PaintUnwrapMeshes(in, meshCount, tpu, &u, sides, MAX_SLOTS);
     double ms = (Now() - t0) * 1000.0;
     if (!ok) { FAIL("%s: %s", name, MS_LastError()); return; }
-    if (!PaintUnwrapMeshes(in, meshCount, TEXELS, &again)) { FAIL("%s: second run: %s", name, MS_LastError()); MS_PaintUnwrapFree(&u); return; }
-    bool same = SameUnwrap(&u, &again);
+    if (!PaintUnwrapMeshes(in, meshCount, tpu, &again, sides2, MAX_SLOTS)) {
+        FAIL("%s: second run: %s", name, MS_LastError());
+        MS_PaintUnwrapFree(&u);
+        return;
+    }
+    bool same = SameUnwrap(&u, &again) && memcmp(sides, sides2, sizeof(sides)) == 0;
     if (!same) FAIL("%s: two runs differ", name);
     MS_PaintUnwrapFree(&again);
 
@@ -340,22 +368,32 @@ static void Check(const char *name, const PaintUnwrapInput *in, int meshCount)
 
     // Per slot: overlap and gaps
     int *slots = malloc(sizeof(int) * (size_t)(u.meshCount + 1));
-    int slotCount = 0, charts = 0, overlap = 0, coincident = 0, footprint = 0, minGap = MIN_GAP + 1;
+    int slotCount = 0, charts = 0, overlap = 0, coincident = 0, footprint = 0, minGap = MIN_GAP + 1, largest = 0;
+    double dmin = INFINITY, dmax = 0.0;
     if (!slots) { FAIL("out of memory"); bad++; }
     for (int m = 0; m < u.meshCount && !bad; m++) {
         int s = u.meshes[m].slot, k = 0;
         while (k < slotCount && slots[k] != s) k++;
         if (k < slotCount) continue;
         slots[slotCount++] = s;
-        SlotStats st = CheckSlot(&u, in, s);
+        int side = s >= 0 && s < MAX_SLOTS ? sides[s] : -1;
+        if (side < 0) { FAIL("%s: slot %d has no side", name, s); bad++; continue; }
+        if (side > largest) largest = side;
+        SlotStats st = CheckSlot(&u, in, s, side);
+        if (st.area3d > 0.0 && st.uvArea > 0.0) {
+            double dens = st.uvArea / (st.area3d * (double)tpu * tpu);
+            dmin = fmin(dmin, dens);
+            dmax = fmax(dmax, dens);
+            if (dens < DENSITY_LO || dens > DENSITY_HI) FAIL("%s: slot %d: texel density %.3f of the asked one", name, s, dens);
+        }
         charts += st.charts;
         overlap += st.overlap;
         coincident += st.coincident;
         footprint += st.footprintOverlap;
         if (st.minGap < minGap) minGap = st.minGap;
         if (st.overlap) FAIL("%s: slot %d: %d texel centres of %d^2 covered twice", name, s, st.overlap, OVERLAP_RES);
-        if (st.footprintOverlap) FAIL("%s: slot %d: chart footprints share %d texels at %d^2", name, s, st.footprintOverlap, TEXELS);
-        if (st.minGap < MIN_GAP) FAIL("%s: slot %d: charts %d texels apart at %d^2", name, s, st.minGap, TEXELS);
+        if (st.footprintOverlap) FAIL("%s: slot %d: chart footprints share %d texels at %d^2", name, s, st.footprintOverlap, side);
+        if (st.minGap < MIN_GAP) FAIL("%s: slot %d: charts %d texels apart at %d^2", name, s, st.minGap, side);
     }
     free(slots);
 
@@ -377,10 +415,13 @@ static void Check(const char *name, const PaintUnwrapInput *in, int meshCount)
     char gap[16];
     if (minGap > MIN_GAP) snprintf(gap, sizeof(gap), ">%d", MIN_GAP);
     else snprintf(gap, sizeof(gap), "%d", minGap);
+    char dens[48] = "-";
+    if (dmax > 0.0) snprintf(dens, sizeof(dens), "%.3f..%.3f", dmin, dmax);
     printf("%s %-28s meshes %3d  slots %2d  triangles %6d  vertices %6d -> %6d  charts %5d  overlap %d (coincident faces %d)  footprints %d  "
-           "min gap %s  %s  %.1f ms  sidecar: %s\n",
+           "min gap %s  tpu %.2f  largest side %d  density %s  %s  %.1f ms  sidecar: %s\n",
            bad || overlap || footprint || minGap < MIN_GAP || !same ? "FAIL" : "ok  ", name, meshCount, slotCount,
-           triangles, inVertices, vertices, charts, overlap, coincident, footprint, gap, same ? "deterministic" : "NOT deterministic", ms, trip);
+           triangles, inVertices, vertices, charts, overlap, coincident, footprint, gap, (double)tpu, largest, dens,
+           same ? "deterministic" : "NOT deterministic", ms, trip);
     MS_PaintUnwrapFree(&u);
 }
 
@@ -411,9 +452,9 @@ static void CubeCase(void)
         for (int i = 0; i < 6; i++) idx[f * 6 + i] = (unsigned int)(f * 4) + q[i];
     }
     PaintUnwrapInput in = { pos, uv, idx, 24, 36, 0 };
-    Check("cube (faces share UVs)", &in, 1);
+    Check("cube (faces share UVs)", &in, 1, SYNTH_TPU);
     in.texcoords = NULL;
-    Check("cube (no UVs)", &in, 1);
+    Check("cube (no UVs)", &in, 1, SYNTH_TPU);
 }
 
 // A cube of 8 shared vertices without UVs (xatlas must cut it to unfold it)
@@ -425,7 +466,7 @@ static void SharedCubeCase(void)
         0, 2, 3, 0, 3, 1,  4, 5, 7, 4, 7, 6,  0, 1, 5, 0, 5, 4,  2, 6, 7, 2, 7, 3,  0, 4, 6, 0, 6, 2,  1, 3, 7, 1, 7, 5,
     };
     PaintUnwrapInput in = { pos, NULL, idx, 8, 36, 3 };
-    Check("cube (8 shared vertices)", &in, 1);
+    Check("cube (8 shared vertices)", &in, 1, SYNTH_TPU);
 }
 
 // Two quads side by side, the second mirrored in UV: both cover UV 0..1 (Kenney's mirrored halves)
@@ -435,7 +476,7 @@ static void MirroredCase(void)
     static const float uv[8 * 2] = { 0, 0, 1, 0, 0, 1, 1, 1,  1, 0, 0, 0, 1, 1, 0, 1 };
     static const unsigned int idx[12] = { 0, 1, 3, 0, 3, 2,  4, 5, 7, 4, 7, 6 };
     PaintUnwrapInput in = { pos, uv, idx, 8, 12, 0 };
-    Check("mirrored quads", &in, 1);
+    Check("mirrored quads", &in, 1, SYNTH_TPU);
 }
 
 // Several meshes and slots: slot 1 in meshes 0 and 2 (one domain), slot 0, an empty mesh (slot 2),
@@ -455,7 +496,7 @@ static void MultiCase(void)
         { NULL, NULL, NULL, 0, 0, 2 },
         { tri, NULL, NULL, 9, 0, 4 },       // the third triangle is a line (degenerate)
     };
-    Check("meshes and slots", in, 5);
+    Check("meshes and slots", in, 5, SYNTH_TPU);
 }
 
 // Bad input is refused with a message
@@ -467,7 +508,7 @@ static void BadInputCases(void)
     for (int i = 0; i < 3; i++) {
         MS_ClearError();            // (so a refusal without a message would show)
         MS_PaintUnwrap u;
-        if (PaintUnwrapMeshes(&cases[i], 1, TEXELS, &u)) { FAIL("bad input %d accepted", i); MS_PaintUnwrapFree(&u); }
+        if (PaintUnwrapMeshes(&cases[i], 1, SYNTH_TPU, &u, NULL, 0)) { FAIL("bad input %d accepted", i); MS_PaintUnwrapFree(&u); }
         else if (!MS_LastError()[0] || u.meshCount || u.meshes) FAIL("bad input %d: no message or not empty", i);
         else printf("ok   bad input refused: %s\n", MS_LastError());
     }
@@ -519,6 +560,15 @@ static void FreeModelInputs(ModelInput *mi)
     free(mi->in);
 }
 
+// The texels per unit a model is unwrapped at here: MODEL_TEXELS over the square root of its area
+static float ModelTpu(const ModelInput *mi)
+{
+    double area = 0.0;
+    for (int m = 0; m < mi->count; m++)
+        for (int t = 0; t + 2 < Corners(&mi->in[m]); t += 3) area += Area3D(&mi->in[m], t);
+    return area > 0.0 ? (float)(MODEL_TEXELS / sqrt(area)) : SYNTH_TPU;
+}
+
 // UV range of a model's own texture coordinates (why it needs an unwrap)
 static void UvRange(const ModelInput *mi, float r[4])
 {
@@ -541,42 +591,45 @@ static void ModelCase(const char *path)
         UvRange(&mi, r);
         const char *name = strrchr(path, '/') ? strrchr(path, '/') + 1 : path;
         printf("     %s: own UVs %.2f..%.2f x %.2f..%.2f\n", name, r[0], r[2], r[1], r[3]);
-        Check(name, mi.in, mi.count);
+        Check(name, mi.in, mi.count, ModelTpu(&mi));
     }
     FreeModelInputs(&mi);
     R3D_UnloadModel(model, true);
 }
 
-// PaintUnwrapModelFile on a loaded package must equal the direct unwrap of the same file
+// PaintUnwrapModelFileAt on a loaded package must equal the direct unwrap of the same file (the
+// same texels per unit: the file's, as ModelTpu gives it)
 static void SceneCase(const char *package)
 {
     MS_Scene *scene = MS_Load(package, NULL);
     if (!scene) { FAIL("--scene %s: %s", package, MS_LastError()); return; }
     for (int f = 0; f < scene->modelFileCount; f++) {
         const MS_ModelFile *mf = &scene->modelFiles[f];
-        MS_PaintUnwrap viaScene;
-        if (!PaintUnwrapModelFile(scene, f, TEXELS, &viaScene)) {
-            R3D_MeshData probe;
-            if (!MS_ModelMeshData(scene, f, 0, &probe)) printf("skip %s: PaintUnwrapModelFile (MS_ModelMeshData: phase-0 stub)\n", mf->path);
-            else FAIL("PaintUnwrapModelFile %s: %s", mf->path, MS_LastError());
-            continue;
-        }
         char full[1100];
         snprintf(full, sizeof(full), "%s%s", scene->root, mf->path);
         R3D_Model model = R3D_LoadModelEx(full, R3D_IMPORT_RETAIN_MESH_DATA);
         ModelInput mi = { 0 };
-        MS_PaintUnwrap direct;
-        if (!ModelInputs(&model, &mi) || !PaintUnwrapMeshes(mi.in, mi.count, PAINTUNWRAP_TEXELS, &direct))
-            FAIL("%s: direct unwrap", mf->path);
+        MS_PaintUnwrap direct, viaScene;
+        int sidesDirect[MAX_SLOTS], sidesScene[MAX_SLOTS];
+        if (!ModelInputs(&model, &mi)) FAIL("%s: out of memory or no mesh data", mf->path);
         else {
-            direct.fileHash = viaScene.fileHash;
-            if (!SameUnwrap(&direct, &viaScene)) FAIL("%s: PaintUnwrapModelFile differs from the direct unwrap", mf->path);
-            else printf("ok   %s: PaintUnwrapModelFile = the direct unwrap (file hash %016llx)\n", mf->path, viaScene.fileHash);
-            MS_PaintUnwrapFree(&direct);
+            float tpu = ModelTpu(&mi);
+            if (!PaintUnwrapModelFileAt(scene, f, tpu, &viaScene, sidesScene, MAX_SLOTS))
+                FAIL("PaintUnwrapModelFileAt %s: %s", mf->path, MS_LastError());
+            else {
+                if (!PaintUnwrapMeshes(mi.in, mi.count, tpu, &direct, sidesDirect, MAX_SLOTS)) FAIL("%s: direct unwrap", mf->path);
+                else {
+                    direct.fileHash = viaScene.fileHash;
+                    if (!SameUnwrap(&direct, &viaScene) || memcmp(sidesDirect, sidesScene, sizeof(sidesDirect)) != 0)
+                        FAIL("%s: PaintUnwrapModelFileAt differs from the direct unwrap", mf->path);
+                    else printf("ok   %s: PaintUnwrapModelFileAt = the direct unwrap (file hash %016llx)\n", mf->path, viaScene.fileHash);
+                    MS_PaintUnwrapFree(&direct);
+                }
+                MS_PaintUnwrapFree(&viaScene);
+            }
         }
         FreeModelInputs(&mi);
         R3D_UnloadModel(model, true);
-        MS_PaintUnwrapFree(&viaScene);
     }
     MS_Unload(scene);
 }

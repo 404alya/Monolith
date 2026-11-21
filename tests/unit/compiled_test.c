@@ -19,9 +19,9 @@ static char dir[1024], fuzzPath[1100];
 enum { H_VERSION = 8, H_SIZE = 12, H_ORDER = 16, H_FORMAT = 20, H_COUNT = 24, H_TABLE = 28, H_FILESIZE = 32 };
 enum { S_STRINGS = 1, S_BOXES = 2, S_MATERIALS = 4, S_STATEMENTS = 13, S_ENV = 14, S_BOX_TURNS = 17, S_PAINT = 18, S_SECTIONS = 18 };
 // A material record and its face layout, filter and padding bytes, its paint atlas path,
-// paint filter and padding, noPrepass, drawDistance
-enum { MAT_SIZE = 172, MAT_UV_FACES = 148, MAT_FILTER = 154, MAT_PAD = 155, MAT_PAINT = 156, MAT_PAINT_FILTER = 160, MAT_PAD2 = 161, MAT_NO_PREPASS = 164,
-       MAT_DRAW_DISTANCE = 168 };
+// paint filter and padding, noPrepass, drawDistance, paintGrid
+enum { MAT_SIZE = 176, MAT_UV_FACES = 148, MAT_FILTER = 154, MAT_PAD = 155, MAT_PAINT = 156, MAT_PAINT_FILTER = 160, MAT_PAD2 = 161, MAT_NO_PREPASS = 164,
+       MAT_DRAW_DISTANCE = 168, MAT_PAINT_GRID = 172 };
 
 static uint32_t Rd32(const unsigned char *b, uint32_t at) { uint32_t v; memcpy(&v, b + at, 4); return v; }
 static void Wr32(unsigned char *b, uint32_t at, uint32_t v) { memcpy(b + at, &v, 4); }
@@ -290,6 +290,18 @@ int main(int argc, char **argv)
     CASE("material draw distance -2", Wr32(c, mats + MAT_DRAW_DISTANCE, 0xC0000000u));
     CASE("material draw distance 2e6", Wr32(c, mats + MAT_DRAW_DISTANCE, 0x49F42400u));
     CASE("material draw distance NaN", Wr32(c, mats + MAT_DRAW_DISTANCE, 0x7FC00000u));
+    // The paint grid: -1 not set, 0 none, else 1..1024 texels per metre
+    CASE("material paint grid 0.5", Wr32(c, mats + MAT_PAINT_GRID, 0x3F000000u));
+    CASE("material paint grid 2000", Wr32(c, mats + MAT_PAINT_GRID, 0x44FA0000u));
+    CASE("material paint grid -2", Wr32(c, mats + MAT_PAINT_GRID, 0xC0000000u));
+    CASE("material paint grid NaN", Wr32(c, mats + MAT_PAINT_GRID, 0x7FC00000u));
+    {
+        unsigned char *ok = Copy(orig, size);
+        Wr32(ok, mats + MAT_PAINT_GRID, 0x41C00000u);      // (24)
+        if (!Load(ok, size)) { printf("FAIL paint grid 24 on material 0: %s\n", MS_LastError()); fails++; }
+        else printf("ok   paint grid 24 on material 0 loads\n");
+        free(ok);
+    }
     // A layout needs uv_scale 1 1 (tests/models: material 2, "tiles", has 2 2); material 0 loads with one
     if (Rd32(orig, mats + 2 * MAT_SIZE + 80) != 0x3F800000u)       // (its uvScale.x is not 1)
         CASE("uv_faces on a material with uv_scale 2 2", memcpy(c + mats + 2 * MAT_SIZE + MAT_UV_FACES, ALL, 6));

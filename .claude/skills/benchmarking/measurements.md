@@ -517,3 +517,15 @@ Machine C, headless 1366 × 768, low + `render_scale = 1`, against dd1d299, 2 in
 - **Scratch copy of `maps/monolith` with the spots' `clip` removed** (still, Terrace + Tower, 100 frames): lights 13.30 → 10.91 ms (**−2.4 ms, −18 %**; pairs −2.10 / −2.67), frame 67.7 → 64.9 ms (−4.1 %).
 - **`maps/voxel-test`** (no spot lights; still, viewpoints 1, 3, 4): lights 14.33 → 13.37 ms (−0.97, −6.7 %; pairs −0.96 / −0.97), frame −1.6 ms (−2.6 %). Not from the cone test, which never runs for point lights: the only other change is L computed before the normal read; likely the compiler's scheduling of the fetch (not investigated).
 - **`maps/monolith`** (spinning, 7 viewpoints, 150 frames): lights +0.03 ms, GPU +0.02 ms (noise); frame +0.23 ms in both pairs with the GPU unchanged, so not the shader (B always ran second, at a degree higher).
+
+## The paint grid: cost of painted materials (2026-11-21, machine A)
+
+Machine A (RTX 4050 Laptop GPU, driver 615.71.09, Ryzen 7 7435HS, Linux 7.2.5-cachyos), plugged in; the developer's editor and the request coordinator were open during the runs. The paint-grid round (`docs/painting.md` §17) changed the paint stage: the half-texel clamp moved to the vertex stage (one more flat `vec4`, one `textureSize` there instead of per pixel) and grid faces' table texels hold the face's extent. Packages: scratch copies of `maps/monolith` with N painted concrete faces (+y, ±x, ±z of plain concrete boxes, a 1-texel checker at alpha 200, `paint_filter nearest`, one 4096-wide atlas): A = the build before the round (no grid), B = after it (`env paint.grid 24`). Full runs (600 frames), 3 interleaved pairs each.
+
+| Exported game (`bench-export-ab`) | mean of paired differences | median | range |
+|---|---:|---:|---:|
+| N = 10 | −0.004 ms (−0.11 %) | −0.28 % | −0.026 .. +0.025 ms |
+| N = 100 | +0.101 ms (+2.54 %) | +1.04 % | −0.060 .. +0.321 ms (pair 2 an outlier) |
+| N = 1000 | +0.013 ms (+0.33 %) | −0.15 % | −0.022 .. +0.068 ms |
+
+Editor, N = 1000 (`--bench --headless`, per-pass GPU table): geometry pass (where the paint stage runs) 0.463 → 0.464 ms (+0.001 ms, per pair +0.003 / −0.003 / +0.003); GPU total −0.022 ms (−0.70 %); frame −0.025 ms (−0.61 %). Within noise everywhere; per-view differences change sign between N (±5 %), i.e. noise.

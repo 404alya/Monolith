@@ -4,6 +4,8 @@
 // Paint lives in per-material RGBA8 atlases (textures/paint/), composited by the runtime over
 // what the material computed, so an object looks exactly as before wherever it isn't painted.
 // This file owns each atlas's pixels while it paints; strokes are undo steps in the edit history.
+// On a material with a paint grid, new rectangles are the faces' grid cells and strokes map through
+// them, so paint texels lie on the map's own pixel grid (docs/painting.md 17).
 // Reference: docs/code/drawmode.md
 #include "drawmode.h"
 #include "paintunwrap.h"
@@ -22,7 +24,7 @@
 #define BORDER          2           // transparent texels around a rectangle
 #define CELL            4           // the packer's grid (mip levels 1 and 2 stay inside the border)
 #define SHADER_LIMIT    16384       // R3D's limit of a surface shader's source (bytes)
-#define STAGE_BYTES     1800        // what the paint stage adds to a shader (the empty one: ~1.7 KB)
+#define STAGE_BYTES     2000        // what the paint stage adds to a shader (the empty one: ~1.9 KB)
 
 static bool Ctrl(void) { return IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL); }
 static bool Shift(void) { return IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT); }
@@ -305,26 +307,150 @@ static void BoxRectSize(float rho, int b, unsigned char faces, int *w, int *h)
     *h = ClampI((int)ceilf(rho * sv - 1e-4f), DRAW_RECT_MIN, DRAW_RECT_MAX);
 }
 
-// A model slot's world area in this instance
-static double SlotArea(int model, int slot)
+// Face f of box b on a grid of rho texels per metre (docs/painting.md 17.2): the cells it covers
+// (w x h) and where its 0 and 1 lie in them (texels from the first cell), as the runtime's paint
+// table maps the face
+typedef struct { int w, h; float u0, u1, v0, v1; } FaceCells;
+
+static bool FaceGridCells(int b, int f, float rho, FaceCells *c)
+{
+    memset(c, 0, sizeof(*c));
+    Vector2 off;
+    if (!MS_BoxFaceCells(scene, b, f, rho, &c->w, &c->h, &off)) return false;
+    float su, sv;
+    FaceDims(b, f, &su, &sv);
+    c->u0 = off.x;
+    c->v0 = off.y;
+    c->u1 = (float)fmax(fmin((double)off.x + (double)rho * su, (double)c->w), (double)off.x);
+    c->v1 = (float)fmax(fmin((double)off.y + (double)rho * sv, (double)c->h), (double)off.y);
+    return true;
+}
+
+// A box face group's rectangle on a grid (docs/painting.md 17.3): per axis the cells of the group's
+// largest face. False when a face covers more than DRAW_RECT_MAX cells along an axis (*big: that
+// face, *cells: how many), so a rectangle never stretches
+static bool BoxGroupCells(int b, unsigned char faces, float rho, int *w, int *h, int *big, int *cells)
+{
+    *w = *h = 1;
+    *big = -1;
+    *cells = 0;
+    for (int f = 0; f < 6; f++) {
+        FaceCells c;
+        if (!(faces & (1u << f)) || !FaceGridCells(b, f, rho, &c)) continue;
+        *w = c.w > *w ? c.w : *w;
+        *h = c.h > *h ? c.h : *h;
+        int most = c.w > c.h ? c.w : c.h;
+        if (most > DRAW_RECT_MAX && most > *cells) { *big = f; *cells = most; }
+    }
+    return *big < 0;
+}
+
+// The largest of a model instance's three scales (docs/painting.md 17.5: the unwrap's texels per unit)
+static float InstanceScale(int model)
+{
+    Vector3 s = scene->models[model].scale;
+    float k = fmaxf(fabsf(s.x), fmaxf(fabsf(s.y), fabsf(s.z)));
+    return k > 0.0f ? k : 1.0f;
+}
+
+// A model slot in this instance: its world area *A, and the share *a of the 0..1 paint domain its
+// triangles cover (0 while it has no paint UVs)
+static void SlotAreas(int model, int slot, double *A, double *a)
 {
     const MS_ModelInstance *M = &scene->models[model];
     int n = MS_ModelSlotTriangleCount(scene, M->file, slot);
-    double area = 0.0;
+    *A = *a = 0.0;
     for (int k = 0; k < n; k++) {
-        Vector2 uv[3];
+        Vector2 uv[3], puv[3];
         Vector3 p[3];
-        if (!MS_ModelSlotTriangle(scene, M->file, slot, k, uv, p) && !MS_ModelSlotPaintTriangle(scene, M->file, slot, k, uv, p)) continue;
+        bool paint = MS_ModelSlotPaintTriangle(scene, M->file, slot, k, puv, p);
+        if (!paint && !MS_ModelSlotTriangle(scene, M->file, slot, k, uv, p)) continue;
         for (int v = 0; v < 3; v++) p[v] = Vector3Transform(p[v], M->transform);
-        area += 0.5 * Vector3Length(Vector3CrossProduct(Vector3Subtract(p[1], p[0]), Vector3Subtract(p[2], p[0])));
+        *A += 0.5 * Vector3Length(Vector3CrossProduct(Vector3Subtract(p[1], p[0]), Vector3Subtract(p[2], p[0])));
+        if (paint)
+            *a += 0.5 * fabs((double)(puv[1].x - puv[0].x) * (puv[2].y - puv[0].y) -
+                             (double)(puv[1].y - puv[0].y) * (puv[2].x - puv[0].x));
     }
-    return area;
 }
 
-// A model slot's square: clamp(pow2ceil(rho * sqrt(A)), 16, 2048)
-static int SlotRectSide(float rho, int model, int slot)
+// The unwrap of model file `file` made this session (NULL: none)
+static const DrawUnwrap *SessionUnwrap(const DrawMode *dm, int file)
 {
-    return ClampI(Pow2Ceil(rho * (float)sqrt(SlotArea(model, slot))), DRAW_SLOT_MIN, DRAW_RECT_MAX);
+    for (int i = 0; file >= 0 && i < dm->unwrapCount; i++)
+        if (strcmp(dm->unwraps[i].modelPath, scene->modelFiles[file].path) == 0) return &dm->unwraps[i];
+    return NULL;
+}
+
+// The texels per metre new paint on material m gets (docs/painting.md 17.7): its paint grid (m -1: a
+// model's own material, the map's), else the panel's density
+static float RhoOf(const DrawMode *dm, int m)
+{
+    float g = MS_PaintGridOf(scene, m);
+    return g > 0.0f ? g : dm->density;
+}
+
+#define UNWRAP_FILL 1.35f       // an unwrap's square over sqrt(its charts' area): xatlas packs ~55 %
+
+// The rectangle slot `slot` of model instance `model` drawn with material m gets (docs/painting.md
+// 17.4, 17.5) at rho texels per metre (the grid, else the density): the albedo texture's size when the
+// slot's own UVs carry it texel for texel (halved until both sides are at most 2048); else the square
+// of the file's unwrap made this session; else (others) the square another entry of the same file and
+// slot has; else ceil(rho sqrt(A / a)) (A the slot's world area here, a its share of the paint domain),
+// so the texels have the grid's size. *estimate: the slot still needs its unwrap (about UNWRAP_FILL x
+// rho sqrt(A) until it is made). Without a grid at most 2048 a side
+static void SlotSize(const DrawMode *dm, int model, int slot, int m, float rho, bool others, int *w, int *h, bool *estimate)
+{
+    const MS_ModelInstance *M = &scene->models[model];
+    bool grid = MS_PaintGridOf(scene, m) > 0.0f;
+    *estimate = false;
+    if (MS_PaintSlotTexels(scene, m, M->file, slot, w, h)) {
+        while (*w > DRAW_RECT_MAX || *h > DRAW_RECT_MAX) {
+            *w = (*w + 1) / 2;
+            *h = (*h + 1) / 2;
+        }
+        return;
+    }
+    const DrawUnwrap *u = SessionUnwrap(dm, M->file);
+    if (u && slot < u->sideCount && u->sides[slot] > 0) {
+        // (the file's unwrap was made for the slot painted first: another slot of it can need more
+        // than 2048 at that texel size; without a grid it is clamped like any rectangle, on a grid
+        // Resolve refuses it with code 9)
+        *w = *h = u->sides[slot];
+        if (!grid && *w > DRAW_RECT_MAX) *w = *h = DRAW_RECT_MAX;
+        return;
+    }
+    int n = others ? MS_PaintEntryCount(scene) : 0;
+    for (int i = 0; i < n; i++) {
+        const MS_PaintEntry *e = MS_PaintEntryAt(scene, i);
+        if (e->obj.kind != MS_OBJ_MODEL || e->obj.index < 0 || e->obj.index >= scene->modelCount || e->slot != slot ||
+            scene->models[e->obj.index].file != M->file)
+            continue;
+        *w = e->w;
+        *h = e->h;
+        return;
+    }
+    double A, a;
+    SlotAreas(model, slot, &A, &a);
+    double side;
+    if (MS_ModelPaintUv(scene, M->file, slot) == MS_PAINTUV_NEEDS_UNWRAP || a <= 0.0) {
+        *estimate = MS_ModelPaintUv(scene, M->file, slot) == MS_PAINTUV_NEEDS_UNWRAP;
+        side = UNWRAP_FILL * rho * sqrt(A);
+    } else side = rho * sqrt(A / a);
+    *w = *h = (int)fmin(ceil(side - 1e-4), 1e9);
+    if (*w < 1) *w = *h = 1;
+    if (!grid && *w > DRAW_RECT_MAX) *w = *h = DRAW_RECT_MAX;
+}
+
+// A first stroke's rectangle (SlotSize, a rectangle the file's slot has elsewhere counts)
+static void SlotNewSize(const DrawMode *dm, int model, int slot, int m, float rho, int *w, int *h, bool *estimate)
+{
+    SlotSize(dm, model, slot, m, rho, true, w, h, estimate);
+}
+
+// Fit to grid / Resize to density on a model slot (SlotSize at the material's grid or the density)
+static void SlotFitSize(const DrawMode *dm, int model, int slot, int m, int *w, int *h, bool *estimate)
+{
+    SlotSize(dm, model, slot, m, RhoOf(dm, m), false, w, h, estimate);
 }
 
 // Whether material m's shader can take the paint stage (docs/painting.md 3.4): at most 2 samplers,
@@ -1132,6 +1258,21 @@ static bool HitPaintUv(const MS_SurfaceHit *h, Vector2 *uv)
     return true;
 }
 
+// An inactive entry of box hit h (its index) whose rectangle is smaller than the cells of the face
+// on the material's grid (docs/painting.md 17.2: the runtime's PAINT_GRID_CELLS; the box grew, or the
+// rectangle was made before the grid): Fit to grid gives it its cells. -1: none
+static int GridTooSmall(const MS_SurfaceHit *h, int inactive)
+{
+    float rho = MS_PaintGridOf(scene, h->material);
+    if (inactive < 0 || !HitIsBox(h) || rho <= 0.0f) return -1;
+    const MS_PaintEntry *E = MS_PaintEntryAt(scene, inactive);
+    for (int f = 0; f < 6; f++) {
+        FaceCells c;
+        if ((E->faces & (1u << f)) && FaceGridCells(h->hit.obj.index, f, rho, &c) && (c.w > E->w || c.h > E->h)) return inactive;
+    }
+    return -1;
+}
+
 // What paint at h goes into, or why it can't be painted (docs/painting.md 3.4); *g its rectangle.
 // Runs every frame (the hover, the panel's target), so it says why with a code, and RefusalPrint
 // words it. Returns:
@@ -1139,7 +1280,9 @@ static bool HitPaintUv(const MS_SurfaceHit *h, Vector2 *uv)
 //   1  nothing there (no text)
 //   2  a light; 3 nothing to paint here; 4 the map changed under the hit; 5 the material's shader
 //      can't take the paint stage; 6 a skinned model; 7 a model slot that can't be painted; 8 its
-//      paint entry is inactive
+//      paint entry is inactive; 9 a new rectangle on the grid would pass 2048 texels a side (17.7);
+//      10 its paint entry is inactive because its rectangle is smaller than the face's cells of the
+//      grid (Fit to grid gives it them; *g has the entry, its grid and mapping)
 static unsigned char Resolve(DrawMode *dm, const MS_SurfaceHit *h, DrawGeom *g)
 {
     memset(g, 0, sizeof(*g));
@@ -1152,6 +1295,7 @@ static unsigned char Resolve(DrawMode *dm, const MS_SurfaceHit *h, DrawGeom *g)
     if (!HitIsBox(h) && !HitIsModel(h)) return 3;
     int m = h->material;
     if (m >= scene->materialCount) return 4;
+    g->grid = MS_PaintGridOf(scene, m);
     if (m >= 0 && !ShaderTakesPaint(dm, m)) return 5;
     int file = -1;
     if (HitIsModel(h)) {
@@ -1164,12 +1308,13 @@ static unsigned char Resolve(DrawMode *dm, const MS_SurfaceHit *h, DrawGeom *g)
     }
     int inactive;
     int e = EntryFor(h->hit.obj, m, h->face, h->slot, &inactive);
-    if (e < 0 && inactive >= 0) return 8;
+    int small = e < 0 ? GridTooSmall(h, inactive) : -1;
+    if (e < 0 && inactive >= 0 && small < 0) return 8;
     AtlasRelOf(m, file, h->slot, &g->atlasW, &g->atlasH, &g->nearest);
     const char *rel = AtlasRelOf(m, file, h->slot, NULL, NULL, NULL);
     if (!rel || (m < 0 && g->atlasW <= 0)) g->nearest = dm->pixelLook;      // (no atlas yet: the pixel look switch)
-    if (e >= 0) {
-        const MS_PaintEntry *E = MS_PaintEntryAt(scene, e);
+    if (e >= 0 || small >= 0) {
+        const MS_PaintEntry *E = MS_PaintEntryAt(scene, e >= 0 ? e : small);
         g->entry = e;
         g->x = E->x;
         g->y = E->y;
@@ -1180,10 +1325,31 @@ static unsigned char Resolve(DrawMode *dm, const MS_SurfaceHit *h, DrawGeom *g)
         g->fresh = true;
         if (HitIsBox(h)) {
             g->faces = (unsigned char)(1u << h->face);
-            BoxRectSize(dm->density, h->hit.obj.index, g->faces, &g->w, &g->h);
-        } else g->w = g->h = SlotRectSide(dm->density, h->hit.obj.index, h->slot);
+            if (g->grid > 0.0f) {
+                int big, cells;
+                if (!BoxGroupCells(h->hit.obj.index, g->faces, g->grid, &g->w, &g->h, &big, &cells)) return 9;
+            } else BoxRectSize(dm->density, h->hit.obj.index, g->faces, &g->w, &g->h);
+        } else {
+            SlotNewSize(dm, h->hit.obj.index, h->slot, m, RhoOf(dm, m), &g->w, &g->h, &g->estimate);
+            if (g->grid > 0.0f && !g->estimate && (g->w > DRAW_RECT_MAX || g->h > DRAW_RECT_MAX)) return 9;
+        }
+    }
+    // The mapping of the surface onto the rectangle's texels (a box face on a grid: its cells, 17.2)
+    g->u1 = (float)g->w;
+    g->v1 = (float)g->h;
+    g->cellsW = g->w;
+    g->cellsH = g->h;
+    FaceCells c;
+    if (HitIsBox(h) && g->grid > 0.0f && FaceGridCells(h->hit.obj.index, h->face, g->grid, &c)) {
+        g->u0 = c.u0;
+        g->u1 = c.u1;
+        g->v0 = c.v0;
+        g->v1 = c.v1;
+        g->cellsW = c.w < g->w ? c.w : g->w;
+        g->cellsH = c.h < g->h ? c.h : g->h;
     }
     if (!HitPaintUv(h, &g->uv)) g->uv = (Vector2){ -1.0f, -1.0f };
+    if (small >= 0) return 10;
     g->ok = true;
     return 0;
 }
@@ -1192,9 +1358,9 @@ static unsigned char Resolve(DrawMode *dm, const MS_SurfaceHit *h, DrawGeom *g)
 // "" for 0 and 1. Right after Resolve (the scene as it saw it)
 static int RefusalPrint(char *out, size_t size, unsigned char code, const MS_SurfaceHit *h)
 {
-    const char *name = code == 6 || code == 7 ? GetFileName(scene->modelFiles[scene->models[h->hit.obj.index].file].path) : "";
+    const char *name = code == 6 || code == 7 || (code == 9 && HitIsModel(h)) ? GetFileName(scene->modelFiles[scene->models[h->hit.obj.index].file].path) : "";
     int inactive = -1;
-    if (code == 8) EntryFor(h->hit.obj, h->material, h->face, h->slot, &inactive);
+    if (code == 8 || code == 10) EntryFor(h->hit.obj, h->material, h->face, h->slot, &inactive);
     switch (code) {
     case 2: return snprintf(out, size, "a light: nothing to paint");
     case 3: return snprintf(out, size, "nothing to paint here");
@@ -1205,6 +1371,24 @@ static int RefusalPrint(char *out, size_t size, unsigned char code, const MS_Sur
     case 7: return snprintf(out, size, "%s slot %d can't be painted", name, h->slot);
     case 8: return snprintf(out, size, "its paint entry (map line %d) is inactive (see the log): fix or remove that line",
                             inactive >= 0 ? MS_PaintEntryAt(scene, inactive)->line : 0);
+    case 9: {
+        float rho = MS_PaintGridOf(scene, h->material);
+        if (HitIsBox(h)) {
+            int w, hh, big, cells;
+            BoxGroupCells(h->hit.obj.index, (unsigned char)(1u << h->face), rho, &w, &hh, &big, &cells);
+            return snprintf(out, size, "face %s covers %d texels of the grid (%g/m); the most is %d", FACE_NAMES[big >= 0 ? big : h->face],
+                            cells, (double)rho, DRAW_RECT_MAX);
+        }
+        return snprintf(out, size, "%s slot %d needs more than %d texels a side on the grid (%g/m)", name, h->slot, DRAW_RECT_MAX,
+                        (double)rho);
+    }
+    case 10: {
+        const MS_PaintEntry *E = inactive >= 0 ? MS_PaintEntryAt(scene, inactive) : NULL;
+        FaceCells c = { 0 };
+        if (HitIsBox(h)) FaceGridCells(h->hit.obj.index, h->face, MS_PaintGridOf(scene, h->material), &c);
+        return snprintf(out, size, "its paint (map line %d, %dx%d) is smaller than the face's %dx%d cells of the grid: Fit to grid",
+                        E ? E->line : 0, E ? E->w : 0, E ? E->h : 0, c.w, c.h);
+    }
     default: return snprintf(out, size, "%s", "");
     }
 }
@@ -1232,12 +1416,26 @@ static void ProvideUnwrap(const DrawUnwrap *u)
         if (strcmp(scene->modelFiles[f].path, u->modelPath) == 0) MS_PaintUnwrapProvide(scene, f, &u->u);
 }
 
-// Model file `file` gets its paint unwrap (xatlas, at the slot's rectangle size: texelsHint) when a
-// slot needs one: made, kept, provided (the next live edit uses it). Returns 0 done (or not needed);
-// 1 not made, why in MS_LastError() (no licence row: the sidecar derives from the model's; a
-// degenerate file; out of memory)
-static unsigned char EnsureUnwrap(DrawMode *dm, int file, int slot, int texels)
+static void FreeUnwrapOf(DrawUnwrap *u)
 {
+    free(u->modelPath);
+    free(u->sides);
+    MS_PaintUnwrapFree(&u->u);
+    memset(u, 0, sizeof(*u));
+}
+
+#define UNWRAP_TRIES 3          // unwraps of a file without a grid while its slot's square passes 2048
+
+// Model file `file` gets its paint unwrap (docs/painting.md 17.5) when slot `slot` (of instance
+// `model`, drawn with material m) needs one: xatlas at a fixed texel size, rho (the grid's texels per
+// metre, else the panel's density) times the instance's largest scale per model unit; made, kept with
+// each slot's square, provided (the next live edit uses it). Without a grid a square larger than 2048
+// is made again at a lower density (the free density's clamp); on a grid it is refused. Returns 0 done
+// (or not needed); 1 not made, why in MS_LastError() (no licence row: the sidecar derives from the
+// model's; a degenerate file; too large for the grid; out of memory)
+static unsigned char EnsureUnwrap(DrawMode *dm, int model, int slot, int m)
+{
+    int file = scene->models[model].file;
     if (MS_ModelPaintUv(scene, file, slot) != MS_PAINTUV_NEEDS_UNWRAP) return 0;
     const char *path = scene->modelFiles[file].path;
     for (int i = 0; i < dm->unwrapCount; i++)
@@ -1245,23 +1443,49 @@ static unsigned char EnsureUnwrap(DrawMode *dm, int file, int slot, int texels)
     char *row = AssetsRow(path);
     if (!row) { MS_SetError("%s has no licence row in ASSETS.md (its paint unwrap derives from it)", path); return 1; }
     free(row);
+    bool grid = MS_PaintGridOf(scene, m) > 0.0f;
+    float scale = InstanceScale(model), rho = RhoOf(dm, m), tpu = rho * scale;
+    int count = scene->modelFiles[file].model.materialCount > slot ? scene->modelFiles[file].model.materialCount : slot + 1;
     DrawUnwrap u = { 0 };
+    u.sides = malloc(sizeof(int) * (size_t)(count > 0 ? count : 1));
+    u.sideCount = count;
+    if (!u.sides) { MS_SetError("out of memory"); return 1; }
     double t0 = GetTime();
-    if (!PaintUnwrapModelFile(scene, file, texels, &u.u)) {
-        MS_SetError("%s can't be unwrapped for paint: %s", path, MS_LastError());     // (MS_SetError may quote the last error)
-        return 1;
+    for (int t = 0;; t++) {
+        if (!PaintUnwrapModelFileAt(scene, file, tpu, &u.u, u.sides, u.sideCount)) {
+            MS_SetError("%s can't be unwrapped for paint: %s", path, MS_LastError());     // (MS_SetError may quote the last error)
+            FreeUnwrapOf(&u);
+            return 1;
+        }
+        int side = u.sides[slot];
+        if (side <= DRAW_RECT_MAX) break;
+        MS_PaintUnwrapFree(&u.u);
+        if (grid) {
+            MS_SetError("%s slot %d needs a %dx%d rectangle at the grid's %g texels/m (scale %g); the most is %d", path, slot, side, side,
+                        (double)rho, (double)scale, DRAW_RECT_MAX);
+            FreeUnwrapOf(&u);
+            return 1;
+        }
+        if (t + 1 >= UNWRAP_TRIES) {
+            MS_SetError("%s slot %d needs more than %d texels a side: lower the density", path, slot, DRAW_RECT_MAX);
+            FreeUnwrapOf(&u);
+            return 1;
+        }
+        tpu *= 0.98f * DRAW_RECT_MAX / side;
     }
+    u.texelsPerUnit = tpu;
+    u.scale = scale;
     u.modelPath = MS_StrDup(path);
     DrawUnwrap *slotU = u.modelPath ? MS_PUSH(dm->unwraps, dm->unwrapCount, dm->unwrapCap) : NULL;
     if (!slotU) {
-        free(u.modelPath);
-        MS_PaintUnwrapFree(&u.u);
+        FreeUnwrapOf(&u);
         MS_SetError("out of memory");
         return 1;
     }
     *slotU = u;
     ProvideUnwrap(slotU);
-    TraceLog(LOG_INFO, "monolith: draw: unwrapped %s for paint in %.0f ms (%d texels)", path, (GetTime() - t0) * 1000.0, texels);
+    TraceLog(LOG_INFO, "monolith: draw: unwrapped %s for paint in %.0f ms (%.3g texels per unit, slot %d: %d texels a side)", path,
+             (GetTime() - t0) * 1000.0, (double)tpu, slot, u.sides[slot]);
     return 0;
 }
 
@@ -1307,8 +1531,8 @@ static unsigned char AddRect(DrawMode *dm, PaintStep *p, bool *pushed, MS_ObjRef
     Atlas *a = &dm->atlases[p->atlas];
     int x, y, W, H;
     if (!AllocRect(a->rel, a->img.width, a->img.height, w, h, exclude, &x, &y, &W, &H)) {
-        MS_SetError("the paint atlas of %s is full at %dx%d: lower the density", a->material ? a->material : a->rel,
-                    DRAW_ATLAS_MAX, DRAW_ATLAS_MAX);
+        MS_SetError("the paint atlas of %s is full at %dx%d%s", a->material ? a->material : a->rel, DRAW_ATLAS_MAX, DRAW_ATLAS_MAX,
+                    MS_PaintGridOf(scene, m) > 0.0f ? "" : ": lower the density");
         if (!*pushed) ReleaseStep(dm, p);
         return 1;
     }
@@ -1414,10 +1638,18 @@ static bool StrokeSample(DrawMode *dm, const MS_SurfaceHit *h, Sample *s)
     if (model ? h->slot != dm->strokeSlot : !HitIsBox(h)) return false;
     PaintStep *p = dm->stroke;
     int e = EntryFor(h->hit.obj, h->material, h->face, h->slot, NULL);
+    float rho = MS_PaintGridOf(scene, h->material);
     if (e < 0) {
+        // (a new rectangle: a box face's cells on a grid, else at the density; a model slot's 17.4 / 17.5)
         int w, hh, x, y;
-        if (model) w = hh = SlotRectSide(dm->density, h->hit.obj.index, h->slot);
-        else BoxRectSize(dm->density, h->hit.obj.index, (unsigned char)(1u << h->face), &w, &hh);
+        DrawGeom g;
+        unsigned char refused = Resolve(dm, h, &g);
+        if (refused != 0) {     // (a face the stroke went onto that can't take paint: skipped, said)
+            if (refused >= 2) SayRefusal(dm, refused, h, "nothing to paint here");
+            return false;
+        }
+        w = g.w;
+        hh = g.h;
         if (AddRect(dm, p, &dm->strokePushed, h->hit.obj, h->material, model ? 0 : (unsigned char)(1u << h->face), h->slot, w, hh, -1,
                     EDIT_PAINT_ADD, &x, &y) != 0) {     // (not added: why in the last error)
             Sayf(dm, true, "%s", MS_LastError());
@@ -1434,6 +1666,14 @@ static bool StrokeSample(DrawMode *dm, const MS_SurfaceHit *h, Sample *s)
     Vector2 uv;
     if (!HitPaintUv(h, &uv)) return false;
     PaintRegion r = { E->x, E->y, E->w, E->h, -1, -1, -1 };
+    // A box face on a grid: its cells (the texels it shows: the rectangle's lower-left part, 17.3), and
+    // the hit's texel from its first cell (17.6); else the face's 0..1 over the whole rectangle
+    FaceCells fc;
+    bool grid = !model && rho > 0.0f && FaceGridCells(h->hit.obj.index, h->face, rho, &fc);
+    if (grid) {
+        r.w = fc.w < E->w ? fc.w : E->w;
+        r.h = fc.h < E->h ? fc.h : E->h;
+    }
     if (model) {
         int file = scene->models[h->hit.obj.index].file;
         const DrawIslands *I = IslandsFor(dm, file, h->slot, E->w, E->h);
@@ -1444,8 +1684,13 @@ static bool StrokeSample(DrawMode *dm, const MS_SurfaceHit *h, Sample *s)
         if (r.island < 0) return false;
     }
     s->region = RegionIndex(p, r);
-    s->tx = E->x + Clamp01(uv.x) * E->w;
-    s->ty = E->y + Clamp01(uv.y) * E->h;
+    if (grid) {
+        s->tx = E->x + fc.u0 + Clamp01(uv.x) * (fc.u1 - fc.u0);
+        s->ty = E->y + fc.v0 + Clamp01(uv.y) * (fc.v1 - fc.v0);
+    } else {
+        s->tx = E->x + Clamp01(uv.x) * E->w;
+        s->ty = E->y + Clamp01(uv.y) * E->h;
+    }
     s->joined = false;
     return s->region >= 0;
 }
@@ -1510,7 +1755,7 @@ static bool StrokeBegin(DrawMode *dm, EditMode *em, const MS_SurfaceHit *h)
     if (!em->ed.work && !MapEditBegin(&em->ed)) { SayStatic(dm, true, "this map can't be painted (a compiled map?): load its .map"); return false; }
     bool model = HitIsModel(h);
     int file = model ? scene->models[h->hit.obj.index].file : -1;
-    if (g.needsUnwrap && EnsureUnwrap(dm, file, h->slot, g.w) != 0) { Sayf(dm, true, "%s", MS_LastError()); return false; }
+    if (g.needsUnwrap && EnsureUnwrap(dm, h->hit.obj.index, h->slot, h->material) != 0) { Sayf(dm, true, "%s", MS_LastError()); return false; }
     int m = h->material;
     char rel[MS_PATH_MAX];
     const char *have = AtlasRelOf(m, file, h->slot, NULL, NULL, NULL);
@@ -1981,17 +2226,70 @@ static DrawModeResult EditStepEnd(DrawMode *dm, PaintStep *p, bool pushed, const
     return DRAWMODE_RELOADED;
 }
 
-// The surface a panel action acts on: a box or a model slot with paint (its entry, active)
-static bool ActionEntry(DrawMode *dm, const MS_SurfaceHit *h, const char *what, int *entry)
+// The surface a panel action acts on: a box or a model slot with paint (its entry, active; small:
+// also an inactive one whose rectangle is smaller than its face's cells of the grid, Resolve's 10)
+static bool ActionEntry(DrawMode *dm, const MS_SurfaceHit *h, const char *what, int *entry, bool small)
 {
     if (!HitIsBox(h) && !HitIsModel(h)) {
         Sayf(dm, true, "%s: point at a painted box or model first (the panel acts on the surface the cursor rests on)", what);
         return false;
     }
     if (!dm->em->ed.work && !MapEditBegin(&dm->em->ed)) { SayStatic(dm, true, "this map can't be painted (a compiled map?)"); return false; }
-    *entry = EntryFor(h->hit.obj, h->material, h->face, h->slot, NULL);
+    int inactive;
+    *entry = EntryFor(h->hit.obj, h->material, h->face, h->slot, &inactive);
+    if (*entry < 0 && small) *entry = GridTooSmall(h, inactive);
     if (*entry < 0) { Sayf(dm, true, "%s: %s has no paint yet: paint it first", what, HitIsBox(h) ? "this face" : "this slot"); return false; }
     return true;
+}
+
+// How MoveEntry carries the old paint over
+typedef enum { MOVE_TEXELS = 0, MOVE_NEAREST, MOVE_BILINEAR } MoveMode;
+
+// The entry of object obj that holds `faces` (or `slot`) in material m, with the rectangle o (ox oy
+// ow oh) of step p's atlas, gets a new rectangle w x h (EDIT_PAINT_SET; exclude: its index, so its
+// old room may be reused): its paint copied texel for texel into the new one's lower-left corner
+// (MOVE_TEXELS: a box face on a grid shows its texels from its first cell, so the surface doesn't
+// change where the rectangle still covers it) or resampled onto it, the old rectangle cleared. *rx
+// *ry where it went. Returns 0 done; 1 not, why in MS_LastError() (when the step wasn't pushed it is
+// released then)
+static unsigned char MoveEntry(DrawMode *dm, PaintStep *p, bool *pushed, MS_ObjRef obj, int m, unsigned char faces, int slot,
+                               int exclude, int ox, int oy, int ow, int oh, int w, int h, MoveMode mode, int *rx, int *ry)
+{
+    Atlas *a = &dm->atlases[p->atlas];
+    // The old paint, before anything moves
+    Image old = NewImage(ow, oh);
+    if (!old.data) {
+        MS_SetError("out of memory");
+        if (!*pushed) ReleaseStep(dm, p);
+        return 1;
+    }
+    for (int y = 0; y < oh; y++)
+        memcpy((unsigned char *)old.data + (size_t)y * ow * 4, (const unsigned char *)a->img.data + ((size_t)(oy + y) * a->img.width + ox) * 4,
+               (size_t)ow * 4);
+    if (AddRect(dm, p, pushed, obj, m, faces, slot, w, h, exclude, EDIT_PAINT_SET, rx, ry) != 0) {     // (not added: why)
+        FreeImage(&old);
+        return 1;
+    }
+    a = &dm->atlases[p->atlas];
+    // (the old rectangle cleared, but where the new one lies: it was cleared already, and is drawn next)
+    ClearRect(a, p, ox, oy, ow, oh);
+    for (int ty = 0; ty < h; ty++)
+        for (int tx = 0; tx < w; tx++) {
+            unsigned char px[4] = { 0, 0, 0, 0 };
+            if (mode == MOVE_TEXELS) {
+                if (tx >= ow || ty >= oh) continue;
+                memcpy(px, (const unsigned char *)old.data + ((size_t)ty * ow + tx) * 4, 4);
+            } else if (mode == MOVE_NEAREST) memcpy(px, (const unsigned char *)old.data + ((size_t)(ty * oh / h) * ow + tx * ow / w) * 4, 4);
+            else {
+                float s[4];
+                SampleRect(&old, 0, 0, ow, oh, (tx + 0.5f) / w, (ty + 0.5f) / h, s);
+                for (int c = 0; c < 4; c++) px[c] = (unsigned char)ClampI((int)lroundf(s[c]), 0, 255);
+                if (px[3] == 0) px[0] = px[1] = px[2] = 0;
+            }
+            SetTexel(a, p, *rx + tx, *ry + ty, px);
+        }
+    FreeImage(&old);
+    return 0;
 }
 
 // The face groups of box hit h in its material (DrawTarget.groups): faces in one entry share a
@@ -2047,10 +2345,20 @@ static DrawModeResult ActFaces(DrawMode *dm, const MS_SurfaceHit *h, const unsig
     Atlas *a = &dm->atlases[p->atlas];
     bool pushed = false, ok = true;
     char *why = NULL;       // (a failed op's reason, kept from the last error: heap, NULL when out of memory)
+    float rho = MS_PaintGridOf(scene, h->material);
     for (int n = 0; n < 6 && ok; n++) {
         unsigned char G = 0;
         for (int f = 0; f < 6; f++) if (g[f] == n) G |= (unsigned char)(1u << f);
         if (!G) continue;
+        // On a grid the group's rectangle is its cells (17.3: per axis its largest face's)
+        int cw = 0, ch = 0, big, cells;
+        if (rho > 0.0f && !BoxGroupCells(h->hit.obj.index, G, rho, &cw, &ch, &big, &cells)) {
+            MS_SetError("faces: face %s covers %d texels of the grid (%g/m); the most is %d", FACE_NAMES[big], cells, (double)rho,
+                        DRAW_RECT_MAX);
+            why = MS_StrDup(MS_LastError());
+            ok = false;
+            break;      // (the step, not pushed by an earlier group, is released by EditStepEnd)
+        }
         // the entry that holds most of the group (not kept by an earlier group), and where its paint is
         int best = -1, bestCount = 0, src = -1, srcCount = 0;
         for (int s = 0; s < snapCount; s++) {
@@ -2063,6 +2371,7 @@ static DrawModeResult ActFaces(DrawMode *dm, const MS_SurfaceHit *h, const unsig
         if (best >= 0) {
             snaps[best].kept = true;
             if (snaps[best].faces == G) continue;
+            Snap *B = &snaps[best];
             EditOp op = { .kind = EDIT_PAINT_SET };
             op.paint.material = scene->materials[h->material].name;
             op.paint.faces = G;
@@ -2073,13 +2382,25 @@ static DrawModeResult ActFaces(DrawMode *dm, const MS_SurfaceHit *h, const unsig
             op.paint.rect[2] = snaps[best].w;
             op.paint.rect[3] = snaps[best].h;
             ok = PushOp(dm, p, &pushed, h->hit.obj, &op, "faces") == 0;     // (0: pushed / amended)
+            // (on a grid, a group that now covers more cells than its rectangle grows to them, its
+            // paint moved texel for texel: what its faces showed stays)
+            if (ok && rho > 0.0f && (B->w < cw || B->h < ch)) {
+                int first = 0, inactive, x, y;
+                while (!(G & (1u << first))) first++;
+                int e = EntryFor(h->hit.obj, h->material, first, -1, &inactive);
+                ok = MoveEntry(dm, p, &pushed, h->hit.obj, h->material, G, -1, e >= 0 ? e : inactive, B->x, B->y, B->w, B->h,
+                               B->w > cw ? B->w : cw, B->h > ch ? B->h : ch, MOVE_TEXELS, &x, &y) == 0;     // (0: moved)
+                if (ok) *B = (Snap){ x, y, B->w > cw ? B->w : cw, B->h > ch ? B->h : ch, G, true };
+            }
         } else {
-            // a split: a new rectangle of the source's size with a copy of its paint
+            // a split: a new rectangle of the source's size (on a grid: the group's cells) with a copy of
+            // its paint (texel for texel, the source's lower-left part)
             int x, y;
             const Snap *S = &snaps[src];
-            ok = AddRect(dm, p, &pushed, h->hit.obj, h->material, G, -1, S->w, S->h, -1, EDIT_PAINT_ADD, &x, &y) == 0;     // (0: added)
-            for (int ty = 0; ok && ty < S->h; ty++)
-                for (int tx = 0; tx < S->w; tx++) {
+            int w = rho > 0.0f ? cw : S->w, hh = rho > 0.0f ? ch : S->h;
+            ok = AddRect(dm, p, &pushed, h->hit.obj, h->material, G, -1, w, hh, -1, EDIT_PAINT_ADD, &x, &y) == 0;     // (0: added)
+            for (int ty = 0; ok && ty < S->h && ty < hh; ty++)
+                for (int tx = 0; tx < S->w && tx < w; tx++) {
                     unsigned char px[4];
                     memcpy(px, (const unsigned char *)a->img.data + ((size_t)(S->y + ty) * a->img.width + S->x + tx) * 4, 4);
                     SetTexel(a, p, x + tx, y + ty, px);
@@ -2111,63 +2432,77 @@ static DrawModeResult ActFaces(DrawMode *dm, const MS_SurfaceHit *h, const unsig
     return EditStepEnd(dm, p, pushed, ok ? TextFormat("faces: groups %s", gt) : NULL);
 }
 
-// Resize to density: the entry gets a rectangle of the size the density gives, its paint resampled
-// into it (nearest with paint_filter nearest, else bilinear), the old one cleared
+#define FIT_SAME_CELLS 1        // Fit to grid moves paint texel for texel when the rectangle differs from
+                                // its cells by at most this many texels along each axis (a box moved by
+                                // a fraction of a texel covers one cell more or less); else it resamples
+
+// Resize to density (docs/painting.md 5.3): the entry gets a rectangle of the size the density gives,
+// its paint resampled into it (nearest with paint_filter nearest, else bilinear), the old one cleared.
+// On a material with a paint grid it is Fit to grid (17.7): the rectangle becomes the cells (a box
+// face group: its largest face's per axis; a model slot: 17.4 / 17.5), the paint moved texel for
+// texel when the old rectangle was on the grid (its size within one texel of the cells: the box was
+// moved since; the faces show the same texels where they still cover them), else resampled
+// nearest (a rectangle made at a density before the grid; a model slot, whose paint domain spans the
+// whole rectangle)
 static DrawModeResult ActResize(DrawMode *dm, const MS_SurfaceHit *h)
 {
+    float rho = MS_PaintGridOf(scene, h->material);
+    const char *what = rho > 0.0f ? "fit to grid" : "resize";
     int entry;
-    if (!ActionEntry(dm, h, "resize", &entry)) return DRAWMODE_NONE;
+    if (!ActionEntry(dm, h, what, &entry, rho > 0.0f)) return DRAWMODE_NONE;
     MS_PaintEntry E = *MS_PaintEntryAt(scene, entry);
     bool model = HitIsModel(h);
     int file = model ? scene->models[h->hit.obj.index].file : -1;
-    int w, hh;
-    if (model) w = hh = SlotRectSide(dm->density, h->hit.obj.index, h->slot);
-    else BoxRectSize(dm->density, h->hit.obj.index, E.faces, &w, &hh);
-    if (w == E.w && hh == E.h) {
-        Sayf(dm, false, "resize: the rectangle is %dx%d already at %g texels/m", w, hh, dm->density);
-        return DRAWMODE_NONE;
-    }
-    PaintStep *p = EditStepOn(dm, h->material, file, h->slot, "resize");
-    if (!p) return DRAWMODE_NONE;
-    Atlas *a = &dm->atlases[p->atlas];
     bool nearest;
     AtlasRelOf(h->material, file, h->slot, NULL, NULL, &nearest);
-    // The old paint, before anything moves
-    Image old = NewImage(E.w, E.h);
-    if (!old.data) { ReleaseStep(dm, p); SayStatic(dm, true, "out of memory"); return DRAWMODE_NONE; }
-    for (int y = 0; y < E.h; y++)
-        memcpy((unsigned char *)old.data + (size_t)y * E.w * 4, (const unsigned char *)a->img.data + ((size_t)(E.y + y) * a->img.width + E.x) * 4,
-               (size_t)E.w * 4);
+    int w, hh;
+    MoveMode mode = nearest ? MOVE_NEAREST : MOVE_BILINEAR;
+    if (model) {
+        bool estimate;
+        SlotFitSize(dm, h->hit.obj.index, h->slot, h->material, &w, &hh, &estimate);
+        if (rho > 0.0f) mode = MOVE_NEAREST;
+        if (rho > 0.0f && (w > DRAW_RECT_MAX || hh > DRAW_RECT_MAX)) {
+            Sayf(dm, true, "%s: slot %d needs %dx%d texels of the grid (%g/m); the most is %d", what, h->slot, w, hh, (double)rho, DRAW_RECT_MAX);
+            return DRAWMODE_NONE;
+        }
+    } else if (rho > 0.0f) {
+        int big, cells;
+        if (!BoxGroupCells(h->hit.obj.index, E.faces, rho, &w, &hh, &big, &cells)) {
+            Sayf(dm, true, "%s: face %s covers %d texels of the grid (%g/m); the most is %d", what, FACE_NAMES[big], cells, (double)rho,
+                 DRAW_RECT_MAX);
+            return DRAWMODE_NONE;
+        }
+        // (texel for texel when its texels already have about the grid's size: a rectangle made on the
+        // grid whose box moved or was resized since; else, made at a density before the grid, resampled)
+        // (a ratio rule, "within a quarter", moved paint made at 16..26 texels/m before a 20/m grid
+        // texel for texel: its layout distorted or texels dropped; the verification of 2026-11-21)
+        mode = abs(E.w - w) <= FIT_SAME_CELLS && abs(E.h - hh) <= FIT_SAME_CELLS ? MOVE_TEXELS : MOVE_NEAREST;
+    } else BoxRectSize(dm->density, h->hit.obj.index, E.faces, &w, &hh);
+    if (w == E.w && hh == E.h) {
+        if (rho > 0.0f) Sayf(dm, false, "fit to grid: the rectangle is %dx%d already, on the grid (%g texels/m)", w, hh, (double)rho);
+        else Sayf(dm, false, "resize: the rectangle is %dx%d already at %g texels/m", w, hh, (double)dm->density);
+        return DRAWMODE_NONE;
+    }
+    PaintStep *p = EditStepOn(dm, h->material, file, h->slot, what);
+    if (!p) return DRAWMODE_NONE;
     bool pushed = false;
-    int x, y;
-    bool ok = AddRect(dm, p, &pushed, h->hit.obj, h->material, model ? 0 : E.faces, h->slot, w, hh, entry, EDIT_PAINT_SET, &x, &y) == 0;
-    if (ok) {
-        a = &dm->atlases[p->atlas];
-        // (the old rectangle cleared, but where the new one lies: it was cleared already, and is drawn next)
-        ClearRect(a, p, E.x, E.y, E.w, E.h);
-        for (int ty = 0; ty < hh; ty++)
-            for (int tx = 0; tx < w; tx++) {
-                unsigned char px[4];
-                if (nearest) memcpy(px, (const unsigned char *)old.data + ((size_t)(ty * E.h / hh) * E.w + tx * E.w / w) * 4, 4);
-                else {
-                    float s[4];
-                    SampleRect(&old, 0, 0, E.w, E.h, (tx + 0.5f) / w, (ty + 0.5f) / hh, s);
-                    for (int c = 0; c < 4; c++) px[c] = (unsigned char)ClampI((int)lroundf(s[c]), 0, 255);
-                    if (px[3] == 0) px[0] = px[1] = px[2] = 0;
-                }
-                SetTexel(a, p, x + tx, y + ty, px);
-            }
-    } else Sayf(dm, true, "%s", MS_LastError());      // (not added: why)
-    FreeImage(&old);
+    int x = 0, y = 0;
+    bool ok = MoveEntry(dm, p, &pushed, h->hit.obj, h->material, model ? 0 : E.faces, h->slot, entry, E.x, E.y, E.w, E.h, w, hh, mode, &x,
+                        &y) == 0;       // (0: moved)
+    if (!ok) Sayf(dm, true, "%s", MS_LastError());      // (not moved: why)
     if (!pushed) return DRAWMODE_NONE;      // (the step was released)
-    return EditStepEnd(dm, p, pushed, ok ? TextFormat("resized the rectangle %dx%d -> %dx%d at %d %d", E.w, E.h, w, hh, x, y) : NULL);
+    static const char *const HOW[3] = { "moved texel for texel", "resampled nearest", "resampled" };
+    const char *said = !ok ? NULL
+                     : rho > 0.0f ? TextFormat("fit to grid: %dx%d -> %dx%d cells at %d %d (%s)", E.w, E.h, w, hh, x, y, HOW[mode])
+                     : TextFormat("resized the rectangle %dx%d -> %dx%d at %d %d", E.w, E.h, w, hh, x, y);
+    return EditStepEnd(dm, p, pushed, said);
 }
 
 // Clear paint: the entry goes (EDIT_PAINT_REMOVE), its rectangle becomes transparent
 static DrawModeResult ActClear(DrawMode *dm, const MS_SurfaceHit *h)
 {
     int entry;
-    if (!ActionEntry(dm, h, "clear", &entry)) return DRAWMODE_NONE;
+    if (!ActionEntry(dm, h, "clear", &entry, true)) return DRAWMODE_NONE;
     MS_PaintEntry E = *MS_PaintEntryAt(scene, entry);
     bool model = HitIsModel(h);
     int file = model ? scene->models[h->hit.obj.index].file : -1;
@@ -2245,7 +2580,9 @@ DrawModeResult DrawModePanelAction(DrawMode *dm, EditMode *em, int action, const
         SayStatic(dm, true, "point at a painted box or model first (the panel acts on the surface the cursor rests on)");
         return DRAWMODE_NONE;
     }
-    if (!dm->target.ok && dm->target.refusalCode >= 2) { Sayf(dm, true, "%s", MsgText(&dm->target.refusal)); return DRAWMODE_NONE; }     // (a refusal)
+    // (a refusal; an entry too small for its grid cells can still be fitted or cleared)
+    bool small = dm->target.refusalCode == 10 && (action == DRAW_ACT_RESIZE || action == DRAW_ACT_CLEAR);
+    if (!dm->target.ok && dm->target.refusalCode >= 2 && !small) { Sayf(dm, true, "%s", MsgText(&dm->target.refusal)); return DRAWMODE_NONE; }
     if (action == DRAW_ACT_RESIZE) return ActResize(dm, h);
     if (action == DRAW_ACT_FACES && faces) return ActFaces(dm, h, faces);
     if (action == DRAW_ACT_CLEAR) return ActClear(dm, h);
@@ -2364,6 +2701,8 @@ static DrawTextKey TextKeyOf(unsigned char code, const MS_SurfaceHit *h, bool ok
     if (g) {
         k.fresh = g->fresh;
         k.needsUnwrap = g->needsUnwrap;
+        k.estimate = g->estimate;
+        k.grid = g->grid;
         k.atlasW = g->atlasW;
         k.atlasH = g->atlasH;
         k.w = g->w;
@@ -2444,12 +2783,17 @@ static void TargetText(DrawMode *dm)
         T->faceKey = h->hit.obj.index * 1024 + (h->material & 1023);
         BoxGroups(h, T->groups, NULL);
     }
+    T->grid = T->geom.grid;
+    // (an entry to fit: an active one, or one too small for its cells; an unpainted face has none)
+    T->fitOk = T->grid > 0.0f && ((T->ok && h->paintEntry >= 0) || T->refusalCode == 10);
     DrawTextKey k = TextKeyOf(T->refusalCode, h, T->ok, &T->geom);
+    k.density = dm->density;
     if (memcmp(&k, &T->textKey, sizeof(k)) == 0) return;
     T->textKey = k;
     MsgSetStatic(&T->into, "");
     MsgSetStatic(&T->texel, "");
-    T->intoSet = T->texelSet = false;
+    MsgSetStatic(&T->gridLine, "");
+    T->intoSet = T->texelSet = T->gridLineSet = false;
     if (HitIsBox(h)) {
         const MS_Ref *r = MS_ObjectRef(scene, h->hit.obj);
         int e = MS_ObjectEntity(scene, h->hit.obj), first = e;
@@ -2468,15 +2812,34 @@ static void TargetText(DrawMode *dm)
         MsgSetStatic(&T->what, "point at a box or a model");
         return;
     }
-    if (!T->ok) return;
+    // The grid the paint follows (docs/painting.md 17.7), or the density it gets without one
     const DrawGeom *g = &T->geom;
+    if (T->ok || T->refusalCode == 10 || T->refusalCode == 9) {
+        if (g->grid > 0.0f && h->material >= 0)
+            MsgSetf(&T->gridLine, "follows the grid of %.120s: %g texels/m (%.1f cm)", scene->materials[h->material].name, (double)g->grid,
+                    100.0 / g->grid);
+        else if (g->grid > 0.0f) MsgSetf(&T->gridLine, "follows the map's grid: %g texels/m (%.1f cm)", (double)g->grid, 100.0 / g->grid);
+        else if (h->material >= 0)
+            MsgSetf(&T->gridLine, "%.120s has no paint grid: %g texels/m from the panel", scene->materials[h->material].name,
+                    (double)dm->density);
+        else MsgSetf(&T->gridLine, "the map has no paint grid: %g texels/m from the panel", (double)dm->density);
+        T->gridLineSet = true;
+    }
+    if (!T->ok) return;
     // (the atlas's name: "<material>'s atlas" / "the own atlas of <file> slot N", heap: it holds names)
     char *atlas = h->material >= 0 ? MonoStrf("%s's atlas", scene->materials[h->material].name)
                 : MonoStrf("the own atlas of %s slot %d", GetFileName(scene->modelFiles[scene->models[h->hit.obj.index].file].path), h->slot);
     const char *an = atlas ? atlas : "out of memory";
-    if (!g->fresh) MsgSetf(&T->into, "%s %d×%d: %d×%d at %d %d", an, g->atlasW, g->atlasH, g->w, g->h, g->x, g->y);
-    else if (g->atlasW > 0) MsgSetf(&T->into, "the first stroke adds %d×%d to %.120s (%d×%d)", g->w, g->h, an, g->atlasW, g->atlasH);
-    else MsgSetf(&T->into, "the first stroke makes %.120s with a %d×%d rectangle", an, g->w, g->h);
+    // (a box on a grid: its rectangle in cells of the grid, 17.7)
+    bool cells = HitIsBox(h) && g->grid > 0.0f;
+    char gridTag[48] = "";
+    if (g->grid > 0.0f) snprintf(gridTag, sizeof(gridTag), " (%g/m)", (double)g->grid);
+    if (!g->fresh) MsgSetf(&T->into, "%s %d×%d: %d×%d%s at %d %d%s", an, g->atlasW, g->atlasH, g->w, g->h, cells ? " cells" : "", g->x, g->y, gridTag);
+    else if (g->atlasW > 0)
+        MsgSetf(&T->into, "the first stroke adds %s%d×%d%s%s to %.120s (%d×%d)", g->estimate ? "~" : "", g->w, g->h, cells ? " cells" : "",
+                gridTag, an, g->atlasW, g->atlasH);
+    else if (cells) MsgSetf(&T->into, "the first stroke makes %.120s with %d×%d cells%s", an, g->w, g->h, gridTag);
+    else MsgSetf(&T->into, "the first stroke makes %.120s with a %s%d×%d rectangle%s", an, g->estimate ? "~" : "", g->w, g->h, gridTag);
     free(atlas);
     T->intoSet = true;
     if (g->needsUnwrap)
@@ -2486,15 +2849,29 @@ static void TargetText(DrawMode *dm)
     if (HitIsBox(h)) {
         float su, sv;
         FaceDims(h->hit.obj.index, h->face, &su, &sv);
-        if (g->w > 0 && g->h > 0) {
+        if (g->grid > 0.0f) {
+            MsgSetf(&T->texel, "face %s: a texel %s %.1f mm, on the grid (%d×%d cells)", FACE_NAMES[h->face], will, 1000.0 / g->grid,
+                    g->cellsW, g->cellsH);
+            T->texelSet = true;
+        } else if (g->w > 0 && g->h > 0) {
             MsgSetf(&T->texel, "face %s: a texel %s %.1f × %.1f mm%s", FACE_NAMES[h->face], will, su * 1000.0f / g->w,
                     sv * 1000.0f / g->h, g->w >= DRAW_RECT_MAX || g->h >= DRAW_RECT_MAX ? " (the rectangle is clamped to 2048)" : "");
             T->texelSet = true;
         }
     } else if (g->w > 0) {
-        double A = SlotArea(h->hit.obj.index, h->slot);
-        if (A > 0.0) {
-            MsgSetf(&T->texel, "slot %d: a texel %s about %.1f mm (%d² over %.2f m²)", h->slot, will, 1000.0 * sqrt(A) / g->w, g->w, A);
+        // (the slot's world area over the texels its paint UVs cover; before its unwrap: the grid's or
+        // the density's texel, which the unwrap is made at)
+        double A, a;
+        SlotAreas(h->hit.obj.index, h->slot, &A, &a);
+        if (A > 0.0 && a > 0.0) {
+            double mm = 1000.0 * sqrt(A / (a * g->w * g->h));
+            MsgSetf(&T->texel, "slot %d: a texel %s about %.1f mm (%d×%d over %.2f m²)", h->slot, will, mm, g->w, g->h, A);
+            const DrawUnwrap *u = SessionUnwrap(dm, scene->models[h->hit.obj.index].file);
+            float s = InstanceScale(h->hit.obj.index);
+            if (u && fabsf(u->scale - s) > 0.01f * s) MsgAppendf(&T->texel, ": the unwrap was made at scale %g", (double)u->scale);
+            T->texelSet = true;
+        } else if (A > 0.0) {
+            MsgSetf(&T->texel, "slot %d: a texel %s about %.1f mm", h->slot, will, 1000.0 / RhoOf(dm, h->material));
             T->texelSet = true;
         }
     }
@@ -2822,8 +3199,11 @@ int DrawModeDrawHud(const DrawMode *dm, const EditMode *em, int x, int y)
             snprintf(what, sizeof(what), "%s slot %d", GetFileName(scene->modelFiles[scene->models[h->hit.obj.index].file].path), h->slot);
         else snprintf(what, sizeof(what), "face %s", FACE_NAMES[h->face]);
         AtlasName(h, atlas, (int)sizeof(atlas));
-        if (!g->fresh) snprintf(target, sizeof(target), "  |  %.120s %d×%d, %.100s", atlas, g->atlasW, g->atlasH, what);
-        else snprintf(target, sizeof(target), "  |  %.60s: a new %d×%d in %.120s%s", what, g->w, g->h, atlas, g->needsUnwrap ? " (unwrap first)" : "");
+        char grid[40] = "";     // (the paint grid, docs/painting.md 17.7)
+        if (g->grid > 0.0f) snprintf(grid, sizeof(grid), ", grid %g/m", (double)g->grid);
+        if (!g->fresh) snprintf(target, sizeof(target), "  |  %.120s %d×%d, %.100s%s", atlas, g->atlasW, g->atlasH, what, grid);
+        else snprintf(target, sizeof(target), "  |  %.60s: a new %s%d×%d%s in %.120s%s%s", what, g->estimate ? "~" : "", g->w, g->h,
+                      HitIsBox(h) && g->grid > 0.0f ? " cells" : "", atlas, grid, g->needsUnwrap ? " (unwrap first)" : "");
     }
     char unsaved[64] = "";
     int n = EditModeUnsaved(em);
@@ -3043,10 +3423,12 @@ static bool ClipSegment(Vector2 *a, Vector2 *b, const Vector2 *poly, int n)
 }
 
 // A rectangle-texel point (around the hit texel (tx, ty)) in the surface's paint coordinates: face
-// coordinates 0..1 (boxes) or the slot's paint UV (models)
+// coordinates 0..1 (boxes; on a grid through the face's cells, docs/painting.md 17.2, so texel edges
+// land on the surface's texel lines) or the slot's paint UV (models)
 static Vector2 TexelToSurface(const DrawGeom *g, Vector2 p, float tx, float ty)
 {
-    return (Vector2){ g->uv.x + (p.x - tx) / g->w, g->uv.y + (p.y - ty) / g->h };
+    float du = g->u1 - g->u0, dv = g->v1 - g->v0;
+    return (Vector2){ g->uv.x + (p.x - tx) / (du > 0.0f ? du : 1.0f), g->uv.y + (p.y - ty) / (dv > 0.0f ? dv : 1.0f) };
 }
 
 // A point of a slot triangle (its paint uv corners, model-space corners) at paint coordinate t
@@ -3131,6 +3513,19 @@ static void CursorFill(const DrawMode *dm, Color col)
         static const Vector2 q[4] = { { 0, 0 }, { 1, 0 }, { 1, 1 }, { 0, 1 } };
         for (int f = 0; f < 6; f++) {
             if (!(g->faces & (1u << f))) continue;
+            FaceCells c;
+            if (g->grid > 0.0f && FaceGridCells(h->hit.obj.index, f, g->grid, &c) && c.u1 > c.u0 && c.v1 > c.v0) {
+                // (on a grid the fill covers the hit face's cells: on each face of the entry the part of
+                // them it shows, through that face's own cells)
+                Vector2 r[4];
+                for (int i = 0; i < 4; i++)
+                    r[i] = (Vector2){ (q[i].x * g->cellsW - c.u0) / (c.u1 - c.u0), (q[i].y * g->cellsH - c.v0) / (c.v1 - c.v0) };
+                for (int i = 0; i < 4; i++) {
+                    Vector2 a = r[i], b = r[(i + 1) % 4];
+                    if (ClipSegment(&a, &b, q, 4)) CursorLine(FacePoint(h->hit.obj.index, f, a), FacePoint(h->hit.obj.index, f, b), col);
+                }
+                continue;
+            }
             for (int i = 0; i < 4; i++)
                 CursorLine(FacePoint(h->hit.obj.index, f, q[i]), FacePoint(h->hit.obj.index, f, q[(i + 1) % 4]), col);
         }
@@ -3158,8 +3553,9 @@ void DrawModeDrawCursor(const DrawMode *dm, Camera3D cam)
     Color col = Fade(CURSOR_COLOR, 0.95f);
     if (dm->pen == PEN_FILL) CursorFill(dm, col);
     else {
-        // The pen's footprint in the rectangle's texels about the hit (docs/painting.md 7.2)
-        float tx = Clamp01(g->uv.x) * g->w, ty = Clamp01(g->uv.y) * g->h;
+        // The pen's footprint in the rectangle's texels about the hit (docs/painting.md 7.2; on a grid the
+        // face's cells, 17.2)
+        float tx = g->u0 + Clamp01(g->uv.x) * (g->u1 - g->u0), ty = g->v0 + Clamp01(g->uv.y) * (g->v1 - g->v0);
         int s = dm->size < 1 ? 1 : dm->size;
         if (dm->pen == PEN_SQUARE) CursorQuad(dm, floorf(tx) - (float)(s / 2), floorf(ty) - (float)(s / 2), (float)s, tx, ty, col);
         else if (s == 1) CursorQuad(dm, floorf(tx), floorf(ty), 1.0f, tx, ty, col);
@@ -3200,10 +3596,7 @@ void DrawModeFree(DrawMode *dm)
     if (dm->stroke && !dm->strokePushed) ReleaseStep(dm, dm->stroke);
     for (int i = 0; i < dm->atlasCount; i++) FreeAtlas(&dm->atlases[i]);
     free(dm->atlases);
-    for (int i = 0; i < dm->unwrapCount; i++) {
-        free(dm->unwraps[i].modelPath);
-        MS_PaintUnwrapFree(&dm->unwraps[i].u);
-    }
+    for (int i = 0; i < dm->unwrapCount; i++) FreeUnwrapOf(&dm->unwraps[i]);
     free(dm->unwraps);
     free(dm->shaderOk);
     FreeSlotTris(dm->slotTris);
@@ -3216,6 +3609,7 @@ void DrawModeFree(DrawMode *dm)
     MsgFree(&dm->target.what);
     MsgFree(&dm->target.into);
     MsgFree(&dm->target.texel);
+    MsgFree(&dm->target.gridLine);
     memset(dm, 0, sizeof(*dm));
 }
 
@@ -3235,6 +3629,15 @@ static bool UvHit(MS_ObjRef obj, int faceOrSlot, float u, float v, MS_SurfaceHit
         BoundingBox B = MS_ObjectBounds(scene, obj);
         Vector3 c = FacePoint(obj.index, h->face, (Vector2){ 0.5f, 0.5f }), o = Vector3Scale(Vector3Add(B.min, B.max), 0.5f);
         h->hit.normal = Vector3Normalize(Vector3Subtract(c, o));
+        // (on a paint grid: the hit's texel from the face's first cell, as MS_RaycastSurface gives it)
+        h->paintGrid = MS_PaintGridOf(scene, h->material);
+        FaceCells fc;
+        if (h->paintGrid > 0.0f && FaceGridCells(obj.index, h->face, h->paintGrid, &fc)) {
+            h->paintTexel = (Vector2){ fc.u0 + Clamp01(u) * (fc.u1 - fc.u0), fc.v0 + Clamp01(v) * (fc.v1 - fc.v0) };
+            h->paintCellsW = fc.w;
+            h->paintCellsH = fc.h;
+        }
+        h->paintEntry = EntryFor(obj, h->material, h->face, -1, NULL);
         return true;
     }
     if (obj.kind != MS_OBJ_MODEL || obj.index < 0 || obj.index >= scene->modelCount) return false;
@@ -3295,9 +3698,9 @@ static void UvSegment(DrawMode *dm, MS_ObjRef obj, int fs, Vector2 a, Vector2 b)
 {
     MS_SurfaceHit ha;
     if (!UvHit(obj, fs, a.x, a.y, &ha)) return;
-    int e = EntryFor(obj, ha.material, ha.face, ha.slot, NULL);
-    const MS_PaintEntry *E = e >= 0 ? MS_PaintEntryAt(scene, e) : NULL;
-    float du = (b.x - a.x) * (E ? E->w : 1), dv = (b.y - a.y) * (E ? E->h : 1);
+    DrawGeom g;
+    Resolve(dm, &ha, &g);       // (the surface's texels: its rectangle, a box face on a grid its cells)
+    float du = (b.x - a.x) * (g.u1 > g.u0 ? g.u1 - g.u0 : 1.0f), dv = (b.y - a.y) * (g.v1 > g.v0 ? g.v1 - g.v0 : 1.0f);
     int steps = ClampI((int)ceilf(hypotf(du, dv) / Spacing(dm)), 1, 100000);
     for (int i = 1; i <= steps && dm->stroking; i++) {
         float t = (float)i / steps;
@@ -3313,23 +3716,36 @@ static void PrintState(DrawMode *dm, EditMode *em)
 {
     for (int i = 0; i < dm->atlasCount; i++) {
         const Atlas *a = &dm->atlases[i];
-        printf("paint:   atlas %s %dx%d %s%s unsaved %s hash %016llx refs %d%s%s\n", a->rel, a->img.width, a->img.height,
-               a->material ? "material " : "own ", a->material ? a->material : a->modelPath ? a->modelPath : "-",
+        float grid = MS_PaintGridOf(scene, a->material ? MaterialIndex(a->material) : -1);
+        printf("paint:   atlas %s %dx%d %s%s grid %g unsaved %s hash %016llx refs %d%s%s\n", a->rel, a->img.width, a->img.height,
+               a->material ? "material " : "own ", a->material ? a->material : a->modelPath ? a->modelPath : "-", (double)grid,
                AtlasLive(a) && AtlasUnsaved(a) ? "yes" : "no", PixelHash(&a->img), a->refs, a->provided ? " provided" : "",
                a->stale ? " (stale)" : "");
     }
     int n = MS_PaintEntryCount(scene);
     for (int i = 0; i < n; i++) {
         const MS_PaintEntry *e = MS_PaintEntryAt(scene, i);
-        char where[48];
+        char where[48], cells[48] = "";
         if (e->obj.kind == MS_OBJ_BOX) FacesText(e->faces, where, (int)sizeof(where));
         else snprintf(where, sizeof(where), "slot %d", e->slot);
-        printf("paint:   entry line %d %s%s%s %u:%d %s %d %d %d %d%s%s\n", e->line, e->material >= 0 ? "\"" : "own",
+        // (a box on a grid: the cells its faces cover, 17.3)
+        float grid = MS_PaintGridOf(scene, e->material);
+        int cw, ch, big, many;
+        if (e->obj.kind == MS_OBJ_BOX && e->obj.index >= 0 && e->obj.index < scene->boxCount && grid > 0.0f) {
+            BoxGroupCells(e->obj.index, e->faces, grid, &cw, &ch, &big, &many);
+            snprintf(cells, sizeof(cells), " cells %dx%d", cw, ch);
+        }
+        printf("paint:   entry line %d %s%s%s %u:%d %s %d %d %d %d%s%s%s\n", e->line, e->material >= 0 ? "\"" : "own",
                e->material >= 0 ? scene->materials[e->material].name : "", e->material >= 0 ? "\"" : "", e->entity.stmt, e->entity.index, where,
-               e->x, e->y, e->w, e->h, e->nearest ? " nearest" : "", e->active ? "" : " (inactive)");
+               e->x, e->y, e->w, e->h, cells, e->nearest ? " nearest" : "", e->active ? "" : " (inactive)");
     }
-    for (int i = 0; i < dm->unwrapCount; i++)
-        printf("paint:   unwrap %s %d meshes%s\n", dm->unwraps[i].modelPath, dm->unwraps[i].u.meshCount, dm->unwraps[i].written ? " written" : "");
+    for (int i = 0; i < dm->unwrapCount; i++) {
+        const DrawUnwrap *u = &dm->unwraps[i];
+        printf("paint:   unwrap %s %d meshes %g texels/unit (scale %g) sides", u->modelPath, u->u.meshCount, (double)u->texelsPerUnit,
+               (double)u->scale);
+        for (int k = 0; k < u->sideCount; k++) printf(" %d", u->sides[k]);
+        printf("%s\n", u->written ? " written" : "");
+    }
     printf("paint:   %d unsaved edit%s, %d failed, paint history %lld bytes\n", MapEditUnsaved(&em->ed),
            MapEditUnsaved(&em->ed) == 1 ? "" : "s", em->ed.failedCount, MapEditPaintBytes(&em->ed));
     for (int i = 0; i < em->ed.failedCount; i++) printf("paint:   failed: %s\n", em->ed.failed[i].what);
@@ -3360,9 +3776,7 @@ static unsigned char ScriptStroke(DrawMode *dm, EditMode *em, Camera3D cam, int 
         // (a model that needs an unwrap: made first, so its paint coordinates exist; synchronous here)
         if (obj.kind == MS_OBJ_MODEL && obj.index >= 0 && obj.index < scene->modelCount &&
             MS_ModelPaintUv(scene, scene->models[obj.index].file, fs) == MS_PAINTUV_NEEDS_UNWRAP) {
-            const MS_ModelInstance *M = &scene->models[obj.index];
-            int file = M->file;
-            if (EnsureUnwrap(dm, file, fs, SlotRectSide(dm->density, obj.index, fs)) != 0) {     // (not made: why)
+            if (EnsureUnwrap(dm, obj.index, fs, SlotMaterial(&scene->models[obj.index], fs)) != 0) {     // (not made: why)
                 MsgSetf(line, "%s", MS_LastError());
                 return 1;
             }
@@ -3414,11 +3828,12 @@ static unsigned char ScriptStroke(DrawMode *dm, EditMode *em, Camera3D cam, int 
 // --paint-script <file> (docs/painting.md 14): one command per line, '#' starts a comment; each prints
 // a "paint: file:line: ..." line, the first failing one stops the script (exit 1):
 //   pen <round|square|soft|eraser|fill>   size <1-256>   hardness <0-1>   color <r> <g> <b> [<a>]
-//   density <8-512>                    texels per metre of new rectangles (and resize)
+//   density <8-512>                    texels per metre of new rectangles (and resize) without a paint grid
 //   pixel <on|off>                     the pixel look: new atlases, and the atlas painted last
-//   faces <a b c d e f>                the face groups of the box painted last (5.3), applied
-//   resize                             the rectangle painted last to the size of the current density
-//   clear                              the paint of the face / slot painted last (its entry goes)
+//   faces <a b c d e f>                the face groups of the box painted (or hovered) last (5.3), applied
+//   resize                             the rectangle painted (or hovered) last to the size of the current
+//                                      density; on a material with a paint grid: fit to grid (17.7)
+//   clear                              the paint of the face / slot painted (or hovered) last (its entry goes)
 //   stroke px <x0> <y0> <x1> <y1> ...  an LMB drag through these screen pixels of the shot's camera
 //                                      (one segment per frame, cut in screen space as the mouse is)
 //   stroke uv <id N:i | entity HEX:i> <face|slot> <u0> <v0> [<u1> <v1> ...]
@@ -3426,7 +3841,9 @@ static unsigned char ScriptStroke(DrawMode *dm, EditMode *em, Camera3D cam, int 
 //                                      -z, u v 0..1 on it) or a model slot (u v its paint UV; a model
 //                                      that needs an unwrap gets it first)
 //   dab px <x> <y> / dab uv <obj> <face|slot> <u> <v>   one stamp (fill: fills there)
-//   hover px <x> <y>                   what the cursor is over there (the HUD and the brush cursor)
+//   hover px <x> <y>                   what the cursor is over there (the HUD, the brush cursor and the
+//                                      panel's lines, the grid's among them); faces, resize and clear
+//                                      then act on that surface (until the next stroke); pixel doesn't
 //   pick px <x> <y>                    the eyedropper (prints the colour; it becomes the colour)
 //   undo / redo / save / print         print: the atlases (size, unsaved, pixel hash), the entries,
 //                                      the unwraps, the history
@@ -3449,6 +3866,10 @@ int DrawModeRunScript(DrawMode *dm, EditMode *em, Designer *d, Camera3D cam, int
     int status = 0, lineNo = 0;
     Vector2 *pts = NULL;
     int ptCap = 0;
+    // The surface `hover` named last (faces, resize and clear act on it while it is newer than the last
+    // stroke; pixel keeps acting on the last stroke's surface, as before the paint-grid round)
+    MS_SurfaceHit hoverHit = { 0 };
+    bool hoverNewer = false;
     MonoMsg msg = { 0 };        // (each command's line)
     for (char *line = text; line && status == 0; ) {
         char *nl = strchr(line, '\n');
@@ -3497,17 +3918,18 @@ int DrawModeRunScript(DrawMode *dm, EditMode *em, Designer *d, Camera3D cam, int
             MsgSetf(&msg, "pixel look %s: %s", wd[1], MsgText(&dm->message));
         } else if (strcmp(wd[0], "faces") == 0 && n == 7) {
             unsigned char cells[6];
-            ok = dm->lastHitSet;
+            ok = dm->lastHitSet || hoverNewer;
             for (int k = 0; k < 6 && ok; k++) {
                 ok = ScriptNum(wd[1 + k], &f[0]) && f[0] >= 0 && f[0] <= 5;
                 cells[k] = (unsigned char)(ok ? f[0] : 0);
             }
-            if (ok) ok = ActFaces(dm, &dm->lastHit, cells) == DRAWMODE_RELOADED;
+            if (ok) ok = ActFaces(dm, hoverNewer ? &hoverHit : &dm->lastHit, cells) == DRAWMODE_RELOADED;
             if (dm->messageSaid) MsgSetf(&msg, "%s", MsgText(&dm->message));
             else MsgSetStatic(&msg, "faces <a b c d e f> (0-5), after a stroke on a box");
         } else if ((strcmp(wd[0], "resize") == 0 || strcmp(wd[0], "clear") == 0) && n == 1) {
             bool resize = wd[0][0] == 'r';
-            ok = dm->lastHitSet && (resize ? ActResize(dm, &dm->lastHit) : ActClear(dm, &dm->lastHit)) == DRAWMODE_RELOADED;
+            const MS_SurfaceHit *on = hoverNewer ? &hoverHit : &dm->lastHit;
+            ok = (dm->lastHitSet || hoverNewer) && (resize ? ActResize(dm, on) : ActClear(dm, on)) == DRAWMODE_RELOADED;
             MsgSetf(&msg, "%s: %s", wd[0], dm->messageSaid ? MsgText(&dm->message) : "nothing painted yet");
         } else if ((stroke || dab) && n >= 4 && (strcmp(wd[1], "px") == 0 || strcmp(wd[1], "uv") == 0)) {
             bool uv = wd[1][0] == 'u';
@@ -3525,14 +3947,22 @@ int DrawModeRunScript(DrawMode *dm, EditMode *em, Designer *d, Camera3D cam, int
             for (int k = 0; ok && k < count; k++) ok = ScriptNum(wd[at + 2 * k], &pts[k].x) && ScriptNum(wd[at + 2 * k + 1], &pts[k].y);
             if (!ok) MsgSetf(&msg, "%s px <x> <y> ... | %s uv <id N:i | entity HEX:i> <face|slot> <u> <v> ...", wd[0], wd[0]);
             else ok = ScriptStroke(dm, em, cam, w, h, uv, obj, fs, pts, count, &msg) == 0;     // (0: done)
+            hoverNewer = false;
         } else if (strcmp(wd[0], "hover") == 0 && n == 4 && strcmp(wd[1], "px") == 0 && ScriptNum(wd[2], &f[0]) && ScriptNum(wd[3], &f[1])) {
             DrawModeHover(dm, cam, (Vector2){ f[0], f[1] }, w, h);
             ok = true;
+            // (faces, resize and clear act on it now, as the panel acts on its target: also on an entry no
+            // stroke can reach, one too small for its grid cells; pixel stays on the last stroke's surface,
+            // so `pixel on` before a first stroke still sets the switch for new atlases)
+            if (HitIsBox(&dm->target.hit) || HitIsModel(&dm->target.hit)) {
+                hoverHit = dm->target.hit;
+                hoverNewer = true;
+            }
             bool refused = dm->refusalCode >= 2;    // (a refusal; the panel's lines where they apply)
             const DrawTarget *T = &dm->target;
-            MsgSetf(&msg, "hover %s%s%s%s%s%s%s", dm->hoverOk ? "paintable" : "not paintable", refused ? ": " : "",
+            MsgSetf(&msg, "hover %s%s%s%s%s%s%s%s%s", dm->hoverOk ? "paintable" : "not paintable", refused ? ": " : "",
                     refused ? MsgText(&dm->refusal) : "", T->intoSet ? " | " : "", T->intoSet ? MsgText(&T->into) : "", T->texelSet ? " | " : "",
-                    T->texelSet ? MsgText(&T->texel) : "");
+                    T->texelSet ? MsgText(&T->texel) : "", T->gridLineSet ? " | " : "", T->gridLineSet ? MsgText(&T->gridLine) : "");
         } else if (strcmp(wd[0], "pick") == 0 && n == 4 && strcmp(wd[1], "px") == 0 && ScriptNum(wd[2], &f[0]) && ScriptNum(wd[3], &f[1])) {
             MS_SurfaceHit hit = CastAt(cam, w, h, (Vector2){ f[0], f[1] });
             Color c = { 0 };

@@ -90,11 +90,14 @@ typedef struct {
     int faceCube;                       // set at upload: 1 + its entry in faceCubes[] (hasFaces), 0 = R3D's cube
     // The paint layer: `paint "path"` (its atlas, NULL = none) and `paint_filter` (TEX_*); painted:
     // it has an active paint entry, so it draws with the paint version of its shader (PaintResolve);
-    // paintW x paintH: the atlas image's size (0: unreadable); paintTex: the atlas on the GPU
+    // paintW x paintH: the atlas image's size (0: unreadable); paintTex: the atlas on the GPU;
+    // paintGrid: `paint_grid` (texels per metre the paint's texels lie on; 0 none; -1 not set: the
+    // map's `env paint.grid` applies, docs/painting.md 17.1)
     char *paint;
     int paintLine;
     unsigned char paintFilter;
     bool painted;
+    float paintGrid;
     int paintW, paintH;
     Texture2D paintTex;
 } MatDef;
@@ -105,7 +108,8 @@ enum { TEX_TRILINEAR, TEX_NEAREST };
 // instance. material -1: the model slot's own material (its atlas is named by file and slot:
 // ownAtlas). The object is resolved from the entity (`id N`, index i) when the map is parsed; the
 // entity id itself is filled in after BuildEntities. active: drawn (PaintResolve); why: the reason
-// it isn't (PAINT_*), for the log
+// it isn't (PAINT_*), for the log; gridFace, gridW x gridH: with PAINT_GRID_CELLS, the face whose
+// grid cells don't fit the rectangle and how many it covers
 typedef struct {
     int material;
     int kind;                           // PAINT_BOX or PAINT_MODEL
@@ -119,10 +123,13 @@ typedef struct {
     int ownAtlas;                       // own material: index into ownAtlases[]; else -1
     bool active;
     signed char why;
+    signed char gridFace;
+    int gridW, gridH;
 } PaintDef;
 
 enum { PAINT_BOX = 0, PAINT_MODEL = 1 };
-enum { PAINT_OK = 0, PAINT_NOT_DRAWN, PAINT_OUTSIDE, PAINT_NO_ATLAS, PAINT_SKINNED, PAINT_NEEDS_UNWRAP, PAINT_NO_SHADER };
+enum { PAINT_OK = 0, PAINT_NOT_DRAWN, PAINT_OUTSIDE, PAINT_NO_ATLAS, PAINT_SKINNED, PAINT_NEEDS_UNWRAP, PAINT_NO_SHADER,
+       PAINT_GRID_CELLS };
 
 // The atlas of a model slot drawn with the file's own material: textures/paint/<file>_s<slot>.png
 typedef struct {
@@ -191,6 +198,8 @@ typedef struct {
     float bloomOffExposure;             // exposure factor when a quality setting turns bloom off
     float vfogFadeStart, vfogFadeEnd;   // volumetric fog density fade (R3D patch 13); end <= 0: none
     float vfogFadeNear;                 // and fade-in from the eye (R3D patch 15); <= 0: none
+    float paintGrid;                    // `paint.grid`: the paint grid of materials without `paint_grid`
+                                        // and of model slots' own materials (texels per metre; 0 none)
     bool homeSet, fogRegionSet;
     Vector3 home;
     BoundingBox fogRegion;
@@ -995,6 +1004,7 @@ static const KeyDef DEF_KEYS[] = {
     KD("volumetricFog.fadeNear", T_F, vfogFadeNear),
     KD("shadow.home", T_V3, home),
     KD("fogCache.region", T_BOX, fogRegion),
+    KD("paint.grid", T_F, paintGrid),
 };
 
 // R3D_ProceduralSky fields, as sky.<name> and ambientSky.<name>
@@ -1229,6 +1239,7 @@ static const EnvRange ENV_RANGES[] = {
     { "bloom.offExposure", 0, 100, true },
     { "volumetricFog.fadeStart", 0, 10000, false }, { "volumetricFog.fadeEnd", 0, 10000, false },
     { "volumetricFog.fadeNear", 0, 10000, false },
+    { "paint.grid", 0, 1024, false },
 };
 
 #ifdef MONOLITH_EDITOR
@@ -1268,6 +1279,11 @@ static bool CheckEnvValue(const char *key, int type, const void *p, const char *
     }
     if ((strcmp(key, "sky.size") == 0 || strcmp(key, "ambientSky.size") == 0) && (i < 16 || i > 4096)) {
         ErrAt(path, line, "sky sizes must be 16..4096");
+        return false;
+    }
+    // The paint grid (docs/painting.md 17.1): none, or 1..1024 texels per metre (ENV_RANGES: <= 1024)
+    if (strcmp(key, "paint.grid") == 0 && *(const float *)p > 0.0f && *(const float *)p < 1.0f) {
+        ErrAt(path, line, "paint.grid must be 0 (none) or 1..1024 texels per metre");
         return false;
     }
     if (strcmp(key, "sun.range") == 0 && !(*(const float *)p > 0.0f)) {
@@ -1710,10 +1726,16 @@ static const char PAINT_STAGE_HEAD[] =
 // The vertex stage: which paint key and where in its domain. INSTANCE_CUSTOM.y tells the draw kinds
 // apart: 1 an instanced box (key x + face, uv from the unit cube), 2 a model instance (key x + the
 // slot in bone index 0, uv in the bone weights as two unorm16), 0 a merged box mesh (the key in the
-// four bone indices, uv in the bone weights). Key 0 holds a zero rectangle: no paint.
+// four bone indices, uv in the bone weights). Key 0 holds a zero rectangle: no paint. ms_clamp: the
+// texels the face's extent covers, half a texel inside (docs/painting.md 17.2: floor(u0 W) + 1/2 ..
+// ceil(u1 W) - 1/2, with PAINT_GRID_EPS against float error, so an extent that starts on a texel edge
+// doesn't reach into the texel before it; the upper bound never below the lower one, which an extent
+// under PAINT_GRID_EPS starting on a texel edge would give: GLSL's clamp is undefined then); for a
+// whole rectangle it is the rectangle +- half a texel.
 static const char PAINT_STAGE_VERT[] =
     "#ifdef STAGE_VERT\n"
     "MS_INTERP(flat) out vec4 ms_rect;\n"
+    "MS_INTERP(flat) out vec4 ms_clamp;\n"
     "out vec2 ms_uv;\n"
     "void vertex() {\n"
     "%s"
@@ -1735,6 +1757,9 @@ static const char PAINT_STAGE_VERT[] =
     "else ms_key = aBoneIndices.x + aBoneIndices.y * 256 + aBoneIndices.z * 65536;\n"
     "}\n"
     "ms_rect = texelFetch(ms_paintTable, ivec2(ms_key % 1024, ms_key / 1024), 0);\n"
+    "vec2 ms_s = vec2(textureSize(ms_paint, 0));\n"
+    "vec2 ms_lo = floor(ms_rect.xy * ms_s + 0.00390625) + 0.5;\n"
+    "ms_clamp = vec4(ms_lo, max(ms_lo, ceil(ms_rect.zw * ms_s - 0.00390625) - 0.5)) / ms_s.xyxy;\n"
     "ms_uv = ms_p;\n"
     "#endif\n"
     "}\n"
@@ -1742,18 +1767,18 @@ static const char PAINT_STAGE_VERT[] =
 
 // The fragment stage: paint is a matte coat over the material's albedo, covering its emission and
 // metalness by its alpha; on a blended (forward) material it adds to the alpha. The atlas is
-// premultiplied; the uv stays half a texel inside the rectangle. (GEOMETRY_PREPASS is not a depth
+// premultiplied; the uv stays inside ms_clamp (the vertex stage's). (GEOMETRY_PREPASS is not a depth
 // variant: with the depth pre-pass it is also the shading pass, R3D patch 6.)
 static const char PAINT_STAGE_FRAG[] =
     "#ifdef STAGE_FRAG\n"
     "MS_INTERP(flat) in vec4 ms_rect;\n"
+    "MS_INTERP(flat) in vec4 ms_clamp;\n"
     "in vec2 ms_uv;\n"
     "void fragment() {\n"
     "%s"
     "#if !defined(DEPTH) && !defined(DEPTH_CUBE)\n"
     "if (ms_rect.z > ms_rect.x) {\n"
-    "vec2 ms_h = 0.5 / vec2(textureSize(ms_paint, 0));\n"
-    "vec4 ms_c = texture(ms_paint, clamp(mix(ms_rect.xy, ms_rect.zw, ms_uv), ms_rect.xy + ms_h, ms_rect.zw - ms_h));\n"
+    "vec4 ms_c = texture(ms_paint, clamp(mix(ms_rect.xy, ms_rect.zw, ms_uv), ms_clamp.xy, ms_clamp.zw));\n"
     "ALBEDO = ALBEDO * (1.0 - ms_c.a) + ms_c.rgb;\n"
     "EMISSION *= 1.0 - ms_c.a;\n"
     "METALNESS *= 1.0 - ms_c.a;\n"
@@ -1951,9 +1976,49 @@ static bool TriOverlapsSquare(const Vector2 *t, float x0, float y0, float x1, fl
 // How a slot maps onto paint (MS_PaintUvKind's values, for the game build too)
 enum { PUV_OWN = 0, PUV_UNWRAP, PUV_NEEDS_UNWRAP, PUV_SKINNED };
 
+// Whether n triangles' texels are even (docs/painting.md 17.4): each triangle's texel density,
+// sqrt(uv area / model-space area) (a texture's texels per side scale every triangle's alike, so the
+// texture isn't needed), within 25 % of the area-weighted mean over at least 90 % of the area.
+// Palette UVs (each face mapped into a sliver of one swatch) fail it. *share / *mean (may be NULL):
+// the area share within 25 %, the mean density.
+// Triangle i's model-space area and texel density (both 0 for a degenerate triangle)
+static double UvTriangleDensity(const Vector2 *uv, const Vector3 *pos, int i, double *area)
+{
+    const Vector2 *t = &uv[3 * i];
+    const Vector3 *p = &pos[3 * i];
+    double ex = (double)p[1].x - p[0].x, ey = (double)p[1].y - p[0].y, ez = (double)p[1].z - p[0].z;
+    double fx = (double)p[2].x - p[0].x, fy = (double)p[2].y - p[0].y, fz = (double)p[2].z - p[0].z;
+    double cx = ey * fz - ez * fy, cy = ez * fx - ex * fz, cz = ex * fy - ey * fx;
+    *area = 0.5 * sqrt(cx * cx + cy * cy + cz * cz);
+    if (!(*area > 0.0) || !isfinite(*area)) return *area = 0.0;
+    double uvArea = 0.5 * fabs(((double)t[1].x - t[0].x) * ((double)t[2].y - t[0].y) -
+                               ((double)t[2].x - t[0].x) * ((double)t[1].y - t[0].y));
+    return sqrt(uvArea / *area);
+}
+
+static bool UvTexelsEven(const Vector2 *uv, const Vector3 *pos, int n, double *share, double *mean)
+{
+    // The area-weighted mean density, then the area whose density lies within 25 % of it
+    double total = 0.0, weighted = 0.0, within = 0.0, area;
+    for (int i = 0; i < n; i++) {
+        double density = UvTriangleDensity(uv, pos, i, &area);
+        total += area;
+        weighted += area * density;
+    }
+    double avg = total > 0.0 ? weighted / total : 0.0;
+    for (int i = 0; avg > 0.0 && i < n; i++) {
+        double density = UvTriangleDensity(uv, pos, i, &area);
+        if (fabs(density - avg) <= 0.25 * avg) within += area;
+    }
+    if (share) *share = total > 0.0 ? within / total : 0.0;
+    if (mean) *mean = avg;
+    return avg > 0.0 && within >= 0.9 * total;
+}
+
 // PUV_OWN or PUV_NEEDS_UNWRAP for slot `slot` of a loaded model with its CPU mesh data: the
 // triangles of the meshes drawn with that slot. No texture coordinates (all 0, what R3D's importer
-// leaves), or out of memory: needs an unwrap (the safe answer).
+// leaves), texels that aren't even (UvTexelsEven), or out of memory: needs an unwrap (the safe
+// answer).
 static int OwnUvKind(const R3D_Model *m, int slot)
 {
     if (!m->meshData || !m->meshMaterials) return PUV_NEEDS_UNWRAP;
@@ -1965,11 +2030,12 @@ static int OwnUvKind(const R3D_Model *m, int slot)
     }
     if (n == 0) return PUV_NEEDS_UNWRAP;
     Vector2 *tri = malloc(sizeof(Vector2) * 3 * (size_t)n);
+    Vector3 *pos = malloc(sizeof(Vector3) * 3 * (size_t)n);
     UvEdge *edges = malloc(sizeof(UvEdge) * 3 * (size_t)n);
     int *parent = malloc(sizeof(int) * (size_t)n);
     int *owner = calloc((size_t)PAINT_RASTER * PAINT_RASTER, sizeof(int));
     unsigned char *centre = calloc((size_t)PAINT_RASTER * PAINT_RASTER, 1);
-    bool own = tri && edges && parent && owner && centre, any = false;
+    bool own = tri && pos && edges && parent && owner && centre, any = false;
 
     // The slot's triangles in file order, every coordinate inside 0..1 (and not all of them 0)
     int t = 0;
@@ -1984,9 +2050,13 @@ static int OwnUvKind(const R3D_Model *m, int slot)
                 own = own && uv.x >= 0.0f && uv.x <= 1.0f && uv.y >= 0.0f && uv.y <= 1.0f;
                 any = any || uv.x != 0.0f || uv.y != 0.0f;
                 tri[3 * t + c] = uv;
+                pos[3 * t + c] = v < (unsigned int)md->vertexCount ? md->vertices[v].position : (Vector3){ 0 };
             }
     }
     own = own && any;
+
+    // Even texels (docs/painting.md 17.4): not a palette
+    own = own && UvTexelsEven(tri, pos, n, NULL, NULL);
 
     // Islands: triangles that share a UV edge (both ends exactly equal) are one island
     for (int i = 0; own && i < n; i++) {
@@ -2040,7 +2110,7 @@ static int OwnUvKind(const R3D_Model *m, int slot)
                 if (inside && centre[(size_t)y * PAINT_RASTER + x]++) own = false;
             }
     }
-    free(tri); free(edges); free(parent); free(owner); free(centre);
+    free(tri); free(pos); free(edges); free(parent); free(owner); free(centre);
     return own ? PUV_OWN : PUV_NEEDS_UNWRAP;
 }
 
@@ -2127,6 +2197,68 @@ static int OwnAtlasOf(SceneData *d, int file, int slot)
     if (!a) { free(copy); return -1; }
     *a = (OwnAtlas){ .file = file, .slot = slot, .rel = copy };
     return d->ownAtlasCount - 1;
+}
+
+// --- The paint grid (docs/painting.md 17): a material's paint texels lie on a grid of rho texels per
+// metre through the world origin (a turned box: its own axes through the origin). A box face covers
+// the grid's cells from its first to its last; the paint table holds the face's own extent in its
+// rectangle (PaintKeys), so the face's 0..1 lands on its cells and the mesh keeps its 0 / 1 corners.
+
+// Grid coordinates closer than this to a cell edge (texels) count as on it: a box side written on a
+// grid line (0.35 m at 20 texels / m) is 6.99999988 texels as a float. The paint stage's clamp uses
+// the same margin (PAINT_STAGE_VERT), so both agree which cell a face starts in.
+#define PAINT_GRID_EPS      (1.0 / 256.0)
+
+// The grid the paint of material m lies on (texels per metre, 0: none): its `paint_grid`, else the
+// map's `env paint.grid`; m -1 (a model slot's own material) the map's
+static float PaintGridOf(const SceneData *d, int m)
+{
+    if (m >= 0 && m < d->materialCount && d->matDefs[m].paintGrid >= 0.0f) return d->matDefs[m].paintGrid;
+    return d->env.paintGrid;
+}
+
+// Along which of the box's axes (0 x, 1 y, 2 z) and in which direction face f's u and v run, as
+// R3D's unit cube maps them (CubeFaceUv): +x u along -z, -x along +z, +-y and +z along +x, -z along
+// -x; v along +y on the side faces, -z on +y, +z on -y
+static const signed char FACE_U_AXIS[6] = { 2, 2, 0, 0, 0, 0 }, FACE_U_SIGN[6] = { -1, 1, 1, 1, 1, -1 };
+static const signed char FACE_V_AXIS[6] = { 1, 1, 2, 2, 1, 1 }, FACE_V_SIGN[6] = { 1, 1, -1, 1, 1, 1 };
+
+// The cells a face covers along one of its axes: `first` the grid's first cell, `frac` where the
+// face's 0 lies in it and `end` where its 1 lies (texels from the first cell's start; 0 <= frac <=
+// end <= cells), `cells` how many it touches (at least 1)
+typedef struct { double first, frac, end; int cells; } GridSpan;
+
+// The coordinates box b covers along its axis k: world coordinates for an axis-aligned box, for a
+// turned box the coordinates along its own axis k through the world origin (dot(axis, P))
+static void BoxAxisRange(const SceneData *d, int b, int k, double *lo, double *hi)
+{
+    const MS_TurnedBox *t = TurnedOf(d, b);
+    if (!t) {
+        *lo = (double)((const float *)&d->boxes[b].min)[k];
+        *hi = (double)((const float *)&d->boxes[b].max)[k];
+        return;
+    }
+    Vector3 a = t->axis[k];
+    double c = (double)a.x * t->center.x + (double)a.y * t->center.y + (double)a.z * t->center.z;
+    double h = 0.5 * (double)((const float *)&t->size)[k];
+    *lo = c - h;
+    *hi = c + h;
+}
+
+// The span of face f of box b along its u (v false) or v (v true) on a grid of rho texels per metre:
+// grid coordinate g = rho * sign * c (docs/painting.md 17.2), the face from g0 to g1
+static GridSpan BoxFaceSpan(const SceneData *d, int b, int f, bool v, double rho)
+{
+    int axis = v ? FACE_V_AXIS[f] : FACE_U_AXIS[f], sign = v ? FACE_V_SIGN[f] : FACE_U_SIGN[f];
+    double lo, hi;
+    BoxAxisRange(d, b, axis, &lo, &hi);
+    double g0 = sign > 0 ? rho * lo : -rho * hi, g1 = sign > 0 ? rho * hi : -rho * lo;
+    double first = floor(g0 + PAINT_GRID_EPS), last = ceil(g1 - PAINT_GRID_EPS);
+    if (!(last >= first + 1.0)) last = first + 1.0;
+    double cells = last - first;
+    GridSpan s = { first, fmax(g0 - first, 0.0), fmin(g1, last) - first, cells < 1e9 ? (int)cells : 1000000000 };
+    if (s.end < s.frac) s.end = s.frac;
+    return s;
 }
 
 // #endregion
@@ -2795,7 +2927,7 @@ static int AddMaterial(SceneData *d, const char *name)
     }
     int mi = d->materialCount++;
     d->materials[mi] = (MS_Material){ .name = copy, .material = R3D_MATERIAL_BASE };
-    d->matDefs[mi] = (MatDef){ 0 };
+    d->matDefs[mi] = (MatDef){ .paintGrid = -1.0f };
     d->matLookHash[mi] = d->matShapeHash[mi] = d->matPaintlessHash[mi] = FNV_OFFSET;
     if (!MatHashInsert(d, mi)) return -1;   // (the entry stays; FreeData frees its name)
     return mi;
@@ -2967,6 +3099,13 @@ static bool ParseMaterial(Parser *P, Token *tok, int n)
             ONE_WORD();
             if (!Keyword(P, v[0], PF, 2, "paint filter", &e)) return false;
             D->paintFilter = (unsigned char)e;
+        } else if (strcmp(k, "paint_grid") == 0) {
+            // The grid the paint's texels lie on (docs/painting.md 17.1): 0 none, else 1..1024 texels per metre
+            NEED(1);
+            if (!NumF(P, v[0], &f)) return false;
+            if (!(f == 0.0f || (f >= 1.0f && f <= 1024.0f)))
+                return Fail(P, "paint_grid must be 0 (none) or 1..1024 texels per metre", NULL);
+            D->paintGrid = f;
         } else if (strcmp(k, "priority") == 0) {
             NEED(1);
             if (!NumI(P, v[0], -1000000, 1000000, &m->priority)) return false;
@@ -3006,8 +3145,9 @@ static bool ParseMaterial(Parser *P, Token *tok, int n)
         #undef ONE_WORD
         // The key into the material's hashes (the shape hash leaves out what a live edit can change
         // without a full upload: the face layout, the filter, the albedo map, the draw distance and
-        // the paint keys; the paintless hash leaves out only the paint keys, whose change rebuilds no mesh)
-        bool paintKey = strcmp(k, "paint") == 0 || strcmp(k, "paint_filter") == 0;
+        // the paint keys; the paintless hash leaves out only the paint keys, whose change rebuilds no mesh:
+        // paint, paint_filter and paint_grid, docs/painting.md 9.2, 17.1)
+        bool paintKey = strcmp(k, "paint") == 0 || strcmp(k, "paint_filter") == 0 || strcmp(k, "paint_grid") == 0;
         d->matLookHash[mi] = HashTokens(d->matLookHash[mi], &tok[t], 1 + used);
         if (strcmp(k, "uv_faces") != 0 && strcmp(k, "filter") != 0 && strcmp(k, "albedo_map") != 0 &&
             strcmp(k, "draw_distance") != 0 && !paintKey)
@@ -3726,9 +3866,15 @@ static bool OlderFormat(Parser *P, int v)
 // A statement that is not an object, group, use, spawn or viewpoint (format, material, env): its
 // tokens go into d->lookHash, so a live edit knows whether the text changed anything but objects.
 // The format and env lines also go into restLookHash (a material line into its own hashes:
-// ParseMaterial), so it can tell materials appended or changed from anything else.
+// ParseMaterial), so it can tell materials appended or changed from anything else. `env paint.grid`
+// is a paint key (docs/painting.md 17.1): it changes only the paint table, so it goes into paintHash
+// and a live edit of it keeps everything else (as a `paint` line does).
 static void HashLook(SceneData *d, const Token *tok, int n)
 {
+    if (n >= 2 && strcmp(tok[0].s, "env") == 0 && !tok[1].quoted && strcmp(tok[1].s, "paint.grid") == 0) {
+        d->paintHash = HashTokens(d->paintHash, tok, n);
+        return;
+    }
     d->lookHash = HashTokens(d->lookHash, tok, n);
     if (strcmp(tok[0].s, "material") != 0) d->restLookHash = HashTokens(d->restLookHash, tok, n);
 }
@@ -3884,7 +4030,7 @@ static bool ParseText(Parser *P, const char *text, int size)
 // (CmRead*) in ReadCompiled's list after the sections its records point into, and the matching
 // section writer (CmPut*). The layout goes into docs/compiled-map.md.
 
-#define CM_VERSION          7           // MS_COMPILED_VERSION: bump on any change to a record or section
+#define CM_VERSION          8           // MS_COMPILED_VERSION: bump on any change to a record or section
 #define CM_BYTE_ORDER       0x01020304u
 #define CM_NONE             0xFFFFFFFFu // a string field without a string
 #define CM_MAX_ENV          4096        // env records (the key tables have ~120 keys)
@@ -3930,7 +4076,8 @@ typedef struct {
 // uvFaces: the box face layout (`uv_faces`, a cell per face +x -x +y -y +z -z; all 255 = none);
 // filter: TEX_* (`filter`); pad: 0. paint: the paint atlas (`paint`, CM_NONE for none);
 // paintFilter: TEX_* (`paint_filter`); pad2: 0. noPrepass: 0 or 1 (`prepass off`).
-// drawDistance: MS_Material.drawDistance (`draw_distance`: m, 0 auto, -1 off).
+// drawDistance: MS_Material.drawDistance (`draw_distance`: m, 0 auto, -1 off). paintGrid:
+// `paint_grid` (texels per metre; 0 none, -1 not set: the map's `env paint.grid` applies).
 typedef struct {
     uint32_t name, shader, maps[MAP_COUNT];     // maps: albedo, normal, orm, emission
     int32_t line, shaderLine, mapLine[MAP_COUNT];
@@ -3945,6 +4092,7 @@ typedef struct {
     uint8_t paintFilter, pad2[3];
     uint32_t noPrepass;
     float drawDistance;
+    float paintGrid;
 } CmMaterial;
 
 // A `paint` statement, its entity resolved to the object: material (CM_NONE: the model
@@ -4370,7 +4518,8 @@ static bool CmMaterialInRange(const CmMaterial *c)
            c->filter <= TEX_NEAREST &&
            c->pad == 0 &&
            c->paintFilter <= TEX_NEAREST &&
-           c->pad2[0] == 0 && c->pad2[1] == 0 && c->pad2[2] == 0;
+           c->pad2[0] == 0 && c->pad2[1] == 0 && c->pad2[2] == 0 &&
+           (c->paintGrid == -1.0f || c->paintGrid == 0.0f || (c->paintGrid >= 1.0f && c->paintGrid <= 1024.0f));
 }
 
 // A material's face layout: none (all 255), or a layout the parser accepts (FaceCellsValid) on a
@@ -4419,6 +4568,7 @@ static void CmFillMaterial(const CmMaterial *c, MS_Material *M, MatDef *D)
     if (D->hasFaces) memcpy(D->uvFaces, c->uvFaces, sizeof(D->uvFaces));
     D->filter = c->filter;
     D->paintFilter = c->paintFilter;
+    D->paintGrid = c->paintGrid;
 }
 
 // A material's uniforms and samplers. Each material's ranges start where the previous material's
@@ -5245,6 +5395,7 @@ static void CmPutMaterials(CmWriter *W, const SceneData *d)
             .samplerFirst = W->count[CM_SAMPLERS], .samplerCount = (uint32_t)D->samplerCount,
             .uvFaces = { 255, 255, 255, 255, 255, 255 }, .filter = D->filter,
             .paintFilter = D->paintFilter, .noPrepass = D->noPrepass, .drawDistance = M->drawDistance,
+            .paintGrid = D->paintGrid,
         };
         if (D->hasFaces) memcpy(c.uvFaces, D->uvFaces, sizeof(c.uvFaces));
         for (int k = 0; k < MAP_COUNT; k++) {
@@ -7882,6 +8033,7 @@ static void PaintLogInactive(const SceneData *d, const PaintDef *e)
 {
     char what[64], why[MS_PATH_MAX + 64];
     PaintTargetText(e, what, sizeof(what));
+    if (e->why == PAINT_GRID_CELLS && e->gridFace >= 0 && e->gridFace < 6) snprintf(what, sizeof(what), "%s", PAINT_FACES[e->gridFace]);
     const char *mat = e->material >= 0 ? d->materials[e->material].name : "its own material";
     const char *atlas = e->material >= 0 ? d->matDefs[e->material].paint : d->ownAtlases[e->ownAtlas].rel;
     switch (e->why) {
@@ -7889,7 +8041,9 @@ static void PaintLogInactive(const SceneData *d, const PaintDef *e)
     case PAINT_OUTSIDE:      snprintf(why, sizeof(why), "lies outside its atlas %s", atlas); break;
     case PAINT_NO_ATLAS:     snprintf(why, sizeof(why), "has no atlas image %s", atlas); break;
     case PAINT_SKINNED:      snprintf(why, sizeof(why), "is in a skinned model file (its bone channels are in use)"); break;
-    case PAINT_NEEDS_UNWRAP: snprintf(why, sizeof(why), "needs a paint unwrap (its own UVs overlap, repeat or are missing)"); break;
+    case PAINT_NEEDS_UNWRAP: snprintf(why, sizeof(why), "needs a paint unwrap (its own UVs overlap, repeat, are a palette or are missing)"); break;
+    case PAINT_GRID_CELLS:   snprintf(why, sizeof(why), "covers %dx%d cells of the grid, more than its %dx%d rectangle", e->gridW,
+                                      e->gridH, e->w, e->h); break;
     default:                 snprintf(why, sizeof(why), "can't be drawn: %s's shader can't take the paint stage", mat); break;
     }
     TraceLog(LOG_WARNING, "monolith_scene: %s:%d: paint: %u:%d %s %s; inactive", d->srcPath, e->line, e->entity.stmt,
@@ -7897,8 +8051,9 @@ static void PaintLogInactive(const SceneData *d, const PaintDef *e)
 }
 
 // Which entries draw (docs/painting.md 4.2): the object draws those faces / that slot with the
-// entry's material, the slot's UVs can carry paint, and the rectangle lies inside its atlas. After
-// BuildEntities (a compiled map's entries get their entity ids here) and the model files.
+// entry's material, the slot's UVs can carry paint, the rectangle lies inside its atlas and, on a
+// paint grid, holds the cells of each of its faces (17.2). After BuildEntities (a compiled map's
+// entries get their entity ids here) and the model files.
 static void PaintResolve(SceneData *d)
 {
     for (int m = 0; m < d->materialCount; m++) {
@@ -7926,6 +8081,18 @@ static void PaintResolve(SceneData *d)
         }
         if (why == PAINT_OK && (w <= 0 || h <= 0)) why = PAINT_NO_ATLAS;
         else if (why == PAINT_OK && ((long long)e->x + e->w > w || (long long)e->y + e->h > h)) why = PAINT_OUTSIDE;
+        e->gridFace = -1;
+        e->gridW = e->gridH = 0;
+        double rho = e->kind == PAINT_BOX ? (double)PaintGridOf(d, e->material) : 0.0;
+        for (int f = 0; why == PAINT_OK && rho > 0.0 && f < 6; f++) {
+            if (!(e->faces >> f & 1)) continue;
+            GridSpan su = BoxFaceSpan(d, e->object, f, false, rho), sv = BoxFaceSpan(d, e->object, f, true, rho);
+            if (su.cells <= e->w && sv.cells <= e->h) continue;
+            why = PAINT_GRID_CELLS;
+            e->gridFace = (signed char)f;
+            e->gridW = su.cells;
+            e->gridH = sv.cells;
+        }
         e->active = why == PAINT_OK;
         e->why = (signed char)why;
         if (!e->active) PaintLogInactive(d, e);
@@ -8081,7 +8248,9 @@ static bool PaintKeys(SceneData *d, const SceneData *old, const int *boxFrom, co
     }
     if (next > 16777215) return false;      // (keys are 3 bytes in a merged mesh's vertices)
 
-    // The table: each active entry's rectangle, normalised to its atlas, at its faces' / slot's keys
+    // The table: each active entry's rectangle, normalised to its atlas, at its faces' / slot's keys;
+    // a box face on a paint grid gets its own extent in the rectangle instead (docs/painting.md 17.2):
+    // from where its 0 lies in its first cell to where its 1 lies, computed in double from the box
     d->paintKeyCount = next;
     d->paintTableRows = (next + PAINT_TABLE_W - 1) / PAINT_TABLE_W;
     if (!(d->paintTable = calloc((size_t)d->paintTableRows * PAINT_TABLE_W * 4, sizeof(float)))) return false;
@@ -8091,9 +8260,19 @@ static bool PaintKeys(SceneData *d, const SceneData *old, const int *boxFrom, co
         float w = (float)(e->material >= 0 ? d->matDefs[e->material].paintW : d->ownAtlases[e->ownAtlas].w);
         float h = (float)(e->material >= 0 ? d->matDefs[e->material].paintH : d->ownAtlases[e->ownAtlas].h);
         float r[4] = { (float)e->x / w, (float)e->y / h, (float)(e->x + e->w) / w, (float)(e->y + e->h) / h };
+        double rho = e->kind == PAINT_BOX ? (double)PaintGridOf(d, e->material) : 0.0;
         if (e->kind == PAINT_BOX) {
-            for (int f = 0; f < 6; f++)
-                if (e->faces & (1u << f)) memcpy(&d->paintTable[4 * (size_t)(d->boxPaintKey[e->object] + f)], r, sizeof(r));
+            for (int f = 0; f < 6; f++) {
+                if (!(e->faces & (1u << f))) continue;
+                if (rho > 0.0) {
+                    GridSpan su = BoxFaceSpan(d, e->object, f, false, rho), sv = BoxFaceSpan(d, e->object, f, true, rho);
+                    r[0] = (float)((e->x + su.frac) / (double)w);
+                    r[1] = (float)((e->y + sv.frac) / (double)h);
+                    r[2] = (float)((e->x + su.end) / (double)w);
+                    r[3] = (float)((e->y + sv.end) / (double)h);
+                }
+                memcpy(&d->paintTable[4 * (size_t)(d->boxPaintKey[e->object] + f)], r, sizeof(r));
+            }
         } else memcpy(&d->paintTable[4 * (size_t)(d->modelPaintKey[e->object] + e->slot)], r, sizeof(r));
     }
     return true;
@@ -10880,6 +11059,18 @@ static void SurfaceOfBox(const SceneData *d, MS_SurfaceHit *out)
     out->faceUv = fu;
     out->paintUv = fu;          // (the face corner UVs of the paint keys: CubeFaceUv's mapping)
     out->paintEntry = PaintEntryOf(d, PAINT_BOX, b, m, out->face, -1);
+    // On a paint grid (docs/painting.md 17.6): the hit in texels from the face's first cell, as the
+    // paint table maps the face (PaintKeys), and the cells the face covers
+    out->paintGrid = PaintGridOf(d, m);
+    if (out->paintGrid > 0.0f) {
+        GridSpan su = BoxFaceSpan(d, b, out->face, false, out->paintGrid), sv = BoxFaceSpan(d, b, out->face, true, out->paintGrid);
+        out->paintTexel = (Vector2){ (float)(su.frac + fu.x * (su.end - su.frac)), (float)(sv.frac + fu.y * (sv.end - sv.frac)) };
+        out->paintCellsW = su.cells;
+        out->paintCellsH = sv.cells;
+    } else if (out->paintEntry >= 0) {
+        const PaintDef *e = &d->paints[out->paintEntry];
+        out->paintTexel = (Vector2){ fu.x * (float)e->w, fu.y * (float)e->h };
+    }
     Vector2 uv = fu;
     if (m >= 0 && m < d->materialCount) {
         const MatDef *D = &d->matDefs[m];
@@ -10938,6 +11129,11 @@ static void SurfaceOfModel(const MS_Scene *s, Vector3 origin, Vector3 dir, float
         out->paintUv = (Vector2){ bary.x * q[0].x + bary.y * q[1].x + bary.z * q[2].x,
                                   bary.x * q[0].y + bary.y * q[1].y + bary.z * q[2].y };
     out->paintEntry = PaintEntryOf(d, PAINT_MODEL, mi, m, -1, out->slot);
+    out->paintGrid = PaintGridOf(d, m);
+    if (any && out->paintEntry >= 0) {
+        const PaintDef *e = &d->paints[out->paintEntry];
+        out->paintTexel = (Vector2){ out->paintUv.x * (float)e->w, out->paintUv.y * (float)e->h };
+    }
     // The uv_scale / uv_offset the slot is drawn with: the override's, else the file's own material's
     const R3D_Material *R = m >= 0 ? &d->materials[m].material
                           : out->slot >= 0 && out->slot < model->materialCount && model->materials ? &model->materials[out->slot]
@@ -11229,6 +11425,60 @@ bool MS_PaintAtlasOf(const MS_Scene *s, int material, int file, int slot, MS_Pai
         snprintf(full, sizeof(full), "%s%s", d->root, rel);
         ImageFileSize(full, &out->width, &out->height);
     }
+    return true;
+}
+
+// The paint grid (docs/painting.md 17): the region "Small helpers: the paint layer" computes it
+float MS_PaintGridOf(const MS_Scene *s, int material)
+{
+    const SceneData *d = s && s->priv ? s->priv->d : NULL;
+    if (!d || material >= d->materialCount) return 0.0f;
+    return PaintGridOf(d, material < 0 ? -1 : material);
+}
+
+bool MS_BoxFaceCells(const MS_Scene *s, int box, int face, float rho, int *w, int *h, Vector2 *offset)
+{
+    *w = *h = 0;
+    *offset = (Vector2){ 0 };
+    const SceneData *d = s && s->priv ? s->priv->d : NULL;
+    if (!d || box < 0 || box >= d->boxCount || face < 0 || face > 5 || !(rho > 0.0f)) return false;
+    GridSpan su = BoxFaceSpan(d, box, face, false, rho), sv = BoxFaceSpan(d, box, face, true, rho);
+    *w = su.cells;
+    *h = sv.cells;
+    *offset = (Vector2){ (float)su.frac, (float)sv.frac };
+    return true;
+}
+
+// The albedo texture a model slot shows through its own UVs (17.4): the override's albedo_map (or
+// the model's own texture with `inherit albedo`), else the model's own material's; its size when it
+// is shown 1:1 (uv_scale 1 1, uv_offset 0 0), the slot's own UVs carry paint (PUV_OWN: they pass the
+// overlap and evenness tests, and the file has no unwrap) and the texture is more than one texel
+bool MS_PaintSlotTexels(const MS_Scene *s, int material, int file, int slot, int *w, int *h)
+{
+    *w = *h = 0;
+    SceneData *d = s && s->priv ? s->priv->d : NULL;
+    if (!d || !d->filePaint || file < 0 || file >= d->modelFileCount || !d->modelFiles[file].loaded ||
+        material >= d->materialCount) return false;
+    const R3D_Model *model = &d->modelFiles[file].model;
+    if (slot < 0 || slot >= model->materialCount || !model->materials || FileUvKind(d, file, slot) != PUV_OWN) return false;
+    const R3D_Material *own = &model->materials[slot];
+    const R3D_Material *shown = material >= 0 ? &d->materials[material].material : own;
+    if (shown->uvScale.x != 1.0f || shown->uvScale.y != 1.0f || shown->uvOffset.x != 0.0f || shown->uvOffset.y != 0.0f)
+        return false;
+    int tw = 0, th = 0;
+    if (material < 0 || (d->matDefs[material].inherit & INHERIT_ALBEDO)) {
+        if (own->albedo.texture.id) {
+            tw = own->albedo.texture.width;
+            th = own->albedo.texture.height;
+        }
+    } else if (d->matDefs[material].maps[MAP_ALBEDO]) {
+        char full[MS_PATH_MAX + MS_PATH_MAX];
+        snprintf(full, sizeof(full), "%s%s", d->root, d->matDefs[material].maps[MAP_ALBEDO]);
+        ImageFileSize(full, &tw, &th);
+    }
+    if (tw <= 0 || th <= 0 || (tw == 1 && th == 1)) return false;
+    *w = tw;
+    *h = th;
     return true;
 }
 
@@ -12280,6 +12530,8 @@ bool MS_WriteEnvironment(const MS_Scene *s, FILE *f)
     WriteDefKeys(f, e, "volumetricFog.");   // the density fade, only when the map sets one
     fprintf(f, "# Quality presets: exposure factor when a preset turns bloom off (keeps the mean brightness)\n");
     WriteDefKeys(f, e, "bloom.");
+    fprintf(f, "# Paint: the grid (texels per metre) of materials without paint_grid; 0 none\n");
+    WriteDefKeys(f, e, "paint.");
     return !ferror(f);
 }
 

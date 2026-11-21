@@ -258,9 +258,10 @@ static void PrintSurfaceHit(Vector3 origin, Vector3 dir)
     if (!MS_RaycastSurface(scene, origin, dir, 0.0f, &h)) return;
     static const char *const FACE[] = { "+x", "-x", "+y", "-y", "+z", "-z" };
     printf("pick: surface material %d \"%s\"  face %s  slot %d  mesh %d  triangle %d  faceUv %.4f %.4f  uv %.4f %.4f"
-           "  bary %.3f %.3f %.3f\n", h.material, h.material >= 0 && h.material < scene->materialCount ? scene->materials[h.material].name
-           : "(own)", h.face >= 0 && h.face < 6 ? FACE[h.face] : "-", h.slot, h.mesh, h.triangle, h.faceUv.x, h.faceUv.y, h.uv.x,
-           h.uv.y, h.bary.x, h.bary.y, h.bary.z);
+           "  bary %.3f %.3f %.3f  paint grid %g texel %.3f %.3f cells %dx%d\n", h.material, h.material >= 0 &&
+           h.material < scene->materialCount ? scene->materials[h.material].name : "(own)", h.face >= 0 && h.face < 6 ? FACE[h.face]
+           : "-", h.slot, h.mesh, h.triangle, h.faceUv.x, h.faceUv.y, h.uv.x, h.uv.y, h.bary.x, h.bary.y, h.bary.z, h.paintGrid,
+           h.paintTexel.x, h.paintTexel.y, h.paintCellsW, h.paintCellsH);
 }
 
 static RenderTexture LoadSceneCache(int w, int h)

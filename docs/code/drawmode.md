@@ -16,9 +16,19 @@ The first stroke on a face or slot without a rectangle is one undoable edit (`ED
 
 Every step keeps the 64 x 64 tiles it touched as they were before it, and the atlas's size before and after; undo and redo swap them with the atlas (`mapedit.c` calls the hooks of this file).
 
+## The paint grid
+
+On a material with a paint grid (`MS_PaintGridOf`: its `paint_grid`, else the map's `env paint.grid`; [painting.md](../painting.md) §17) paint follows the map's own pixel grid:
+
+- A new box face rectangle is the face's cells (`MS_BoxFaceCells`; a face group: per axis its largest face's), refused above 2048 cells. A model slot gets `MS_PaintSlotTexels` (its texture's texels) when its own UVs carry them, else the square of its unwrap made at the grid's texel size.
+- A stroke's texel on a grid face is the hit's `paintTexel` (texels from the face's first cell), and its stamps clip to that face's cells; the brush cursor maps its footprint back through the same mapping (`DrawGeom.u0 .. u1`, `v0 .. v1`: where the face's 0 and 1 lie in the rectangle's texels), so its outline lies on the surface's texel lines.
+- *Fit to grid* (the panel's resize on a grid) gives an entry its cells again: texel for texel when the old rectangle was within a quarter of them (made on the grid; the box moved or was resized since), else resampled nearest. It also takes entries a grid made inactive (rectangle smaller than the face's cells).
+
+Without a grid everything is as before: the panel's density sizes rectangles and a face's 0..1 spans the whole rectangle.
+
 ## Unwrapping models
 
-A model slot whose own UVs can't carry paint (tiled, overlapping, missing) gets an unwrap of its whole file on its first stroke (`paintunwrap.c`, xatlas), provided to the runtime and written as the model's `.paintuv` sidecar on save. Interactively the note "unwrapping x.glb ..." shows for a frame first (a scanned rock takes ~3 s).
+A model slot whose own UVs can't carry paint (tiled, overlapping, a palette, missing) gets an unwrap of its whole file on its first stroke (`PaintUnwrapModelFileAt` in `paintunwrap.c`, xatlas) at a fixed texel size: the grid's texels per metre (else the density) times the painted instance's largest scale, each slot packed into a square of its own whose side is the rectangle the first stroke allocates. It is provided to the runtime and written as the model's `.paintuv` sidecar on save. Interactively the note "unwrapping x.glb ..." shows for a frame first (a scanned rock takes ~2 s).
 
 ## A stroke
 

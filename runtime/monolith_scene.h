@@ -681,6 +681,13 @@ typedef struct {
                             // (models: own UVs or the unwrap); -1 -1: a slot that needs an unwrap
     int paintEntry;         // MS_PaintEntryAt index of the active entry of this face / slot in
                             // `material`'s atlas; -1: none yet
+    float paintGrid;        // the paint grid `material` follows (MS_PaintGridOf), texels per metre;
+                            // 0: none (free density, docs/painting.md 17.1)
+    Vector2 paintTexel;     // boxes on a grid: the hit in texels from the face's first grid cell (the
+                            // texel is the rectangle's x + floor(.x), y + floor(.y); 17.6); else
+                            // paintUv x the entry's w h (0 0 without an entry)
+    int paintCellsW, paintCellsH;   // boxes on a grid: the cells the face covers (a new rectangle's
+                            // least size); else 0
 } MS_SurfaceHit;
 
 // MS_Raycast, plus where on the surface it hit. False when nothing is hit (out->hit.obj.kind
@@ -737,6 +744,19 @@ typedef struct {
 } MS_PaintAtlas;
 bool MS_PaintAtlasOf(const MS_Scene *scene, int material, int file, int slot, MS_PaintAtlas *out);
 
+// The paint grid (docs/painting.md 17): the grid material `material`'s paint texels lie on, texels per
+// metre through the world origin: its `paint_grid`, else the map's `env paint.grid`; material -1 (a
+// model slot's own material) the map's. 0: none (the draw mode's free density applies).
+float MS_PaintGridOf(const MS_Scene *scene, int material);
+// Face `face` (0..5 = +x -x +y -y +z -z; a turned box: its own axes) of box `box` on a grid of `rho`
+// texels per metre (17.2): the cells it covers along its u and v, and where its u = v = 0 corner lies
+// in the first cell (0..1 texels). False when out of range or rho <= 0.
+bool MS_BoxFaceCells(const MS_Scene *scene, int box, int face, float rho, int *w, int *h, Vector2 *offset);
+// The albedo texture a model slot drawn with `material` (-1: its own) shows through its own UVs, when
+// those UVs carry paint texel for texel (17.4: they pass the paint test, their texels are even, the
+// texture is the material's albedo map at uv_scale 1 1, uv_offset 0 0): its size. False otherwise.
+bool MS_PaintSlotTexels(const MS_Scene *scene, int material, int file, int slot, int *w, int *h);
+
 // Straight-alpha pixels for an atlas path that the next MS_EditSetText (and any upload from
 // memory) uses instead of the file, also while the file doesn't exist (a new or grown atlas).
 // Copied (as RGBA8); img NULL forgets the path. Kept across live edits; dropped by a load or
@@ -745,9 +765,10 @@ bool MS_PaintAtlasProvide(MS_Scene *scene, const char *rel, const Image *img);
 
 // How model file `file`'s slot `slot` maps onto paint (docs/painting.md 4.5)
 typedef enum {
-    MS_PAINTUV_OWN = 0,         // its own UVs (all in 0..1, no overlap)
+    MS_PAINTUV_OWN = 0,         // its own UVs (all in 0..1, no overlap, texels even across the slot: 17.4)
     MS_PAINTUV_UNWRAP,          // the file's unwrap (its .paintuv sidecar, or a provided one)
-    MS_PAINTUV_NEEDS_UNWRAP,    // own UVs overlap, repeat or are missing, and there is no unwrap yet
+    MS_PAINTUV_NEEDS_UNWRAP,    // own UVs overlap, repeat, are a palette or are missing, and there is
+                                // no unwrap yet
     MS_PAINTUV_SKINNED,         // refused: the file is skinned (its bone channels are in use)
     MS_PAINTUV_INVALID,         // out of range or not loaded
 } MS_PaintUvKind;

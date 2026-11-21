@@ -202,6 +202,7 @@ use "name"
 | `instanced on\|off` | Default off. Keep this material's boxes as instanced unit cubes. Off: boxes are drawn as one mesh per cell of the faces no other box hides (see `UploadBoxes`). On is for shaders that read `INSTANCE_*` or the model-space `POSITION` in `vertex()`; a scan of the source turns it on, with a warning, when it finds those. |
 | `paint "textures/paint/x.png"` | The material's paint atlas (RGBA8 PNG, straight alpha). The material draws with a paint stage after its own shader once a `paint` line below draws with it ([painting.md](../painting.md) §4); without one nothing changes. |
 | `paint_filter trilinear\|nearest` | How the atlas is sampled (nearest: crisp paint texels). |
+| `paint_grid <0 \| 1..1024>` | The grid (texels per metre, through the world origin) the material's paint texels lie on ([painting.md](../painting.md) §17): each box face's paint maps onto the grid cells it covers, so painted texels meet the surface's own texels and the paint of neighbouring boxes. `0`: none (the map's `env paint.grid` doesn't apply either). Without the key the map's `env paint.grid` applies. Changes nothing without `paint` lines. |
 
 #### uv_faces
 
@@ -233,7 +234,7 @@ use "name"
 - no two rectangles of one atlas share a texel;
 - no face or slot of an object is in two entries of one material.
 
-An entry whose object no longer draws that face or slot with that material, or whose rectangle lies outside its atlas, draws nothing (logged). `paint` lines are not statements: they take no statement key.
+An entry whose object no longer draws that face or slot with that material, or whose rectangle lies outside its atlas, draws nothing (logged). On a material with a paint grid (`paint_grid`, `env paint.grid`), a box face maps onto its own grid cells from the rectangle's lower-left texel, and an entry whose rectangle is smaller than one of its faces' cells draws nothing (logged: `paint: 120:0 +x covers 12x8 cells of the grid, more than its 10x8 rectangle; inactive`). `paint` lines are not statements: they take no statement key.
 
 ### Environment
 
@@ -256,6 +257,8 @@ env <key> <value...>
 
 - `volumetricFog.fadeStart f`, `volumetricFog.fadeEnd f`: the volumetric fog's density fades out by distance from the eye: 1 up to fadeStart, smoothstep to 0 at fadeEnd (fadeEnd > fadeStart). Default 0 0 = no fade: the fog stops hard at `volumetricFog.length`. Keeps the near light shafts while far buildings stay clear. R3D patch 13: ignored without `MS_PATCHED_R3D` (upstream R3D then renders the unfaded fog).
 - `volumetricFog.fadeNear f`: the density also fades in, smoothstep from 0 at the eye to full at f m. Default 0 = off; at most fadeStart when a fade-out is set (larger values are clamped to it). Without it the sunlit fog around the eye veils the whole view, so the scene looks brighter when the player stands in sunlight than in shadow. R3D patch 15.
+
+**Paint grid.** `paint.grid f`: the paint grid (texels per metre) of every material without `paint_grid` and of model slots drawn with their own material; `0` (the default) or 1..1024 ([painting.md](../painting.md) §17.1). Changes nothing without `paint` lines; a live edit of it rebuilds only the paint table.
 
 **Bloom off.** `bloom.offExposure f`: the exposure factor applied when a quality setting turns bloom off, so the mean brightness stays (default 1.19, matched on the default map).
 

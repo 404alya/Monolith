@@ -20,9 +20,9 @@ typedef enum {
 #define DRAW_RECENT_COLORS 8
 #define DRAW_SIZE_MAX 256
 #define DRAW_DENSITY_DEFAULT 64.0f      // texels per metre of new paint (docs/painting.md 5.2)
-#define DRAW_RECT_MIN 4                 // a box face group's rectangle: each side 4 .. 2048 texels
+#define DRAW_RECT_MIN 4                 // a box face group's rectangle: each side 4 .. 2048 texels (on a
+                                        // paint grid: its cells, 1 .. 2048; a model slot's: 1 .. 2048)
 #define DRAW_RECT_MAX 2048
-#define DRAW_SLOT_MIN 16                // a model slot's square: 16 .. 2048
 #define DRAW_ATLAS_MIN 256              // an atlas: a power-of-two square from 256, growing to 4096 x 4096
 #define DRAW_ATLAS_MAX 4096
 #define DRAW_TILE 64                    // undo tile side (texels)
@@ -50,12 +50,16 @@ typedef struct {
     int replayed;           // ... how many
 } Atlas;
 
-// A paint unwrap made this session (docs/painting.md 4.5): provided to the runtime, written as the
-// model's .paintuv sidecar on the save that first needs it
+// A paint unwrap made this session (docs/painting.md 4.5, 17.5): provided to the runtime, written as
+// the model's .paintuv sidecar on the save that first needs it
 typedef struct {
     char *modelPath;        // the model file (package path, heap)
     MS_PaintUnwrap u;
     bool written;
+    float texelsPerUnit;    // what it was packed at (texels per model unit) ...
+    float scale;            // ... for an instance of this scale (largest of its three)
+    int *sides;             // per slot of the file: its square's side (-1: no mesh), the rectangle a
+    int sideCount;          // first stroke allocates (heap)
 } DrawUnwrap;
 
 // Where paint at a surface goes (its entry's rectangle, or the one its first stroke will get): the
@@ -70,7 +74,14 @@ typedef struct {
     bool nearest;           // the atlas's paint_filter nearest (fresh atlas: the pixel look switch)
     bool needsUnwrap;       // a model slot without paint UVs yet: the first stroke unwraps the file
     bool fresh;             // no entry yet
+    bool estimate;          // fresh w h are an estimate (the unwrap that sets them isn't made yet)
     Vector2 uv;             // the hit in the entry's paint coordinates (0..1; -1: no paint UVs yet)
+    float grid;             // the paint grid of the material (MS_PaintGridOf; docs/painting.md 17), 0: none
+    // Where the surface's 0 and 1 lie in the rectangle's texels (texel = u0 + u (u1 - u0)): a box face
+    // on a grid its first cell's offset and end (17.2), else 0 .. w and 0 .. h; and the texels the
+    // hit face shows (a box face on a grid: its cells, at most the rectangle; else the rectangle)
+    float u0, u1, v0, v1;
+    int cellsW, cellsH;
 } DrawGeom;
 
 // What a per-frame text was built from (drawmode.c TextKeyOf): the texts hold names, so they are heap
@@ -80,8 +91,9 @@ typedef struct {
     unsigned char code;
     int kind, index, face, slot, material;
     unsigned int version;
-    bool ok, fresh, needsUnwrap;
+    bool ok, fresh, needsUnwrap, estimate;
     int atlasW, atlasH, w, h, x, y;
+    float grid, density;    // the grid's texels per metre (17.7), the panel's density
 } DrawTextKey;
 
 // The surface the panel shows and acts on (docs/painting.md 13.2): the one the cursor last rested
@@ -101,6 +113,13 @@ typedef struct {
     // when ok), the texel size (texelSet); rebuilt only when textKey changes (they hold names)
     MonoMsg what, into, texel;
     bool intoSet, texelSet;
+    float grid;             // the paint grid the target's paint follows (MS_PaintGridOf, texels per
+                            // metre; docs/painting.md 17.7): the panel shows "Grid" and Fit to grid,
+                            // no density slider; 0: none (the panel's density applies)
+    MonoMsg gridLine;       // the panel's line about it: "follows the grid of concrete: 24 texels/m
+    bool gridLineSet;       // (4.2 cm)" / "concrete has no paint grid: 64 texels/m from the panel"
+    bool fitOk;             // Fit to grid can act on it (an entry on a grid, also one too small for
+                            // its face's cells: Resolve's code 10)
     DrawTextKey textKey;
     bool facesOk;           // a box: the Faces section shows its groups
     int faceKey;            // the box and material the groups belong to (-1: none)
@@ -118,7 +137,8 @@ typedef struct {
     Color color;
     Color recent[DRAW_RECENT_COLORS];
     int recentCount;
-    float density;          // texels per metre of new rectangles (and Resize to density)
+    float density;          // texels per metre of new rectangles (and Resize to density) on materials
+                            // without a paint grid (docs/painting.md 17.7)
     bool pixelLook;         // new atlases get paint_filter nearest
     bool panelHidden;       // TAB
     // Atlases and unwraps (heap arrays)
