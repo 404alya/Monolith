@@ -1,5 +1,12 @@
 #include "newmap.h"
 
+#if MONOLITH_EDITING
+// git is started through nob.h (an argument list, no shell), as the classifier starts claude; its
+// implementation is in classifier.c, which only the editing (Linux) build compiles
+#include "vendor/nob/nob.h"
+#include <unistd.h>
+#endif
+
 // ======================================================================================
 // #region New map package
 // ======================================================================================
@@ -64,6 +71,15 @@ static bool WriteText(const char *path, const char *fmt, const char *a, const ch
     return fclose(f) == 0;
 }
 
+// The package's .gitignore: what a package holds that is not map content. A nested repository
+// doesn't inherit the main repo's .gitignore. Keep in step with PACKAGE_GITIGNORE in
+// tools/request-queue.c (docs/map-format.md section 1).
+static const char *GITIGNORE =
+    "# Not map content (docs/map-format.md section 1): the compiled map (monolith --compile)\n"
+    "# and the draw mode's UI state, which the editor rewrites\n"
+    "*.mapb\n"
+    "draw.ini\n";
+
 static bool IsSep(char c) { return c == '/' || c == '\\'; }
 
 char *NewMapDir(const char *mapsDir, const char *target, const char **name)
@@ -105,6 +121,95 @@ static char *Join(const char *a, const char *b)
     char *p = malloc(la + lb + 1);
     if (p) { memcpy(p, a, la); memcpy(p + la, b, lb + 1); }
     return p;
+}
+
+#if MONOLITH_EDITING
+// nob's own messages ("command exited with exit code 1" for a git check that answers no) stay out
+// of the output: the caller reports the outcome in one line
+static void QuietNobLog(Nob_Log_Level level, const char *fmt, va_list args)
+{
+    (void)level;
+    (void)fmt;
+    (void)args;
+}
+
+// Whether an executable `name` is in one of $PATH's folders
+static bool InPath(const char *name)
+{
+    const char *path = getenv("PATH");
+    for (const char *d = path; d && *d;) {
+        size_t len = strcspn(d, ":");
+        char *cand = MonoStrf("%.*s/%s", (int)(len ? len : 1), len ? d : ".", name);
+        bool found = cand && access(cand, X_OK) == 0;
+        free(cand);
+        if (found) return true;
+        d += len;
+        if (*d == ':') d++;
+    }
+    return false;
+}
+
+// `git -C <dir> <args...>` (NULL-terminated), its output to /dev/null; true when it exits 0
+static bool Git(const char *dir, ...)
+{
+    Nob_Cmd cmd = { 0 };
+    nob_cmd_append(&cmd, "git", "-C", dir);
+    va_list args;
+    va_start(args, dir);
+    for (const char *a = va_arg(args, const char *); a; a = va_arg(args, const char *)) nob_cmd_append(&cmd, a);
+    va_end(args);
+    bool ok = nob_cmd_run(&cmd, .stdout_path = "/dev/null", .stderr_path = "/dev/null");
+    nob_cmd_free(cmd);
+    return ok;
+}
+#endif
+
+// The new package as a git repository of its own (docs/map-format.md section 1): git init, then a
+// first commit of every file. Not inside another repository's work tree unless that one ignores
+// the folder (a nested repository there would become an embedded one). 0: a repository with its
+// first commit (the configured identity only: user.useConfigOnly, git doesn't guess one); 1: no repository (git missing, or inside another work tree); 2: a repository
+// without the commit (no git identity, or the commit failed). Prints one warning line for 1 and 2.
+static unsigned char NewMapGit(const char *dir, const char *name)
+{
+#if MONOLITH_EDITING
+    Nob_Log_Handler *oldLog = nob_get_log_handler();
+    nob_set_log_handler(QuietNobLog);
+    unsigned char result = 0;
+    char *message = MonoStrf("Create %s with monolith --new-map", name);
+    if (!message) {
+        fprintf(stderr, "monolith: --new-map: warning: out of memory: the package is not a git repository\n");
+        result = 1;
+    } else if (!InPath("git")) {
+        fprintf(stderr, "monolith: --new-map: warning: git not found: the package is not a git repository; install git, "
+                        "then run: git -C %s init && git -C %s add -A && git -C %s commit -m \"%s\"\n",
+                dir, dir, dir, message);
+        result = 1;
+    } else if (Git(dir, "rev-parse", "--is-inside-work-tree", NULL) && !Git(dir, "check-ignore", "-q", ".", NULL)) {
+        fprintf(stderr, "monolith: --new-map: warning: %s is inside another git repository's work tree, which doesn't "
+                        "ignore it: no git init (a nested repository there would become an embedded one); create "
+                        "packages under maps/ to give them a history\n", dir);
+        result = 1;
+    } else if (!Git(dir, "init", "-q", NULL)) {
+        fprintf(stderr, "monolith: --new-map: warning: git init failed: the package is not a git repository; "
+                        "run: git -C %s init\n", dir);
+        result = 1;
+    } else if (!Git(dir, "add", "-A", NULL) || !Git(dir, "-c", "user.useConfigOnly=true", "commit", "-q", "-m", message, NULL)) {
+        bool identity = Git(dir, "config", "user.name", NULL) && Git(dir, "config", "user.email", NULL);
+        fprintf(stderr, "monolith: --new-map: warning: %s: the repository has no commit yet; %srun: "
+                        "git -C %s add -A && git -C %s commit -m \"%s\"\n",
+                identity ? "git commit failed" : "no git identity",
+                identity ? "" : "set one (git config --global user.name \"...\"; git config --global user.email ...), then ",
+                dir, dir, message);
+        result = 2;
+    }
+    free(message);
+    nob_set_log_handler(oldLog);
+    return result;
+#else
+    (void)dir;
+    (void)name;
+    return 1;  // (the view-only build refuses --new-map before it gets here)
+#endif
 }
 
 bool NewMapIn(const char *dir, const char *name, const char *mapsDir)
@@ -187,6 +292,10 @@ bool NewMapIn(const char *dir, const char *name, const char *mapsDir)
     ok = path && WriteText(path, ASSETS_MD, name, "");
     free(path);
     if (!ok) return false;
+    path = Join(dir, "/.gitignore");
+    ok = path && WriteText(path, "%s%s", GITIGNORE, "");
+    free(path);
+    if (!ok) return false;
 
     // The package must load (it is generated, so a failure is a bug here)
     MS_Scene *check = MS_Load(dir, &(MS_LoadOptions){ .noGpu = true });
@@ -195,7 +304,11 @@ bool NewMapIn(const char *dir, const char *name, const char *mapsDir)
         return false;
     }
     MS_Unload(check);
-    printf("monolith: created %s/ (%s.map, MAP.md, ASSETS.md, shaders/, models/, textures/)\n", dir, name);
+    static const char *const REPO[] = { "a git repository with its first commit", "not a git repository",
+                                        "a git repository, nothing committed yet" };
+    unsigned char git = NewMapGit(dir, name);
+    printf("monolith: created %s/ (%s.map, MAP.md, ASSETS.md, .gitignore, shaders/, models/, textures/; %s)\n", dir,
+           name, REPO[git]);
     return true;
 }
 

@@ -13,8 +13,12 @@ maps/<name>/
 ├── shaders/       surface shaders the map's materials use (e.g. maps/monolith/shaders/concrete.glsl)
 ├── models/        model files (+ the .bin / textures a .gltf names), each with a <file>.asset.md sidecar
 ├── textures/      textures (PNG, JPG; HDR panoramas for the sky)
-└── ASSETS.md      every external file: source URL, author, licence (+ URL), date, sha256, changes
+├── ASSETS.md      every external file: source URL, author, licence (+ URL), date, sha256, changes
+├── .gitignore     *.mapb and draw.ini: what the package holds that is not map content
+└── .git/          the package's own git repository: its history, one commit per request
 ```
+
+- **A package is a git repository of its own.** `--new-map` makes it one with a first commit, and every finished request that changed it is one commit there (made by the request queue, with the request's id and final state in the message), so `git -C maps/<name> log` reads what each request did and `git -C maps/<name> revert <commit>` takes one back; each request's bundle also holds the change as `map.patch` ([request-queue.md §4a](request-queue.md#4a-the-maps-history-one-commit-and-one-patch-per-request)). The package `.gitignore` leaves out `*.mapb` (the compiled map, build output) and `draw.ini` (the draw mode's UI state, rewritten by the editor): a nested repository doesn't inherit the main repo's `.gitignore`. A package the main repo tracks (`maps/pine_forest/`) is not a repository of its own: its requests get a `map.patch` only. A package without a repository gets one at its first request.
 
 - Every path in a map file is **relative to the package root** (the folder of the map file). Absolute paths and `..` are rejected, so a package can be copied anywhere (and exported, [export.md](export.md)).
 - `--map <path>` takes a package folder (it loads `<folder>/<folder name>.map`, else its only `.map`) or a `.map` file. A single `.map` file outside a package loads too; its folder is its root.
@@ -26,7 +30,7 @@ Free-form Markdown with these sections (the `--new-map` template has them): *Sty
 
 The brief is what keeps a map consistent: every request on the map is carried out in its style, and Claude updates it when a request adds a landmark, a group or a material.
 
-- **New maps.** `monolith --new-map <name>` creates `maps/<name>/` (an argument with a `/` creates the package in that folder instead, e.g. a scratch draft): a 200 × 200 m ground slab (group `ground`), the plain grey `"default"` material, the built-in environment written out as `env` lines (daylight), a `spawn`, two viewpoints, empty `shaders/ models/ textures/`, an empty `ASSETS.md` and a `MAP.md` **template** with placeholders. Fill in the brief yourself, or send a first request that describes the map ("a foggy pine forest at dusk", "a neon market street at night, wet asphalt, stalls on both sides"): Claude writes the brief from it and then builds to it.
+- **New maps.** `monolith --new-map <name>` creates `maps/<name>/` (an argument with a `/` creates the package in that folder instead, e.g. a scratch draft): a 200 × 200 m ground slab (group `ground`), the plain grey `"default"` material, the built-in environment written out as `env` lines (daylight), a `spawn`, two viewpoints, empty `shaders/ models/ textures/`, an empty `ASSETS.md`, the package `.gitignore` and a `MAP.md` **template** with placeholders, and makes the folder a git repository with one commit (`Create <name> with monolith --new-map`; without git, without a git identity, or in a folder inside another repository's work tree that doesn't ignore it, the package is still created, with one warning line saying what to run). Fill in the brief yourself, or send a first request that describes the map ("a foggy pine forest at dusk", "a neon market street at night, wet asphalt, stalls on both sides"): Claude writes the brief from it and then builds to it.
 
 ### 1.3 Format versions
 

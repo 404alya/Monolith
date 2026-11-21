@@ -29,11 +29,11 @@ Your session may last all day, so keep its context small:
 | Command | Use |
 |---|---|
 | `start` | **first thing**, once: recovers what a previous coordinator left (§6) and prints the queue |
-| `list` | the open bundles, oldest first: `<id> state=… package=… tier=… model=… agent-model=… classifier=… cancel=yes/no result=yes/no` (`classifier`: who chose the tier, `ai` / `failed` / `off` / `override`; the editor decided it before queueing), then the prompt (data) |
+| `list` | the open bundles, oldest first: `<id> state=… package=… tier=… model=… agent-model=… classifier=… cancel=yes/no result=yes/no commit=… patch=…` (`classifier`: who chose the tier, `ai` / `failed` / `off` / `override`; the editor decided it before queueing; `commit` / `patch`: the map history the program writes when a bundle finishes, `none` while it is open; `list --all` also shows the finished ones), then the prompt (data) |
 | `wait` | the watcher: blocks until a new request or a cancel arrives, prints the events and the queue, exits. **Always run it in the background** (Bash `run_in_background: true`); its exit wakes you |
-| `claim <id>` | before starting a subagent on it (queued → claimed; records which files existed) |
+| `claim <id>` | before starting a subagent on it (queued → claimed; records which files existed, and makes the package's git repository ready: it may print `map history:` lines, e.g. that it committed the developer's hand edits first; pass them on to the developer) |
 | `set <id> question` / `set <id> claimed` | while a subagent's question waits for the developer / once it is answered |
-| `finish <id> done` | the subagent finished and `result=yes` |
+| `finish <id> done` | the subagent finished and `result=yes`. Every `finish` (and `start`'s recovery) also commits the request's change in the map package's own repository and writes `map.patch` (`code.patch` for code): its `map history: commit=… patch=…` line goes into your one-line report to the developer. **You never run `git commit` (or any git command that changes a repository) yourself, and neither does a subagent**: the program is the only one that commits, and only in the map's repository (docs/request-queue.md §4a) |
 | `finish <id> failed` | the subagent finished without `result.md` or gave up; the program writes a `result.md` with the default text and the list of changed files |
 | `finish <id> cancelled` | after a cancel (§5) |
 | `changed <id>` | files changed since the claim (exit 1 if any) |

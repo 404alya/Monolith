@@ -433,6 +433,199 @@ static void Show(const char **ids, size_t count)
 
 // #endregion
 
+// #region The map's history (docs/request-queue.md section 4a)
+
+// `git -C <dir> <args...>` (NULL-terminated), stderr to /dev/null; its stdout with trailing newlines removed
+// into *out (heap string; "" on failure) when out isn't NULL. Returns the exit status.
+static int GitT(char **out, const char *dir, ...)
+{
+    Nob_Cmd cmd = {0};
+    nob_cmd_append(&cmd, "git", "-C", dir);
+    va_list ap;
+    va_start(ap, dir);
+    for (const char *a = va_arg(ap, const char *); a; a = va_arg(ap, const char *)) nob_cmd_append(&cmd, a);
+    va_end(ap);
+    Nob_String_Builder sb = {0};
+    int status = ToolCapture(&cmd, &sb, (ToolIo){.err = "/dev/null"});
+    nob_cmd_free(cmd);
+    while (sb.count > 0 && sb.items[sb.count - 1] == '\n') sb.count--;
+    nob_sb_append_null(&sb);
+    if (out) *out = status == 0 ? sb.items : (free(sb.items), strdup(""));
+    else nob_sb_free(sb);
+    return status;
+}
+
+// The value after `key` on the first line of <bundle>/<file> that starts with it (heap string; "" when none).
+static char *BundleValue(const char *id, const char *file, const char *key)
+{
+    char *line = FindLine(nob_temp_sprintf("%s/%s/%s", gR, id, file), StartsWith, key, false);
+    char *value = strdup(line ? line + strlen(key) : "");
+    free(line);
+    return value;
+}
+
+// The largest map.patch / code.patch seen (bytes), reported at the end.
+static long gLargestPatch = 0;
+
+// The size of a file, -1 when it doesn't exist; also keeps gLargestPatch.
+static long PatchSize(const char *path)
+{
+    struct stat st;
+    if (stat(path, &st) != 0) return -1;
+    if ((long)st.st_size > gLargestPatch) gLargestPatch = (long)st.st_size;
+    return (long)st.st_size;
+}
+
+// CheckHistory <id> <package> <state> <changed>: the finished bundle's commit and map.patch, as
+// docs/request-queue.md section 4a says. changed: one new commit in the package, on base-map, with the message
+// "<slug>: <line 1 of result.md>", "Request: <id>", "State: <state>"; map.patch reverts it (git apply -R
+// --check on a clone at the commit) and replays it (git am on a clone at base-map gives the commit's tree).
+// Not changed: no commit and map.patch = "no changes". A code.patch exactly when wantCode.
+static void CheckHistory(const char *id, const char *pkg, const char *state, bool changed, bool wantCode)
+{
+    if (!id) return;
+    const char *name = strrchr(pkg, '/') ? strrchr(pkg, '/') + 1 : pkg;
+    char *base = BundleValue(id, "claim.txt", "base-map ");
+    char *commit = BundleValue(id, "commit.txt", "commit ");
+    const char *patch = nob_temp_sprintf("%s/%s/map.patch", gR, id);
+    char *patchPath = strdup(patch);
+    long size = PatchSize(patchPath);
+    bool codePatch = PatchSize(nob_temp_sprintf("%s/%s/code.patch", gR, id)) >= 0;
+    if (!*base) {
+        Bad("%s: no base-map line in claim.txt", id);
+    } else if (!changed) {
+        char *text = Slurp(patchPath);
+        if (strcmp(commit, "none") == 0 && strcmp(text, "no changes\n") == 0 && !codePatch) {
+            Ok("%s (%s, %s): nothing changed: no commit, map.patch \"no changes\"", id, name, state);
+        } else {
+            Bad("%s: commit %s, map.patch %ld bytes, code.patch %s (want none, \"no changes\", none)", id, commit, size,
+                codePatch ? "yes" : "no");
+        }
+        free(text);
+    } else {
+        char *full = NULL, *parent = NULL, *message = NULL, *slug = NULL;
+        GitT(&full, pkg, "rev-parse", "--verify", "-q", nob_temp_sprintf("%s^{commit}", commit), NULL);
+        GitT(&parent, pkg, "rev-parse", "-q", nob_temp_sprintf("%s^", commit), NULL);
+        GitT(&message, pkg, "log", "-1", "--format=%B", commit, NULL);
+        const char *u1 = strchr(id, '_');
+        const char *u2 = u1 ? strchr(u1 + 1, '_') : NULL;
+        slug = strdup(u2 ? u2 + 1 : id);
+        char *line1 = Head1(nob_temp_sprintf("%s/%s/result.md", gR, id));
+        const char *want = nob_temp_sprintf("%s: %.20s", slug, line1);
+        bool shape = strncmp(message, want, strlen(want)) == 0 && strstr(message, nob_temp_sprintf("\n\nRequest: %s\nState: %s", id, state));
+        if (*full && *base && strcmp(parent, base) == 0 && shape) {
+            Ok("%s (%s): one commit %s on base-map, \"%s...\", State: %s", id, name, commit, want, state);
+        } else {
+            Bad("%s: commit %s, parent %s (base-map %s), message \"%s\"", id, commit, parent, base, message);
+        }
+        // the patch: reverts on a clone at the commit, replays on a clone at base-map
+        const char *clone = nob_temp_sprintf("%s/clone-%s", gT, id);
+        char *clonePath = strdup(clone);
+        Nob_Cmd cmd = {0};
+        nob_cmd_append(&cmd, "git", "clone", "-q", "--no-checkout", pkg, clonePath);
+        bool ok = ToolRun(&cmd, (ToolIo){.err = "/dev/null"}) == 0;
+        nob_cmd_free(cmd);
+        ok = ok && GitT(NULL, clonePath, "checkout", "-q", full, NULL) == 0;
+        bool revert = ok && GitT(NULL, clonePath, "apply", "-R", "--check", patchPath, NULL) == 0;
+        ok = ok && GitT(NULL, clonePath, "checkout", "-q", base, NULL) == 0;
+        bool am = ok && GitT(NULL, clonePath, "am", "-q", patchPath, NULL) == 0;
+        char *t1 = NULL, *t2 = NULL;
+        GitT(&t1, clonePath, "rev-parse", "HEAD^{tree}", NULL);
+        GitT(&t2, pkg, "rev-parse", nob_temp_sprintf("%s^{tree}", commit), NULL);
+        if (revert && am && *t1 && strcmp(t1, t2) == 0 && codePatch == wantCode) {
+            Ok("%s: map.patch (%ld bytes) reverts (apply -R --check) and replays (am at base-map = the commit's tree)", id,
+               size);
+        } else {
+            Bad("%s: map.patch: revert %s, am %s, trees %s / %s, code.patch %s", id, revert ? "ok" : "FAILED",
+                am ? "ok" : "FAILED", t1, t2, codePatch ? "yes" : "no");
+        }
+        free(t1);
+        free(t2);
+        free(clonePath);
+        free(line1);
+        free(slug);
+        free(message);
+        free(parent);
+        free(full);
+    }
+    free(patchPath);
+    free(commit);
+    free(base);
+}
+
+// CheckClean <package>: its git status is empty.
+static void CheckClean(const char *pkg)
+{
+    char *status = NULL;
+    int st = GitT(&status, pkg, "status", "--porcelain", NULL);
+    if (st == 0 && !*status) Ok("%s: git status is clean", strrchr(pkg, '/') + 1);
+    else Bad("%s: git status: %s", strrchr(pkg, '/') + 1, st == 0 ? status : "(not a repository)");
+    free(status);
+}
+
+// The main repo's state the queue must never change: HEAD, the index's entries, the status (outside .slop/,
+// the developer's editor markers). Heap string.
+static char *RepoState(void)
+{
+    char *head = NULL, *index = NULL, *status = NULL;
+    GitT(&head, gToolRoot, "rev-parse", "HEAD", NULL);
+    GitT(&index, gToolRoot, "ls-files", "-s", NULL);
+    GitT(&status, gToolRoot, "status", "--porcelain", "--", ".", ":(exclude).slop", NULL);
+    char *state = strdup(nob_temp_sprintf("HEAD %s\nindex %zu bytes\n%s\n%s", head, strlen(index), index, status));
+    free(head);
+    free(index);
+    free(status);
+    return state;
+}
+
+// The folder <scratch>/no-<name>-bin: a symlink to every program in $PATH's folders but `name`, so a run with
+// PATH=<it> finds everything except that program (see NoGioFolder). Returns its path (a temp string).
+static const char *NoProgramFolder(const char *name);
+
+// Runs request-queue with the words (NULL-terminated), its output appended to <scratch>/queue-direct.out;
+// returns the exit status.
+static int QueueT(const char *first, ...)
+{
+    Nob_Cmd cmd = {0};
+    nob_cmd_append(&cmd, ToolProgram("request-queue"));
+    va_list ap;
+    va_start(ap, first);
+    for (const char *a = first; a; a = va_arg(ap, const char *)) nob_cmd_append(&cmd, a);
+    va_end(ap);
+    int status = ToolRun(&cmd, (ToolIo){.out = nob_temp_sprintf("%s/queue-direct.out", gT), .append = true, .errToOut = true});
+    nob_cmd_free(cmd);
+    return status;
+}
+
+// A hand-made queued bundle <gR>/<id> for the package (request.json with its package and prompt, state).
+static void MakeBundle(const char *id, const char *pkg)
+{
+    const char *dir = nob_temp_sprintf("%s/%s", gR, id);
+    ToolMkdirP(dir);
+    FILE *f = fopen(nob_temp_sprintf("%s/request.json", dir), "wb");
+    if (f) {
+        fprintf(f, "{\n  \"format\": 7,\n  \"prompt\": \"test %s\",\n  \"package\": \"%s\",\n}\n", id, pkg);
+        if (fclose(f) != 0) ToolErr("request.json: %s", strerror(errno));
+    }
+    f = fopen(nob_temp_sprintf("%s/state", dir), "wb");
+    if (f) {
+        fputs("queued 2026-01-01T00:00:00 game\n", f);
+        if (fclose(f) != 0) ToolErr("state: %s", strerror(errno));
+    }
+}
+
+// Appends a line to a file.
+static void AppendLine(const char *path, const char *line)
+{
+    FILE *f = fopen(path, "ab");
+    if (f) {
+        fprintf(f, "%s\n", line);
+        if (fclose(f) != 0) ToolErr("%s: %s", path, strerror(errno));
+    }
+}
+
+// #endregion
+
 // #region main
 
 // Sets an environment variable for one call (the script's `VAR=value Submit ...`), remembering the old
@@ -459,13 +652,13 @@ static void RestoreEnv(SavedEnv saved)
     free(saved.old);
 }
 
-// The folder <scratch>/no-gio-bin: a symlink to every program in $PATH's folders but gio (the first of a name
-// wins, as in a PATH search), so a run with PATH=<it> finds everything except gio, without anything being
-// removed from the system. Made on the first call; returns its path (a temp string). The test fails when it
-// can't be made.
-static const char *NoGioFolder(void)
+// The folder <scratch>/no-<name>-bin: a symlink to every program in $PATH's folders but `name` (the first of a
+// name wins, as in a PATH search), so a run with PATH=<it> finds everything except that program, without
+// anything being removed from the system. Made on the first call; returns its path (a temp string). The test
+// fails when it can't be made.
+static const char *NoProgramFolder(const char *name)
 {
-    const char *dir = nob_temp_sprintf("%s/no-gio-bin", gT);
+    const char *dir = nob_temp_sprintf("%s/no-%s-bin", gT, name);
     struct stat st;
     if (stat(dir, &st) == 0) return dir;
     if (!ToolMkdirP(dir)) {
@@ -479,7 +672,7 @@ static const char *NoGioFolder(void)
         char *folder = entry ? realpath(entry, NULL) : NULL;  // absolute link targets, whatever the entry says
         DIR *h = folder ? opendir(folder) : NULL;
         for (struct dirent *e; h && (e = readdir(h));) {
-            if (e->d_name[0] == '.' || strcmp(e->d_name, "gio") == 0) continue;
+            if (e->d_name[0] == '.' || strcmp(e->d_name, name) == 0) continue;
             size_t mark = nob_temp_save();  // thousands of names: give the temp buffer back after each
             const char *from = nob_temp_sprintf("%s/%s", folder, e->d_name);
             const char *to = nob_temp_sprintf("%s/%s", dir, e->d_name);
@@ -496,6 +689,12 @@ static const char *NoGioFolder(void)
         if (*d == ':') d++;
     }
     return dir;
+}
+
+// NoProgramFolder for gio.
+static const char *NoGioFolder(void)
+{
+    return NoProgramFolder("gio");
 }
 
 // The text of a check that compares the number of terminals.
@@ -552,20 +751,36 @@ int main(int argc, char **argv)
     unsetenv("MONOLITH_STUB_LIMITED");
     unsetenv("MONOLITH_STUB_COORD_LIMIT");
     unsetenv("MONOLITH_LIMIT_RETRY");
+    // the map history's commits (docs/request-queue.md section 4a) under an identity of the test's own, so
+    // the test doesn't depend on the developer's git config; no private index or other repository inherited
+    setenv("GIT_AUTHOR_NAME", "test-coordinator", 1);
+    setenv("GIT_AUTHOR_EMAIL", "test-coordinator@example.invalid", 1);
+    setenv("GIT_COMMITTER_NAME", "test-coordinator", 1);
+    setenv("GIT_COMMITTER_EMAIL", "test-coordinator@example.invalid", 1);
+    unsetenv("GIT_INDEX_FILE");
+    unsetenv("GIT_DIR");
+    unsetenv("GIT_WORK_TREE");
+    unsetenv("MONOLITH_CODE_REPO");
+    char *repoBefore = RepoState();
     const char *rootSlash = nob_temp_sprintf("%s/", gToolRoot);
     size_t rootLen = strlen(rootSlash);
 
     Echo("test-coordinator: scratch folder %s", gT + rootLen);
-    // two fresh map packages in the scratch folder
+    // three fresh map packages in the scratch folder (it is under build/, which the repo ignores, so --new-map
+    // makes each a repository): map_a clean, map_b with hand edits before its first request, map_c made
+    // without git in PATH (a plain folder that its first claim turns into a repository)
     const char *A = strdup(nob_temp_sprintf("%s/map_a", gT));
     const char *B = strdup(nob_temp_sprintf("%s/map_b", gT));
-    const char *names[2] = {"a", "b"};
-    const char *maps[2] = {A, B};
-    for (int i = 0; i < 2; i++) {
+    const char *C = strdup(nob_temp_sprintf("%s/map_c", gT));
+    const char *names[3] = {"a", "b", "c"};
+    const char *maps[3] = {A, B, C};
+    for (int i = 0; i < 3; i++) {
         Nob_Cmd cmd = {0};
         nob_cmd_append(&cmd, gGame, "--new-map", maps[i]);
         const char *out = nob_temp_sprintf("%s/newmap-%s.out", gT, names[i]);
+        SavedEnv path = SetEnvFor("PATH", i == 2 ? NoProgramFolder("git") : getenv("PATH"));
         int status = ToolRun(&cmd, (ToolIo){.out = out, .errToOut = true});
+        RestoreEnv(path);
         nob_cmd_free(cmd);
         if (status != 0) {
             fflush(stdout);
@@ -573,12 +788,31 @@ int main(int argc, char **argv)
             return 1;
         }
     }
+    Echo("0. --new-map makes a repository with one commit; without git a plain folder and a warning");
+    {
+        char *log = NULL, *status = NULL;
+        GitT(&log, A, "log", "--format=%s", NULL);
+        GitT(&status, A, "status", "--porcelain", NULL);
+        if (strcmp(log, "Create map_a with monolith --new-map") == 0 && !*status) Ok("map_a: one commit \"%s\", status clean", log);
+        else Bad("map_a: log \"%s\", status \"%s\"", log, status);
+        free(log);
+        free(status);
+        struct stat stc;
+        const char *outC = nob_temp_sprintf("%s/newmap-c.out", gT);
+        if (stat(nob_temp_sprintf("%s/.git", C), &stc) != 0 && FileHas(outC, Contains, "warning: git not found") &&
+            FileHas(outC, Contains, "; not a git repository)")) {
+            Ok("map_c (no git in PATH): created, not a repository, one warning");
+        } else {
+            Bad("map_c without git (see %s)", outC);
+        }
+        AppendLine(nob_temp_sprintf("%s/map_b.map", B), "# a hand edit before the first request");
+    }
 
     // 1. three submits, one terminal, the same package in sequence, two packages in parallel
     Echo("1. three submits (two on map_a, one on map_b): one terminal, same map in sequence, two maps in parallel");
-    char *A1 = Submit(A, "test one on map a", NULL, 0);
+    char *A1 = Submit(A, "[edit] test one on map a", NULL, 0);
     char *A2 = Submit(A, "test two on map a", NULL, 0);
-    char *B1 = Submit(B, "test one on map b", NULL, 0);
+    char *B1 = Submit(B, "[edit] test one on map b", NULL, 0);
     if (Opened() == 1) Ok("exactly one terminal opened for three submits");
     else Bad("%s terminals opened (want 1)", Terminals());
     const char *s1[] = {A1, A2, B1};
@@ -616,7 +850,7 @@ int main(int argc, char **argv)
     // 3. CTRL+K n cancels a running request
     Echo("3. CTRL+K n on a running request cancels it");
     const char *cancelFlags[] = {"--submit-wait", "2.5", "--close-submitted"};
-    char *X1 = Submit(A, "test cancel me", cancelFlags, 3);
+    char *X1 = Submit(A, "[edit] test cancel me", cancelFlags, 3);
     const char *out3 = strdup(nob_temp_sprintf("%s/submit-%d.out", gT, gN));
     // grep -q "^close \[[0-9]*\]: cancelling", and the message is the first line "^close .*cancelling"
     bool asked = false;
@@ -710,6 +944,48 @@ int main(int argc, char **argv)
     st = Overlap(B3, B4);
     if (st == 1) Ok("after the restart map_b's requests still ran in sequence");
     else Bad("overlap %s / %s (status %d)", B3 ? B3 : "", B4 ? B4 : "", st);
+
+    // 4b. the map history of every request so far, and a first request on a plain folder
+    Echo("4b. map history: one commit per request that changed its package, map.patch in every bundle");
+    char *P0 = Submit(C, "[edit] test plain folder", NULL, 0);
+    const char *s4c[] = {P0};
+    if (!WaitFor(30, AllFinal, s4c, 1)) Bad("not finished after 30 s");
+    CheckHistory(A1, A, "done", true, false);
+    CheckHistory(A2, A, "done", false, false);
+    CheckHistory(B1, B, "done", true, false);
+    {
+        char *base = BundleValue(B1 ? B1 : "", "claim.txt", "base-map ");
+        char *message = NULL, *count = NULL;
+        GitT(&message, B, "log", "-1", "--format=%s", base, NULL);
+        GitT(&count, B, "rev-list", "--count", "HEAD", NULL);
+        const char *u = B1 ? strchr(strchr(B1, '_') + 1, '_') + 1 : "";
+        if (strcmp(message, nob_temp_sprintf("Hand edits before request %s", u)) == 0) Ok("map_b's hand edits: their own commit \"%s\" before the request's", message);
+        else Bad("map_b's base-map is \"%s\" (want the hand edits' commit)", message);
+        free(message);
+        free(count);
+        free(base);
+    }
+    CheckHistory(C1, A, "done", false, false);
+    CheckHistory(B2, B, "done", false, false);
+    CheckHistory(X1, A, "cancelled", true, false);
+    CheckHistory(A3, A, "interrupted", true, false);
+    CheckHistory(B3, B, "done", false, false);
+    CheckHistory(B4, B, "done", false, false);
+    {
+        char *first = NULL;
+        GitT(&first, C, "log", "--format=%s", "--reverse", NULL);
+        if (strncmp(first, nob_temp_sprintf("Start the history of map_c (before request %s)", P0 ? P0 : ""), 40) == 0 &&
+            FileHas(gLog, Contains, nob_temp_sprintf("map history %s: ", P0 ? P0 : ""))) {
+            Ok("map_c: the claim made it a repository (\"%.60s...\")", first);
+        } else {
+            Bad("map_c's history: %s", first);
+        }
+        free(first);
+    }
+    CheckHistory(P0, C, "done", true, false);
+    CheckClean(A);
+    CheckClean(B);
+    CheckClean(C);
 
     // 5. no coordinator: the editor cancels a queued request itself
     Echo("5. no coordinator: a queued request is cancelled by the editor itself");
@@ -1097,6 +1373,225 @@ int main(int argc, char **argv)
         RestoreEnv(c1);
         if (oldConfig) setenv("CLAUDE_CONFIG_DIR", oldConfig, 1);
         free(oldConfig);
+    }
+
+    // 9. the map history run directly (no coordinator): a code request's code.patch, a package tracked by an
+    // enclosing repository, no git identity, a bundle claimed by an older request-queue
+    Echo("9. map history without a coordinator: code.patch, a tracked package, no identity, an old bundle");
+    {
+        gR = strdup(nob_temp_sprintf("%s/requests-history", gT));
+        ToolMkdirP(gR);
+        SavedEnv r = SetEnvFor("MONOLITH_REQUESTS_DIR", gR);
+        // the code repository: a scratch one (MONOLITH_CODE_REPO), with a package it tracks
+        const char *code = strdup(nob_temp_sprintf("%s/code-repo", gT));
+        const char *tracked = strdup(nob_temp_sprintf("%s/code-repo/maps/tracked", gT));
+        const char *D = strdup(nob_temp_sprintf("%s/map_d", gT));
+        ToolMkdirP(nob_temp_sprintf("%s/maps", code));
+        GitT(NULL, code, "init", "-q", NULL);
+        AppendLine(nob_temp_sprintf("%s/engine.c", code), "int main(void) { return 0; }");
+        Nob_Cmd cmd = {0};
+        nob_cmd_append(&cmd, gGame, "--new-map", tracked);
+        ToolRun(&cmd, (ToolIo){.out = nob_temp_sprintf("%s/newmap-tracked.out", gT), .errToOut = true});
+        nob_cmd_append(&cmd, gGame, "--new-map", D);
+        ToolRun(&cmd, (ToolIo){.out = nob_temp_sprintf("%s/newmap-d.out", gT), .errToOut = true});
+        nob_cmd_free(cmd);
+        struct stat stt;
+        if (stat(nob_temp_sprintf("%s/.git", tracked), &stt) != 0 &&
+            FileHas(nob_temp_sprintf("%s/newmap-tracked.out", gT), Contains, "inside another git repository's work tree")) {
+            Ok("--new-map inside another work tree that doesn't ignore it: no git init, a warning");
+        } else {
+            Bad("--new-map inside another work tree (see newmap-tracked.out)");
+        }
+        GitT(NULL, code, "add", "-A", NULL);
+        GitT(NULL, code, "commit", "-q", "-m", "code", NULL);
+        SavedEnv cr = SetEnvFor("MONOLITH_CODE_REPO", code);
+        char *codeHead = NULL, *codeIndex = NULL;
+        GitT(&codeHead, code, "rev-parse", "HEAD", NULL);
+        GitT(&codeIndex, code, "ls-files", "-s", NULL);
+
+        // a code request on map_d: the map change (with a 64 KiB binary file) and a code change
+        const char *H1 = "2026-01-01_000001_code-request";
+        MakeBundle(H1, D);
+        QueueT("claim", H1, NULL);
+        AppendLine(nob_temp_sprintf("%s/map_d.map", D), "box 0 0 0 1 1 1");
+        FILE *f = fopen(nob_temp_sprintf("%s/models/blob.bin", D), "wb");
+        if (f) {
+            unsigned int x = 12345;
+            for (int i = 0; i < 65536; i++) fputc((int)((x = x * 1103515245u + 12345u) >> 24), f);
+            if (fclose(f) != 0) ToolErr("blob.bin: %s", strerror(errno));
+        }
+        AppendLine(nob_temp_sprintf("%s/engine.c", code), "// changed by the code request");
+        AppendLine(nob_temp_sprintf("%s/new.c", code), "int added;");
+        AppendLine(nob_temp_sprintf("%s/%s/result.md", gR, H1), "Changed the engine and the map");
+        QueueT("finish", H1, "done", NULL);
+        CheckHistory(H1, D, "done", true, true);
+        const char *codePatch = nob_temp_sprintf("%s/%s/code.patch", gR, H1);
+        char *codePatchPath = strdup(codePatch);
+        char *head2 = NULL, *index2 = NULL;
+        GitT(&head2, code, "rev-parse", "HEAD", NULL);
+        GitT(&index2, code, "ls-files", "-s", NULL);
+        if (GitT(NULL, code, "apply", "-R", "--check", codePatchPath, NULL) == 0 && FileHas(codePatchPath, Contains, "+++ b/new.c") &&
+            !FileHas(codePatchPath, Contains, "maps/")) {
+            Ok("code.patch: the engine change and the new file, repo-relative, reverts (apply -R --check)");
+        } else {
+            Bad("code.patch (see %s)", codePatchPath);
+        }
+        if (strcmp(head2, codeHead) == 0 && strcmp(index2, codeIndex) == 0) Ok("the code repository's HEAD and index are unchanged");
+        else Bad("the code repository's HEAD or index changed");
+        free(head2);
+        free(index2);
+        free(codePatchPath);
+
+        // a package tracked by the code repository: a patch only, no commit, that repository's index unchanged
+        const char *T1 = "2026-01-01_000002_tracked";
+        MakeBundle(T1, tracked);
+        QueueT("claim", T1, NULL);
+        AppendLine(nob_temp_sprintf("%s/tracked.map", tracked), "box 0 0 0 1 1 1");
+        AppendLine(nob_temp_sprintf("%s/%s/result.md", gR, T1), "Changed the tracked map");
+        QueueT("finish", T1, "done", NULL);
+        char *tc = BundleValue(T1, "commit.txt", "commit ");
+        const char *tp = nob_temp_sprintf("%s/%s/map.patch", gR, T1);
+        char *tpPath = strdup(tp);
+        PatchSize(tpPath);
+        char *head3 = NULL, *index3 = NULL;
+        GitT(&head3, code, "rev-parse", "HEAD", NULL);
+        GitT(&index3, code, "ls-files", "-s", NULL);
+        struct stat stp;
+        if (strcmp(tc, "none") == 0 && FileHas(tpPath, StartsWith, "diff --git a/tracked.map b/tracked.map") &&
+            GitT(NULL, tracked, "apply", "-R", "--check", tpPath, NULL) == 0 && strcmp(head3, codeHead) == 0 &&
+            strcmp(index3, codeIndex) == 0 && stat(nob_temp_sprintf("%s/%s/code.patch", gR, T1), &stp) != 0) {
+            Ok("tracked package: no commit, map.patch relative to the package reverts, the repository's HEAD and index unchanged, no code.patch");
+        } else {
+            Bad("tracked package: commit %s (see %s)", tc, tpPath);
+        }
+        free(tc);
+        free(tpPath);
+        free(head3);
+        free(index3);
+
+        // no git identity (hand edits at the claim too): no commit, commit=failed, the patch still written
+        const char *N1 = "2026-01-01_000003_no-identity";
+        MakeBundle(N1, D);
+        AppendLine(nob_temp_sprintf("%s/map_d.map", D), "# a hand edit without an identity");
+        char *headD = NULL;
+        GitT(&headD, D, "rev-parse", "HEAD", NULL);
+        SavedEnv i1 = SetEnvFor("GIT_CONFIG_GLOBAL", "/dev/null");
+        SavedEnv i2 = SetEnvFor("GIT_CONFIG_NOSYSTEM", "1");
+        SavedEnv i3 = SetEnvFor("GIT_CONFIG_COUNT", "1");  // (git must not guess one from the host name)
+        SavedEnv i4 = SetEnvFor("GIT_CONFIG_KEY_0", "user.useConfigOnly");
+        SavedEnv i5 = SetEnvFor("GIT_CONFIG_VALUE_0", "true");
+        SavedEnv i6 = SetEnvFor("GIT_AUTHOR_NAME", "");
+        SavedEnv i7 = SetEnvFor("GIT_AUTHOR_EMAIL", "");
+        SavedEnv i8 = SetEnvFor("GIT_COMMITTER_NAME", "");
+        SavedEnv i9 = SetEnvFor("GIT_COMMITTER_EMAIL", "");
+        unsetenv("GIT_AUTHOR_NAME");
+        unsetenv("GIT_AUTHOR_EMAIL");
+        unsetenv("GIT_COMMITTER_NAME");
+        unsetenv("GIT_COMMITTER_EMAIL");
+        SavedEnv i10 = SetEnvFor("EMAIL", "");
+        unsetenv("EMAIL");
+        QueueT("claim", N1, NULL);
+        AppendLine(nob_temp_sprintf("%s/map_d.map", D), "box 2 0 0 3 1 1");
+        AppendLine(nob_temp_sprintf("%s/%s/result.md", gR, N1), "Added a box without an identity");
+        QueueT("finish", N1, "done", NULL);
+        RestoreEnv(i10);
+        RestoreEnv(i9);
+        RestoreEnv(i8);
+        RestoreEnv(i7);
+        RestoreEnv(i6);
+        RestoreEnv(i5);
+        RestoreEnv(i4);
+        RestoreEnv(i3);
+        RestoreEnv(i2);
+        RestoreEnv(i1);
+        {
+            char *nc = BundleValue(N1, "commit.txt", "commit ");
+            char *head4 = NULL;
+            GitT(&head4, D, "rev-parse", "HEAD", NULL);
+            const char *np = nob_temp_sprintf("%s/%s/map.patch", gR, N1);
+            char *npPath = strdup(np);
+            PatchSize(npPath);
+            char *listed = NULL;
+            {
+                Nob_Cmd lc = {0};
+                nob_cmd_append(&lc, ToolProgram("request-queue"), "list", "--all");
+                Nob_String_Builder out = {0};
+                ToolCapture(&lc, &out, (ToolIo){0});
+                nob_cmd_free(lc);
+                nob_sb_append_null(&out);
+                listed = out.items;
+            }
+            // N1's row (its first line) ends in "commit=failed patch=map"
+            const char *row = strstr(listed, nob_temp_sprintf("%s state=done", N1));
+            const char *end = row ? strchr(row, '\n') : NULL;
+            const char *tail = " commit=failed patch=map";
+            bool rowFailed = end && (size_t)(end - row) >= strlen(tail) && strncmp(end - strlen(tail), tail, strlen(tail)) == 0;
+            if (strcmp(nc, "failed: no git identity") == 0 && strcmp(head4, headD) == 0 && rowFailed &&
+                FileHas(npPath, Contains, "+box 2 0 0 3 1 1") && FileHas(npPath, Contains, "+# a hand edit without an identity") == false) {
+                Ok("no identity: no commit (also none for the hand edits), list says commit=failed, map.patch holds only the request's change");
+            } else {
+                Bad("no identity: commit.txt \"%s\", HEAD %s (was %s), list row %s (see %s)", nc, head4, headD, row ? "found" : "missing", npPath);
+            }
+            free(listed);
+            free(npPath);
+            free(head4);
+            free(nc);
+        }
+        free(headD);
+
+        // an old bundle (claimed by a request-queue before the history): no commit, no patch, one line
+        const char *O1 = "2026-01-01_000004_old-bundle";
+        MakeBundle(O1, D);
+        QueueT("claim", O1, NULL);
+        {
+            // claim.txt as an older request-queue wrote it: the fingerprint lines only
+            const char *claim = nob_temp_sprintf("%s/%s/claim.txt", gR, O1);
+            char *text = Slurp(claim);
+            Nob_String_Builder kept = {0};
+            for (char *line = text; *line;) {
+                char *nl = strchr(line, '\n');
+                size_t len = nl ? (size_t)(nl - line + 1) : strlen(line);
+                if (strncmp(line, "map-repo ", 9) != 0 && strncmp(line, "base-", 5) != 0) nob_sb_append_buf(&kept, line, len);
+                line += len;
+            }
+            FILE *cf = fopen(claim, "wb");
+            if (cf) {
+                fwrite(kept.items, 1, kept.count, cf);
+                if (fclose(cf) != 0) ToolErr("claim.txt: %s", strerror(errno));
+            }
+            nob_sb_free(kept);
+            free(text);
+        }
+        char *headO = NULL, *headO2 = NULL;
+        GitT(&headO, D, "rev-parse", "HEAD", NULL);
+        AppendLine(nob_temp_sprintf("%s/map_d.map", D), "box 4 0 0 5 1 1");
+        AppendLine(nob_temp_sprintf("%s/%s/result.md", gR, O1), "An old bundle");
+        QueueT("finish", O1, "done", NULL);
+        GitT(&headO2, D, "rev-parse", "HEAD", NULL);
+        struct stat so;
+        if (StateIs(O1, "done") && strcmp(headO, headO2) == 0 && stat(nob_temp_sprintf("%s/%s/map.patch", gR, O1), &so) != 0 &&
+            FileHas(nob_temp_sprintf("%s/queue-direct.out", gT), Contains,
+                    nob_temp_sprintf("%s: map history: claimed by an older request-queue", O1))) {
+            Ok("old bundle (no map-repo line): done as before, no commit, no map.patch, one line saying so");
+        } else {
+            Bad("old bundle (see queue-direct.out)");
+        }
+        free(headO);
+        free(headO2);
+        free(codeHead);
+        free(codeIndex);
+        RestoreEnv(cr);
+        RestoreEnv(r);
+    }
+
+    // the main repo: the queue never touched its HEAD, index or status
+    {
+        char *repoAfter = RepoState();
+        if (strcmp(repoBefore, repoAfter) == 0) Ok("the main repo's HEAD, index and status are the same as before the test");
+        else Bad("the main repo changed during the test (HEAD, index or git status; a concurrent edit by hand also shows here)");
+        free(repoAfter);
+        free(repoBefore);
+        Echo("  (largest patch: %ld bytes)", gLargestPatch);
     }
 
     Echo("--- coordinator output: %s/coordinator.out, queue log: %s", gT + rootLen,

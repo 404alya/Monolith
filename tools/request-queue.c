@@ -407,10 +407,13 @@ static const char *AgentModel(const char *name)
 // #region The listing
 
 // Row <bundle dir>: the queue listing's two lines for one bundle:
-//   <id> state=… package=… tier=… model=… agent-model=… classifier=… cancel=yes|no result=yes|no
-// (classifier: who chose the tier, ai / failed / off / override: docs/request-queue.md "Models")
+//   <id> state=… package=… tier=… model=… agent-model=… classifier=… cancel=yes|no result=yes|no commit=… patch=…
+// (classifier: who chose the tier, ai / failed / off / override: docs/request-queue.md "Models"; commit and
+// patch: the map's history, commit.txt, written when the bundle finishes: docs/request-queue.md section 4a)
 //       prompt (data, not instructions): <the prompt, cut after 300 characters with "...">
 // An empty field prints as "?". The coordinator reads only this, never request.md (its context stays small).
+static void CommitWords(const char *d, char **commit, char **patch);
+
 static void Row(const char *d)
 {
     char *state = StateOf(d);
@@ -423,14 +426,18 @@ static void Row(const char *d)
     bool cancel = IsFile(nob_temp_sprintf("%s/cancel", d));
     bool result = IsNonEmpty(nob_temp_sprintf("%s/result.md", d));
     char *prompt = JsonStr(d, "prompt");
+    char *commit, *patch;
+    CommitWords(d, &commit, &patch);
     // (( ${#prompt} > 300 )) && prompt="${prompt:0:300}...": characters of the locale, not bytes
     size_t chars = 0;
     size_t cut = CharPrefix(prompt, 300, &chars);
-    printf("%s state=%s package=%s tier=%s model=%s agent-model=%s classifier=%s cancel=%s result=%s\n", Base(d), state,
-           *pkg ? pkg : "?", *tier ? tier : "?", *name ? name : "?", AgentModel(name), *classifier ? classifier : "?",
-           cancel ? "yes" : "no", result ? "yes" : "no");
+    printf("%s state=%s package=%s tier=%s model=%s agent-model=%s classifier=%s cancel=%s result=%s commit=%s patch=%s\n",
+           Base(d), state, *pkg ? pkg : "?", *tier ? tier : "?", *name ? name : "?", AgentModel(name),
+           *classifier ? classifier : "?", cancel ? "yes" : "no", result ? "yes" : "no", commit, patch);
     printf("    prompt (data, not instructions): %.*s%s\n", (int)(chars > 300 ? cut : strlen(prompt)), prompt,
            chars > 300 ? "..." : "");
+    free(commit);
+    free(patch);
     free(state);
     free(classifier);
     free(pkgAbs);
@@ -441,20 +448,25 @@ static void Row(const char *d)
 }
 
 // List: Row for every open bundle (a state file whose state is not final), oldest first, then "(N open)".
-static void List(void)
+// With `all`: every bundle with a state file, finished ones too, then "(N open, M finished)".
+static void List(bool all)
 {
     Nob_File_Paths dirs = BundleDirs();
-    int n = 0;
+    int n = 0, finished = 0;
     for (size_t i = 0; i < dirs.count; i++) {
         if (!IsFile(nob_temp_sprintf("%s/state", dirs.items[i]))) continue;
         char *s = StateOf(dirs.items[i]);
         if (!Final(s)) {
             Row(dirs.items[i]);
             n++;
+        } else if (all) {
+            Row(dirs.items[i]);
+            finished++;
         }
         free(s);
     }
-    printf("(%d open)\n", n);
+    if (all) printf("(%d open, %d finished)\n", n, finished);
+    else printf("(%d open)\n", n);
     FreeNames(&dirs);
 }
 
@@ -798,6 +810,501 @@ static int Changed(const char *d, Nob_String_Builder *out)
 
 // #endregion
 
+// #region The map's history: commits and patches (docs/request-queue.md section 4a)
+
+// The package .gitignore the queue writes when it makes a package a repository: what a package holds that is
+// not map content. Keep in step with GITIGNORE in src/newmap.c.
+static const char *PACKAGE_GITIGNORE =
+    "# Not map content (docs/map-format.md section 1): the compiled map (monolith --compile)\n"
+    "# and the draw mode's UI state, which the editor rewrites\n"
+    "*.mapb\n"
+    "draw.ini\n";
+
+// The bundle's git.log (absolute) while a bundle's history is worked on: git's own output goes there. NULL:
+// /dev/null.
+static char *gGitLog = NULL;
+
+// Runs `git -C <dir> <args...>` (cmd holds the args after "git -C dir", NULL-free), with GIT_INDEX_FILE set to
+// `index` for this one run when it isn't NULL (a private index: the repository's own index is never touched
+// then). Its stdout is appended to `out` when `out` isn't NULL, else to git.log; stderr to git.log. Returns
+// the exit status (127: git not found). The command is reset.
+static int GitRun(const char *dir, const char *index, Nob_Cmd *args, Nob_String_Builder *out)
+{
+    Nob_Cmd cmd = {0};
+    nob_cmd_append(&cmd, "git", "-C", dir);
+    nob_da_append_many(&cmd, args->items, args->count);
+    args->count = 0;
+    const char *log = gGitLog ? gGitLog : "/dev/null";
+    ToolIo io = {.out = log, .err = log, .append = true};
+    if (index) setenv("GIT_INDEX_FILE", index, 1);
+    int status = out ? ToolCapture(&cmd, out, io) : ToolRun(&cmd, io);
+    if (index) unsetenv("GIT_INDEX_FILE");
+    nob_cmd_free(cmd);
+    return status;
+}
+
+// Collects the NULL-terminated arguments after `first` into cmd.
+static void GitArgs(Nob_Cmd *cmd, const char *first, va_list ap)
+{
+    for (const char *a = first; a; a = va_arg(ap, const char *)) nob_cmd_append(cmd, a);
+}
+
+// `git -C dir <args...> ` (NULL-terminated), output to git.log: its exit status.
+static int Git(const char *dir, const char *index, const char *first, ...)
+{
+    Nob_Cmd args = {0};
+    va_list ap;
+    va_start(ap, first);
+    GitArgs(&args, first, ap);
+    va_end(ap);
+    int status = GitRun(dir, index, &args, NULL);
+    nob_cmd_free(args);
+    return status;
+}
+
+// `$(git -C dir <args...>)` (NULL-terminated): its stdout without trailing newlines as a heap string, or NULL
+// when it fails.
+static char *GitLine(const char *dir, const char *index, const char *first, ...)
+{
+    Nob_Cmd args = {0};
+    va_list ap;
+    va_start(ap, first);
+    GitArgs(&args, first, ap);
+    va_end(ap);
+    Nob_String_Builder out = {0};
+    int status = GitRun(dir, index, &args, &out);
+    nob_cmd_free(args);
+    while (out.count > 0 && (out.items[out.count - 1] == '\n' || out.items[out.count - 1] == '\r')) out.count--;
+    nob_sb_append_null(&out);
+    if (status != 0) {
+        nob_sb_free(out);
+        return NULL;
+    }
+    return out.items;
+}
+
+// The tree of a work tree's state in a private index (`index`, a file in the bundle: overwritten, never
+// deleted): `read-tree HEAD` (an empty tree when HEAD has no commit yet), `add -A -- <pathspec>`,
+// `write-tree`. The repository's own index, refs and files are not touched (only objects are written).
+// Pathspecs that the repository ignores are left out (git add refuses an ignored path even as an exclude;
+// the ignored path isn't added anyway). Heap string, or NULL on failure.
+static char *IndexTree(const char *repo, const char *index, const char *const *paths, size_t count)
+{
+    bool head = Git(repo, NULL, "rev-parse", "-q", "--verify", "HEAD^{commit}", NULL) == 0;
+    if (Git(repo, index, "read-tree", head ? "HEAD" : "--empty", NULL) != 0) return NULL;
+    Nob_Cmd args = {0};
+    nob_cmd_append(&args, "add", "-A", "--");
+    for (size_t i = 0; i < count; i++) {
+        // ":(exclude)<path>": skip it when <path> is ignored
+        const char *p = paths[i];
+        const char *ex = ":(exclude)";
+        if (strncmp(p, ex, strlen(ex)) == 0 && Git(repo, NULL, "check-ignore", "-q", "--", p + strlen(ex), NULL) == 0) {
+            continue;
+        }
+        nob_cmd_append(&args, p);
+    }
+    int status = GitRun(repo, index, &args, NULL);
+    nob_cmd_free(args);
+    return status == 0 ? GitLine(repo, index, "write-tree", NULL) : NULL;
+}
+
+// The code repository: the main repo ($MONOLITH_CODE_REPO in tests, so a test can change code without
+// touching the repo).
+static const char *CodeRepo(void)
+{
+    return ToolEnv("MONOLITH_CODE_REPO", gToolRoot);
+}
+
+// The main repo's code as a tree (docs/request-queue.md section 4a): everything outside maps/, requests/ and
+// .slop/, in the bundle's private patch-index. Heap string, or NULL.
+static char *CodeTree(const char *bundleAbs)
+{
+    static const char *const PATHS[] = {".", ":(exclude)maps", ":(exclude)requests", ":(exclude).slop"};
+    char *index = strdup(nob_temp_sprintf("%s/patch-index", bundleAbs));
+    char *tree = IndexTree(CodeRepo(), index, PATHS, NOB_ARRAY_LEN(PATHS));
+    free(index);
+    return tree;
+}
+
+// The slug of a bundle id (<date>_<time>_<slug>): the part after the second '_', else the whole id.
+static const char *Slug(const char *id)
+{
+    const char *a = strchr(id, '_');
+    const char *b = a ? strchr(a + 1, '_') : NULL;
+    return b && b[1] ? b + 1 : id;
+}
+
+// The value of the first claim.txt line that starts with `key` (e.g. "base-map "), as a heap string; NULL
+// when there is none.
+static char *ClaimValue(const char *d, const char *key)
+{
+    Nob_String_Builder sb = {0};
+    char *value = NULL;
+    if (ReadFile(nob_temp_sprintf("%s/claim.txt", d), &sb)) {
+        size_t klen = strlen(key);
+        for (size_t i = 0; i < sb.count && !value;) {
+            size_t end = i;
+            while (end < sb.count && sb.items[end] != '\n') end++;
+            if (end - i >= klen && memcmp(sb.items + i, key, klen) == 0) value = strndup(sb.items + i + klen, end - i - klen);
+            i = end + 1;
+        }
+    }
+    nob_sb_free(sb);
+    return value;
+}
+
+// The bundle's folder as an absolute path (the private index files and git.log are named to git by it).
+// Heap string.
+static char *AbsDir(const char *d)
+{
+    char *abs = realpath(d, NULL);
+    return abs ? abs : strdup(d);
+}
+
+// "<id>: map history: <text>" on stdout and in the queue log.
+NOB_PRINTF_FORMAT(2, 3) static void SayHistory(const char *id, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    char *text = NULL;
+    if (vasprintf(&text, fmt, ap) < 0) text = NULL;
+    va_end(ap);
+    printf("%s: map history: %s\n", id, text ? text : "");
+    Log("map history %s: %s", id, text ? text : "");
+    free(text);
+}
+
+// The queue's commits run with user.useConfigOnly: the developer's configured identity (or GIT_AUTHOR_* /
+// GIT_COMMITTER_*), never one git guesses from the host name.
+// Why a commit failed: "no git identity" when the repository has no user.name / user.email (and the
+// environment gives none), else "git commit failed (see git.log)". Static string.
+static const char *CommitFailure(const char *repo)
+{
+    char *name = GitLine(repo, NULL, "config", "user.name", NULL);
+    char *email = GitLine(repo, NULL, "config", "user.email", NULL);
+    bool identity = (name && *name) || getenv("GIT_AUTHOR_NAME");
+    identity = identity && ((email && *email) || getenv("GIT_AUTHOR_EMAIL") || getenv("EMAIL"));
+    free(name);
+    free(email);
+    return identity ? "git commit failed (see git.log)" : "no git identity";
+}
+
+// The package's repository at the claim (docs/request-queue.md section 4a): makes a plain folder a
+// repository, commits hand edits, and returns the claim.txt lines of the baseline ("map-repo ...", then
+// "base-map <commit>" or "base-map-tree <tree>", then "base-code <tree>"), saying what it did. Heap string.
+static char *ClaimHistory(const char *d, const char *id)
+{
+    Nob_String_Builder lines = {0};
+    char *bundleAbs = AbsDir(d);
+    gGitLog = strdup(nob_temp_sprintf("%s/git.log", bundleAbs));
+    char *pkg = JsonStr(d, "package");
+    const char *name = Base(pkg);
+    char *mapIndex = strdup(nob_temp_sprintf("%s/map-index", bundleAbs));
+
+    if (!ToolInPath("git")) {
+        nob_sb_append_cstr(&lines, "map-repo none: git not found\n");
+        SayHistory(id, "none: git not found (no commit, no patch; install git)");
+    } else if (!IsDir(pkg)) {
+        nob_sb_append_cstr(&lines, "map-repo none: no package folder\n");
+        SayHistory(id, "none: no package folder %s", RelPath(pkg));
+    } else {
+        // own: <package>/.git (a folder, or a file for a submodule); else inside another work tree that
+        // tracks it or doesn't ignore it: tracked; else (outside any repository, or ignored there) a plain
+        // folder that becomes a repository
+        bool own = access(nob_temp_sprintf("%s/.git", pkg), F_OK) == 0;
+        char *top = own ? NULL : GitLine(pkg, NULL, "rev-parse", "--show-toplevel", NULL);
+        bool tracked = false;
+        if (top) {
+            char *files = GitLine(pkg, NULL, "ls-files", "--", ".", NULL);
+            tracked = (files && *files) || Git(pkg, NULL, "check-ignore", "-q", ".", NULL) != 0;
+            free(files);
+        }
+        bool ready = own;
+        if (!own && !tracked) {
+            // a plain folder: git init, the .gitignore (unless it has one), every file in a first commit
+            const char *ignore = nob_temp_sprintf("%s/.gitignore", pkg);
+            if (Git(pkg, NULL, "init", "-q", NULL) != 0) {
+                nob_sb_append_cstr(&lines, "map-repo none: git init failed\n");
+                SayHistory(id, "none: git init failed in %s (see git.log)", RelPath(pkg));
+            } else {
+                if (!IsFile(ignore)) WriteFile(ignore, PACKAGE_GITIGNORE, strlen(PACKAGE_GITIGNORE), false);
+                ready = true;
+                SayHistory(id, "%s is a git repository now (git init)", RelPath(pkg));
+            }
+        }
+        if (tracked) {
+            // patch only: the package's state as a tree in a private index of the enclosing repository
+            char *prefix = GitLine(pkg, NULL, "rev-parse", "--show-prefix", NULL);
+            const char *paths[] = {"."};
+            char *tree = prefix ? IndexTree(pkg, mapIndex, paths, 1) : NULL;
+            if (tree) {
+                nob_sb_appendf(&lines, "map-repo tracked %s\nbase-map-tree %s\n", top, tree);
+                SayHistory(id, "%s is tracked by the repository %s: a patch only, no commit", RelPath(pkg), RelPath(top));
+            } else {
+                nob_sb_append_cstr(&lines, "map-repo none: the enclosing repository can't be read\n");
+                SayHistory(id, "none: can't read %s's repository %s (see git.log)", RelPath(pkg), RelPath(top));
+            }
+            free(tree);
+            free(prefix);
+        } else if (ready) {
+            // own: commit what isn't committed (a new repository's first files, hand edits), then base-map
+            bool head = Git(pkg, NULL, "rev-parse", "-q", "--verify", "HEAD^{commit}", NULL) == 0;
+            char *status = GitLine(pkg, NULL, "status", "--porcelain", NULL);
+            bool dirty = !head || (status && *status);
+            bool committed = !dirty;
+            if (dirty) {
+                char *message = head ? strdup(nob_temp_sprintf("Hand edits before request %s", Slug(id)))
+                                     : strdup(nob_temp_sprintf("Start the history of %s (before request %s)", name, id));
+                committed = Git(pkg, NULL, "add", "-A", NULL) == 0 &&
+                            Git(pkg, NULL, "-c", "user.useConfigOnly=true", "commit", "-q", "-m", message, NULL) == 0;
+                if (committed) {
+                    char *sha = GitLine(pkg, NULL, "rev-parse", "--short", "HEAD", NULL);
+                    SayHistory(id, "committed %s %s as %s \"%s\"", head ? "the hand edits in" : "the files of",
+                               RelPath(pkg), sha ? sha : "?", message);
+                    free(sha);
+                } else {
+                    Git(pkg, NULL, "reset", "-q", NULL);  // (unstage again: the files stay as they are)
+                }
+                free(message);
+            }
+            char *base = committed ? GitLine(pkg, NULL, "rev-parse", "HEAD", NULL) : NULL;
+            if (base) {
+                nob_sb_appendf(&lines, "map-repo own\nbase-map %s\n", base);
+            } else {
+                // no commit possible (no identity): the state as a tree, the request gets a patch only
+                const char *paths[] = {"."};
+                char *tree = IndexTree(pkg, mapIndex, paths, 1);
+                const char *why = CommitFailure(pkg);
+                if (tree) {
+                    nob_sb_appendf(&lines, "map-repo own-uncommitted %s\nbase-map-tree %s\n", why, tree);
+                    SayHistory(id, "commit failed: %s: the request gets a patch only", why);
+                } else {
+                    nob_sb_appendf(&lines, "map-repo none: %s\n", why);
+                    SayHistory(id, "none: %s, and the package's state can't be read (see git.log)", why);
+                }
+                free(tree);
+            }
+            free(base);
+            free(status);
+        }
+        free(top);
+    }
+
+    // the code tree, for every request (a code.patch only when it changes)
+    char *code = ToolInPath("git") ? CodeTree(bundleAbs) : NULL;
+    if (code) nob_sb_appendf(&lines, "base-code %s\n", code);
+    free(code);
+
+    free(mapIndex);
+    free(pkg);
+    free(bundleAbs);
+    free(gGitLog);
+    gGitLog = NULL;
+    nob_sb_append_null(&lines);
+    return lines.items;
+}
+
+// Writes the commit message file <bundle>/commit-msg.txt: "<slug>: <line 1 of result.md>" (cut to 100
+// characters, control bytes dropped), a blank line, "Request: <id>", "State: <state>". Returns its path
+// (heap string).
+static char *WriteCommitMessage(const char *bundleAbs, const char *id, const char *state)
+{
+    char *line1 = FirstLine(nob_temp_sprintf("%s/result.md", bundleAbs));
+    char *subject = strdup(nob_temp_sprintf("%s: %s", Slug(id), *line1 ? line1 : "(no result.md)"));
+    char *w = subject;
+    for (char *r = subject; *r; r++) {
+        if ((unsigned char)*r >= 0x20 && *r != 0x7f) *w++ = *r;
+    }
+    *w = '\0';
+    // longer than 100 characters: the first 97 (whole characters of the locale, never a cut UTF-8 sequence)
+    // and "..." (the text is longer than those 97 characters by at least 3 bytes, so it fits in place)
+    size_t chars = 0;
+    CharPrefix(subject, 100, &chars);
+    if (chars > 100) memcpy(subject + CharPrefix(subject, 97, &chars), "...", 4);
+    char *path = strdup(nob_temp_sprintf("%s/commit-msg.txt", bundleAbs));
+    const char *text = nob_temp_sprintf("%s\n\nRequest: %s\nState: %s\n", subject, id, state);
+    WriteByRename(path, text, strlen(text));
+    free(subject);
+    free(line1);
+    return path;
+}
+
+// The history at the end of a request (docs/request-queue.md section 4a): the commit in the package's
+// repository (state: done / failed / cancelled / interrupted), map.patch, code.patch, commit.txt. Says the
+// result in one line ("<id>: commit=... patch=..."). A bundle without a claim.txt (never started) gets
+// nothing; one without a map-repo line (claimed by an older request-queue) gets one line saying so.
+static void FinishHistory(const char *d, const char *id, const char *state)
+{
+    if (!IsFile(nob_temp_sprintf("%s/claim.txt", d))) return;
+    char *repoKind = ClaimValue(d, "map-repo ");
+    if (!repoKind) {
+        SayHistory(id, "claimed by an older request-queue (no map-repo line in claim.txt): no commit, no patch");
+        return;
+    }
+    char *bundleAbs = AbsDir(d);
+    gGitLog = strdup(nob_temp_sprintf("%s/git.log", bundleAbs));
+    char *pkg = JsonStr(d, "package");
+    char *baseMap = ClaimValue(d, "base-map ");
+    char *baseTree = ClaimValue(d, "base-map-tree ");
+    char *baseCode = ClaimValue(d, "base-code ");
+    char *mapIndex = strdup(nob_temp_sprintf("%s/map-index", bundleAbs));
+    const char *mapPatch = nob_temp_sprintf("%s/map.patch", bundleAbs);
+    char *mapPatchPath = strdup(mapPatch);
+    char *commit = strdup("none");     // the commit= word
+    char *why = NULL;                  // commit=failed: why
+    bool patchMap = false, patchCode = false;
+    bool baseline = false, changed = false;  // a baseline that could be compared; something changed since
+    Nob_String_Builder patch = {0};
+
+    if (baseMap && strncmp(repoKind, "own", 3) == 0) {
+        // own repository with a base commit: add -A, commit when the tree differs from HEAD's
+        char *baseTreeOf = GitLine(pkg, NULL, "rev-parse", nob_temp_sprintf("%s^{tree}", baseMap), NULL);
+        bool added = Git(pkg, NULL, "add", "-A", NULL) == 0;
+        char *tree = added ? GitLine(pkg, NULL, "write-tree", NULL) : NULL;
+        char *headTree = GitLine(pkg, NULL, "rev-parse", "HEAD^{tree}", NULL);
+        baseline = tree && baseTreeOf;
+        changed = baseline && strcmp(tree, baseTreeOf) != 0;
+        if (!baseline) {
+            why = strdup("the package's repository can't be read (see git.log)");
+        } else if (changed) {
+            bool committed = headTree && strcmp(tree, headTree) == 0;  // (already committed by hand)
+            if (!committed) {
+                char *msg = WriteCommitMessage(bundleAbs, id, state);
+                committed = Git(pkg, NULL, "-c", "user.useConfigOnly=true", "commit", "-q", "-F", msg, NULL) == 0;
+                free(msg);
+                if (committed) {
+                    free(commit);
+                    commit = GitLine(pkg, NULL, "rev-parse", "--short", "HEAD", NULL);
+                    if (!commit) commit = strdup("?");
+                } else {
+                    why = strdup(CommitFailure(pkg));
+                    Git(pkg, NULL, "reset", "-q", NULL);  // (unstage again: the files stay as they are)
+                }
+            }
+            if (committed) {
+                Nob_Cmd args = {0};
+                nob_cmd_append(&args, "format-patch", "--stdout", "--binary", nob_temp_sprintf("%s..HEAD", baseMap));
+                patchMap = GitRun(pkg, NULL, &args, &patch) == 0;
+                nob_cmd_free(args);
+            } else {
+                // no commit: the diff of the two trees (the tree was written from the index before the reset)
+                Nob_Cmd args = {0};
+                nob_cmd_append(&args, "diff-tree", "-p", "--binary", baseTreeOf, tree);
+                patchMap = GitRun(pkg, NULL, &args, &patch) == 0;
+                nob_cmd_free(args);
+            }
+        }
+        free(headTree);
+        free(tree);
+        free(baseTreeOf);
+    } else if (baseTree) {
+        // patch only (tracked by another repository, or no commit possible at the claim): the package's
+        // state now as a tree in the same private index, diffed with the claim's, paths relative to it
+        const char *paths[] = {"."};
+        char *tree = IndexTree(pkg, mapIndex, paths, 1);
+        char *prefix = GitLine(pkg, NULL, "rev-parse", "--show-prefix", NULL);
+        if (strncmp(repoKind, "tracked", 7) == 0) why = strdup("tracked by another repository: a patch only");
+        else why = strdup(strchr(repoKind, ' ') ? strchr(repoKind, ' ') + 1 : repoKind);  // (the claim's reason)
+        baseline = tree && prefix;
+        changed = baseline && strcmp(tree, baseTree) != 0;
+        if (changed) {
+            Nob_Cmd args = {0};
+            nob_cmd_append(&args, "diff-tree", "-p", "--binary");
+            if (*prefix) nob_cmd_append(&args, nob_temp_sprintf("--relative=%s", prefix));
+            nob_cmd_append(&args, baseTree, tree, "--", ".");
+            patchMap = GitRun(pkg, NULL, &args, &patch) == 0;
+            nob_cmd_free(args);
+        } else if (!baseline) {
+            free(why);
+            why = strdup("the package's repository can't be read (see git.log)");
+        }
+        free(prefix);
+        free(tree);
+    } else {
+        why = strdup(repoKind);  // "none: <why>"
+    }
+
+    // map.patch: the patch, or "no changes" when nothing changed since the baseline
+    if (changed && patchMap && patch.count > 0) {
+        WriteByRename(mapPatchPath, patch.items, patch.count);
+    } else if (baseline && !changed) {
+        WriteByRename(mapPatchPath, "no changes\n", 11);
+        patchMap = true;
+    } else {
+        patchMap = false;
+    }
+    patch.count = 0;
+
+    // code.patch: only when the code tree changed
+    if (baseCode) {
+        char *code = CodeTree(bundleAbs);
+        if (code && strcmp(code, baseCode) != 0) {
+            Nob_Cmd args = {0};
+            nob_cmd_append(&args, "diff-tree", "-p", "--binary", baseCode, code);
+            if (GitRun(CodeRepo(), NULL, &args, &patch) == 0 && patch.count > 0) {
+                WriteByRename(nob_temp_sprintf("%s/code.patch", bundleAbs), patch.items, patch.count);
+                patchCode = true;
+            }
+            nob_cmd_free(args);
+        }
+        free(code);
+    }
+
+    // commit.txt and the line: failed only when a commit was due and didn't happen (patch-only kinds and
+    // "none" say commit=none with their reason)
+    bool failed = why && strncmp(why, "none", 4) != 0 && strncmp(why, "tracked", 7) != 0 && (changed || !baseline);
+    const char *patchWord = patchMap ? (patchCode ? "map+code" : "map") : (patchCode ? "code" : "none");
+    Nob_String_Builder text = {0};
+    if (failed) nob_sb_appendf(&text, "commit failed: %s\n", why);
+    else nob_sb_appendf(&text, "commit %s\n", commit);
+    nob_sb_appendf(&text, "patch %s\n", patchWord);
+    WriteByRename(nob_temp_sprintf("%s/commit.txt", bundleAbs), text.items, text.count);
+    if (failed) SayHistory(id, "commit=failed: %s patch=%s", why, patchWord);
+    else if (why) SayHistory(id, "commit=none (%s) patch=%s", why, patchWord);
+    else SayHistory(id, "commit=%s patch=%s", commit, patchWord);
+
+    nob_sb_free(text);
+    nob_sb_free(patch);
+    free(why);
+    free(commit);
+    free(mapPatchPath);
+    free(mapIndex);
+    free(baseCode);
+    free(baseTree);
+    free(baseMap);
+    free(pkg);
+    free(repoKind);
+    free(bundleAbs);
+    free(gGitLog);
+    gGitLog = NULL;
+}
+
+// The commit= and patch= words of a bundle's commit.txt: "<short sha>" / "none" / "failed", and "map" /
+// "map+code" / "code" / "none". Heap strings.
+static void CommitWords(const char *d, char **commit, char **patch)
+{
+    Nob_String_Builder sb = {0};
+    *commit = NULL;
+    *patch = NULL;
+    if (ReadFile(nob_temp_sprintf("%s/commit.txt", d), &sb)) {
+        nob_sb_append_null(&sb);
+        for (char *line = sb.items; *line;) {
+            char *nl = strchr(line, '\n');
+            if (nl) *nl = '\0';
+            if (strncmp(line, "commit failed", 13) == 0 && !*commit) *commit = strdup("failed");
+            else if (strncmp(line, "commit ", 7) == 0 && !*commit) *commit = strndup(line + 7, strcspn(line + 7, " "));
+            else if (strncmp(line, "patch ", 6) == 0 && !*patch) *patch = strndup(line + 6, strcspn(line + 6, " "));
+            if (!nl) break;
+            line = nl + 1;
+        }
+    }
+    nob_sb_free(sb);
+    if (!*commit) *commit = strdup("none");
+    if (!*patch) *patch = strdup("none");
+}
+
+// #endregion
+
 // #region The usage limit (docs/request-queue.md, "Usage limit and the fallback account")
 
 // The value of the top-level string key `key` in a JSON text (the StopFailure hook's stdin), unescaped
@@ -1002,8 +1509,10 @@ static time_t LastLimit(void)
 // Finish <bundle dir> <done|failed|cancelled> [summary]: the end of a request. Already final: says so and
 // changes nothing. done needs a result.md (exit 2 without). failed / cancelled write result.md when there is
 // none: the summary (or the default line), then what changed since the claim (or that it had not started).
-// Then the state, a log line and "<id>: <old> -> <new>: <line 1 of result.md>".
-static void Finish(const char *d, const char *to, const char *summary)
+// Then the map's history (the commit in the package's repository, map.patch, code.patch: FinishHistory, whose
+// "map history" line comes first; `interrupted` gives the commit State: interrupted), the state, a log line
+// and "<id>: <old> -> <new>: <line 1 of result.md>".
+static void Finish(const char *d, const char *to, const char *summary, bool interrupted)
 {
     const char *id = Base(d);
     char *cur = StateOf(d);
@@ -1051,6 +1560,9 @@ static void Finish(const char *d, const char *to, const char *summary)
     } else {
         ToolDie(2, "finish: state must be done, failed or cancelled");
     }
+    // the history before the state: a crash in between leaves the bundle claimed, and its recovery's finish
+    // finds the commit already made (FinishHistory doesn't commit twice)
+    FinishHistory(d, id, interrupted ? "interrupted" : to);
     SetState(d, to);
     Log("%s %s", to, id);
     char *line1 = FirstLine(resultPath);
@@ -1079,7 +1591,7 @@ static void Recover(void)
             struct stat claim;
             time_t claimAt = stat(nob_temp_sprintf("%s/claim.txt", d), &claim) == 0 ? claim.st_mtime : 0;
             if (IsNonEmpty(nob_temp_sprintf("%s/result.md", d))) {
-                Finish(d, "done", "");
+                Finish(d, "done", "", false);
             } else if (Changed(d, &ignored) == 0) {
                 SetState(d, "queued");
                 Log("requeued %s (the previous coordinator stopped; nothing had changed)", Base(d));
@@ -1090,11 +1602,11 @@ static void Recover(void)
                 const char *why = nob_temp_sprintf("Interrupted: the account's usage limit was reached; restarted on %s; files changed, check them",
                                                    account ? account : "the next account");
                 char *summary = strdup(why);
-                Finish(d, "failed", summary);
+                Finish(d, "failed", summary, true);
                 free(summary);
                 free(account);
             } else {
-                Finish(d, "failed", "Interrupted: the coordinator stopped mid-run; files changed, check them");
+                Finish(d, "failed", "Interrupted: the coordinator stopped mid-run; files changed, check them", true);
             }
             nob_sb_free(ignored);
         }
@@ -1186,7 +1698,7 @@ static void Wait(int argc, char **argv)
             nob_sb_free(add);
             for (size_t i = 0; i < events.count; i++) printf("event: %s\n", events.items[i]);
             printf("--- queue\n");
-            List();
+            List(false);
             FreeNames(&events);
             exit(0);
         }
@@ -1216,20 +1728,25 @@ static void Usage(void)
           "  build/tools/request-queue start                coordinator startup: empty the seen list,\n"
           "                                                 recover bundles a dead coordinator had claimed,\n"
           "                                                 print the queue\n"
-          "  build/tools/request-queue list                 the open bundles (state not done / failed /\n"
-          "                                                 cancelled), oldest first, with their prompts\n"
+          "  build/tools/request-queue list [--all]         the open bundles (state not done / failed /\n"
+          "                                                 cancelled), oldest first, with their prompts;\n"
+          "                                                 --all: the finished ones too (commit=, patch=)\n"
           "  build/tools/request-queue wait [--timeout s]   block (polling once a second, no tokens) until a\n"
           "                                                 queued bundle or a cancel file appears that it\n"
           "                                                 has not reported before; print the events and\n"
           "                                                 the queue, exit 0. Run it in the background.\n"
           "                                                 --timeout: exit 3 after s seconds without one\n"
-          "  build/tools/request-queue claim <id>           queued -> claimed; writes claim.txt (fingerprint)\n"
+          "  build/tools/request-queue claim <id>           queued -> claimed; writes claim.txt (fingerprint\n"
+          "                                                 and the map history's baseline: the package's git\n"
+          "                                                 repository, made one or its hand edits committed)\n"
           "  build/tools/request-queue set <id> question|claimed\n"
           "  build/tools/request-queue requeue <id>         claimed / question -> queued\n"
           "  build/tools/request-queue changed <id>         files changed since the claim; exit 1 if any\n"
           "  build/tools/request-queue finish <id> done|failed|cancelled [summary words]\n"
           "                                                 done needs result.md; failed / cancelled write\n"
-          "                                                 one (summary + what changed) if there is none\n"
+          "                                                 one (summary + what changed) if there is none;\n"
+          "                                                 commits the request in the package's repository,\n"
+          "                                                 writes map.patch (and code.patch), commit.txt\n"
           "  build/tools/request-queue recover              (part of start) claimed bundles without\n"
           "                                                 result.md: nothing changed since the claim ->\n"
           "                                                 queued again; else failed + reported\n"
@@ -1312,9 +1829,9 @@ int main(int argc, char **argv)
         }
         FreeNames(&dirs);
         printf("--- queue\n");
-        List();
+        List(false);
     } else if (strcmp(cmd, "list") == 0) {
-        List();
+        List(strcmp(a1, "--all") == 0);
     } else if (strcmp(cmd, "wait") == 0) {
         Wait(nargs, args);
     } else if (strcmp(cmd, "claim") == 0) {
@@ -1322,8 +1839,16 @@ int main(int argc, char **argv)
         char *d = Bundle(a1);
         char *s = StateOf(d);
         if (strcmp(s, "queued") != 0) ToolDie(2, "%s is %s, not queued", a1, s);
+        // the package's repository first (git init, the hand edits' commit: no package file changes), then the
+        // fingerprint, then the baseline lines after it (docs/request-queue.md section 4a)
+        char *history = ClaimHistory(d, a1);
         char *fp = Fingerprint(d);
-        WriteByRename(nob_temp_sprintf("%s/claim.txt", d), fp, strlen(fp));
+        Nob_String_Builder claim = {0};
+        nob_sb_append_cstr(&claim, fp);
+        nob_sb_append_cstr(&claim, history);
+        WriteByRename(nob_temp_sprintf("%s/claim.txt", d), claim.items, claim.count);
+        nob_sb_free(claim);
+        free(history);
         free(fp);
         SetState(d, "claimed");
         char *pkg = JsonStr(d, "package");
@@ -1368,7 +1893,7 @@ int main(int argc, char **argv)
     } else if (strcmp(cmd, "finish") == 0) {
         char *d = Bundle(a1);
         char *summary = JoinArgs(nargs, args, 2);
-        Finish(d, a2, summary);
+        Finish(d, a2, summary, false);
         free(summary);
         free(d);
     } else if (strcmp(cmd, "recover") == 0) {
