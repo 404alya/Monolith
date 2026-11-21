@@ -216,7 +216,10 @@ typedef struct {
     DrawPickMode pickTool;  // what the eyedropper tool samples
     float density;          // texels per metre of new rectangles (and Resize to density) on materials
                             // without a paint grid (docs/painting.md 17.7)
-    bool pixelLook;         // new atlases get paint_filter nearest
+    bool pixelLook;         // new atlases of materials without a paint grid get paint_filter nearest
+    bool gridFiltered;      // new atlases on a paint grid stay filtered: Pixel look turned off for them
+                            // (session only, not kept); by default their first stroke writes
+                            // paint_filter nearest (docs/painting.md 17.7)
     bool panelHidden;       // TAB
     DrawSelection sel;
     DrawShape shapeDrag;

@@ -2,10 +2,11 @@
 // wide, in the ui.h look. From top to bottom: Target (the surface the cursor rested on last, what
 // paint there goes into or why it can't be painted), Tools (the 22 tools' grid, the tool's name and
 // key, its options: brush, size, hardness, pixel perfect, spray, bucket, gradient, eyedropper;
-// docs/painting.md 18.9), Colour (saturation / value square, hue and alpha strips, fg / bg, R G B A,
-// the hex field, the recent colours, the palette), Density (texels per metre, the texel size
-// there, Resize to density, Pixel look, Clear paint; "Grid" with Fit to grid and no slider when the
-// target's material has a paint grid) and Faces (boxes only: the face groups of the box's paint).
+// docs/painting.md 18.9; on a paint grid also Pixel look, 17.7), Colour (saturation / value square,
+// hue and alpha strips, fg / bg, R G B A, the hex field, the recent colours, the palette), Density
+// (texels per metre, the texel size there, Resize to density, Pixel look, Clear paint; "Grid" with Fit
+// to grid and no slider when the target's material has a paint grid) and Faces (boxes only: the face
+// groups of the box's paint).
 // The target, its rectangle and its lines come from the draw mode (dm->target); the actions act on it.
 //
 // One layout function serves three passes: a measure pass (the height, no widget runs), the input
@@ -174,10 +175,21 @@ static void SyncFaces(DrawPanel *p, const DrawMode *dm)
     } else if (memcmp(p->faces, now, 6) == 0) memcpy(p->facesLoaded, now, 6);
 }
 
-// The pixel look of the target (its atlas's paint_filter), or of new atlases
+// The pixel look of the target (its atlas's paint_filter, or what its first stroke gives a new one:
+// nearest on a paint grid, docs/painting.md 17.7), or of new atlases
 static bool PixelLookShown(const DrawMode *dm)
 {
     return TargetSet(dm) && dm->target.ok && dm->target.geom.ok ? dm->target.geom.nearest : dm->pixelLook;
+}
+
+// The target's paint follows a paint grid (docs/painting.md 17.7): the section is "Grid", no density,
+// and Pixel look sits with the brush (one texel is one cell of the surface's pixel art)
+static bool TargetGrid(const DrawMode *dm) { return TargetSet(dm) && dm->target.grid > 0.0f && dm->target.gridLineSet; }
+
+// The Pixel look toggle at r: the draw mode toggles what it shows (DrawModePanelAction)
+static void PixelLookButton(Ctx *c, Rectangle r)
+{
+    if (Button(c, r, "Pixel look", PixelLookShown(c->dm))) c->act = DRAWPANEL_ACT_PIXEL_LOOK;
 }
 
 // #endregion
@@ -479,9 +491,15 @@ static void ToolOptions(Ctx *c)
     bool brush = t == TOOL_PENCIL || t == TOOL_ERASER || t == TOOL_SPRAY || t == TOOL_LINE || t == TOOL_CURVE ||
                  t == TOOL_RECT || t == TOOL_ELLIPSE || t == TOOL_BLUR || t == TOOL_JUMBLE;
     if (brush) BrushRows(c);
+    // On a paint grid Pixel look sits here, with the brush (docs/painting.md 17.7): beside Pixel perfect,
+    // else on a row of its own under the tool's options
+    bool grid = TargetGrid(dm);
     if (t == TOOL_PENCIL) {
-        Rectangle r = { (float)(c->x + LABEL_W), (float)c->y, (float)(c->w - LABEL_W), BUTTON_H };
+        int bw = (c->w - GAP) / 2;
+        Rectangle r = grid ? (Rectangle){ (float)c->x, (float)c->y, (float)bw, BUTTON_H }
+                           : (Rectangle){ (float)(c->x + LABEL_W), (float)c->y, (float)(c->w - LABEL_W), BUTTON_H };
         if (Button(c, r, "Pixel perfect", dm->pixelPerfect)) dm->pixelPerfect = !dm->pixelPerfect;
+        if (grid) PixelLookButton(c, (Rectangle){ (float)(c->x + bw + GAP), (float)c->y, (float)(c->w - bw - GAP), BUTTON_H });
         c->y += BUTTON_H + GAP;
     } else if (t == TOOL_SPRAY) {
         IntRow(c, "Width", W_SPRAYW_S, W_SPRAYW_F, &dm->sprayWidth, 1, 256);
@@ -504,6 +522,10 @@ static void ToolOptions(Ctx *c)
         static const char *const PICKS[2] = { "Screen", "Paint" };
         int k = Choice(c, "Samples", PICKS, 2, dm->pickTool == DRAW_PICK_SCREEN ? 0 : 1);
         if (k >= 0) dm->pickTool = k == 0 ? DRAW_PICK_SCREEN : DRAW_PICK_PAINT;
+    }
+    if (grid && t != TOOL_PENCIL) {
+        PixelLookButton(c, (Rectangle){ (float)(c->x + LABEL_W), (float)c->y, (float)(c->w - LABEL_W), BUTTON_H });
+        c->y += BUTTON_H + GAP;
     }
     // (what the tool does when it has no options; the selection tools' modifiers)
     if (DrawToolKindOf(t) == TOOLKIND_SELECT) {
@@ -727,27 +749,28 @@ static void SectionColor(Ctx *c)
 }
 
 // The Density / Grid section's buttons: resize (Resize to density, or Fit to grid on a grid), Pixel
-// look, Clear paint
-static void DensityButtons(Ctx *c, const char *resize, bool resizeShown)
+// look (on a grid it sits with the brush instead, ToolOptions: then Clear paint joins the first row),
+// Clear paint
+static void DensityButtons(Ctx *c, const char *resize, bool resizeShown, bool pixelHere)
 {
-    DrawMode *dm = c->dm;
     int bw = (c->w - GAP) / 2;
+    Rectangle left = { (float)c->x, (float)c->y, (float)bw, BUTTON_H };
+    Rectangle right = { (float)(c->x + bw + GAP), (float)c->y, (float)(c->w - bw - GAP), BUTTON_H };
     // (Fit to grid only on a target with an entry, DrawTarget.fitOk; its place stays, so the panel
     // doesn't move under the cursor)
-    if (resizeShown && Button(c, (Rectangle){ (float)c->x, (float)c->y, (float)bw, BUTTON_H }, resize, false)) c->act = DRAWPANEL_ACT_RESIZE;
-    // (the target atlas's filter when it has one; else what new atlases get)
-    bool pixel = PixelLookShown(dm);
-    if (Button(c, (Rectangle){ (float)(c->x + bw + GAP), (float)c->y, (float)(c->w - bw - GAP), BUTTON_H }, "Pixel look", pixel)) {
-        dm->pixelLook = !pixel;
-        c->act = DRAWPANEL_ACT_PIXEL_LOOK;
+    if (resizeShown && Button(c, left, resize, false)) c->act = DRAWPANEL_ACT_RESIZE;
+    if (!pixelHere) {
+        if (Button(c, right, "Clear paint", false)) c->act = DRAWPANEL_ACT_CLEAR;
+        c->y += BUTTON_H + GAP;
+        return;
     }
+    // (the target atlas's filter when it has one; else what new atlases get)
+    PixelLookButton(c, right);
     c->y += BUTTON_H + GAP;
-    if (Button(c, (Rectangle){ (float)c->x, (float)c->y, (float)bw, BUTTON_H }, "Clear paint", false)) c->act = DRAWPANEL_ACT_CLEAR;
+    left.y = (float)c->y;
+    if (Button(c, left, "Clear paint", false)) c->act = DRAWPANEL_ACT_CLEAR;
     c->y += BUTTON_H + GAP;
 }
-
-// The target's paint follows a paint grid (docs/painting.md 17.7): the section is "Grid", no density
-static bool TargetGrid(const DrawMode *dm) { return TargetSet(dm) && dm->target.grid > 0.0f && dm->target.gridLineSet; }
 
 static void SectionDensity(Ctx *c)
 {
@@ -761,7 +784,7 @@ static void SectionDensity(Ctx *c)
     if (grid) {
         // The texel size there (its rectangle's or the one its first stroke gets) and Fit to grid
         if (dm->target.texelSet) c->y += Wrapped(c, MsgText(&dm->target.texel), UI_S, UI_DIM, 2) + GAP - 1;
-        DensityButtons(c, "Fit to grid", dm->target.fitOk);
+        DensityButtons(c, "Fit to grid", dm->target.fitOk, false);
         return;
     }
     // Texels per metre of new paint: the slider over log2 (8 .. 512: 64 in the middle)
@@ -777,7 +800,7 @@ static void SectionDensity(Ctx *c)
     const char *texel = TargetSet(dm) && dm->target.ok && dm->target.texelSet ? MsgText(&dm->target.texel)
                       : TextFormat("new paint: a texel is about %.1f mm", 1000.0f / d);
     c->y += Wrapped(c, texel, UI_S, UI_DIM, 2) + GAP - 1;
-    DensityButtons(c, "Resize to density", true);
+    DensityButtons(c, "Resize to density", true, true);
 }
 
 // faces[] with the numbers closed up in order (0 2 2 5 -> 0 1 1 2)

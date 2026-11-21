@@ -1571,6 +1571,14 @@ static int GridTooSmall(const MS_SurfaceHit *h, int inactive)
     return -1;
 }
 
+// Whether a new atlas of a material on a paint grid of `grid` texels per metre (0: none) gets
+// paint_filter nearest: on a grid unless Pixel look was turned off for grids this session (one texel
+// is one cell of the surface's pixel art, docs/painting.md 17.7), else the kept pixel look
+static bool NewAtlasNearest(const DrawMode *dm, float grid)
+{
+    return grid > 0.0f ? !dm->gridFiltered : dm->pixelLook;
+}
+
 // What paint at h goes into, or why it can't be painted (docs/painting.md 3.4); *g its rectangle.
 // Runs every frame (the hover, the panel's target), so it says why with a code, and RefusalPrint
 // words it. Returns:
@@ -1610,7 +1618,7 @@ static unsigned char Resolve(DrawMode *dm, const MS_SurfaceHit *h, DrawGeom *g)
     if (e < 0 && inactive >= 0 && small < 0) return 8;
     AtlasRelOf(m, file, h->slot, &g->atlasW, &g->atlasH, &g->nearest);
     const char *rel = AtlasRelOf(m, file, h->slot, NULL, NULL, NULL);
-    if (!rel || (m < 0 && g->atlasW <= 0)) g->nearest = dm->pixelLook;      // (no atlas yet: the pixel look switch)
+    if (!rel || (m < 0 && g->atlasW <= 0)) g->nearest = NewAtlasNearest(dm, g->grid);     // (no atlas yet: what it will get)
     if (e >= 0 || small >= 0) {
         const MS_PaintEntry *E = MS_PaintEntryAt(scene, e >= 0 ? e : small);
         g->entry = e;
@@ -1865,8 +1873,8 @@ static unsigned char AddRect(DrawMode *dm, PaintStep *p, bool *pushed, MS_ObjRef
         }
         bool near;
         AtlasRelOf(-1, scene->models[obj.index].file, slot, NULL, NULL, &near);
-        op.paint.nearest = ownEntries ? near : dm->pixelLook;
-    } else op.paint.nearest = !rel && dm->pixelLook;
+        op.paint.nearest = ownEntries ? near : NewAtlasNearest(dm, MS_PaintGridOf(scene, -1));
+    } else op.paint.nearest = !rel && NewAtlasNearest(dm, MS_PaintGridOf(scene, m));
     char *what = MonoStrf("a %dx%d rectangle in %s", w, h, GetFileName(a->rel));
     bool haveWhat = what != NULL;
     unsigned char r = haveWhat ? PushOp(dm, p, pushed, obj, &op, what) : 1;
@@ -3336,15 +3344,22 @@ static DrawModeResult ActClear(DrawMode *dm, const MS_SurfaceHit *h)
 }
 
 // Pixel look (docs/painting.md 4.1): the atlas's paint_filter (a material's key, or an own atlas's
-// entries); without an atlas only new ones
+// entries); without an atlas only new ones: on a paint grid the session's switch for grids (new grid
+// atlases are nearest unless it is off, 17.7), else the kept pixel look; no surface (a script before
+// its first stroke): both
 static DrawModeResult ActPixelLook(DrawMode *dm, const MS_SurfaceHit *h, bool on)
 {
-    dm->pixelLook = on;
-    bool model = HitIsModel(h);
+    bool model = HitIsModel(h), surface = HitIsBox(h) || model;
+    float grid = surface ? MS_PaintGridOf(scene, h->material) : 0.0f;
+    if (!surface || grid <= 0.0f) dm->pixelLook = on;
+    if (!surface || grid > 0.0f) dm->gridFiltered = !on;
     int file = model ? scene->models[h->hit.obj.index].file : -1;
-    const char *rel = HitIsBox(h) || model ? AtlasRelOf(h->material, file, h->slot, NULL, NULL, NULL) : NULL;
+    const char *rel = surface ? AtlasRelOf(h->material, file, h->slot, NULL, NULL, NULL) : NULL;
     if (!rel) {
-        SayStatic(dm, false, on ? "pixel look on: new atlases get paint_filter nearest" : "pixel look off: new atlases are filtered");
+        if (grid > 0.0f)
+            SayStatic(dm, false, on ? "pixel look on: a new atlas on a grid gets paint_filter nearest"
+                                    : "pixel look off: new atlases on a grid are filtered (this session)");
+        else SayStatic(dm, false, on ? "pixel look on: new atlases get paint_filter nearest" : "pixel look off: new atlases are filtered");
         return DRAWMODE_NONE;
     }
     if (!dm->em->ed.work && !MapEditBegin(&dm->em->ed)) return DRAWMODE_NONE;
@@ -3385,7 +3400,12 @@ DrawModeResult DrawModePanelAction(DrawMode *dm, EditMode *em, int action, const
     (void)em;
     const MS_SurfaceHit *h = &dm->target.hit;
     bool set = dm->target.version != 0;
-    if (action == DRAW_ACT_PIXEL_LOOK) return ActPixelLook(dm, set ? h : &(MS_SurfaceHit){ 0 }, dm->pixelLook);
+    if (action == DRAW_ACT_PIXEL_LOOK) {
+        // (a toggle of what the panel shows: the target atlas's filter, or what a new one there gets)
+        const DrawTarget *T = &dm->target;
+        bool now = set && T->ok && T->geom.ok ? T->geom.nearest : dm->pixelLook;
+        return ActPixelLook(dm, set ? h : &(MS_SurfaceHit){ 0 }, !now);
+    }
     if (!set) {
         SayStatic(dm, true, "point at a painted box or model first (the panel acts on the surface the cursor rests on)");
         return DRAWMODE_NONE;
@@ -3643,7 +3663,11 @@ static void TargetText(DrawMode *dm)
     bool cells = HitIsBox(h) && g->grid > 0.0f;
     char gridTag[48] = "";
     if (g->grid > 0.0f) snprintf(gridTag, sizeof(gridTag), " (%g/m)", (double)g->grid);
-    if (!g->fresh) MsgSetf(&T->into, "%s %d×%d: %d×%d%s at %d %d%s", an, g->atlasW, g->atlasH, g->w, g->h, cells ? " cells" : "", g->x, g->y, gridTag);
+    if (!g->fresh && cells && (g->cellsW != g->w || g->cellsH != g->h))
+        // (the face shows part of its rectangle: a face group with a larger face, or a box that shrank)
+        MsgSetf(&T->into, "%s %d×%d: %d×%d at %d %d%s, face %s covers %d×%d cells of it", an, g->atlasW, g->atlasH, g->w, g->h, g->x, g->y,
+                gridTag, FACE_NAMES[h->face], g->cellsW, g->cellsH);
+    else if (!g->fresh) MsgSetf(&T->into, "%s %d×%d: %d×%d%s at %d %d%s", an, g->atlasW, g->atlasH, g->w, g->h, cells ? " cells" : "", g->x, g->y, gridTag);
     else if (g->atlasW > 0)
         MsgSetf(&T->into, "the first stroke adds %s%d×%d%s%s to %.120s (%d×%d)", g->estimate ? "~" : "", g->w, g->h, cells ? " cells" : "",
                 gridTag, an, g->atlasW, g->atlasH);

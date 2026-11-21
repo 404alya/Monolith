@@ -23,7 +23,7 @@ typedef enum {
     DRAWPANEL_ACT_NONE = 0,
     DRAWPANEL_ACT_RESIZE = DRAW_ACT_RESIZE,         // Resize to density; Fit to grid on a grid (docs/painting.md 17.7)
     DRAWPANEL_ACT_FACES = DRAW_ACT_FACES,           // apply faces[] to the target box's entries (5.3)
-    DRAWPANEL_ACT_PIXEL_LOOK = DRAW_ACT_PIXEL_LOOK, // pixelLook changed: the target atlas's paint_filter
+    DRAWPANEL_ACT_PIXEL_LOOK = DRAW_ACT_PIXEL_LOOK, // Pixel look toggled: the target atlas's paint_filter
     DRAWPANEL_ACT_CLEAR = DRAW_ACT_CLEAR,           // Clear paint: the target's entry goes (5.3)
 } DrawPanelAction;
 

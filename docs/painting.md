@@ -64,7 +64,8 @@ again):
   4096 × 4096 (§5).
 - **Density** 64 texels/m (the panel's control, 8–512), now only the paint's own resolution; each
   side of a rectangle is clamped to 4..2048 texels (§5.2).
-- **Pixel look** is per atlas: `paint_filter nearest` on the material (§4.1).
+- **Pixel look** is per atlas: `paint_filter nearest` on the material (§4.1). On a paint grid the first
+  stroke writes it (§17.7, since the pixel-bugs round).
 - **Compositing** (§4.3): the paint is a matte coat. Painted texels take the paint's colour over
   the material's albedo, and cover its emission and metalness in proportion to their alpha;
   roughness, normal, occlusion and specular stay the material's.
@@ -154,6 +155,8 @@ material "concrete" shader "shaders/concrete.glsl" ... paint "textures/paint/con
   uses it; a `paint` key without entries changes nothing.
 - `paint_filter trilinear | nearest`: how the atlas is sampled (`trilinear`, the default: mipmapped;
   `nearest`: nearest magnification and nearest-mipmap-linear minification, the panel's *Pixel look*).
+  The map format's default stays `trilinear`; draw mode writes `nearest` with the first stroke into a
+  new atlas on a paint grid (§17.7).
 - **A model's own material** has no line to put the key on. Its atlas is named by the entries
   themselves (§4.2, `own`) and is always `textures/paint/<model file name>_s<N>.png`, the file name kept
   to letters, digits, `-`, `_`. Its filter is `paint_filter` written on the entry.
@@ -703,8 +706,8 @@ As in the first round (its implementation notes give the layout), except:
    concrete: 24 texels/m (4.2 cm)", no slider, *Fit to grid* for *Resize*; without a grid the slider
    under "concrete has no paint grid: 64 texels/m from the panel"): texels / m, the texel size the
    target's paint has (or will have; "the rectangle is clamped to 2048" when it is), *Resize to density* (§5.3), *Pixel look* (the atlas's
-   `paint_filter`: `EDIT_MATERIAL_SET` on the material, or every `paint own` entry of an own atlas), and
-   *Clear paint* (§5.3).
+   `paint_filter`: `EDIT_MATERIAL_SET` on the material, or every `paint own` entry of an own atlas; on a
+   grid target it sits in the Tools section beside *Pixel perfect*, §17.7), and *Clear paint* (§5.3).
 5. **Faces** (boxes): the six faces, each with a group number button (0..5); faces with the same
    number share one rectangle. *Apply* rewrites the target box's entries (§5.3); *All separate* and
    *Sides together* set the buttons.
@@ -952,7 +955,18 @@ texels): the panel's face groups size a rectangle with it.
 - **The brush** is in texels of the rectangle, so size 1 is one grid texel; the cursor maps the
   footprint through the face's grid mapping (§17.2), so its outline lies on the surface's texel lines.
 - **The target line** names the grid: "box line 120 #3, face +z: concrete atlas 1024², 53×84 cells at 0 0
-  (24/m)".
+  (24/m)". When the face's cells differ from its rectangle (a face group with a larger face, a box that
+  shrank) it says so (the pixel-bugs round): "concrete's atlas 1024²: 54×61 at 0 0 (24/m), face -x covers
+  37×61 cells of it".
+- **Pixel look on a grid** (the pixel-bugs round, the developer's decision (c), 2026-11-21): one texel is
+  one cell of the surface's pixel art, so the first stroke into a new atlas on a grid writes
+  `paint_filter nearest` on the material (on an own atlas: on its entry), and a size-1 click is one sharp
+  cell under the outline. The default of the key doesn't change, so no existing map changes and a map
+  says in its text how its paint is filtered. *Pixel look* turned off before the first stroke keeps new
+  atlases on a grid filtered for the rest of the session (`DrawMode.gridFiltered`, not kept); without a
+  grid the kept `pixel_look` decides as before (default off). On a grid target the panel shows *Pixel
+  look* in the Tools section beside *Pixel perfect* (another tool: on a row of its own there), and the
+  Grid section keeps *Fit to grid* and *Clear paint* on one row, so it is never below the fold.
 - **`--paint-script`**: `resize` fits to the grid on a grid material (no new name); `print` adds `grid
   <ρ>` per atlas's material and the face's cells per entry (`cells WxH`, a box on a grid) and each
   unwrap's texels per unit, scale and sides; `hover` adds the grid line, and `faces`, `resize`, `clear`
@@ -2274,6 +2288,67 @@ read from a sidecar isn't known (another entry's, else the formula).
   undefined then).
 - **The maps**: `maps/monolith` declares `env paint.grid 24`, voxel-test `env paint.grid 20`, each recorded
   in its `MAP.md`; identical box dumps and 0 changed pixels at every viewpoint.
+
+### Implementation notes: the draw-mode pixel bugs (2026-11-21)
+
+Task prompt `2026-11-21_draw-mode-pixel-bugs`. The developer's screenshot: hysteria, pencil, square,
+size 1, black, one click on box line 3933 face −x of *bank grass* (no shader, no `paint_filter`,
+`env paint.grid 8`): a soft dark smudge larger than the outline, darkest right of its centre, and a
+face that looked several cells wide against the target line's "2×8 cells".
+
+**Phase 1: measured** on scratch copies, before any change: one size-1 square black dab per case,
+the texel the stroke wrote (the saved atlas PNG), the cell under the brush outline (`--draw-mode
+--shot-hud --cursor`, spectator mode through `--view`) and the cell drawn (a `--shot` against one
+without paint). They agreed in every case: hysteria box 3933 −x (texel 1 7: outline 799..952 ×
+327..480, paint 800..952 × 328..480); a floating box on every face direction (merged mesh), a turned
+box (`rot 30 20 10`) on every face direction, an `instanced on` material (−x +z −y +y); monolith's
+concrete (24/m, its world-grid shader: a pillar's +z and +x); voxel-test (20/m: a display's −x, the
+pavement's +y); log.glb slots on a scratch pine_forest with `env paint.grid 16` (where its bark and
+wood triangles overlap, `--pick-at` itself alternates between the slots pixel by pixel: the asset,
+not draw mode). (A `--draw-mode` shot without `--view` is in walk mode and draws the designer's
+hover overlay and crosshair at the centre: not the brush outline.)
+
+**The bugs and their causes:**
+
+1. *The smudge*: the default `paint_filter trilinear` (`runtime/monolith_scene.c`, the atlas's
+   `GetTextureEx` in the paint stage's build): one 12.5 cm texel magnified bilinearly over three
+   cells. With `pixel on` the same click is one sharp cell that fills the outline exactly.
+2. *Off-centre*: no mapping error. Bilinear magnification plus the clamp half a texel inside the face
+   (`ms_clamp`, §17.2): a texel at the face's edge keeps its full colour out to the edge and fades only
+   inward, so the darkest part sits off the outline's centre. Fixed with 1.
+3. *The cell count*: right. Box 3933 is 0.25 m × 1 m on its −x face: 2×8 cells at 8/m. The bank is a
+   staircase of 25 cm boxes (lines 3929, 3931, 3933, 3935) whose −x faces read as one wall on screen.
+   But the target line printed the **rectangle's** size as "cells" (`TargetText`): on a face of a face
+   group (a 0.76 × 0.77 × 0.62 m box, all faces together: 8×7) face −x said "8×7 cells" though it covers
+   6×7, while the texel line beside it said 6×7.
+4. *Pixel look below the fold*: at 1600 × 900 the panel ends at the palette; the Grid section with
+   *Pixel look* needed scrolling.
+5. (not fixed, on the AI TODO list) *Apply* of face groups on a grid logs a spurious "covers 8x6 cells
+   of the grid, more than its 6x7 rectangle; inactive": `ActFaces` first gives the group's faces to the
+   old rectangle (`EDIT_PAINT_SET`, parsed live), then grows it (`MoveEntry`). No frame shows the
+   in-between state. Swapping the two would change where a grown group is packed (the old entries'
+   rectangles are still taken at the grow), so it needs its own change and check of the atlas hashes.
+
+**Fixes** (draw mode only, the runtime and the map format unchanged): the developer chose (c). A new
+atlas on a grid gets `paint_filter nearest` from its first stroke (`NewAtlasNearest` in `Resolve` and
+`AddRect`); *Pixel look* off before it sets `DrawMode.gridFiltered` (session only), and without a
+surface (a script's `pixel` before its first stroke) it sets both that and the kept `pixel_look`.
+`DrawModePanelAction` toggles what the panel shows instead of the panel writing `pixelLook` (which
+now means new atlases without a grid). The panel: *Pixel look* in the Tools options on a grid target
+(beside *Pixel perfect* with the pencil, its own row with other tools), *Fit to grid* and *Clear
+paint* on one row of the Grid section. The target line: "…: 8×7 at 0 0 (8/m), face -x covers 6×7 cells
+of it" when the face's cells differ from the rectangle.
+
+**Tests** (`./build.sh test paintgrid`, `tests/unit/paintgrid_test.c`): A, without a GPU,
+`MS_BoxFaceCells` and `MS_RaycastSurface`'s `paintTexel`, `paintCellsW/H` and `faceUv` on every face of
+six boxes (off and on the grid's lines, a float a hair off a line at 20/m, negative coordinates, under
+one cell, turned, yawed at 24/m) against §17.2's formula computed in the test; B, end to end with
+`build/linux/monolith`: one size-1 black dab on every face direction of a merged box, two faces of a
+turned and of an instanced box (unlit white, volumetric fog, SSAO, SSIL and bloom off): the black
+cell's bounds equal the outline's within 2 px, the 3..6 px ring around it is the surface's white, and
+the saved map has `paint_filter nearest`; the control (`pixel off` first) has no key and a ring
+darkened by the filter (248 of 296 pixels); the grouped face's target line. The old binary fails B on
+every case (a blob of ~10 px in an 83 px outline, the ring darkened, no key, the old target line).
 
 ## Implementation notes of the first round (canvases and the shader bake, replaced)
 

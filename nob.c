@@ -1314,6 +1314,20 @@ static const UnitTest UNIT_TESTS[] = {
         .args = (const char *[]){"{root}", "{out}", NULL},
     },
     {
+        // paint on a grid (tests/unit/paintgrid_test.c; docs/painting.md 17): MS_BoxFaceCells and
+        // MS_RaycastSurface's paint texel on every face of axis-aligned and turned boxes against the grid's
+        // formula (a noGpu load of a map it writes into {out}), then draw mode end to end with
+        // build/linux/monolith (--paint-script + --shot): one size-1 click is one sharp cell under the brush
+        // outline on every face direction, the first stroke on a grid writes paint_filter nearest, a grouped
+        // face's target line. Needs ./build.sh first; the editor's runtime (it parses the map text)
+        .name = "paintgrid",
+        .sources = (const char *[]){"tests/unit/paintgrid_test.c", "runtime/monolith_scene.c", NULL},
+        .defines = (const char *[]){"-DMONOLITH_EDITOR", NULL},
+        .includes = (const char *[]){"runtime", NULL},
+        .r3d = true,
+        .args = (const char *[]){"{root}", "{out}", NULL},
+    },
+    {
         // the draw mode's rasterisers and selection masks (src/drawtools.c, tests/unit/drawtools_test.c):
         // exact texels of every shape, flood, blur, jumble, spray, the selection operations. Plain C + libm:
         // needs no ./build.sh first.
