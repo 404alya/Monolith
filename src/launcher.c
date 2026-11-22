@@ -15,6 +15,7 @@
 #include "png.h"
 #include <ctype.h>
 #include <errno.h>
+#include <limits.h>
 #include <math.h>
 #include <time.h>
 #include <fcntl.h>
@@ -222,7 +223,36 @@ static const MS_TurnedBox *ObjTurn(MS_ObjRef o)
     return o.kind == MS_OBJ_BOX && scene->boxTurned && scene->boxTurned[o.index] >= 0 ? &scene->turnedBoxes[scene->boxTurned[o.index]]
                                                                                     : NULL;
 }
-static int ObjLine(MS_ObjRef o) { return MS_ObjectRef(scene, o)->line; }
+
+// A map line across the map-text files (docs/map-format.md 2.10): file index in the high 32 bits,
+// line in the low ones, so a line of a part never meets the same number in the main file, and
+// keys sort by file (main file first), then line. Without imports a key is the line number.
+static long long LineKey(int file, int line) { return ((long long)file << 32) | (unsigned)line; }
+static int KeyFile(long long key) { return (int)(key >> 32); }
+static int KeyLine(long long key) { return (int)(key & 0xffffffffLL); }
+static long long ObjKey(MS_ObjRef o)
+{
+    const MS_Ref *r = MS_ObjectRef(scene, o);
+    return LineKey(r->file, r->line);
+}
+// The package-relative path of the part holding the line, NULL for the main map file
+static const char *KeyPart(long long key)
+{
+    const MS_MapFile *F = KeyFile(key) > 0 ? MS_MapFileAt(scene, KeyFile(key)) : NULL;
+    return F ? F->path : NULL;
+}
+// A line as the bundle names it: "41" in the main map file (bundles of maps without imports stay
+// as they were), "parts/lake.map:41" in a part
+static void PutLine(FILE *f, long long key)
+{
+    if (KeyPart(key)) fprintf(f, "%s:%d", KeyPart(key), KeyLine(key));
+    else fprintf(f, "%d", KeyLine(key));
+}
+// The text of the line (a pointer into the scene's copy of its file, *len bytes), NULL if none
+static const char *KeyText(long long key, int *len)
+{
+    return KeyLine(key) > 0 ? MS_LineText(scene, KeyFile(key), KeyLine(key), len) : NULL;
+}
 static int ObjGroup(MS_ObjRef o) { return MS_ObjectRef(scene, o)->group; }
 // Material name (models: their override material; NULL = the model's own materials)
 static const char *ObjMaterial(MS_ObjRef o)
@@ -261,12 +291,13 @@ static const char *SkipWord(const char *p, const char *end)
 static CopyInfo ObjCopy(MS_ObjRef o)
 {
     CopyInfo c = { .nth = ObjNth(o), .perCopy = 1 };
-    int line = ObjLine(o), count = o.kind == MS_OBJ_MODEL ? scene->modelCount : scene->boxCount;
+    long long key = ObjKey(o);
+    int count = o.kind == MS_OBJ_MODEL ? scene->modelCount : scene->boxCount;
     c.total = c.nth + 1;
-    for (int i = o.index + 1; i < count && MS_ObjectRef(scene, (MS_ObjRef){ o.kind, i })->line == line; i++) c.total++;
+    for (int i = o.index + 1; i < count && ObjKey((MS_ObjRef){ o.kind, i }) == key; i++) c.total++;
     // The line's placement prefixes: repeat n dx dy dz (up to 3)
     int len = 0;
-    const char *p = line > 0 ? MS_LineText(scene, line, &len) : NULL;
+    const char *p = KeyText(key, &len);
     const char *end = p ? p + len : NULL;
     while (p && p < end) {
         p = SkipSpace(p, end);
@@ -1033,7 +1064,7 @@ static unsigned char ClassifierFallback(Classifier *c, int *account)
 // Selected boxes grouped by source line (a `repeat` line can make dozens of boxes; its
 // text is quoted once). Groups keep the order in which their first box was selected.
 typedef struct {
-    int line;
+    long long line;     // LineKey: file and line
     int first;          // index into sel[] of the first box of this line
     int count;
 } SelLine;
@@ -1042,7 +1073,7 @@ typedef struct {
     int group;          // -1 = boxes without a group
     float dist;         // nearest object (box or model) of the group
     int nearCount;      // objects of the group within NEARBY_RADIUS
-    int firstLine, lastLine;    // over all objects of the group
+    long long firstLine, lastLine;  // LineKeys, over all objects of the group (lastLine 0: none)
 } Nearby;
 
 typedef struct {
@@ -1105,7 +1136,8 @@ static bool BuildBundle(Bundle *B, const DesignRequest *req)
     for (int i = 0; i < req->selectedCount; i++)
         if (ObjValid(req->selected[i])) B->sel[B->selCount++] = req->selected[i];
     for (int i = 0; i < B->selCount; i++) {
-        int line = ObjLine(B->sel[i]), k = 0;
+        long long line = ObjKey(B->sel[i]);
+        int k = 0;
         while (k < B->selLineCount && B->selLines[k].line != line) k++;
         if (k == B->selLineCount) {
             SelLine *sl = MS_PUSH(B->selLines, B->selLineCount, B->selLineCap);
@@ -1118,13 +1150,13 @@ static bool BuildBundle(Bundle *B, const DesignRequest *req)
     for (int k = 0; k < B->selLineCount; k++) {
         B->selLines[k].first = at;
         for (int i = 0; i < B->selCount; i++)
-            if (ObjLine(B->sel[i]) == B->selLines[k].line) B->selOrder[at++] = B->sel[i];
+            if (ObjKey(B->sel[i]) == B->selLines[k].line) B->selOrder[at++] = B->sel[i];
     }
 
     // Nearby groups around the hit point (or the eye if the crosshair points at the sky)
     B->nearbyCenter = B->hit ? req->hit.point : req->eye;
     for (int g = 0; g <= scene->groupCount; g++)
-        B->nearby[g] = (Nearby){ g < scene->groupCount ? g : -1, 1e30f, 0, 1 << 30, 0 };
+        B->nearby[g] = (Nearby){ g < scene->groupCount ? g : -1, 1e30f, 0, LLONG_MAX, 0 };
     // (boxes and models: a model counts by its bounds)
     for (int i = 0; i < scene->boxCount + scene->modelCount; i++) {
         MS_ObjRef o = i < scene->boxCount ? (MS_ObjRef){ MS_OBJ_BOX, i } : (MS_ObjRef){ MS_OBJ_MODEL, i - scene->boxCount };
@@ -1133,9 +1165,9 @@ static bool BuildBundle(Bundle *B, const DesignRequest *req)
         float d = DistToBox(B->nearbyCenter, ObjBounds(o));
         if (d < n->dist) n->dist = d;
         if (d <= NEARBY_RADIUS) n->nearCount++;
-        int line = ObjLine(o);
-        if (line > 0 && line < n->firstLine) n->firstLine = line;
-        if (line > n->lastLine) n->lastLine = line;
+        long long line = ObjKey(o);
+        if (KeyLine(line) > 0 && line < n->firstLine) n->firstLine = line;
+        if (KeyLine(line) > 0 && line > n->lastLine) n->lastLine = line;
     }
     for (int g = 0; g <= scene->groupCount; g++)
         if (B->nearby[g].nearCount > 0) B->nearby[B->nearbyCount++] = B->nearby[g];
@@ -1178,19 +1210,21 @@ static void MdFence(FILE *f, const char *text, const char *info)
 
 static void MdVec(FILE *f, Vector3 v) { fprintf(f, "(%.3f, %.3f, %.3f)", v.x, v.y, v.z); }
 
-// Map line `line` as a heap string (free it), NULL if there is none
-static char *LineDup(int line)
+// Map line `line` (a LineKey) as a heap string (free it), NULL if there is none
+static char *LineDup(long long line)
 {
     int len;
-    const char *text = line > 0 ? MS_LineText(scene, line, &len) : NULL;
+    const char *text = KeyText(line, &len);
     return text ? MS_StrNDup(text, len) : NULL;
 }
 
-static void MdLine(FILE *f, int line)
+static void MdLine(FILE *f, long long line)
 {
     char *text = LineDup(line);
     if (text) {
-        fprintf(f, "Map line %d:\n\n", line);
+        fprintf(f, "Map line ");
+        PutLine(f, line);
+        fprintf(f, ":\n\n");
         MdFence(f, text, "");
     } else fprintf(f, "Not from a map line.\n\n");
     free(text);
@@ -1215,7 +1249,8 @@ static void MdModel(FILE *f, int index, const char *bullet)
 
 static void MdRegionObject(FILE *f, MS_ObjRef o)
 {
-    fprintf(f, "%s #%d, group \"%s\", line %d", ObjKindName(o), o.index, GroupName(ObjGroup(o)), ObjLine(o));
+    fprintf(f, "%s #%d, group \"%s\", line ", ObjKindName(o), o.index, GroupName(ObjGroup(o)));
+    PutLine(f, ObjKey(o));
     if (o.kind == MS_OBJ_MODEL) fprintf(f, ", file `%s`", scene->modelFiles[scene->models[o.index].file].path);
     fprintf(f, ", material \"%s\"", DesignerMaterialLabel(o));
 }
@@ -1225,13 +1260,13 @@ static void MdRegionObject(FILE *f, MS_ObjRef o)
 
 // A region's objects summed per map line: one `repeat` line can be dozens of small objects
 // (stair steps, roof beams) whose shares only make sense together
-typedef struct { int line; MS_ObjRef first; int objects; float share; } LineShare;
+typedef struct { long long line; MS_ObjRef first; int objects; float share; } LineShare;   // line: a LineKey
 
 static int CompareLineShare(const void *pa, const void *pb)
 {
     const LineShare *a = pa, *b = pb;
     if (a->share != b->share) return a->share > b->share ? -1 : 1;
-    return a->line - b->line;
+    return (a->line > b->line) - (a->line < b->line);
 }
 
 // Heap array (free it) of the region's map lines, largest share first; NULL with *count 0
@@ -1245,7 +1280,8 @@ static LineShare *RegionLines(const DesignRegionInfo *g, int *count)
     for (int k = 0; k < g->objectCount; k++) {
         MS_ObjRef o = g->objects[k].obj;
         if (!ObjValid(o)) continue;
-        int line = ObjLine(o), j = 0;
+        long long line = ObjKey(o);
+        int j = 0;
         while (j < n && ls[j].line != line) j++;
         if (j == n) ls[n++] = (LineShare){ line, o, 0, 0.0f };
         ls[j].objects++;
@@ -1254,6 +1290,28 @@ static LineShare *RegionLines(const DesignRegionInfo *g, int *count)
     if (n > 1) qsort(ls, n, sizeof(ls[0]), CompareLineShare);
     *count = n;
     return ls;
+}
+
+// Appends "<line>: <text>\n" of map line `line` (a LineKey; "parts/lake.map:41: ..." in a part) to the
+// heap text *block (*n bytes, *cap allocated) and counts it in *quoted; a line without text is left
+// out. False when out of memory.
+static bool QuoteLine(char **block, int *n, int *cap, long long line, int *quoted)
+{
+    int len;
+    const char *text = KeyText(line, &len);
+    if (!text) return true;
+    const char *part = KeyPart(line);
+    char *num = part ? MonoStrf("%s:%d: ", part, KeyLine(line)) : MonoStrf("%d: ", KeyLine(line));
+    int nl = num ? (int)strlen(num) : 0;
+    if (!num || !MS_RESERVE(*block, *cap, *n + nl + len + 2)) { free(num); return false; }
+    (*quoted)++;
+    memcpy(*block + *n, num, nl);
+    memcpy(*block + *n + nl, text, len);
+    *n += nl + len;
+    (*block)[(*n)++] = '\n';
+    (*block)[*n] = 0;
+    free(num);
+    return true;
 }
 
 static void MdSides(FILE *f, unsigned int sides)
@@ -1313,7 +1371,9 @@ static void WriteRegionsMd(FILE *f, const Bundle *B)
                     if (!ObjValid(e->obj)) continue;
                     fprintf(f, "| %.2f m | %s #%d", e->dist, ObjKindName(e->obj), e->obj.index);
                     if (e->obj.kind == MS_OBJ_MODEL) fprintf(f, " `%s`", scene->modelFiles[scene->models[e->obj.index].file].path);
-                    fprintf(f, " | %s | %d | ", GroupName(ObjGroup(e->obj)), ObjLine(e->obj));
+                    fprintf(f, " | %s | ", GroupName(ObjGroup(e->obj)));
+                    PutLine(f, ObjKey(e->obj));
+                    fprintf(f, " | ");
                     MdSides(f, e->sides);
                     fprintf(f, " | %d | ", e->samples);
                     MdVec(f, e->point);
@@ -1331,8 +1391,9 @@ static void WriteRegionsMd(FILE *f, const Bundle *B)
             fprintf(f, "By map line:\n\n| share | line | group | objects |\n|---|---|---|---|\n");
             int rows = lineCount < MD_REGION_ROWS ? lineCount : MD_REGION_ROWS;
             for (int k = 0; k < rows; k++) {
-                fprintf(f, "| %.1f%% | %d | %s | %d %s%s", 100.0f * ls[k].share, ls[k].line, GroupName(ObjGroup(ls[k].first)),
-                        ls[k].objects, ObjKindName(ls[k].first), ls[k].objects == 1 ? "" : ls[k].first.kind == MS_OBJ_BOX ? "es" : "s");
+                fprintf(f, "| %.1f%% | ", 100.0f * ls[k].share);
+                PutLine(f, ls[k].line);
+                fprintf(f, " | %s | %d %s%s", GroupName(ObjGroup(ls[k].first)), ls[k].objects, ObjKindName(ls[k].first), ls[k].objects == 1 ? "" : ls[k].first.kind == MS_OBJ_BOX ? "es" : "s");
                 if (ls[k].first.kind == MS_OBJ_MODEL) fprintf(f, " (`%s`)", scene->modelFiles[scene->models[ls[k].first.index].file].path);
                 fprintf(f, " |\n");
             }
@@ -1345,8 +1406,10 @@ static void WriteRegionsMd(FILE *f, const Bundle *B)
             MS_ObjRef o = g->objects[k].obj;
             if (!ObjValid(o)) continue;
             BoundingBox b = ObjBounds(o);
-            fprintf(f, "| %.1f%% | %s #%d | %s | %d | ", 100.0f * g->objects[k].share, ObjKindName(o), o.index,
-                    GroupName(ObjGroup(o)), ObjLine(o));
+            fprintf(f, "| %.1f%% | %s #%d | %s | ", 100.0f * g->objects[k].share, ObjKindName(o), o.index,
+                    GroupName(ObjGroup(o)));
+            PutLine(f, ObjKey(o));
+            fprintf(f, " | ");
             MdVec(f, b.min); fprintf(f, " | "); MdVec(f, b.max); fprintf(f, " |\n");
         }
         int more = g->objectCount - rows;
@@ -1362,18 +1425,7 @@ static void WriteRegionsMd(FILE *f, const Bundle *B)
         int quoted = 0, n = 0, cap = 0;
         char *block = NULL;
         for (int k = 0; ls && k < lineCount && k < MD_REGION_ROWS; k++) {
-            int line = ls[k].line, len;
-            const char *text = line > 0 ? MS_LineText(scene, line, &len) : NULL;
-            if (!text) continue;
-            quoted++;
-            char num[16];
-            int nl = snprintf(num, sizeof(num), "%d: ", line);
-            if (!MS_RESERVE(block, cap, n + nl + len + 2)) break;
-            memcpy(block + n, num, nl);
-            memcpy(block + n + nl, text, len);
-            n += nl + len;
-            block[n++] = '\n';
-            block[n] = 0;
+            if (!QuoteLine(&block, &n, &cap, ls[k].line, &quoted)) break;
         }
         if (quoted > 0 && block) {
             fprintf(f, "Map lines of these objects:\n\n");
@@ -1389,22 +1441,22 @@ static void WriteRegionsMd(FILE *f, const Bundle *B)
 
 // A volume's objects summed per map line or per group (heap, free it): largest summed
 // shareOfVolume first
-typedef struct { int key; MS_ObjRef first; int objects, inside; float share; } VolumeTally;
+typedef struct { long long key; MS_ObjRef first; int objects, inside; float share; } VolumeTally;
 
 static int CompareTallyKey(const void *pa, const void *pb)
 {
     const VolumeTally *a = pa, *b = pb;
-    return a->key - b->key;
+    return (a->key > b->key) - (a->key < b->key);
 }
 
 static int CompareTallyShare(const void *pa, const void *pb)
 {
     const VolumeTally *a = pa, *b = pb;
     if (a->share != b->share) return a->share > b->share ? -1 : 1;
-    return a->key - b->key;
+    return (a->key > b->key) - (a->key < b->key);
 }
 
-// byGroup false: per map line (key = line); true: per group (key = group index, -1 = none).
+// byGroup false: per map line (key = its LineKey); true: per group (key = group index, -1 = none).
 // Sorted by key, then merged, so thousands of objects stay cheap.
 static VolumeTally *VolumeTallies(const DesignVolumeInfo *v, bool byGroup, int *count)
 {
@@ -1415,7 +1467,7 @@ static VolumeTally *VolumeTallies(const DesignVolumeInfo *v, bool byGroup, int *
     for (int k = 0; k < v->objectCount; k++) {
         MS_ObjRef o = v->objects[k].obj;
         if (!ObjValid(o)) continue;
-        t[n++] = (VolumeTally){ byGroup ? ObjGroup(o) : ObjLine(o), o, 1, v->objects[k].fullyInside, v->objects[k].shareOfVolume };
+        t[n++] = (VolumeTally){ byGroup ? ObjGroup(o) : ObjKey(o), o, 1, v->objects[k].fullyInside, v->objects[k].shareOfVolume };
     }
     // (first: any object of the key; one map line makes one kind of object)
     if (n > 1) qsort(t, n, sizeof(t[0]), CompareTallyKey);
@@ -1483,7 +1535,9 @@ static void WriteVolumesMd(FILE *f, const Bundle *B)
             int rows = lineCount < MD_REGION_ROWS ? lineCount : MD_REGION_ROWS;
             for (int k = 0; k < rows; k++) {
                 const VolumeTally *t = &lines[k];
-                fprintf(f, "| %.2f%% | %d | %s | %d %s%s", 100.0f * t->share, t->key, GroupName(ObjGroup(t->first)), t->objects,
+                fprintf(f, "| %.2f%% | ", 100.0f * t->share);
+                PutLine(f, t->key);
+                fprintf(f, " | %s | %d %s%s", GroupName(ObjGroup(t->first)), t->objects,
                         ObjKindName(t->first), t->objects == 1 ? "" : t->first.kind == MS_OBJ_BOX ? "es" : "s");
                 if (t->first.kind == MS_OBJ_MODEL) fprintf(f, " (`%s`)", scene->modelFiles[scene->models[t->first.index].file].path);
                 fprintf(f, " | %d |\n", t->inside);
@@ -1500,7 +1554,9 @@ static void WriteVolumesMd(FILE *f, const Bundle *B)
             fprintf(f, "| %.2f%% | %.1f%% | %s | %s #%d", 100.0f * vo->shareOfVolume, 100.0f * vo->shareOfObject,
                     vo->fullyInside ? "yes" : "no", ObjKindName(vo->obj), vo->obj.index);
             if (vo->obj.kind == MS_OBJ_MODEL) fprintf(f, " `%s`", scene->modelFiles[scene->models[vo->obj.index].file].path);
-            fprintf(f, " | %s | %d | ", GroupName(ObjGroup(vo->obj)), ObjLine(vo->obj));
+            fprintf(f, " | %s | ", GroupName(ObjGroup(vo->obj)));
+            PutLine(f, ObjKey(vo->obj));
+            fprintf(f, " | ");
             MdVec(f, b.min); fprintf(f, " | "); MdVec(f, b.max); fprintf(f, " |\n");
         }
         if (v->objectCount > rows) fprintf(f, "| | | | %d more object%s (see `request.json`) | | | | |\n", v->objectCount - rows,
@@ -1511,18 +1567,7 @@ static void WriteVolumesMd(FILE *f, const Bundle *B)
         int quoted = 0, n = 0, cap = 0;
         char *block = NULL;
         for (int k = 0; lines && k < lineCount && k < MD_REGION_ROWS; k++) {
-            int line = lines[k].key, len;
-            const char *text = line > 0 ? MS_LineText(scene, line, &len) : NULL;
-            if (!text) continue;
-            quoted++;
-            char num[16];
-            int nl = snprintf(num, sizeof(num), "%d: ", line);
-            if (!MS_RESERVE(block, cap, n + nl + len + 2)) break;
-            memcpy(block + n, num, nl);
-            memcpy(block + n + nl, text, len);
-            n += nl + len;
-            block[n++] = '\n';
-            block[n] = 0;
+            if (!QuoteLine(&block, &n, &cap, lines[k].key, &quoted)) break;
         }
         if (quoted > 0 && block) {
             fprintf(f, "Map lines of these objects:\n\n");
@@ -1534,12 +1579,82 @@ static void WriteVolumesMd(FILE *f, const Bundle *B)
     }
 }
 
+// The absolute path of map-text file `file` (the package folder + its package-relative path; [0] is
+// the bundle's map path) as a heap string (free it), NULL when out of memory
+static char *MapFileAbs(const Bundle *B, int file)
+{
+    const MS_MapFile *F = MS_MapFileAt(scene, file);
+    if (file == 0 || !F) return MS_StrDup(B->mapPath);
+    return MonoStrf("%s/%s", B->package, F->path);
+}
+
+// The Map section's list of map-text files for a map with imports (docs/map-format.md 2.10): each
+// file with its own FNV-1a 64 and the import line that reached it, a command that prints each file's
+// hash and one that recomputes the combined scene->hash by its formula (FNV-1a 64 over, per file in
+// order, its path, NUL, its size in decimal, NUL, its bytes). Commands are heap text: a map can
+// import any number of files.
+static void WriteMapFilesMd(FILE *f, const Bundle *B)
+{
+    int count = MS_MapFileCount(scene);
+    fprintf(f, "This map's text is split over %d files with `import` (`docs/map-format.md` section 2.10). A line "
+               "named `<file>:<line>` in this bundle (`parts/lake.map:41`) is in that file; a plain line number is "
+               "in the main map file. Edit the file that holds the line. The hash above is the combined hash of "
+               "every file below, in this order: FNV-1a 64 over each file's path as listed, a NUL byte, its size "
+               "in bytes in decimal, a NUL byte and its bytes.\n\n", count);
+    fprintf(f, "| file | bytes | FNV-1a 64 at submit | imported by |\n|---|---|---|---|\n");
+    for (int i = 0; i < count; i++) {
+        const MS_MapFile *F = MS_MapFileAt(scene, i);
+        fprintf(f, "| `%s`%s | %lld | `%016llx` | ", F->path, i == 0 ? " (main)" : "", F->size, F->hash);
+        const MS_MapFile *by = F->importFile >= 0 ? MS_MapFileAt(scene, F->importFile) : NULL;
+        if (by) fprintf(f, "`%s:%d` |\n", by->path, F->importLine);
+        else fprintf(f, "- |\n");
+    }
+    fprintf(f, "\nSeveral requests can run at once. Before editing a file, check that it still has its hash; "
+               "if not, it changed since this request was submitted (maybe another request edited it): "
+               "re-read it, the line numbers above may have moved. Each file's hash:\n\n");
+
+    char *cmd = NULL, *sum = NULL;
+    size_t cmdSize = 0, sumSize = 0;
+    FILE *c = open_memstream(&cmd, &cmdSize);
+    FILE *t = open_memstream(&sum, &sumSize);
+    if (c && t) {
+        fprintf(c, "python3 -c \"import sys,functools as f;[print('%%016x'%%f.reduce(lambda h,b:((h^b)*0x100000001b3)"
+                   "&(2**64-1),open(p,'rb').read(),0xcbf29ce484222325),p) for p in sys.argv[1:]]\"");
+        fprintf(t, "python3 -c \"import sys,functools as f;r=sys.argv[1];print('%%016x'%%f.reduce(lambda h,b:((h^b)"
+                   "*0x100000001b3)&(2**64-1),b''.join(p.encode()+b'\\0'+str(len(d)).encode()+b'\\0'+d for p in "
+                   "sys.argv[2:] for d in [open(r+p,'rb').read()]),0xcbf29ce484222325))\"");
+        char q[2 * MS_PATH_MAX + 16];       // (one path, shell-quoted)
+        char *root = MonoStrf("%s/", B->package);
+        ShellQuote(root ? root : "./", q, sizeof(q));
+        fprintf(t, " %s", q);
+        free(root);
+        for (int i = 0; i < count; i++) {
+            char *abs = MapFileAbs(B, i);
+            ShellQuote(abs ? abs : "", q, sizeof(q));
+            fprintf(c, " %s", q);
+            free(abs);
+            ShellQuote(MS_MapFileAt(scene, i)->path, q, sizeof(q));
+            fprintf(t, " %s", q);
+        }
+    }
+    bool ok = c && t;
+    if (c) ok &= fclose(c) == 0;
+    if (t) ok &= fclose(t) == 0;
+    if (ok && cmd && sum) {
+        MdFence(f, cmd, "sh");
+        fprintf(f, "The combined hash (the one above, `map.hash` in `request.json`):\n\n");
+        MdFence(f, sum, "sh");
+    } else fprintf(f, "(out of memory: commands left out)\n\n");
+    free(cmd);
+    free(sum);
+}
+
 // request.md after its title and Model line (WriteBundleFiles writes those two once the model is
 // known)
 static void WriteRequestMdBody(FILE *f, const Bundle *B)
 {
     const DesignRequest *r = B->req;
-    fprintf(f, "Request `%s`, submitted %s from the monolith map designer. Bundle format 7: besides the "
+    fprintf(f, "Request `%s`, submitted %s from the monolith map designer. Bundle format 8: besides the "
                "crosshair hit and the selected objects it may contain **screen regions** the developer "
                "dragged over the frame and **volumes**, boxes marked in world space (see *Screen regions* and "
                "*Volumes* below and `.claude/skills/map-request/bundle-reference.md`).\n\n", B->id, B->created);
@@ -1589,11 +1704,13 @@ static void WriteRequestMdBody(FILE *f, const Bundle *B)
                           "bounds\n", t->rotationDeg.x, t->rotationDeg.y, t->rotationDeg.z);
         fprintf(f, "- copy: ");
         MdCopy(f, o);
-        fprintf(f, " among the %s%s of map line %d (0-based", ObjKindName(o), o.kind == MS_OBJ_BOX ? "es" : "s", ObjLine(o));
+        fprintf(f, " among the %s%s of map line ", ObjKindName(o), o.kind == MS_OBJ_BOX ? "es" : "s");
+        PutLine(f, ObjKey(o));
+        fprintf(f, " (0-based");
         MdRepeats(f, o);
         fprintf(f, ")\n");
         fprintf(f, "- group: \"%s\", material \"%s\"\n\n", GroupName(ObjGroup(o)), DesignerMaterialLabel(o));
-        MdLine(f, ObjLine(o));
+        MdLine(f, ObjKey(o));
     } else {
         fprintf(f, "Nothing: the crosshair points at the sky (no object hit).\n\n");
     }
@@ -1607,7 +1724,9 @@ static void WriteRequestMdBody(FILE *f, const Bundle *B)
         const SelLine *sl = &B->selLines[k];
         MS_ObjRef first = B->selOrder[sl->first];
         bool model = first.kind == MS_OBJ_MODEL;
-        fprintf(f, "### Line %d, group \"%s\", material \"%s\", %d %s%s\n\n", sl->line, GroupName(ObjGroup(first)),
+        fprintf(f, "### Line ");
+        PutLine(f, sl->line);
+        fprintf(f, ", group \"%s\", material \"%s\", %d %s%s\n\n", GroupName(ObjGroup(first)),
                 DesignerMaterialLabel(first), sl->count, model ? "model" : "box",
                 sl->count == 1 ? "" : model ? "s" : "es");
         MdLine(f, sl->line);
@@ -1661,8 +1780,15 @@ static void WriteRequestMdBody(FILE *f, const Bundle *B)
     for (int i = 0; i < B->nearbyCount; i++) {
         const Nearby *n = &B->nearby[i];
         fprintf(f, "| %s | %.1f m | %d | ", GroupName(n->group), n->dist, n->nearCount);
-        if (n->lastLine > 0) fprintf(f, "%d-%d |\n", n->firstLine, n->lastLine);
-        else fprintf(f, "- |\n");
+        if (n->lastLine > 0 && KeyFile(n->firstLine) == KeyFile(n->lastLine)) {
+            if (KeyPart(n->firstLine)) fprintf(f, "%s:", KeyPart(n->firstLine));
+            fprintf(f, "%d-%d |\n", KeyLine(n->firstLine), KeyLine(n->lastLine));
+        } else if (n->lastLine > 0) {           // (a group with lines in several map-text files)
+            PutLine(f, n->firstLine);
+            fprintf(f, " - ");
+            PutLine(f, n->lastLine);
+            fprintf(f, " |\n");
+        } else fprintf(f, "- |\n");
     }
     if (B->nearbyCount == 0) fprintf(f, "| (none) | | | |\n");
     fprintf(f, "\n");
@@ -1683,6 +1809,10 @@ static void WriteRequestMdBody(FILE *f, const Bundle *B)
     if (tm) strftime(when, sizeof(when), "%Y-%m-%d %H:%M:%S", tm);
     fprintf(f, "- at submit: FNV-1a 64 hash `%016llx`, mtime %ld (%s), load #%u, %d boxes, %d models, %d groups, %d material%s\n\n",
             scene->hash, scene->mtime, when, scene->version, scene->boxCount, scene->modelCount, scene->groupCount, MAP_MATERIALS, MAP_MATERIALS == 1 ? "" : "s");
+    if (MS_MapFileCount(scene) > 1) {
+        WriteMapFilesMd(f, B);
+        return;
+    }
     fprintf(f, "Several requests can run at once. Before editing, check that the file still has this hash; "
                "if not, it changed since this request was submitted (maybe another request edited it): "
                "re-read it, the line numbers above may have moved.\n\n");
@@ -1738,7 +1868,15 @@ static void JsonVec(FILE *f, Vector3 v)
     fputc('[', f); JsonNum(f, v.x); fputs(", ", f); JsonNum(f, v.y); fputs(", ", f); JsonNum(f, v.z); fputc(']', f);
 }
 
-static void JsonLineText(FILE *f, int line)
+// "line": <n> of a LineKey, plus "mapFile": "<path>" when the line is in an imported file (a line of
+// the main map file reads as it did before imports)
+static void JsonLine(FILE *f, long long line)
+{
+    fprintf(f, "\"line\": %d", KeyLine(line));
+    if (KeyPart(line)) { fprintf(f, ", \"mapFile\": "); JsonStr(f, KeyPart(line)); }
+}
+
+static void JsonLineText(FILE *f, long long line)
 {
     char *text = LineDup(line);
     if (text) JsonStr(f, text);
@@ -1794,7 +1932,9 @@ static void WriteVolumesJson(FILE *f, const DesignRequest *r)
             fprintf(f, "{ \"y\": "); JsonNum(f, v->floor.point.y);
             fprintf(f, ", \"below\": "); JsonNum(f, v->box.min.y - v->floor.point.y);
             fprintf(f, ", \"point\": "); JsonVec(f, v->floor.point);
-            fprintf(f, ", \"kind\": \"%s\", \"index\": %d, \"line\": %d, \"group\": ", ObjKindName(o), o.index, ObjLine(o));
+            fprintf(f, ", \"kind\": \"%s\", \"index\": %d, ", ObjKindName(o), o.index);
+            JsonLine(f, ObjKey(o));
+            fprintf(f, ", \"group\": ");
             JsonStr(f, GroupName(ObjGroup(o)));
             fprintf(f, " }");
         } else fprintf(f, "null");
@@ -1807,7 +1947,9 @@ static void WriteVolumesJson(FILE *f, const DesignRequest *r)
             BoundingBox b = ObjBounds(o);
             fprintf(f, "%s\n        { \"kind\": \"%s\", \"index\": %d", listed++ ? "," : "", ObjKindName(o), o.index);
             if (o.kind == MS_OBJ_BOX) fprintf(f, ", \"box\": %d", o.index);
-            fprintf(f, ", \"line\": %d, \"group\": ", ObjLine(o)); JsonStr(f, GroupName(ObjGroup(o)));
+            fprintf(f, ", ");
+            JsonLine(f, ObjKey(o));
+            fprintf(f, ", \"group\": "); JsonStr(f, GroupName(ObjGroup(o)));
             if (o.kind == MS_OBJ_MODEL) { fprintf(f, ", \"file\": "); JsonStr(f, scene->modelFiles[scene->models[o.index].file].path); }
             fprintf(f, ", \"material\": "); JsonMaterial(f, o);
             fprintf(f, ", \"shareOfVolume\": "); JsonNum(f, vo->shareOfVolume);
@@ -1824,7 +1966,9 @@ static void WriteVolumesJson(FILE *f, const DesignRequest *r)
         fprintf(f, ",\n      \"lines\": [");
         for (int k = 0; k < lineCount; k++) {
             const VolumeTally *t = &lines[k];
-            fprintf(f, "%s\n        { \"line\": %d, \"lineText\": ", k ? "," : "", t->key);
+            fprintf(f, "%s\n        { ", k ? "," : "");
+            JsonLine(f, t->key);
+            fprintf(f, ", \"lineText\": ");
             JsonLineText(f, t->key);
             fprintf(f, ", \"group\": "); JsonStr(f, GroupName(ObjGroup(t->first)));
             fprintf(f, ", \"kind\": \"%s\", \"objects\": %d, \"fullyInside\": %d, \"shareOfVolume\": ", ObjKindName(t->first), t->objects, t->inside);
@@ -1835,7 +1979,7 @@ static void WriteVolumesJson(FILE *f, const DesignRequest *r)
         for (int k = 0; k < groupCount; k++) {
             const VolumeTally *t = &groups[k];
             fprintf(f, "%s\n        { \"group\": ", k ? "," : "");
-            JsonStr(f, GroupName(t->key));
+            JsonStr(f, GroupName((int)t->key));
             fprintf(f, ", \"objects\": %d, \"fullyInside\": %d, \"shareOfVolume\": ", t->objects, t->inside);
             JsonNum(f, t->share);
             fprintf(f, " }");
@@ -1853,7 +1997,7 @@ static void WriteVolumesJson(FILE *f, const DesignRequest *r)
 static void WriteRequestJsonParts(FILE *head, FILE *f, const Bundle *B)
 {
     const DesignRequest *r = B->req;
-    fprintf(head, "{\n  \"format\": 7,\n  \"id\": "); JsonStr(head, B->id);
+    fprintf(head, "{\n  \"format\": 8,\n  \"id\": "); JsonStr(head, B->id);
     fprintf(head, ",\n  \"slug\": "); JsonStr(head, B->slug);
     fprintf(head, ",\n  \"created\": "); JsonStr(head, B->created);
     fprintf(head, ",\n  \"instructions\": ");
@@ -1893,14 +2037,18 @@ static void WriteRequestJsonParts(FILE *head, FILE *f, const Bundle *B)
         if (o.kind == MS_OBJ_MODEL) { fprintf(f, ",\n    \"model\": "); JsonModel(f, o.index); }
         fprintf(f, ",\n    \"group\": "); JsonStr(f, GroupName(ObjGroup(o)));
         fprintf(f, ",\n    "); JsonCopy(f, o);
-        fprintf(f, ",\n    \"line\": %d,\n    \"lineText\": ", ObjLine(o)); JsonLineText(f, ObjLine(o));
+        fprintf(f, ",\n    ");
+        JsonLine(f, ObjKey(o));
+        fprintf(f, ",\n    \"lineText\": "); JsonLineText(f, ObjKey(o));
         fprintf(f, "\n  }");
     } else fprintf(f, "null");
 
     fprintf(f, ",\n  \"selection\": [");
     for (int k = 0; k < B->selLineCount; k++) {
         const SelLine *sl = &B->selLines[k];
-        fprintf(f, "%s\n    {\n      \"line\": %d,\n      \"lineText\": ", k ? "," : "", sl->line);
+        fprintf(f, "%s\n    {\n      ", k ? "," : "");
+        JsonLine(f, sl->line);
+        fprintf(f, ",\n      \"lineText\": ");
         JsonLineText(f, sl->line);
         fprintf(f, ",\n      \"group\": "); JsonStr(f, GroupName(ObjGroup(B->selOrder[sl->first])));
         fprintf(f, ",\n      \"objects\": [");
@@ -1939,7 +2087,9 @@ static void WriteRequestJsonParts(FILE *head, FILE *f, const Bundle *B)
             fprintf(f, ", \"normal\": "); JsonVec(f, g->centerNormal);
             fprintf(f, ", \"kind\": \"%s\", \"index\": %d, \"distance\": ", ObjKindName(g->centerObj), g->centerObj.index);
             JsonNum(f, g->centerDist);
-            fprintf(f, ", \"line\": %d, \"group\": ", ObjLine(g->centerObj)); JsonStr(f, GroupName(ObjGroup(g->centerObj)));
+            fprintf(f, ", ");
+            JsonLine(f, ObjKey(g->centerObj));
+            fprintf(f, ", \"group\": "); JsonStr(f, GroupName(ObjGroup(g->centerObj)));
             fprintf(f, " }");
         } else fprintf(f, "null");
         fprintf(f, ",\n      \"depth\": ");
@@ -1952,8 +2102,9 @@ static void WriteRequestJsonParts(FILE *head, FILE *f, const Bundle *B)
             MS_ObjRef o = g->objects[k].obj;
             if (!ObjValid(o)) continue;
             BoundingBox b = ObjBounds(o);
-            fprintf(f, "%s\n        { \"kind\": \"%s\", \"index\": %d, \"line\": %d, \"group\": ",
-                    listed++ ? "," : "", ObjKindName(o), o.index, ObjLine(o));
+            fprintf(f, "%s\n        { \"kind\": \"%s\", \"index\": %d, ", listed++ ? "," : "", ObjKindName(o), o.index);
+            JsonLine(f, ObjKey(o));
+            fprintf(f, ", \"group\": ");
             JsonStr(f, GroupName(ObjGroup(o)));
             if (o.kind == MS_OBJ_MODEL) { fprintf(f, ", \"file\": "); JsonStr(f, scene->modelFiles[scene->models[o.index].file].path); }
             fprintf(f, ", \"material\": "); JsonMaterial(f, o);
@@ -1967,7 +2118,9 @@ static void WriteRequestJsonParts(FILE *head, FILE *f, const Bundle *B)
         LineShare *ls = RegionLines(g, &lineCount);
         fprintf(f, ",\n      \"lines\": [");
         for (int k = 0; k < lineCount; k++) {
-            fprintf(f, "%s\n        { \"line\": %d, \"group\": ", k ? "," : "", ls[k].line);
+            fprintf(f, "%s\n        { ", k ? "," : "");
+            JsonLine(f, ls[k].line);
+            fprintf(f, ", \"group\": ");
             JsonStr(f, GroupName(ObjGroup(ls[k].first)));
             fprintf(f, ", \"objects\": %d, \"share\": ", ls[k].objects);
             JsonNum(f, ls[k].share);
@@ -1980,8 +2133,9 @@ static void WriteRequestJsonParts(FILE *head, FILE *f, const Bundle *B)
         fprintf(f, ", \"objects\": [");
         for (int k = 0; k < g->edgeCount; k++) {
             const DesignRegionEdge *e = &g->edges[k];
-            fprintf(f, "%s\n        { \"kind\": \"%s\", \"index\": %d, \"line\": %d, \"group\": ", k ? "," : "",
-                    ObjKindName(e->obj), e->obj.index, ObjValid(e->obj) ? ObjLine(e->obj) : 0);
+            fprintf(f, "%s\n        { \"kind\": \"%s\", \"index\": %d, ", k ? "," : "", ObjKindName(e->obj), e->obj.index);
+            JsonLine(f, ObjValid(e->obj) ? ObjKey(e->obj) : 0);
+            fprintf(f, ", \"group\": ");
             JsonStr(f, ObjValid(e->obj) ? GroupName(ObjGroup(e->obj)) : "");
             if (e->obj.kind == MS_OBJ_MODEL && ObjValid(e->obj)) {
                 fprintf(f, ", \"file\": "); JsonStr(f, scene->modelFiles[scene->models[e->obj.index].file].path);
@@ -2007,7 +2161,13 @@ static void WriteRequestJsonParts(FILE *head, FILE *f, const Bundle *B)
         fprintf(f, "%s\n      { \"group\": ", i ? "," : ""); JsonStr(f, GroupName(n->group));
         fprintf(f, ", \"nearest\": "); JsonNum(f, n->dist);
         fprintf(f, ", \"objectsWithinRadius\": %d, \"boxesWithinRadius\": %d, ", n->nearCount, n->nearCount);
-        if (n->lastLine > 0) fprintf(f, "\"firstLine\": %d, \"lastLine\": %d }", n->firstLine, n->lastLine);
+        if (n->lastLine > 0) {
+            fprintf(f, "\"firstLine\": %d", KeyLine(n->firstLine));
+            if (KeyPart(n->firstLine)) { fprintf(f, ", \"firstMapFile\": "); JsonStr(f, KeyPart(n->firstLine)); }
+            fprintf(f, ", \"lastLine\": %d", KeyLine(n->lastLine));
+            if (KeyPart(n->lastLine)) { fprintf(f, ", \"lastMapFile\": "); JsonStr(f, KeyPart(n->lastLine)); }
+            fprintf(f, " }");
+        }
         else fprintf(f, "\"firstLine\": null, \"lastLine\": null }");
     }
     fprintf(f, "%s]\n  }", B->nearbyCount ? "\n    " : "");
@@ -2024,7 +2184,26 @@ static void WriteRequestJsonParts(FILE *head, FILE *f, const Bundle *B)
     fprintf(f, ",\n    \"brief\": ");
     if (B->brief[0]) JsonStr(f, B->brief); else fputs("null", f);
     fprintf(f, ",\n    \"formatVersion\": %d", MAP_FORMAT_VERSION);
-    fprintf(f, ",\n    \"hash\": \"%016llx\",\n    \"hashAlgorithm\": \"FNV-1a 64 of the file bytes\"", scene->hash);
+    fprintf(f, ",\n    \"hash\": \"%016llx\",\n    \"hashAlgorithm\": \"%s\"", scene->hash,
+            MS_MapFileCount(scene) > 1 ? "FNV-1a 64 over, per file of files[] in order, its path, a NUL byte, its size in "
+                                         "decimal, a NUL byte and its bytes"
+                                       : "FNV-1a 64 of the file bytes");
+    // Every map-text file (one without imports): its package-relative path, absolute path, size and own
+    // FNV-1a 64, and the import line that reached it (null for the main file)
+    fprintf(f, ",\n    \"files\": [");
+    for (int i = 0; i < MS_MapFileCount(scene); i++) {
+        const MS_MapFile *F = MS_MapFileAt(scene, i);
+        char *abs = MapFileAbs(B, i);
+        fprintf(f, "%s\n      { \"path\": ", i ? "," : ""); JsonStr(f, F->path);
+        fprintf(f, ", \"fullPath\": "); JsonStr(f, abs ? abs : F->fullPath);
+        fprintf(f, ", \"bytes\": %lld, \"hash\": \"%016llx\", \"importedBy\": ", F->size, F->hash);
+        const MS_MapFile *by = F->importFile >= 0 ? MS_MapFileAt(scene, F->importFile) : NULL;
+        if (by) { fprintf(f, "{ \"mapFile\": "); JsonStr(f, by->path); fprintf(f, ", \"line\": %d }", F->importLine); }
+        else fprintf(f, "null");
+        fprintf(f, " }");
+        free(abs);
+    }
+    fprintf(f, "%s]", MS_MapFileCount(scene) ? "\n    " : "");
     fprintf(f, ",\n    \"mtime\": %ld,\n    \"version\": %u,\n    \"boxes\": %d,\n    \"models\": %d,\n    \"groups\": %d,\n    \"materials\": %d\n  }\n}\n",
             scene->mtime, scene->version, scene->boxCount, scene->modelCount, scene->groupCount, MAP_MATERIALS);
 }

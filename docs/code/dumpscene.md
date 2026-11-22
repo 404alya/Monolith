@@ -12,17 +12,19 @@ The version line comes first:
 monolith-scene-dump 1
 map "<path>" format <n>
 counts boxes <n> models <n> modelFiles <n> materials <n> lights <n> groups <n> colliders <n> [turned <n>]
-box <i> <minx miny minz maxx maxy maxz>  line <l> group <g> material <m>
+box <i> <minx miny minz maxx maxy maxz>  line <[path:]l> group <g> material <m>
     [rot <3 hex> center <3 hex> size <3 hex>]
 modelfile <i> "<path>" loaded <yes|no> meshes <n> triangles <n> materials <n> bounds <6 hex>
-model <i> file <f> line <l> group <g> material <m|-1> origin <o> collide <c> shadow <on|off>
+model <i> file <f> line <[path:]l> group <g> material <m|-1> origin <o> collide <c> shadow <on|off>
       position <3 hex> rotationDeg <3 hex> scale <3 hex> translation <3 hex> rotation <4 hex>
       bounds <6 hex> colliders <first> <count> slots <N=m,...|->
 collider <i> <6 hex>
-material <i> "<name>" line <l> shader "<path>" unlit <on|off> [draw_distance <off|hex>] [collide off]
-light <i> <point|spot|dir> line <l> position <3 hex> direction <3 hex> color r g b energy <hex> range <hex> shadow <on|off> [clip <3 hex> <3 hex>]
+material <i> "<name>" line <[path:]l> shader "<path>" unlit <on|off> [draw_distance <off|hex>] [collide off]
+light <i> <point|spot|dir> line <[path:]l> position <3 hex> direction <3 hex> color r g b energy <hex> range <hex> shadow <on|off> [clip <3 hex> <3 hex>]
 sun direction <3 hex> energy <hex> range <hex> shadow <on|off>
 ```
+
+**Lines of imported files.** `line <l>` is a line of the main map file. A line in a file the map imports (`docs/map-format.md` §2.10) prints `line <path>:<l>`, with the file's package-relative path (`line parts/lake.map:41`). So the dumps of a map without imports are byte for byte what they were before imports existed. The same holds for the `line` field of `--dump-entities`.
 
 | Item | Notes |
 |---|---|
@@ -37,7 +39,7 @@ Writes the entities (`runtime/monolith_scene.h`, "Entities"), in map order:
 monolith-entity-dump 1
 map "<path>" entities <n>
 entity <e> id <stmt as 8 hex digits>:<index> <explicit|implicit> <box|model|light> <object index>
-       line <l> copy <c> part <p> position <3 hex> rotationDeg <3 hex> scale <3 hex> model <file|-1>
+       line <[path:]l> copy <c> part <p> position <3 hex> rotationDeg <3 hex> scale <3 hex> model <file|-1>
 ```
 
 ## --dump-scene-diff

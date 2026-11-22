@@ -151,25 +151,27 @@ void DesignerPrintHit(DesignerHit hit)
     MS_Ref r = *rp;
     BoundingBox b = MS_ObjectBounds(scene, hit.obj);
     int textLen = 0;
-    const char *text = r.line > 0 ? MS_LineText(scene, r.line, &textLen) : NULL;
+    const char *text = r.line > 0 ? MS_LineText(scene, r.file, r.line, &textLen) : NULL;
     if (!text) text = "";
     if (hit.obj.kind == MS_OBJ_MODEL) {
         const MS_ModelInstance *m = &scene->models[hit.obj.index];
         static const char *const ORIGIN[] = { "model", "bottom", "center" };
-        printf("pick: model %d  file \"%s\"  group \"%s\"  material \"%s\"  line %d: %.*s\n"
+        printf("pick: model %d  file \"%s\"  group \"%s\"  material \"%s\"  line %s%s%d: %.*s\n"
                "pick: point %.3f %.3f %.3f  normal %.3f %.3f %.3f  dist %.3f\n"
                "pick: model position %.3f %.3f %.3f  rot %.3f %.3f %.3f  scale %.3f %.3f %.3f  origin %s  -> translation %.3f %.3f %.3f\n"
                "pick: model bounds min %.3f %.3f %.3f  max %.3f %.3f %.3f\n",
                hit.obj.index, scene->modelFiles[m->file].path, r.group >= 0 ? scene->groups[r.group] : "",
-               DesignerMaterialLabel(hit.obj), r.line, textLen, text, hit.point.x, hit.point.y, hit.point.z, hit.normal.x, hit.normal.y,
+               DesignerMaterialLabel(hit.obj), MAPEDIT_LINE_AT(r.file, r.line), textLen, text, hit.point.x, hit.point.y, hit.point.z,
+               hit.normal.x, hit.normal.y,
                hit.normal.z, hit.dist, m->position.x, m->position.y, m->position.z, m->rotationDeg.x, m->rotationDeg.y,
                m->rotationDeg.z, m->scale.x, m->scale.y, m->scale.z, ORIGIN[m->origin % 3], m->translation.x,
                m->translation.y, m->translation.z, b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z);
     } else {
-        printf("pick: box %d  group \"%s\"  material \"%s\"  line %d: %.*s\n"
+        printf("pick: box %d  group \"%s\"  material \"%s\"  line %s%s%d: %.*s\n"
                "pick: point %.3f %.3f %.3f  normal %g %g %g  dist %.3f\n"   // (%g: -1 0 0 as before, a turned face in full)
                "pick: box min %.3f %.3f %.3f  max %.3f %.3f %.3f\n",
-               hit.obj.index, r.group >= 0 ? scene->groups[r.group] : "", DesignerMaterialLabel(hit.obj), r.line, textLen, text,
+               hit.obj.index, r.group >= 0 ? scene->groups[r.group] : "", DesignerMaterialLabel(hit.obj), MAPEDIT_LINE_AT(r.file, r.line),
+               textLen, text,
                hit.point.x, hit.point.y, hit.point.z, hit.normal.x, hit.normal.y, hit.normal.z, hit.dist,
                b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z);
     }
@@ -683,15 +685,17 @@ int DesignerObjNth(MS_ObjRef o)
     const MS_Ref *r = MS_ObjectRef(scene, o);
     if (!r) return 0;
     // Consecutive calls along one line (selecting a whole `repeat` line) count on from the last
-    static struct { unsigned int version; MS_ObjKind kind; int line, index, nth; } last;
+    static struct { unsigned int version; MS_ObjKind kind; int line, file, index, nth; } last;
     int nth = 0;
-    if (last.version == scene->version && last.kind == o.kind && last.line == r->line && last.index == o.index - 1)
+    if (last.version == scene->version && last.kind == o.kind && last.line == r->line && last.file == r->file &&
+        last.index == o.index - 1)
         nth = last.nth + 1;
     else
-        for (int i = o.index - 1; i >= 0 && KindRef(o.kind, i)->line == r->line; i--) nth++;
+        for (int i = o.index - 1; i >= 0 && KindRef(o.kind, i)->line == r->line && KindRef(o.kind, i)->file == r->file; i--) nth++;
     last.version = scene->version;
     last.kind = o.kind;
     last.line = r->line;
+    last.file = r->file;
     last.index = o.index;
     last.nth = nth;
     return nth;
@@ -700,7 +704,7 @@ int DesignerObjNth(MS_ObjRef o)
 static DesignerSelKey MakeKey(MS_ObjRef o)
 {
     const MS_Ref *r = KindRef(o.kind, o.index);
-    DesignerSelKey k = { .kind = o.kind, .box = MS_ObjectBounds(scene, o), .line = r->line, .group = r->group };
+    DesignerSelKey k = { .kind = o.kind, .box = MS_ObjectBounds(scene, o), .line = r->line, .file = r->file, .group = r->group };
     k.nth = DesignerObjNth(o);
     if (k.group >= 0) k.groupName = MS_StrDup(scene->groups[k.group]);
     return k;
@@ -745,11 +749,11 @@ bool DesignerSelectObject(Designer *d, MS_ObjRef o)
     return SelectionAdd(d, o);
 }
 
-void DesignerSelectLine(Designer *d, int line)
+void DesignerSelectLine(Designer *d, int file, int line)
 {
     for (int k = MS_OBJ_BOX; k <= MS_OBJ_MODEL; k++)
         for (int i = 0; i < KindCount(k); i++)
-            if (KindRef(k, i)->line == line && !SelectionAdd(d, (MS_ObjRef){ k, i })) return;
+            if (KindRef(k, i)->line == line && KindRef(k, i)->file == file && !SelectionAdd(d, (MS_ObjRef){ k, i })) return;
 }
 
 // The object's whole group, boxes and models (an object without a group stands alone)
@@ -802,9 +806,15 @@ static bool GeoIndexBuild(GeoIndex *g, MS_ObjKind kind)
     return true;
 }
 
-// First object of `kind` made by map line `line` (objects are in map-line order), or -1
-static int FirstOfLine(MS_ObjKind kind, int line)
+// First object of `kind` made by line `line` of map-text file `file`, or -1. Objects are in the order of
+// the map's text: in line order for a map in one file (a binary search), not across imported files
+static int FirstOfLine(MS_ObjKind kind, int file, int line)
 {
+    if (MS_MapFileCount(scene) > 1) {
+        for (int i = 0; i < KindCount(kind); i++)
+            if (KindRef(kind, i)->line == line && KindRef(kind, i)->file == file) return i;
+        return -1;
+    }
     int lo = 0, hi = KindCount(kind);
     while (lo < hi) {
         int mid = lo + (hi - lo) / 2;
@@ -847,14 +857,15 @@ void DesignerSync(Designer *d)
             for (int i = geo[kind].head[GeoHash(k->box) & geo[kind].mask]; i >= 0; i = geo[kind].next[i]) {
                 const MS_Ref *r = KindRef(kind, i);
                 if (!SameBox(MS_ObjectBounds(scene, (MS_ObjRef){ kind, i }), k->box) || SelectionIndexOf(d, (MS_ObjRef){ kind, i }) >= 0) continue;
-                if (found < 0 || r->line == k->line) found = i;
-                if (r->line == k->line) break;
+                bool sameLine = r->line == k->line && r->file == k->file;
+                if (found < 0 || sameLine) found = i;
+                if (sameLine) break;
             }
         }
         if (found < 0) {
-            int i = FirstOfLine(kind, k->line);
+            int i = FirstOfLine(kind, k->file, k->line);
             if (i >= 0) i += k->nth;
-            if (i >= 0 && i < KindCount(kind) && KindRef(kind, i)->line == k->line) {
+            if (i >= 0 && i < KindCount(kind) && KindRef(kind, i)->line == k->line && KindRef(kind, i)->file == k->file) {
                 const MS_Ref *r = KindRef(kind, i);
                 const char *name = r->group >= 0 ? scene->groups[r->group] : "";
                 if (strcmp(name, k->groupName ? k->groupName : "") == 0 && SelectionIndexOf(d, (MS_ObjRef){ kind, i }) < 0) found = i;
@@ -2061,23 +2072,24 @@ int DesignerDrawHud(const Designer *d, int x, int y)
         MapEditIdText(d->hit.obj, idText, sizeof(idText));
         if (d->hit.obj.kind == MS_OBJ_MODEL) {
             const MS_ModelInstance *m = &scene->models[d->hit.obj.index];
-            HudText(TextFormat("crosshair: %s  |  model %s  |  material %s  |  line %d  |  %s  |  model %d  |  %.1f m", group,
-                    scene->modelFiles[m->file].path, DesignerMaterialLabel(d->hit.obj), r.line, idText, d->hit.obj.index,
+            HudText(TextFormat("crosshair: %s  |  model %s  |  material %s  |  line %s%s%d  |  %s  |  model %d  |  %.1f m", group,
+                    scene->modelFiles[m->file].path, DesignerMaterialLabel(d->hit.obj), MAPEDIT_LINE_AT(r.file, r.line), idText,
+                    d->hit.obj.index,
                     d->hit.dist), x, y, main);
             y += 20;
             HudText(TextFormat("  at %.2f %.2f %.2f  rot %.1f %.1f %.1f  scale %.2f %.2f %.2f", m->position.x, m->position.y,
                     m->position.z, m->rotationDeg.x, m->rotationDeg.y, m->rotationDeg.z, m->scale.x, m->scale.y, m->scale.z),
                     x, y, dim);
         } else
-            HudText(TextFormat("crosshair: %s  |  material %s  |  line %d  |  %s  |  box %d  |  %.1f m",
-                    group, DesignerMaterialLabel(d->hit.obj), r.line, idText, d->hit.obj.index, d->hit.dist),
+            HudText(TextFormat("crosshair: %s  |  material %s  |  line %s%s%d  |  %s  |  box %d  |  %.1f m",
+                    group, DesignerMaterialLabel(d->hit.obj), MAPEDIT_LINE_AT(r.file, r.line), idText, d->hit.obj.index, d->hit.dist),
                     x, y, main);
         y += 20;
         char line[128];     // (cut below anyway)
-        if (r.line > 0 && MS_GetLine(scene, r.line, line, sizeof(line))) {
+        if (r.line > 0 && MS_GetLine(scene, r.file, r.line, line, sizeof(line))) {
             // Long lines are cut to keep the HUD on screen
             if (strlen(line) > 110) strcpy(line + 107, "...");
-            HudText(TextFormat("  %d: %s", r.line, line), x, y, dim);
+            HudText(TextFormat("  %s%s%d: %s", MAPEDIT_LINE_AT(r.file, r.line), line), x, y, dim);
             y += 20;
         }
     } else {

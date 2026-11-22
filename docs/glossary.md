@@ -32,6 +32,8 @@ Terms used across these pages, in alphabetical order.
 
 **Hot reload:** the editor watches the map package's files and reloads the map when one changes, keeping the old version loaded while a new one has errors.
 
+**Import, part:** a map's text can be split over several files: the main `<name>.map` names the others with `import "parts/<name>.map"`, and each is read in place of its import line. An imported file is a *part*; it starts with its own `monolith N` line, with no `use` and no `group`, and may not hold `env`, `spawn` or `viewpoint` lines. Edits land in the file that holds the line, and the compiled map is still one `<name>.mapb`. Only the AI splits a map, with the edit script's `move-to-file` ([map-format.md](map-format.md) §2.10)
+
 **IBL, ambient map:** image-based lighting: the soft light from the sky that reaches every surface, computed from a (procedural) sky image.
 
 **Map package:** a folder `maps/<name>/` with the `.map` file, `MAP.md`, `ASSETS.md` and the map's shaders, models and textures. Paths inside it are relative, so it can be copied or exported as a whole.

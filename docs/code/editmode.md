@@ -6,7 +6,7 @@ M in spectator mode: move, turn, remove, duplicate and add objects by hand.
 
 The edits act on the designer's selection (LMB, SHIFT+LMB, CTRL+LMB for a group, under the cursor: in the mode the camera flies only while RMB is held, `main.c`). Each one is a minimal text edit (`mapedit.c`, [mapedit.md](mapedit.md)) of the working copy, the map text the scene shows, and goes live at once (`MS_EditSetText`: only what changed is rebuilt, nothing is read from disk). The selection follows the edited objects through their entity ids.
 
-CTRL+S writes the working copy to the map file; in auto save mode (settings: Editor, `edit_save = auto`) every edit, undo and redo is written at once. The HUD shows "N unsaved edits" in every spectator mode.
+CTRL+S writes the working copy to the map's files (only those that differ from disk: the main file, or the parts the edits changed; [mapedit.md](mapedit.md#several-files)); in auto save mode (settings: Editor, `edit_save = auto`) every edit, undo and redo is written at once. The HUD shows "N unsaved edits" in every spectator mode.
 
 When the file changes on disk meanwhile (a request finished, another editor), the unsaved edits are applied again on top of it (`EditModeSync`); those that no longer apply are listed in red until CTRL+SHIFT+DELETE. No request is made.
 
@@ -27,7 +27,7 @@ When the file changes on disk meanwhile (a request finished, another editor), th
 | CTRL+I | give the selection's line an id (see below) |
 | M / ESC | leave the mode (V and C leave it too); with unsaved edits the first press only says so (again within 3 s leaves; the edits stay live) |
 
-**CTRL+I:** with objects of one line selected, the id panel (a number field, prefilled with the line's id or the next free one; digits, BACKSPACE, ENTER sets it, ESC cancels; empty = the next free id). With objects of several lines, each line without an id gets the next free one at once. Only the `id n` prefix changes (`mapedit.c`).
+**CTRL+I:** with objects of one line selected, the id panel (its title names the line, `parts/lake.map:41` in a part; a number field, prefilled with the line's id or the next free one; digits, BACKSPACE, ENTER sets it, ESC cancels; empty = the next free id). With objects of several lines, each line without an id gets the next free one at once. Only the `id n` prefix changes (`mapedit.c`).
 
 ## Undo, redo and open requests
 

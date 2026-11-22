@@ -46,7 +46,7 @@ You are the session doing one request. Your job is to change the map (rarely the
    4. look at the images, locate the target (§3), edit the map and verify the edit (`map-editing`), and write **`requests/<id>/result.md`** (§4).
 5. The editor polls the bundle twice a second. Its HUD shows the request as `queued`, `running`, `[?]` (a question waits for the developer) and, when `result.md` appears, `[done] <slug>: <first line of result.md>` (or `[failed]` / `[cancelled]`). The map change is already visible through hot reload. **R** flies the developer's camera back to where the request was made.
 
-Under the coordinator no other request edits your map package while you work, and code requests run alone. Still check the map hash first (`map-editing`, verification step 1): the developer may have edited the map by hand, an earlier request may have changed it since the submit, and in per-request mode several sessions can edit the same map at once.
+Under the coordinator no other request edits your map package while you work, and code requests run alone. Still check the map hash first (`map-editing`, verification step 1): the developer may have edited the map by hand, an earlier request may have changed it since the submit, and in per-request mode several sessions can edit the same map at once. **A map split over several files** (`import`, `docs/map-format.md` §2.10): the bundle names a line in a part as `<file>:<line>` (`parts/lake.map:41`; a plain number is a line of the main `.map`) and lists every map-text file with its own hash under *Map*: check the hash of each file you will edit, and edit the file that holds the line (new lines go into the file of the object they belong to; `map-editing` §2). Requests on one package still never run at the same time, parts or not.
 
 ### 2a. Working under the coordinator
 
@@ -80,7 +80,7 @@ Write it **last**, in one go. The editor picks it up as soon as it has a complet
 
 - **Line 1: a one-line summary.** It appears in the editor's HUD as `[done] <slug>: <line 1>`. Leading `#` and spaces are stripped and the line is cut at 159 characters. Keep it short (< 100 characters), plain ASCII (other characters show as `?`), and specific, e.g. `Pillar at (9, -5) raised from 20 m to 25 m (line 193 split into 3 lines)` or `3 pines added along the path, restyled needles/bark`.
 - Then:
-  - **what changed**: map lines before → after (quote them, with line numbers), and `MAP.md` / `ASSETS.md` changes;
+  - **what changed**: map lines before → after (quote them, with line numbers; `parts/lake.map:41` for a line in a part), and `MAP.md` / `ASSETS.md` changes;
   - the **paths of the before/after images**;
   - **assets**: every downloaded file with its source and licence (or why none was acceptable);
   - **anything left open**: assumptions, departures from the brief, things you couldn't do, side effects;

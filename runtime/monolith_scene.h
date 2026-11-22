@@ -28,7 +28,8 @@
 // runaway input (a `repeat` grid of 100 M boxes, a 1 GB file) with a clear error:
 #define MS_MAX_OBJECTS          1000000 // boxes + model instances + lights a map may make (and
                                         // model collision boxes, counted separately)
-#define MS_MAX_FILE_BYTES       (4 * 1024 * 1024)   // map file (and a .gltf/.obj read for its references)
+#define MS_MAX_FILE_BYTES       (4 * 1024 * 1024)   // each map-text file (and a .gltf/.obj read for its
+                                                    // references); no cap on a map's total
 #define MS_PATH_MAX             1024    // longest path the loader builds (package root + relative path)
 #define MS_MAX_COMPILED_BYTES   (256 * 1024 * 1024) // compiled map file (<name>.mapb)
 #define MS_DEFAULT_EYE_HEIGHT   1.62f   // eye above the spawn's feet (for the viewpoint made from the spawn)
@@ -43,9 +44,11 @@ typedef enum { MS_OBJ_NONE = 0, MS_OBJ_BOX, MS_OBJ_MODEL, MS_OBJ_LIGHT } MS_ObjK
 // light (into lights[]; MS_Raycast never returns lights)
 typedef struct { MS_ObjKind kind; int index; } MS_ObjRef;
 
-// Where an object came from in the map file
+// Where an object came from in the map text
 typedef struct {
-    int line;               // 1-based source line in the map file, 0 = not from a file
+    int line;               // 1-based source line in its file, 0 = not from a file
+    int file;               // the map-text file holding that line: 0 = the main map file, else a
+                            // file the main one imports (the compiled map lists them)
     int prim;               // index of the statement (map line) that generated it, -1 = none
     int group;              // index into groups[], -1 = no group
     int material;           // index into materials[] (boxes: the material; models: the override, -1 = own)
@@ -88,7 +91,7 @@ typedef struct {
 } MS_TurnedBox;
 
 typedef struct {
-    int line, prim;         // map line and statement index (= MS_Ref)
+    int line, file, prim;   // map line, its map-text file and the statement index (= MS_Ref)
     int copy, part;         // `repeat` copy and the object within it (= MS_Ref)
 } MS_Source;
 
@@ -96,6 +99,7 @@ typedef struct {
 typedef struct {
     const char *name;
     int line;               // first map line that defines it, 0 = built-in
+    int file;               // the map-text file of that line (MS_Ref.file)
     R3D_Material material;  // ready to draw (shader, textures loaded)
     const char *shader;     // package-relative shader path, NULL = none
     float drawDistance;     // m (`draw_distance`): 0 = automatic (from the size of its boxes),
@@ -113,6 +117,7 @@ typedef struct {
     BoundingBox bounds;         // model space (R3D's aabb: node transforms applied, no unit scale)
     int triangleCount;          // summed over the meshes (R3D doesn't store it), 0 in noGpu scenes
     int line;                   // first map line that uses it
+    int file;                   // the map-text file of that line (MS_Ref.file)
 } MS_ModelFile;
 
 typedef enum { MS_ORIGIN_MODEL = 0, MS_ORIGIN_BOTTOM, MS_ORIGIN_CENTER } MS_ModelOrigin;
@@ -171,8 +176,9 @@ typedef struct {
     // step (MS_EditPreviewSet); loadVersion only on a load or reload from disk
     unsigned int loadVersion;
     const char *brief;              // root + "MAP.md" if it exists, else "" (never NULL)
-    unsigned long long hash;        // FNV-1a 64 of the map file bytes
-    long mtime;
+    unsigned long long hash;        // the map text's hash: FNV-1a 64 of the map file's bytes; with
+                                    // imports the combined hash of every map-text file (MS_MapFile)
+    long mtime;                     // of the main map file
 #endif
 
     const BoundingBox *boxes;       // axis-aligned boxes (a turned box: its world AABB)
@@ -363,17 +369,38 @@ MS_ReloadResult MS_Reload(MS_Scene *scene, const char *path);
 // successful one: unlike MS_LastError(), it stays until the scene reloads again. No length limit.
 const char *MS_Error(const MS_Scene *scene);
 
-// Line `line` (1-based) of the loaded map's text, without the newline (cut to outSize - 1 bytes)
-bool MS_GetLine(const MS_Scene *scene, int line, char *out, int outSize);
+// --- The map-text files (docs/map-format.md 2.10). A map's text can be split over several files:
+// the main map file imports others (`import "parts/lake.map"`), which may import more. The scene
+// lists them: [0] is the main map file, then each imported file in the order the parser first
+// reached it. MS_Ref.file / MS_Source.file / MS_Material.file ... index this list. A compiled map
+// lists the files it was compiled from (no text: MS_LineText and MS_MapText return nothing).
+typedef struct {
+    const char *path;           // package-relative: [0] the main file's name ("forest.map"), else the
+                                // imported path as normalised ("parts/lake.map")
+    const char *fullPath;       // scene->root + path: the name messages and the editor use
+    unsigned long long hash;    // FNV-1a 64 of its bytes (compiled: of the bytes it was compiled from)
+    long long size;             // its bytes
+    int importFile, importLine; // the `import` line that reached it: file index and line (-1 0 for [0])
+} MS_MapFile;
 
-// The same line without copying: a pointer into the scene's copy of the map file, *length
-// bytes, not NUL-terminated (print it with "%.*s"); NULL if there is no such line. Valid
-// until the next reload. Lines have no length limit.
-const char *MS_LineText(const MS_Scene *scene, int line, int *length);
+// How many map-text files the scene has (1 without imports; 0 when nothing is loaded)
+int MS_MapFileCount(const MS_Scene *scene);
+// File `file`, NULL when out of range
+const MS_MapFile *MS_MapFileAt(const MS_Scene *scene, int file);
+// The index of the file with this package-relative path (as MS_MapFile.path), -1 if none
+int MS_MapFileFind(const MS_Scene *scene, const char *path);
 
-// The whole loaded map file (*size bytes, not NUL-terminated; its FNV-1a 64 is scene->hash).
-// Valid until the next reload.
-const char *MS_MapText(const MS_Scene *scene, int *size);
+// Line `line` (1-based) of map-text file `file`, without the newline (cut to outSize - 1 bytes)
+bool MS_GetLine(const MS_Scene *scene, int file, int line, char *out, int outSize);
+
+// The same line without copying: a pointer into the scene's copy of that file, *length bytes,
+// not NUL-terminated (print it with "%.*s"); NULL if there is no such file or line. Valid until
+// the next reload. Lines have no length limit.
+const char *MS_LineText(const MS_Scene *scene, int file, int line, int *length);
+
+// The whole text of map-text file `file` as loaded (*size bytes, not NUL-terminated; its FNV-1a 64
+// is MS_MapFileAt(scene, file)->hash). "" with *size 0 when out of range. Valid until the next reload.
+const char *MS_MapText(const MS_Scene *scene, int file, int *size);
 
 // The argument layout of a box primitive (box, block, stairs, waffle): returns the argument
 // count and fills axes[0..count-1] with what `repeat` shifts: MS_AXIS_X/Y/Z, MS_AXIS_NONE
@@ -386,6 +413,8 @@ int MS_PrimitiveArgs(const char *name, unsigned char axes[8]);
 // Compiled maps (editor; docs/compiled-map.md)
 // ======================================================================================
 // A compiled map has no map text: MS_GetLine, MS_LineText and MS_MapText return nothing for it.
+// It is one file for the whole map, imported files included (flattened into it); it lists every
+// map-text file it was compiled from (name, size, hash) for MS_CompiledSource and messages.
 
 // Compiles the map text at mapPath (a package folder or a .map file) into a compiled map at
 // outPath: parsed, checked like a noGpu load (model files included), read back, then written
@@ -396,11 +425,12 @@ bool MS_Compile(const char *mapPath, const char *outPath);
 
 typedef enum {
     MS_SOURCE_TEXT = 0,     // the scene was loaded from its map text
-    MS_SOURCE_CURRENT,      // from a compiled map; the .map it was compiled from is next to it, unchanged
-    MS_SOURCE_STALE,        // ... and has changed since (compile it again)
-    MS_SOURCE_MISSING,      // ... and is not there
+    MS_SOURCE_CURRENT,      // from a compiled map; every map-text file it was compiled from is in the
+                            // package, unchanged
+    MS_SOURCE_STALE,        // ... and one of them has changed since (compile it again)
+    MS_SOURCE_MISSING,      // ... and one of them is not there (and none has changed)
 } MS_SourceState;
-// sourcePath (may be NULL): the map text's path (for a text load, scene->path)
+// sourcePath (may be NULL): the main map text's path (for a text load, scene->path)
 MS_SourceState MS_CompiledSource(const MS_Scene *scene, const char **sourcePath);
 
 // ======================================================================================
@@ -428,14 +458,27 @@ typedef struct {
     double parseMs, modelsMs, bvhMs, entitiesMs, hiddenMs, meshesMs, uploadMs, aoMs;
 } MS_EditStats;
 
-// The scene becomes the parse of text[0..size) (copied). scene->hash = its hash, version + 1;
-// loadVersion and the hot-reload state are unchanged (the files on disk are). MS_RELOADED on
-// success (stats filled when not NULL), MS_RELOAD_FAILED with "file:line: message" in
-// MS_LastError() and the scene unchanged otherwise. Ends a preview (MS_EditPreviewBegin) if one is running.
-MS_ReloadResult MS_EditSetText(MS_Scene *scene, const char *text, int size, MS_EditStats *stats);
+// One map-text file's working text for MS_EditSetText: its package-relative path (as MS_MapFile.path)
+// and its bytes (not NUL-terminated)
+typedef struct {
+    const char *path;
+    const char *text;
+    int size;
+} MS_MapFileText;
 
-// The editor wrote the scene's current text (MS_MapText) to the map file: hot reload takes the
-// files on disk as loaded, so MS_Poll does not reload them for that write
+// The scene becomes the parse of the given texts (copied): files[0] is the main map file (its path
+// is not looked at), and each `import` takes the text given for its path, else reads the file from
+// disk (a file newly imported). Texts given for files the parse doesn't reach are ignored. The new
+// scene's MS_MapFile list is the parse's (its order can differ from files[]). scene->hash = the
+// texts' hash, version + 1; loadVersion and the hot-reload state are unchanged (the files on disk
+// are). MS_RELOADED on success (stats filled when not NULL), MS_RELOAD_FAILED with
+// "file:line: message" in MS_LastError() and the scene unchanged otherwise. Ends a preview
+// (MS_EditPreviewBegin) if one is running.
+MS_ReloadResult MS_EditSetText(MS_Scene *scene, const MS_MapFileText *files, int count, MS_EditStats *stats);
+
+// The editor wrote the scene's current texts (MS_MapText of every file it changed; the others are
+// on disk as loaded): hot reload takes the files on disk as loaded, so MS_Poll does not reload
+// them for that write
 void MS_EditMarkSaved(MS_Scene *scene);
 
 // Preview of a transform that follows the mouse (no text): Begin takes the objects out of the
@@ -744,6 +787,7 @@ unsigned int MS_TextureGeneration(const MS_Scene *scene);
 typedef struct {
     int material;           // materials[] index; -1: a model slot's own material (atlas by file + slot)
     int line;               // map line of the statement
+    int file;               // its map-text file (MS_Ref.file)
     MS_EntityId entity;
     MS_ObjRef obj;          // the box or model instance it resolved to (kind MS_OBJ_NONE: unresolved)
     unsigned char faces;    // boxes: bit f for each face +x -x +y -y +z -z sharing the rectangle; models: 0
@@ -838,9 +882,10 @@ void MS_PaintUnwrapFree(MS_PaintUnwrap *u);
 // and export. Values are written so that they read back as the same floats.
 bool MS_WriteEnvironment(const MS_Scene *scene, FILE *f);
 
-// Files the loaded scene depends on, each once: [0] is the map file, then every shader,
-// texture, panorama and model file a statement references, as scene->root + the
-// package-relative path written in the map. These are the files hot reload watches.
+// Files the loaded scene depends on, each once: [0] is the map file, then every imported map-text
+// file, shader, texture, panorama and model file a statement references (in the order the parser
+// reached them), as scene->root + the package-relative path written in the map. These are the
+// files hot reload watches.
 // Files a model file pulls in by itself (a .gltf's .bin and textures) are not listed.
 int MS_DependencyCount(const MS_Scene *scene);
 const char *MS_Dependency(const MS_Scene *scene, int index);   // NULL when out of range

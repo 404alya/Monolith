@@ -426,7 +426,8 @@ static struct {
     const char **fx;            // --fx key=value
     const char **settingsSet;   // --settings-set key=value
     const char **settingsChange;    // --settings-change key=value
-    int *selectLines;           // --select <line>
+    int *selectLines;           // --select [<file>:]<line>: the line
+    const char **selectFiles;   //   and the argument when it names a file (NULL: the main file)
     Rectangle *regions;         // --region x y w h
     BoundingBox *volumes;       // --volume x0 y0 z0 x1 y1 z1
     Vector2 *pickAt;            // --pick-at x y
@@ -440,6 +441,7 @@ static void FreeMainHeap(void)
     free(mainHeap.settingsSet);
     free(mainHeap.settingsChange);
     free(mainHeap.selectLines);
+    free(mainHeap.selectFiles);
     free(mainHeap.regions);
     free(mainHeap.volumes);
     free(mainHeap.pickAt);
@@ -557,6 +559,19 @@ static bool ArgNumber(const char *flag, const char *s, double lo, double hi, dou
     return true;
 }
 
+// The map-text file a --select argument names before its ':' ("parts/lake.map:41"; package-relative, as
+// MS_MapFile.path, a leading "./" allowed): its index in s, 0 for none (the main file), -1 if the map has none
+static int SelectFile(const MS_Scene *s, const char *arg)
+{
+    if (!arg) return 0;
+    const char *colon = strrchr(arg, ':');
+    while (arg[0] == '.' && arg[1] == '/') arg += 2;
+    char *path = MS_StrNDup(arg, (size_t)(colon > arg ? colon - arg : 0));
+    int file = path ? MS_MapFileFind(s, path) : -1;
+    free(path);
+    return file;
+}
+
 static bool ArgInt(const char *flag, const char *s, long *out)
 {
     char *end;
@@ -666,12 +681,13 @@ static int Run(int argc, char **argv)
     // Repeatable arguments: at most argc of each
     mainHeap.fx = malloc(sizeof(const char *) * argc);
     mainHeap.selectLines = malloc(sizeof(int) * argc);
+    mainHeap.selectFiles = malloc(sizeof(const char *) * argc);
     mainHeap.regions = malloc(sizeof(Rectangle) * argc);
     mainHeap.volumes = malloc(sizeof(BoundingBox) * argc);
     mainHeap.pickAt = malloc(sizeof(Vector2) * argc);
     mainHeap.settingsSet = malloc(sizeof(const char *) * argc);
     mainHeap.settingsChange = malloc(sizeof(const char *) * argc);
-    if (!mainHeap.fx || !mainHeap.selectLines || !mainHeap.regions || !mainHeap.volumes || !mainHeap.pickAt || !mainHeap.settingsSet ||
+    if (!mainHeap.fx || !mainHeap.selectLines || !mainHeap.selectFiles || !mainHeap.regions || !mainHeap.volumes || !mainHeap.pickAt || !mainHeap.settingsSet ||
         !mainHeap.settingsChange) {
         fprintf(stderr, "monolith: out of memory\n");
         return 1;
@@ -679,6 +695,7 @@ static int Run(int argc, char **argv)
     const char **fxSettings = mainHeap.fx;
     int fxCount = 0;
     int *selectLines = mainHeap.selectLines, selectLineCount = 0;
+    const char **selectFiles = mainHeap.selectFiles;
     Rectangle *regionArgs = mainHeap.regions;
     BoundingBox *volumeArgs = mainHeap.volumes;
     Vector2 *pickAtArgs = mainHeap.pickAt;
@@ -894,7 +911,16 @@ static int Run(int argc, char **argv)
         else if (strcmp(a, "--close-submitted") == 0) closeSubmitted = true;
         else if (strcmp(a, "--type") == 0) { NEED(1); typeText = argv[++i]; }
         else if (strcmp(a, "--classify") == 0) { NEED(1); classifyText = argv[++i]; }
-        else if (strcmp(a, "--select") == 0) { NEED(1); INT(1, selectLines[selectLineCount]); selectLineCount++; i++; }
+        else if (strcmp(a, "--select") == 0) {
+            // [<file>:]<line>: a line of a part ("parts/lake.map:41"), else of the main file
+            NEED(1);
+            const char *colon = strrchr(argv[i + 1], ':');
+            selectFiles[selectLineCount] = colon ? argv[i + 1] : NULL;
+            long v;
+            if (!ArgInt(a, colon ? colon + 1 : argv[i + 1], &v)) return 1;
+            selectLines[selectLineCount++] = (int)v;
+            i++;
+        }
         else if (strcmp(a, "--region") == 0) {
             // (finite and bounded: the region frame is drawn with integer pixel coordinates)
             NEED(4);
@@ -1191,9 +1217,17 @@ static int Run(int argc, char **argv)
         if (classifyText) {
             int selected = 0;
             for (int b = 0; b < peek->boxCount; b++)
-                for (int k = 0; k < selectLineCount; k++) if (peek->boxRefs[b].line == selectLines[k]) { selected++; break; }
+                for (int k = 0; k < selectLineCount; k++)
+                    if (peek->boxRefs[b].line == selectLines[k] && peek->boxRefs[b].file == SelectFile(peek, selectFiles[k])) {
+                        selected++;
+                        break;
+                    }
             for (int m = 0; m < peek->modelCount; m++)
-                for (int k = 0; k < selectLineCount; k++) if (peek->models[m].ref.line == selectLines[k]) { selected++; break; }
+                for (int k = 0; k < selectLineCount; k++)
+                    if (peek->models[m].ref.line == selectLines[k] && peek->models[m].ref.file == SelectFile(peek, selectFiles[k])) {
+                        selected++;
+                        break;
+                    }
             char *text = Unescape(classifyText);
             if (!text) { MS_Unload(peek); return 1; }
             char *package = MonoStrf("%s", GetFileName(GetDirectoryPath(peek->path)));
@@ -1412,7 +1446,11 @@ static int Run(int argc, char **argv)
     bool scripted = InputScripted();
     designer.interactive = !hidden || scripted;
     DesignerSync(&designer);
-    for (int i = 0; i < selectLineCount; i++) DesignerSelectLine(&designer, selectLines[i]);
+    for (int i = 0; i < selectLineCount; i++) {
+        int file = SelectFile(scene, selectFiles[i]);
+        if (file >= 0) DesignerSelectLine(&designer, file, selectLines[i]);
+        else TraceLog(LOG_WARNING, "monolith: --select %s: the map has no such map-text file", selectFiles[i]);
+    }
     // --region: as if dragged out in snip mode (pixels of the shot)
     if (regionArgCount > 0) DesignerSnipBegin(&designer);
     for (int i = 0; i < regionArgCount; i++)

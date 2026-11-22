@@ -1238,7 +1238,7 @@ static bool PrepareLibrary(const UnitTest *t, const char *out, Nob_Cmd *run);
 // msg, paintunwrap, parse_error), each with its script's flags, sources and run.
 static const UnitTest UNIT_TESTS[] = {
     {
-        // corruption test of the compiled-map reader (tests/unit/compiled_test.c): three packages, copied
+        // corruption test of the compiled-map reader (tests/unit/compiled_test.c): four packages, copied
         // into build/unit/compiled/ and compiled there with monolith --compile (PrepareCompiled), each run
         // through the test; the runtime as a game has it (no MONOLITH_EDITOR)
         .name = "compiled",
@@ -1246,7 +1246,7 @@ static const UnitTest UNIT_TESTS[] = {
         .includes = (const char *[]){"runtime", NULL},
         .r3d = true,
         .game = true,
-        .each = (const char *[]){"models", "rotated", "longname", NULL},
+        .each = (const char *[]){"models", "rotated", "longname", "imports", NULL},
         .args = (const char *[]){"{out}/{each}", NULL},
         .prepare = PrepareCompiled,
     },
@@ -2445,11 +2445,12 @@ static bool CompilePackage(const char *out, const char *dir, const char *name)
     return ok;
 }
 
-// compiled: the three packages the test reads, as compiled maps in build/unit/compiled/.
+// compiled: the four packages the test reads, as compiled maps in build/unit/compiled/.
 //   models, rotated  copies of tests/models and tests/rotated (turned boxes), compiled where they are
 //   longname         made here: a texture three folders of 120 'e acute' deep, so the error-message cases
 //                    have messages longer than any fixed buffer (compiled_test.c, MessageCases)
-// All three are compiled with monolith --compile (build/linux/monolith, which RunUnitTest has already
+//   imports          a copy of tests/imports (a map in several map-text files: several sources)
+// All four are compiled with monolith --compile (build/linux/monolith, which RunUnitTest has already
 // checked for).
 static bool PrepareCompiled(const UnitTest *t, const char *out, Nob_Cmd *run)
 {
@@ -2476,17 +2477,18 @@ static bool PrepareCompiled(const UnitTest *t, const char *out, Nob_Cmd *run)
     }
     if (!WriteLine(nob_temp_sprintf("%s/longname.map", longDir), mapText)) return false;
 
-    // models and rotated: refresh the copies (nothing is removed from them)
-    const char *copied[] = {"models", "rotated"};
+    // models, rotated and imports: refresh the copies (nothing is removed from them)
+    const char *copied[] = {"models", "rotated", "imports"};
     for (size_t i = 0; i < NOB_ARRAY_LEN(copied); i++) {
         const char *dir = nob_temp_sprintf("%s/%s", out, copied[i]);
         if (!CopyInto(nob_temp_sprintf("%s/tests/%s", gRoot, copied[i]), dir)) return false;
     }
 
-    // the compile of all three, in the order the test runs them
+    // the compile of all four, in the order the test runs them
     return CompilePackage(out, nob_temp_sprintf("%s/models", out), "models") &&
            CompilePackage(out, nob_temp_sprintf("%s/rotated", out), "rotated") &&
-           CompilePackage(out, longDir, "longname");
+           CompilePackage(out, longDir, "longname") &&
+           CompilePackage(out, nob_temp_sprintf("%s/imports", out), "imports");
 }
 
 // Appends the files `pattern` matches to `files`, in the order bash's glob gives them (sorted by the locale's

@@ -15,6 +15,15 @@ Monolith reads exactly one map format (`MS_FORMAT_VERSION` in `runtime/monolith_
 - Commands below are for zsh or bash: every variable is quoted. Run anything longer than one command as a script file in the scratch folder with `bash <file>` (the agent shell may refuse compound commands).
 - Don't commit. `tests/migrate/` holds old-format fixtures on purpose: never migrate them.
 
+## A map with imports
+
+A map can be split over several map-text files: the main `<name>.map` and the parts it imports (`import "parts/lake.map"`, nested parts too; `docs/map-format.md` §2.10). Imports exist from format 3 on, so only a step from 3 or later meets them. **A migration rewrites every file of the map, keeps one `.map.v<N>` per file, and runs its proofs on the whole map.** What changes in the procedure:
+- **Step 1:** list the map's files: the main file, then every file an `import` line names, read recursively (`grep -nE '^[[:space:]]*import[[:space:]]' <file>`, skipping hits inside a comment; paths are package-relative). Record `sha256sum` of each.
+- **Step 2:** every part's first statement is its own `monolith N`; each must equal the main file's. A part with another number: refuse (`rule not covered: <part>:1`, quoting the line).
+- **Step 4:** the package copy holds the parts at their paths (import paths are package-relative, so the renamed `step-<K>.map` still finds them). Apply the step's rules to **every** file of the map in `step-<K+1>/`: the main file and each part, the format-line rule to each file's own format line. Count the lines changed per file.
+- **Step 5:** each proof loads the whole map through its main file. Dumps name a part's line `line <part>:<L>` (`line L` in the main file); the proof script's line shift applies to every file's lines, so a step must shift every file alike (a format line inserted in each): if it doesn't, refuse (`rule not covered`).
+- **Steps 6 and 7:** the report gives the sha256 of every file. On success, check that no `<file>.v<N>` exists for any of them, copy each file to its `.v<N>` next to it (`parts/lake.map.v3`), then each migrated file over its original, and run the final box-dump check once on the whole map. The success report lists every file with its rules and line counts.
+
 ## Procedure
 
 1. **Resolve the path.** A folder means `<folder>/<folder>.map`, else its only `.map`; a `.map` file is itself. The map's folder is the package root (copied whole in step 4). The map must be inside the repo:
@@ -117,12 +126,12 @@ else echo "boxes: DIFFER"; diff "$OUT/before.boxes" "$OUT/after.boxes" | head -n
 for k in scene scene-diff; do
   run "$B" --map "$BM" --dump-$k "$OUT/before.$k"
   run "$A" --map "$AM" --dump-$k "$OUT/after.$k"
-  # drop the `map "<path>" format N` line; move the before side's `line L` by SHIFT (L > 0: line 0 is built in)
+  # drop the `map "<path>" format N` line; move the before side's `line L` / `line <part>:L` by SHIFT (L > 0: line 0 is built in)
   python3 -I -c 'import re,sys
 s=int(sys.argv[3])
 for src,dst,sh in ((sys.argv[1],sys.argv[1]+".cmp",s),(sys.argv[2],sys.argv[2]+".cmp",0)):
     t=[l for l in open(src) if not l.startswith("map \"")]
-    open(dst,"w").writelines(re.sub(r" line (\d+)",lambda m:" line %d"%(int(m.group(1))+(sh if int(m.group(1)) else 0)),l) for l in t)' \
+    open(dst,"w").writelines(re.sub(r" line ((?:[^ :]+:)?)(\d+)",lambda m:" line %s%d"%(m.group(1),int(m.group(2))+(sh if int(m.group(2)) else 0)),l) for l in t)' \
     "$OUT/before.$k" "$OUT/after.$k" "$SHIFT"
   if cmp -s "$OUT/before.$k.cmp" "$OUT/after.$k.cmp"; then echo "$k: equal (map line only)"
   else echo "$k: DIFFER"; diff "$OUT/before.$k.cmp" "$OUT/after.$k.cmp" | head -n 20; fail=1; fi

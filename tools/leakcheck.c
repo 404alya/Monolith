@@ -728,6 +728,21 @@ int main(int argc, char **argv)
               false);
     RUN("edit-script-lost", 0, M, "--dump-boxes", T("lost-boxes.txt"), "--map", T("lost-models"), "--edit-script",
         T("lost.txt"));
+    // A map in several map-text files (tests/imports: the main file, parts, a nested part): live edits of
+    // objects in parts (the working copy per file), save, undo, duplicate; then move-to-file on the
+    // single-file twin through --apply-edits (a new part, its self-check, undo, redo), and the compile
+    CopyTree("tests/imports", T("imp-pkg"));
+    WriteText(T("imp.txt"),
+              "select group \"part a\"\nmove 0 1 0\nsave\nundo\nselect group \"part c (nested)\"\n"
+              "duplicate 0 0 2\nprint\nselect line parts/b.map:6\nprint\n",
+              false);
+    // (the copies' folder names are not the map's: the map file is named, the package has two .map files)
+    RUN("edit-script-imports", 0, M, "--dump-scene", T("imp-scene.txt"), "--map",
+        nob_temp_sprintf("%s/imports.map", T("imp-pkg")), "--edit-script", T("imp.txt"));
+    CopyTree("tests/imports", T("imp-flat"));
+    WriteText(T("mtf.txt"), "select group \"part b\"\nmove-to-file \"parts/moved.map\"\nundo\nredo\n", false);
+    RUN("apply-move-to-file", 0, M, "--apply-edits", T("mtf.txt"), "--map", nob_temp_sprintf("%s/imports-flat.map", T("imp-flat")));
+    RUN("compile-imports", 0, M, "--map", nob_temp_sprintf("%s/imports.map", T("imp-pkg")), "--compile", nob_temp_sprintf("%s/imports.mapb", T("imp-pkg")));
     RUN("dump-entities", 0, M, "--dump-entities", T("entities.txt"), "--map", "tests/models");
     RUN("edit-mode-hud", 0, M, "--shot", T("edit.png"), "--view", "1", "--map", "tests/models", "--shot-hud",
         "--edit-mode", "--select", "36");

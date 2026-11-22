@@ -189,7 +189,8 @@ paint own 41:0 slot 0 0 0 256 256 paint_filter nearest
   material changed), the entry is kept but inactive: it draws nothing and the load logs one line
   ("paint: 120:0 +x is not drawn with concrete; inactive"). So editing geometry never breaks a map.
   A rectangle outside its atlas's size is the same (inactive, logged).
-- The painter appends entries to a **paint block** at the end of the file, under the comment
+- The painter appends entries to a **paint block** at the end of the file (a map with parts: the file
+  that holds the painted object's line, docs/code/mapedit.md "Several files"), under the comment
   `# paint (draw mode)`, sorted by material, then entity, then face or slot. The developer may move
   them anywhere after the material's line.
 - `paint` is a statement of the current map format (3).

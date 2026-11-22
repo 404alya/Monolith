@@ -248,7 +248,7 @@ model "models/tree_pineTallC.glb" -30.07 0 15.26 rot 35 0 0 scale 12.84 origin b
 
 ### 2.8 Limits and errors
 
-**No limits on content:** any number of boxes, models, groups, materials, lights and viewpoints, and lines of any length (everything is allocated as needed). Sanity caps only: at most 1 000 000 objects (boxes + model instances + lights) per map, so a `repeat` grid that multiplies to millions fails with a clear message, and a 4 MB map file. Spawn, viewpoint and light positions are limited to ±1 000 000 m, and a spot light's `inner` angle must not exceed `outer`. **Errors** (unknown keyword, wrong argument count, bad number, a missing file, a path outside the package, an undefined material, too many objects, a map with no boxes and no models) are reported as `file:line: message`.
+**No limits on content:** any number of boxes, models, groups, materials, lights and viewpoints, and lines of any length (everything is allocated as needed). Sanity caps only: at most 1 000 000 objects (boxes + model instances + lights) per map, so a `repeat` grid that multiplies to millions fails with a clear message, and 4 MB per map-text file (the main `.map` and each file it imports, §2.10; nothing caps their total but the object cap). Spawn, viewpoint and light positions are limited to ±1 000 000 m, and a spot light's `inner` angle must not exceed `outer`. **Errors** (unknown keyword, wrong argument count, bad number, a missing file, a path outside the package, an undefined material, too many objects, a map with no boxes and no models) are reported as `file:line: message`.
 
 ### 2.9 Entities and manual edits
 
@@ -260,4 +260,41 @@ Every box, model instance and light is an **entity**: an id plus its data (compo
 `examples/05_entities` shows how a game uses them (its own components and systems, lookup by id). `--dump-entities <file>` lists them (`entity <e> id <key>:<index> explicit|implicit <kind> …`).
 
 **Manual edits** (the edit mode, **M**, and `--apply-edits`) change the map file itself, with the smallest text edit, and the editor reloads it: moving or turning an object rewrites the numbers on its line (and adds `id n` to it), removing it deletes the line, and one copy of a `repeat` line is split out onto its own line (the other copies keep their exact floats, with `from` where needed). Giving a line an id (**Ctrl+I**, the script's `id [n]`) changes only its `id n` prefix; removing one (**Delete** in the id panel, **F5**, the script's `id remove`) deletes only that prefix (with the blanks after it), and the line's objects get implicit keys again. Duplicated and added objects are new lines with a new `id`; an added model goes right after the line of the object it stands on (in its group), wrapped in `use "default"` … `use "<material>"` when a `use` is active there (a `use` would restyle it). Comments, spacing, groups and every other line stay as they were. Boxes from `box` and `block` lines turn freely, like models: about any axis, globally or about their own axes (`local`), each about its own centre or orbiting a pivot (`turn … pivot x y z`). The result is written the simplest way: when the box ends up axis-aligned (a 90° step, or a turned box turned back) its corners are rewritten (a block's sizes swap places) and a `rot` it had is removed; otherwise its centre moves and `rot yaw pitch roll` is written (a turn about the vertical adds to the yaw and one about the box's own z to the roll, exactly; any other turn is composed and written with 6 decimals). `rotation y p r` (the script) / reset sets an absolute rotation (`0 0 0`: the plain box again; on a model it removes `rot`). Boxes can be scaled (corners about a pivot; a block's centre and sizes; a turned box's extents along its own axes, each by the factor of the world axis nearest to it) and resized (`size`, along the box's own axes). Stairs and waffles can only move. A model's turn about another axis than the vertical composes with its `rot` (R = Ry · Rx · Rz) and is written back as yaw, pitch and roll with 6 decimals; a turn about the vertical adds to the yaw and one about the model's own z to the roll, exactly. Scaling a model multiplies its `scale` (each model axis by the factor of the world axis nearest to it) and moves its position about the pivot. A turned or scaled whole `repeat` line with a pivot gets its steps turned or scaled too.
+
+### 2.10 Imports: one map in several files
+
+A large map can split its text over several files. The main `<name>.map` names the others with an `import` line, and each one reads that file's lines in place of the import line, like pasting the file's text there:
+
+```
+monolith 3
+env sun.direction -0.3 -1 0.2
+material "stone" albedo 0.6 0.6 0.6
+import "parts/lake.map"                 # the lake: its own file
+group "town"
+use "stone"
+box 0 0 0 10 3 10
+```
+
+```
+monolith 3                              # parts/lake.map: a part starts with the same format line
+group "lake"
+material "water" albedo 0.1 0.3 0.4 roughness 0.05
+use "water"
+box -40 -0.5 -40 40 0 40
+```
+
+The rules:
+
+- **The path** is in double quotes and relative to the package folder, like a model's path (not to the importing file), must end in `.map`, stay inside the package and exist. Parts can live anywhere in the package; `parts/` is the suggested folder.
+- **Each part starts with its own format line**, `monolith N`, with the same number as the main file. A part read alone says its format, and a migration (§1.3) rewrites every file of the map.
+- **A file is read once per map.** Importing it a second time, or a cycle (a file that imports itself, directly or through other parts), is an error. Parts may import other parts (nesting, at most 256 files deep).
+- **Materials are one list for the whole map,** in the order of the text with every import pasted in: a material is defined before a `use` names it, and a `material` line in any file defines that material or adds keys to it.
+- **Each part starts fresh:** no `use` (the `"default"` material) and no `group`. After the import line, the importing file's `use` and `group` are what they were before it, so moving an import line never restyles the lines around it.
+- **`env`, `spawn` and `viewpoint` belong in the main file.** In a part they are an error that says so. Everything else (boxes, models, lights, groups, materials, `use`, `paint`, `repeat`, `id`) may go in any file.
+- **`id n` values are unique across the whole map,** not per file; a duplicate names both lines (`file:line`).
+- **Errors name the file that holds the line:** `maps/x/parts/lake.map:41: unknown material "wter"`.
+
+Splitting a map changes nothing it shows: the same lines in one file and split over parts give the same boxes, models, lights and image. Every tool knows which file a line is in: the editor writes each edit into the file that holds the line (only the files it changes are written), dumps print `line parts/lake.map:41` for a line in a part (`line 41` in the main file, as before), and request bundles list every map-text file with its own hash. The compiled form stays **one `<name>.mapb` for the whole map**, every part flattened into it, so a game loads one file as before; it counts as out of date when any of the files it was compiled from has changed (§1.4, `docs/compiled-map.md`).
+
+**Splitting a map by hand:** move a run of lines (usually one or more whole `group`s) into a new file under `parts/`, give it the main file's `monolith N` line, and put `import "parts/<name>.map"` where the lines were. Repeat the `use` line that was active at the cut at the top of the part (a part starts with `"default"`), and a `group` line if the cut fell inside a group. Keep `env`, `spawn` and `viewpoint` lines in the main file. Then check that `--dump-boxes` is unchanged.
 

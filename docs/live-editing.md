@@ -21,7 +21,8 @@ environment.
 
 ## 2. The working copy
 
-**The working copy is map text.** The editor keeps the map's text in memory (`MapEditor.work`).
+**The working copy is map text.** The editor keeps the map's text in memory (`MapEditor.files`: one
+working text per map-text file, the main `.map` and every part it imports, §2.3).
 Every edit is still made by `mapedit.c` exactly as before (the same minimal hunks: numbers on a
 line, a deleted line, a split `repeat` line, inserted lines), but against the working text, not
 the file. The new text then goes to the runtime with `MS_EditSetText`, which parses it on the
@@ -63,15 +64,35 @@ nothing goes onto the stack; on confirm, one op with the final values goes throu
 
 ```
 MapEditor
-  work, workSize            the working text (heap)
-  diskHash                  FNV-1a 64 of the map file as last read or written by us
-  undo[], redo[]            EditStep: hunks + hashes + op + selection ids + what
+  files[]                   MapEditFile per map-text file, by package path ([0] the main file):
+                              text, size, hash (the working text), diskHash + onDisk (the file
+                              as last read or written by us)
+  workHash                  scene->hash while the scene shows the working copy
+  undo[], redo[]            EditStep: hunks (each naming its file) + hashes + op + selection ids + what
   savedAt                   undo depth that matches the file (-1: none does)
   failed[]                  steps that did not rebase (§5): shown in red, kept until dismissed
 ```
 
 `unsaved = (savedAt < 0 ? undoCount : |undoCount - savedAt|) + lostCount + droppedUnsaved`, and 1 when that is 0 but
-`workHash != diskHash` (`MapEditUnsaved`; [code/mapedit.md](code/mapedit.md#undo--redo)). The HUD shows it whenever it is not 0, in every spectator mode.
+a working file differs from its file on disk (`MapEditUnsaved`; [code/mapedit.md](code/mapedit.md#undo--redo)). The HUD shows it whenever it is not 0, in every spectator mode.
+
+### 2.3 A map in several files (imports)
+
+A map can import parts ([map-format.md](map-format.md) §2.10). The working copy keeps **one text
+per map-text file**, keyed by its package path (`parts/lake.map`), not by the scene's file index:
+the scene's file list is the parse's, and an edit that adds or removes an `import` line
+(`move-to-file`) can change its order. Every edit is made in the file that holds the line
+(`MS_Ref.file`): moves, turns, removals, ids, a split `repeat` line, a duplicate, an added model
+(after its anchor's line), a new `paint` line (in the painted object's file), a material's keys
+(its first line's file). Each hunk names its file; an undo step restores every file it touched
+byte for byte. `MS_EditSetText` gets every working text (`MS_MapFileText[]`, main first). A save
+writes only the files that differ from disk (each with the smallest edit, as before); a new part
+(made by `move-to-file`) gets its folder. The rebase (§5) runs when any of the files changed on
+disk. Closing with unsaved edits (§4.2) writes the main text where it always went and each
+changed part under `<that path without .map>/<package path>`. The ids rule is unchanged: `id n`
+is unique across all files, and the next free id is the largest in any file + 1. Lines are named
+`line 41` in the main file and `line parts/lake.map:41` in a part, in the HUD, the id panel, the
+draw mode, `--pick` and the edit script.
 
 ## 3. The runtime's live-edit API (editor builds only)
 
@@ -79,7 +100,8 @@ Declared in `runtime/monolith_scene.h` in a `MONOLITH_EDITOR` block ("Live edits
 build and `--export` don't have it; `./build.sh test export_strip` checks that.
 
 ```c
-MS_ReloadResult MS_EditSetText(MS_Scene *s, const char *text, int size, MS_EditStats *stats);
+MS_ReloadResult MS_EditSetText(MS_Scene *s, const MS_MapFileText *files, int count, MS_EditStats *stats);
+                               // files[0]: the main text, then a text per imported path (§2.3);
                                // MS_RELOAD_FAILED: "file:line: message" in MS_LastError()
 void MS_EditMarkSaved(MS_Scene *s);
 bool MS_EditPreviewBegin(MS_Scene *s, const MS_ObjRef *objs, int count);
@@ -254,12 +276,13 @@ it for one run. It is not part of `MS_Quality` or the runtime, so the export nev
 
 raylib can't cancel a window close, so the working text is written to
 `<settings folder>/unsaved/<map name>-<YYYYMMDD-HHMMSS>.map` (the settings file's folder:
-`~/.config/monolith/` on Linux) and the log says where. The map file is not touched.
+`~/.config/monolith/` on Linux) and the log says where; a map with parts also gets each part that
+differs from disk under `unsaved/<map name>-<YYYYMMDD-HHMMSS>/<package path>`. The map files are not touched.
 
 ## 5. Conflicts
 
 **The file changes on disk while edits are unsaved** (a request finished, an editor saved it,
-a `git checkout`). `MS_Poll` sees it as today and reloads the package from disk (`loadVersion
+a `git checkout`; with parts: any of the map's files). `MS_Poll` sees it as today and reloads the package from disk (`loadVersion
 + 1`). Then `EditModeSync` **rebases**: the working text becomes the new file, and each unsaved
 step, oldest first, is applied again: its op, to its selection resolved by entity id in the
 current scene. A step applies when every entity of its selection still exists and the op
@@ -397,8 +420,8 @@ the modal still runs for the rest.
 
 Edit script additions: `turn <yaw> [<pitch> <roll>] [local] [pivot x y z]`, `scale <f> | <fx>
 <fy> <fz> [local] [pivot x y z]`, `size <sx> <sy> <sz>` (0 keeps an axis), `id remove`, and for
-`--edit-script` only: `save` (writes the --map file like CTRL+S) and `disk <file>` (replaces the
-map file with that file's bytes and runs the outside-change path, §5: the conflict test).
+`--edit-script` only: `save` (writes the --map file like CTRL+S) and `disk <file> [<part>]` (replaces the
+map file, or the part named, with that file's bytes and runs the outside-change path, §5: the conflict test).
 
 ## 8. Panels
 

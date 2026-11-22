@@ -28,6 +28,7 @@
 
 #define MS_FILE_MAX         MS_MAX_FILE_BYTES
 #define MS_REPEATS_MAX      3       // `repeat` prefixes per line (the grammar: a 3D grid at most)
+#define MS_IMPORT_DEPTH_MAX 256     // `import`s nested in each other (each level recurses the parser)
 // Camera and light positions (spawn, viewpoint, light) stay within +-MS_COORD_LIMIT, so the sun
 // shadow tiles' integer cell keys never overflow (QA2 F4)
 #define MS_COORD_LIMIT      1e6f
@@ -66,7 +67,8 @@
 // only while a map loads; drawing, picking and collision never allocate.
 
 typedef struct { char *name; int count; float v[4]; } MatUniform;
-typedef struct { char *name; char *path; int line; bool data; } MatSampler;   // data: data_sampler (linear, nearest, no mipmaps)
+typedef struct { char *name; char *path; int line, file; bool data; } MatSampler;   // data: data_sampler (linear, nearest,
+                                                                                    // no mipmaps); file: of the line
 
 enum { MAP_ALBEDO, MAP_NORMAL, MAP_ORM, MAP_EMISSION, MAP_COUNT };
 enum { INHERIT_ALBEDO = 1, INHERIT_NORMAL = 2, INHERIT_ORM = 4, INHERIT_EMISSION = 8 };
@@ -80,6 +82,7 @@ typedef struct {
     int samplerCount, samplerCap;
     unsigned inherit;                   // INHERIT_* (for model overrides)
     int shaderLine, mapLine[MAP_COUNT];  // map lines of the keys, for load errors
+    int shaderFile, mapFile[MAP_COUNT];  //   and their map-text files (a material can get keys in several)
     int wrap;                           // texture wrapping: 0 repeat (default), 1 clamp, 2 mirror
     bool instanced;                     // `instanced on`: boxes stay instanced cubes
     bool noPrepass;                     // `prepass off`: no depth pre-pass draw (R3D patch 28, MaterialDrawMode)
@@ -94,7 +97,7 @@ typedef struct {
     // paintGrid: `paint_grid` (texels per metre the paint's texels lie on; 0 none; -1 not set: the
     // map's `env paint.grid` applies, docs/painting.md 17.1)
     char *paint;
-    int paintLine;
+    int paintLine, paintFile;
     unsigned char paintFilter;
     bool painted;
     float paintGrid;
@@ -118,7 +121,7 @@ typedef struct {
     int slot;                           // models: the file's material slot; boxes: -1
     int x, y, w, h;                     // texels of the atlas
     bool nearest;                       // `paint own ... paint_filter nearest`
-    int line;
+    int line, file;                     // its map line and the map-text file of it
     MS_EntityId entity;
     int ownAtlas;                       // own material: index into ownAtlases[]; else -1
     bool active;
@@ -277,22 +280,37 @@ typedef struct {
     int count;
 } ModelGroup;
 
+// One map-text file of the map: [0] the main map file, then each file it imports (directly or not)
+// in the order they were first reached. Every line a message names is a line of one of them
+// (MS_Ref.file and the other `file` fields index this list); a compiled map lists the files it was
+// compiled from (section "sources"), without their text.
+typedef struct {
+    char *path;                         // package-relative ([0]: the main file's name)
+    char *fullPath;                     // the name messages use: root + path ([0]: the map text's path)
+#ifdef MONOLITH_EDITOR
+    MS_MapFile pub;                     // MS_MapFileAt's view (its strings are path and fullPath)
+    char *text;                         // its bytes as parsed, for MS_GetLine (NULL for a compiled map)
+    int textSize;
+    int *lineStarts;                    // offset of each line in text (NULL: out of memory, MS_LineText walks the text)
+    int lineCount;
+#endif
+} MapSrc;
+
 // One parsed (and possibly uploaded) map
 typedef struct {
     int formatVersion;
     char *path, *root;
-    char *srcPath;                      // the map text the lines in messages refer to ("file:line: ...")
+    char *srcPath;                      // the main map text the lines in messages refer to ("file:line: ...")
+    MapSrc *srcs;                       // the map-text files ([0]: srcPath's); see SrcName
+    int srcCount, srcCap;
+    int *srcSet, srcSetCap;             // srcs[] by path (open addressing: index + 1, 0 = empty; a power
+                                        // of two, at most half full): each file once, in linear time
 #ifdef MONOLITH_EDITOR
     char *brief;                        // "" when the package has no MAP.md
-    unsigned long long hash;            // FNV-1a 64 of the map file
+    unsigned long long hash;            // the map text's hash (MS_Scene.hash; a compiled map: of its bytes)
     long mtime;
-    char *text;                         // the map file, for MS_GetLine (NULL for a compiled map)
-    int textSize;
-    int *lineStarts;                    // offset of each line in text (NULL: out of memory, MS_LineText walks the text)
-    int lineCount;
-    bool compiled;                      // loaded from a compiled map: its source's hash and size
-    unsigned long long srcHash;
-    long long srcSize;
+    bool compiled;                      // loaded from a compiled map (srcs[]: the hashes and sizes it was
+                                        // compiled from)
 #endif
 
     // Heap arrays: count = used, cap = allocated (MS_RESERVE / MS_PUSH)
@@ -360,8 +378,8 @@ typedef struct {
     // Statements (lines that make objects), by MS_Ref.prim: their entity key, and a set of the
     // keys in use (open addressing: statement index + 1, 0 = empty) for ids and implicit keys
     unsigned int *stmtKeys;
-    int *stmtLines;                     // map line of each (for the duplicate id message)
-    int stmtCount, stmtCap, stmtLineCap;
+    int *stmtLines, *stmtFiles;         // map line of each and its map-text file (parser messages)
+    int stmtCount, stmtCap, stmtLineCap, stmtFileCap;
     int *stmtSet;
     int stmtSetCap;                     // a power of two, at most half full
     // Entities (BuildEntities): components by entity, object -> entity per kind, and an id ->
@@ -887,6 +905,78 @@ static void RootOf(const char *mapPath, char *root, int size)
     if (cut < 0) snprintf(root, size, "./");
     else snprintf(root, size, "%.*s/", cut, mapPath);
 }
+
+// The name of map-text file `file` for messages ("<name>:<line>: ..."): the main map text's when it
+// is 0 or out of range
+static const char *SrcName(const SceneData *d, int file)
+{
+    return file > 0 && file < d->srcCount ? d->srcs[file].fullPath : d->srcPath;
+}
+
+// The slot of package path `rel` in d->srcSet: the one holding its srcs[] index + 1, else the empty
+// slot where it would go (the set must exist: srcSetCap > 0)
+static int *SrcSlot(const SceneData *d, const char *rel)
+{
+    unsigned mask = (unsigned)d->srcSetCap - 1;
+    unsigned i = (unsigned)Fnv1a64Update(FNV_OFFSET, rel, strlen(rel)) & mask;
+    while (d->srcSet[i] && strcmp(d->srcs[d->srcSet[i] - 1].path, rel) != 0) i = (i + 1) & mask;
+    return &d->srcSet[i];
+}
+
+// The srcs[] index of package path `rel`, -1 if no file of the map has it
+static int SrcFind(const SceneData *d, const char *rel)
+{
+    if (d->srcSetCap == 0) return -1;
+    int at = *SrcSlot(d, rel);
+    return at - 1;
+}
+
+// Puts srcs[i] into the set (its path not there yet), growing it at half full. False when out of memory.
+static bool SrcSetAdd(SceneData *d, int i)
+{
+    if (2 * (i + 1) > d->srcSetCap) {
+        int cap = d->srcSetCap ? 2 * d->srcSetCap : 16;
+        while (2 * (i + 1) > cap) cap *= 2;
+        int *set = calloc((size_t)cap, sizeof(int));
+        if (!set) return false;
+        free(d->srcSet);
+        d->srcSet = set;
+        d->srcSetCap = cap;
+        for (int k = 0; k < i; k++) *SrcSlot(d, d->srcs[k].path) = k + 1;
+    }
+    *SrcSlot(d, d->srcs[i].path) = i + 1;
+    return true;
+}
+
+#ifdef MONOLITH_EDITOR
+// A package-relative path with its empty and "." components dropped ("parts//./a.map" ->
+// "parts/a.map"), heap; NULL when out of memory. ("" when nothing is left.)
+static char *NormalisePath(const char *s)
+{
+    char *out = malloc(strlen(s) + 1);
+    if (!out) return NULL;
+    size_t n = 0;
+    for (const char *part = s; ; ) {
+        size_t len = strcspn(part, "/");
+        if (len > 0 && !(len == 1 && part[0] == '.')) {
+            if (n > 0) out[n++] = '/';
+            memcpy(out + n, part, len);
+            n += len;
+        }
+        if (part[len] == '\0') break;
+        part += len + 1;
+    }
+    out[n] = '\0';
+    return out;
+}
+
+// A map-text file name a map may import: ends in ".map" after at least one character of its own name
+static bool IsMapTextName(const char *s)
+{
+    size_t len = strlen(s);
+    return len > 4 && strcmp(s + len - 4, ".map") == 0 && s[len - 5] != '/';
+}
+#endif
 
 // #endregion
 
@@ -2276,18 +2366,30 @@ typedef struct {
 
 typedef struct {
     SceneData *d;
-    const char *path;           // for messages
+    const char *path;           // for messages: the map-text file being read (d->srcs[cur.file].fullPath)
     int line;                   // 0 = no line in messages
-    MS_Ref cur;                 // stamped on every object (line, statement, group, material)
+    MS_Ref cur;                 // stamped on every object (line, file, statement, group, material)
     int prim;                   // statement counter
     bool badNumber;             // the last failed Box() overflowed float, rather than the scene being full
     bool outOfMemory;           // the last failed Box() could not grow the arrays
-    bool sawStatement;          // the version line must come first
+    bool sawStatement;          // the version line must come first (per map-text file)
     char *lineBuf;              // the current line (tokenized in place), grown to the longest line
     int lineCap;
     Token *tok;                 // its tokens, grown to the most words on a line
     int tokCap;
+    int *open;                  // the files being read, outermost first (the main file, then each
+    int openCount, openCap;     //   import in turn): a cycle is an import of one of them
+    const MS_MapFileText *given; // a live edit's texts (MS_EditSetText): an import takes the text given
+    int givenCount;             //   for its path, else reads the file
 } Parser;
+
+// "<path>:" of map-text file `file` before a line number in a message, "" for the main file:
+// "line %s%d" names a line the way dumps do ("line 12", "line parts/lake.map:12")
+static const char *LineFile(const SceneData *d, int file)
+{
+    return file > 0 && file < d->srcCount ? d->srcs[file].path : "";
+}
+#define LINE_AT(d, file, line) LineFile(d, file), (file) > 0 ? ":" : "", (line)
 
 // Writes "<file>:<line>: <message>" ("<file>: <message>" outside a line) into the parser's
 // last error (ErrPutV); returns false, so a check can `return FailF(…)`
@@ -2954,7 +3056,10 @@ static bool ParseMaterial(Parser *P, Token *tok, int n)
     MS_Material *M = &d->materials[mi];
     MatDef *D = &d->matDefs[mi];
     R3D_Material *m = &M->material;
-    if (M->line == 0) M->line = P->line;
+    if (M->line == 0) {
+        M->line = P->line;
+        M->file = P->cur.file;
+    }
     // (each line starts with its keyword and name in both hashes, so two lines never hash as one)
     d->matLookHash[mi] = HashTokens(d->matLookHash[mi], tok, 2);
     d->matShapeHash[mi] = HashTokens(d->matShapeHash[mi], tok, 2);
@@ -2979,6 +3084,7 @@ static bool ParseMaterial(Parser *P, Token *tok, int n)
             free((char *)M->shader);
             M->shader = copy;
             D->shaderLine = P->line;
+            D->shaderFile = P->cur.file;
         } else if (strcmp(k, "uniform") == 0) {
             if (t + 1 >= n || v[0].quoted) return Fail(P, "uniform takes a name and 1-4 numbers: uniform u_name 1.0", NULL);
             nv = 0;
@@ -3010,6 +3116,7 @@ static bool ParseMaterial(Parser *P, Token *tok, int n)
             free(s->path);
             s->path = copy;
             s->line = P->line;
+            s->file = P->cur.file;
             s->data = k[0] == 'd';
             used = 2;
         } else if (strcmp(k, "albedo") == 0) {
@@ -3027,6 +3134,7 @@ static bool ParseMaterial(Parser *P, Token *tok, int n)
             free(D->maps[slot]);
             D->maps[slot] = copy;
             D->mapLine[slot] = P->line;
+            D->mapFile[slot] = P->cur.file;
         } else if (strcmp(k, "uv_scale") == 0 || strcmp(k, "uv_offset") == 0) {
             NEED(2);
             Vector2 uv;
@@ -3099,6 +3207,7 @@ static bool ParseMaterial(Parser *P, Token *tok, int n)
             free(D->paint);
             D->paint = copy;
             D->paintLine = P->line;
+            D->paintFile = P->cur.file;
         } else if (strcmp(k, "paint_filter") == 0) {
             static const char *const PF[] = { "trilinear", "nearest" };   // = TEX_*
             int e;
@@ -3178,7 +3287,7 @@ static bool ParsePaint(Parser *P, Token *tok, int n)
     static const char USAGE[] = "paint takes a material (or own), an entity id:index, faces (+x,-y,...) or slot N, "
                                 "and a rectangle x y w h: paint \"name\" 12:0 +x 0 0 64 64";
     if (n < 8) return Fail(P, "%s", USAGE);
-    PaintDef e = { .slot = -1, .ownAtlas = -1, .line = P->line };
+    PaintDef e = { .slot = -1, .ownAtlas = -1, .line = P->line, .file = P->cur.file };
 
     // The material (`own`: the model slot's own)
     if (tok[1].quoted) {
@@ -3272,6 +3381,7 @@ static bool ResolvePaintEntities(Parser *P)
     SceneData *d = P->d;
     for (int i = 0; i < d->paintCount; i++) {
         PaintDef *e = &d->paints[i];
+        P->path = SrcName(d, e->file);
         P->line = e->line;
         if (e->material >= 0 && !d->matDefs[e->material].paint)
             return Fail(P, "paint: material \"%s\" has no paint key (add paint \"textures/paint/<name>.png\" to it)",
@@ -3282,11 +3392,12 @@ static bool ResolvePaintEntities(Parser *P)
         int firstBox = StatementObjects(d, false, prim, &boxes), firstModel = StatementObjects(d, true, prim, &models);
         int count = e->kind == PAINT_BOX ? boxes : models;
         if (count == 0)
-            return FailF(P, e->kind == PAINT_BOX ? "paint: line %d (id %u) makes no boxes (a model is painted by slot)"
-                                                 : "paint: line %d (id %u) makes no models (a box is painted by faces)",
-                         d->stmtLines[prim], e->entity.stmt);
+            return FailF(P, e->kind == PAINT_BOX ? "paint: line %s%s%d (id %u) makes no boxes (a model is painted by slot)"
+                                                 : "paint: line %s%s%d (id %u) makes no models (a box is painted by faces)",
+                         LINE_AT(d, d->stmtFiles[prim], d->stmtLines[prim]), e->entity.stmt);
         if (e->entity.index >= count)
-            return FailF(P, "paint: %u:%d: line %d makes %d %s", e->entity.stmt, e->entity.index, d->stmtLines[prim], count,
+            return FailF(P, "paint: %u:%d: line %s%s%d makes %d %s", e->entity.stmt, e->entity.index,
+                         LINE_AT(d, d->stmtFiles[prim], d->stmtLines[prim]), count,
                          e->kind == PAINT_BOX ? (count == 1 ? "box" : "boxes") : (count == 1 ? "model" : "models"));
         e->object = (e->kind == PAINT_BOX ? firstBox : firstModel) + e->entity.index;
 
@@ -3306,17 +3417,19 @@ static bool ResolvePaintEntities(Parser *P)
     if (c < 0) return Fail(P, "out of memory", NULL);
     if (c > 0) {
         const PaintDef *e = &d->paints[a], *f = &d->paints[b];
+        P->path = SrcName(d, f->file);
         P->line = f->line;
         const char *mat = f->material >= 0 ? d->materials[f->material].name : d->ownAtlases[f->ownAtlas].rel;
         if (c == 1)
-            return FailF(P, "paint: the rectangle %d %d %d %d overlaps line %d's (%d %d %d %d) in the atlas of %s",
-                         f->x, f->y, f->w, f->h, e->line, e->x, e->y, e->w, e->h, mat);
+            return FailF(P, "paint: the rectangle %d %d %d %d overlaps line %s%s%d's (%d %d %d %d) in the atlas of %s",
+                         f->x, f->y, f->w, f->h, LINE_AT(d, e->file, e->line), e->x, e->y, e->w, e->h, mat);
         if (f->kind == PAINT_BOX)
-            return FailF(P, "paint: %u:%d: a face of it is already in line %d's entry of %s", f->entity.stmt,
-                         f->entity.index, e->line, mat);
-        return FailF(P, "paint: %u:%d slot %d is already in line %d's entry of %s", f->entity.stmt, f->entity.index,
-                     f->slot, e->line, mat);
+            return FailF(P, "paint: %u:%d: a face of it is already in line %s%s%d's entry of %s", f->entity.stmt,
+                         f->entity.index, LINE_AT(d, e->file, e->line), mat);
+        return FailF(P, "paint: %u:%d slot %d is already in line %s%s%d's entry of %s", f->entity.stmt, f->entity.index,
+                     f->slot, LINE_AT(d, e->file, e->line), mat);
     }
+    P->path = d->srcPath;
     P->line = 0;
     return true;
 }
@@ -3718,6 +3831,7 @@ static bool ParseModel(Parser *P, Token *args, int n, const Placement *pl)
         MS_ModelFile *F = &d->modelFiles[file];
         F->path = copy;
         F->line = P->line;
+        F->file = P->cur.file;
         // Its paint unwrap (docs/painting.md 4.5), when there is one: a file of the package too
         char side[MS_PATH_MAX], sideFull[MS_PATH_MAX + MS_PATH_MAX];
         if (UnwrapSidecarPath(copy, side, sizeof(side))) {
@@ -3830,13 +3944,14 @@ static bool ParseModel(Parser *P, Token *args, int n, const Placement *pl)
 
 // --- Statement keys (MS_EntityId.stmt): `id n`, else derived from the statement's tokens
 
-// Registers the statement P->cur.prim: its explicit id (unique in the file), or an implicit key
+// Registers the statement P->cur.prim: its explicit id (unique in the map), or an implicit key
 // from its text. Identical statements (and the rare hash collision) take the next free key,
 // in map order, so the n-th copy of a line keeps its key while the lines before it stay.
 static bool AddStatement(Parser *P, const Placement *pl, const Token *tok, int n)
 {
     SceneData *d = P->d;
     if (!MS_RESERVE(d->stmtKeys, d->stmtCap, d->stmtCount + 1) || !MS_RESERVE(d->stmtLines, d->stmtLineCap, d->stmtCount + 1) ||
+        !MS_RESERVE(d->stmtFiles, d->stmtFileCap, d->stmtCount + 1) ||
         (2 * (d->stmtCount + 1) > d->stmtSetCap && !GrowStmtSet(d)))
         return Fail(P, "out of memory", NULL);
     unsigned int key;
@@ -3844,7 +3959,11 @@ static bool AddStatement(Parser *P, const Placement *pl, const Token *tok, int n
     if (pl->hasId) {
         key = (unsigned int)pl->id;
         slot = StmtSlot(d, key);
-        if (*slot) return FailF(P, "duplicate id %d (also on line %d)", pl->id, d->stmtLines[*slot - 1]);
+        if (*slot) {
+            int other = *slot - 1, file = d->stmtFiles[other];
+            if (file == P->cur.file) return FailF(P, "duplicate id %d (also on line %d)", pl->id, d->stmtLines[other]);
+            return FailF(P, "duplicate id %d (also at %s:%d)", pl->id, d->srcs[file].path, d->stmtLines[other]);
+        }
     } else {
         unsigned long long h = FNV_OFFSET;
         for (int i = 0; i < n; i++) {
@@ -3857,20 +3976,23 @@ static bool AddStatement(Parser *P, const Placement *pl, const Token *tok, int n
     }
     d->stmtKeys[d->stmtCount] = key;
     d->stmtLines[d->stmtCount] = P->line;
+    d->stmtFiles[d->stmtCount] = P->cur.file;
     *slot = ++d->stmtCount;
     return true;
 }
 
-// A map of an older format v (1: no format line), reported at the current line. The parser reads
-// only the current format; an older map is rewritten to it (docs/map-format.md 1.3).
+// A map of an older format v (1: no format line), reported at the current line (of whichever
+// map-text file it is in); the migration is named for the whole map (its main file). The parser
+// reads only the current format; an older map is rewritten to it (docs/map-format.md 1.3).
 static bool OlderFormat(Parser *P, int v)
 {
     return FailF(P, "map format %d is older than this monolith (%d): run /migrate-map %s in Claude Code "
-                    "(docs/map-format.md \xC2\xA7" "1.3)", v, MS_FORMAT_VERSION, P->path);
+                    "(docs/map-format.md \xC2\xA7" "1.3)", v, MS_FORMAT_VERSION, P->d->path);
 }
 
-// A statement that is not an object, group, use, spawn or viewpoint (format, material, env): its
-// tokens go into d->lookHash, so a live edit knows whether the text changed anything but objects.
+// A statement that is not an object, group, use, spawn or viewpoint (format, material, env, import):
+// its tokens go into d->lookHash, so a live edit knows whether the text changed anything but objects
+// (an import line added, removed or moved: a full upload, whatever the file holds).
 // The format and env lines also go into restLookHash (a material line into its own hashes:
 // ParseMaterial), so it can tell materials appended or changed from anything else. `env paint.grid`
 // is a paint key (docs/painting.md 17.1): it changes only the paint table, so it goes into paintHash
@@ -3885,12 +4007,142 @@ static void HashLook(SceneData *d, const Token *tok, int n)
     if (strcmp(tok[0].s, "material") != 0) d->restLookHash = HashTokens(d->restLookHash, tok, n);
 }
 
+// --- Imports (docs/map-format.md 2.10): one map in several map-text files
+
+static bool ParseLines(Parser *P, const char *text, int size);
+
+// A new entry in d->srcs (path and fullPath copied, text taken over: freed with d); its index, or -1
+// when out of memory (text not taken)
+static int AddSrc(SceneData *d, const char *path, const char *fullPath, char *text, int size, int importFile,
+                  int importLine)
+{
+    char *p = MS_StrDup(path), *f = MS_StrDup(fullPath);
+    MapSrc *m = p && f ? MS_PUSH(d->srcs, d->srcCount, d->srcCap) : NULL;
+    if (!m) {
+        free(p);
+        free(f);
+        return -1;
+    }
+    *m = (MapSrc){ .path = p, .fullPath = f, .text = text, .textSize = size };
+    m->pub = (MS_MapFile){ .path = p, .fullPath = f, .size = size, .importFile = importFile, .importLine = importLine };
+    if (!SrcSetAdd(d, d->srcCount - 1)) {
+        d->srcCount--;                  // (as if never added: the text stays the caller's)
+        free(p);
+        free(f);
+        return -1;
+    }
+    return d->srcCount - 1;
+}
+
+// The text a live edit gives for package path `rel` (MS_EditSetText; files[0], the main file, is
+// never an import; an entry without text is not one), NULL if none
+static const MS_MapFileText *GivenText(const Parser *P, const char *rel)
+{
+    for (int i = 1; i < P->givenCount; i++)
+        if (P->given[i].path && (P->given[i].text || P->given[i].size == 0) && strcmp(P->given[i].path, rel) == 0)
+            return &P->given[i];
+    return NULL;
+}
+
+// `import "<path>.map"`: that file's statements, parsed here as if its text stood in place of this
+// line. The path is package-relative (normalised: empty and "." components dropped), watched before
+// it must exist (PackagePath's rule), and read once per map: a file already reached is a cycle when
+// it is still open (the chain is in the message), else a second import. The file starts with no
+// `use` and no `group` and needs its own format line; the importing file's state comes back after it.
+static bool ParseImport(Parser *P, Token *tok, int n)
+{
+    SceneData *d = P->d;
+    if (n != 2) return Fail(P, "import takes one path in double quotes: import \"parts/name.map\"", NULL);
+    if (!tok[1].quoted) return Fail(P, "a path must be in double quotes: \"%s\"", tok[1].s);
+    if (!InsidePackage(tok[1].s)) return Fail(P, "path must stay inside the package: \"%s\"", tok[1].s);
+
+    // The path as stored (a copy: the tokens are the parser's, reused by the import's own lines)
+    char *rel = NormalisePath(tok[1].s);
+    if (!rel) return Fail(P, "out of memory", NULL);
+    if (!IsMapTextName(rel)) {
+        FailF(P, "import: \"%s\" is not a map-text file (an imported file's name ends in .map)", tok[1].s);
+        free(rel);
+        return false;
+    }
+    char full[MS_PATH_MAX];
+    bool ok = true;
+    if (snprintf(full, sizeof(full), "%s%s", d->root, rel) >= (int)sizeof(full)) ok = Fail(P, "path too long: \"%s\"", rel);
+    if (ok) ok = AddDep(P, full);       // (watched before the checks: a missing part reloads once it appears)
+
+    // Nesting has a sanity cap (each level is a recursion of the parser: its stack)
+    if (ok && P->openCount >= MS_IMPORT_DEPTH_MAX)
+        ok = FailF(P, "imports nested more than %d files deep", MS_IMPORT_DEPTH_MAX);
+
+    // Read once per map: a file reached before is a cycle (still open) or a second import
+    int i = ok ? SrcFind(d, rel) : -1;
+    if (i >= 0) {
+        int at = -1;
+        for (int k = 0; k < P->openCount; k++)
+            if (P->open[k] == i) at = k;
+        if (at >= 0) {
+            FailF(P, "import cycle: \"%s\" is already being read:", rel);
+            for (int k = at; k < P->openCount; k++) ErrAppendF(" %s ->", d->srcs[P->open[k]].path);
+            ok = ErrAppendF(" %s", rel);
+        } else {
+            const MS_MapFile *F = &d->srcs[i].pub;
+            ok = FailF(P, "\"%s\" is already imported (at %s:%d): a file is read once per map", rel,
+                       d->srcs[F->importFile].path, F->importLine);
+        }
+    }
+
+    // Its text: the live edit's, else the file's (at most MS_FILE_MAX bytes, like the main file)
+    char *text = NULL;
+    int size = 0;
+    if (ok) {
+        const MS_MapFileText *g = GivenText(P, rel);
+        if (g) {
+            if (g->size < 0 || g->size > MS_FILE_MAX || !(text = malloc((size_t)g->size + 1)))
+                ok = FailF(P, "import \"%s\": %s", rel, g->size < 0 || g->size > MS_FILE_MAX
+                                                          ? "the text is larger than 4 MB" : "out of memory");
+            else {
+                if (g->size > 0) memcpy(text, g->text, (size_t)g->size);
+                text[g->size] = '\0';
+                size = g->size;
+            }
+        } else if (!FileExists(full))
+            ok = Fail(P, "file not found: \"%s\" (paths are relative to the package folder)", rel);
+        else if (!(text = ReadWholeFile(full, MS_FILE_MAX, &size, true)))
+            ok = FailF(P, "import: %s", MS_LastError());
+    }
+    int file = ok ? AddSrc(d, rel, full, text, size, P->cur.file, P->line) : -1;
+    if (file < 0) free(text);
+    free(rel);
+    if (!ok) return false;
+    if (file < 0 || !MS_RESERVE(P->open, P->openCap, P->openCount + 1)) return Fail(P, "out of memory", NULL);
+    P->open[P->openCount++] = file;
+
+    // Parse it with a fresh scope (no group, the "default" material, its own format line), then
+    // restore the importing file's (every field that is per file: path, line, group, use, format line)
+    MS_Ref saved = P->cur;
+    const char *savedPath = P->path;
+    int savedLine = P->line;
+    bool savedSaw = P->sawStatement;
+    P->cur.file = file;
+    P->cur.group = -1;
+    P->cur.material = 0;
+    P->path = d->srcs[file].fullPath;
+    P->sawStatement = false;
+    if (!ParseLines(P, d->srcs[file].text, d->srcs[file].textSize)) return false;
+    P->openCount--;
+    P->cur = saved;
+    P->path = savedPath;
+    P->line = savedLine;
+    P->sawStatement = savedSaw;
+    return true;
+}
+
 // One statement (already tokenized, at least one token)
 static bool ParseStatement(Parser *P, Token *tok, int n)
 {
     SceneData *d = P->d;
     const char *kw = tok[0].quoted ? "" : tok[0].s;
-    if (strcmp(kw, "monolith") == 0 || strcmp(kw, "material") == 0 || strcmp(kw, "env") == 0) HashLook(d, tok, n);
+    if (strcmp(kw, "monolith") == 0 || strcmp(kw, "material") == 0 || strcmp(kw, "env") == 0 || strcmp(kw, "import") == 0)
+        HashLook(d, tok, n);
 
     if (strcmp(kw, "monolith") == 0) {
         if (P->sawStatement) return Fail(P, "the format line 'monolith N' must be the first statement", NULL);
@@ -3904,6 +4156,11 @@ static bool ParseStatement(Parser *P, Token *tok, int n)
         return true;
     }
     if (!P->sawStatement) return OlderFormat(P, 1);       // no format line: format 1
+
+    if (strcmp(kw, "import") == 0) return ParseImport(P, tok, n);
+    // The map's environment, spawn and viewpoints are in its main file (docs/map-format.md 2.10)
+    if (P->cur.file != 0 && (strcmp(kw, "env") == 0 || strcmp(kw, "spawn") == 0 || strcmp(kw, "viewpoint") == 0))
+        return FailF(P, "%s lines belong in the main map file (%s)", kw, d->srcs[0].path);
 
     if (strcmp(kw, "group") == 0) {
         const char *name;
@@ -3967,6 +4224,7 @@ static bool ParseStatement(Parser *P, Token *tok, int n)
     int t;
     if (!ParsePlacement(P, tok, n, &t, &pl)) return false;
     const char *prim = tok[t].quoted ? "" : tok[t].s;
+    if (strcmp(prim, "import") == 0) return Fail(P, "import takes no id or repeat prefix: import \"parts/name.map\"", NULL);
     P->cur.prim = P->prim++;
     if (!AddStatement(P, &pl, tok, n)) return false;
     P->cur.copy = P->cur.part = 0;
@@ -3981,13 +4239,13 @@ static bool ParseStatement(Parser *P, Token *tok, int n)
     for (int i = 0; i < COUNT(PRIMS); i++)
         if (strcmp(prim, PRIMS[i].name) == 0) return ParsePrimitive(P, &PRIMS[i], &tok[t + 1], n - t - 1, &pl);
     return Fail(P, "unknown keyword '%s' (expected group, box, block, stairs, waffle, model, light, material, use, env, "
-                   "paint, spawn, viewpoint, id or repeat)", prim);
+                   "paint, import, spawn, viewpoint, id or repeat)", prim);
 }
 
-static bool ParseText(Parser *P, const char *text, int size)
+// The lines of one map-text file (P->cur.file), each statement parsed in turn
+static bool ParseLines(Parser *P, const char *text, int size)
 {
     int lineNo = 0, pos = 0;
-    P->cur = (MS_Ref){ 0, -1, -1, 0, 0, 0 };
     if (size >= 3 && memcmp(text, "\xEF\xBB\xBF", 3) == 0) pos = 3;     // a UTF-8 byte order mark: skipped
     while (pos < size) {
         int start = pos;
@@ -4010,6 +4268,17 @@ static bool ParseText(Parser *P, const char *text, int size)
         P->cur.line = lineNo;
         if (!ParseStatement(P, P->tok, n)) return false;
     }
+    return true;
+}
+
+// The whole map: its main file (d->srcs[0]) with every file it imports, then the checks that need
+// every line (the map is not empty, the paint entries resolve)
+static bool ParseText(Parser *P, const char *text, int size)
+{
+    P->cur = (MS_Ref){ .line = 0, .file = 0, .prim = -1, .group = -1, .material = 0 };
+    if (!MS_RESERVE(P->open, P->openCap, 1)) return Fail(P, "out of memory", NULL);
+    P->open[P->openCount++] = 0;
+    if (!ParseLines(P, text, size)) return false;
     P->line = 0;
     if (P->d->boxCount == 0 && P->d->modelCount == 0)
         return Fail(P, "map is empty (no boxes and no models)", NULL);
@@ -4036,7 +4305,7 @@ static bool ParseText(Parser *P, const char *text, int size)
 // (CmRead*) in ReadCompiled's list after the sections its records point into, and the matching
 // section writer (CmPut*). The layout goes into docs/compiled-map.md.
 
-#define CM_VERSION          9           // MS_COMPILED_VERSION: bump on any change to a record or section
+#define CM_VERSION          10          // MS_COMPILED_VERSION: bump on any change to a record or section
 #define CM_BYTE_ORDER       0x01020304u
 #define CM_NONE             0xFFFFFFFFu // a string field without a string
 #define CM_MAX_ENV          4096        // env records (the key tables have ~120 keys)
@@ -4044,11 +4313,12 @@ static const unsigned char CM_MAGIC[8] = { 0x89, 'M', 'A', 'P', 'B', '\r', '\n',
 
 // --- Records. The field order, types and array sizes are the file's layout: any change here
 // bumps CM_VERSION. A string field (`uint32_t name`, `path`, …) is an offset into the string table,
-// CM_NONE for none. A `line` is the map line a value came from (for messages); never negative.
+// CM_NONE for none. A `line` is the map line a value came from (for messages); never negative. Its
+// `file` is the map-text file of that line: an index into the sources section (0 = the main file).
 
 // The file header (64 bytes, at offset 0). sectionTable: the section table's offset;
 // sourceName: the source file's name (a string); sourceHash / sourceSize: FNV-1a 64 and size of the
-// source text, to tell a stale compiled file; flags: 0.
+// source text, to tell a stale compiled file (the main map text: sources[0] repeats them); flags: 0.
 typedef struct {
     uint8_t magic[8];
     uint32_t version, headerSize, byteOrder, formatVersion, sectionCount, sectionTable;
@@ -4062,10 +4332,10 @@ typedef struct {
     uint32_t id, offset, count, recordSize;
 } CmSection;
 
-// The source reference of a box, model or light: MS_Ref in its field order (map line, statement
-// index, group, material, repeat copy, part of a primitive)
+// The source reference of a box, model or light: MS_Ref in its field order (map line, its map-text
+// file, statement index, group, material, repeat copy, part of a primitive)
 typedef struct {
-    int32_t line, prim, group, material, copy, part;
+    int32_t line, file, prim, group, material, copy, part;
 } CmRef;
 
 // A box (section "boxes"), already expanded from repeat / stairs / waffle. A turned box holds
@@ -4084,10 +4354,13 @@ typedef struct {
 // paintFilter: TEX_* (`paint_filter`); pad2: 0. noPrepass: 0 or 1 (`prepass off`).
 // drawDistance: MS_Material.drawDistance (`draw_distance`: m, 0 auto, -1 off). paintGrid:
 // `paint_grid` (texels per metre; 0 none, -1 not set: the map's `env paint.grid` applies).
-// noCollide: 0 or 1 (`collide off`: MS_Material.noCollide).
+// noCollide: 0 or 1 (`collide off`: MS_Material.noCollide). file, shaderFile, mapFile: the map-text
+// files of line, shaderLine and mapLine (a material can get keys in several files); paintLine /
+// paintFile: the `paint` key's line and file (0 0 without one).
 typedef struct {
     uint32_t name, shader, maps[MAP_COUNT];     // maps: albedo, normal, orm, emission
     int32_t line, shaderLine, mapLine[MAP_COUNT];
+    int32_t file, shaderFile, mapFile[MAP_COUNT];
     uint8_t albedo[4], emission[4];
     float emissionEnergy, normalScale, occlusion, roughness, metalness, specular,
           uvScale[2], uvOffset[2], alphaCutoff;
@@ -4101,18 +4374,19 @@ typedef struct {
     float drawDistance;
     float paintGrid;
     uint32_t noCollide;
+    int32_t paintLine, paintFile;
 } CmMaterial;
 
 // A `paint` statement, its entity resolved to the object: material (CM_NONE: the model
 // slot's own material), kind (0 a box, 1 a model instance), object (index into the boxes or models
 // section), faces (a box: bit f for face f, +x -x +y -y +z -z) or the slot (a model), the rectangle
 // in texels of the atlas, filter (TEX_*: `paint own … paint_filter`; 0 for a material's entry), the
-// paint line. Every entry is stored, also one that doesn't draw (the load decides that).
+// paint line and its file. Every entry is stored, also one that doesn't draw (the load decides that).
 typedef struct {
     uint32_t material, kind, object, facesOrSlot;
     uint32_t x, y, w, h;
     uint32_t filter;
-    int32_t line;
+    int32_t line, file;
 } CmPaint;
 
 // A material's shader uniform (`uniform <name> f [f f f]`): count: how many of v are used (1 to 4); the
@@ -4125,7 +4399,7 @@ typedef struct {
 // A material's texture sampler (`sampler <name> "path"` or `data_sampler <name> "path"`)
 typedef struct {
     uint32_t name, path;
-    int32_t line;
+    int32_t line, file;
     uint32_t data;                              // data: 1 = data_sampler
 } CmSampler;
 
@@ -4148,10 +4422,10 @@ typedef struct {
     float eye[3], target[3];
 } CmViewpoint;
 
-// A model file the map's `model` lines use: its path and the line that first names it
+// A model file the map's `model` lines use: its path and the line that first names it (and its file)
 typedef struct {
     uint32_t path;
-    int32_t line;
+    int32_t line, file;
 } CmModelFile;
 
 // A `model` line (an instance) as written. file: index into the model files section; origin,
@@ -4195,12 +4469,24 @@ typedef struct {
     float rotationDeg[3];
 } CmBoxTurn;
 
+// A map-text file the map was compiled from (section "sources"): [0] the main file (its name, size
+// and hash equal the header's source fields), then each imported file in the order the parser first
+// reached it. path: package-relative (as normalised; [0]: a plain file name); importFile /
+// importLine: the import line that reached it (-1 0 for [0]); size, hash: its bytes' count and
+// FNV-1a 64 (to tell a stale compiled file); pad: 0.
+typedef struct {
+    uint32_t path;
+    int32_t importFile, importLine;
+    uint32_t pad;
+    uint64_t size, hash;
+} CmSource;
+
 // The section ids, in file order (an id is also the section's place in the section table)
 enum {
     CM_STRINGS = 1, CM_BOXES, CM_GROUPS, CM_MATERIALS, CM_UNIFORMS, CM_SAMPLERS, CM_LIGHTS, CM_VIEWPOINTS,
     CM_MODEL_FILES, CM_MODELS, CM_COLLIDERS, CM_SLOTS, CM_STATEMENTS, CM_ENV, CM_SPAWN, CM_DEPS,
-    CM_BOX_TURNS, CM_PAINT,
-    CM_SECTIONS = CM_PAINT
+    CM_BOX_TURNS, CM_PAINT, CM_SOURCES,
+    CM_SECTIONS = CM_SOURCES
 };
 
 // What the code knows about one section: its name (for messages), its record size and the most
@@ -4231,6 +4517,7 @@ static const CmSectionInfo CM_SECTION[CM_SECTIONS + 1] = {
     [CM_DEPS]        = { "dependencies", 4, MS_MAX_OBJECTS },
     [CM_BOX_TURNS]   = { "box turns", sizeof(CmBoxTurn), MS_MAX_OBJECTS },
     [CM_PAINT]       = { "paint", sizeof(CmPaint), MS_MAX_OBJECTS },
+    [CM_SOURCES]     = { "sources", sizeof(CmSource), MS_MAX_OBJECTS },
 };
 
 // --- Reader
@@ -4358,13 +4645,17 @@ static bool CmReadRef(CmReader *R, const CmRef *c, bool modelMaterial, const cha
 {
     const SceneData *d = R->d;
     if (c->line < 0 ||
+        c->file < 0 || c->file >= d->srcCount ||
         c->prim < 0 || c->prim >= d->stmtCount ||
         c->group < -1 || c->group >= d->groupCount ||
         c->material < (modelMaterial ? -1 : 0) || c->material >= d->materialCount ||
         c->copy < 0 ||
         c->part < 0)
         return CmFail(R, "%s %u: source reference out of range", what, i);
-    *out = (MS_Ref){ c->line, c->prim, c->group, c->material, c->copy, c->part };
+    *out = (MS_Ref){
+        .line = c->line, .file = c->file, .prim = c->prim, .group = c->group, .material = c->material,
+        .copy = c->copy, .part = c->part
+    };
     return true;
 }
 
@@ -4464,9 +4755,69 @@ static bool CmReadSourceName(CmReader *R, const CmHeader *h)
     d->srcPath = srcPath;
 #ifdef MONOLITH_EDITOR
     d->compiled = true;
-    d->srcHash = h->sourceHash;
-    d->srcSize = h->sourceSize;
 #endif
+    return true;
+}
+
+// A package path as an import stores it: no empty and no "." component (NormalisePath's result)
+static bool IsNormalisedPath(const char *s)
+{
+    for (const char *part = s; ; ) {
+        size_t len = strcspn(part, "/");
+        if (len == 0 || (len == 1 && part[0] == '.')) return false;
+        if (part[len] == '\0') return true;
+        part += len + 1;
+    }
+}
+
+// The map-text files the map was compiled from, for messages that cite their lines (and the
+// staleness check): [0] the header's source text, then each imported file with the parser's
+// guarantees for an `import` line (a normalised package path inside the package, each file once,
+// reached from a line of a file before it, at most MS_FILE_MAX bytes; a build that reads map text
+// also checks the file name). Each is counted as soon as it owns its strings.
+static bool CmReadSources(CmReader *R, const CmHeader *h)
+{
+    SceneData *d = R->d;
+    uint32_t n = R->sec[CM_SOURCES].count;
+    if (n == 0) return CmFail(R, "compiled map: no sources (the first is the main map text)");
+    if (!MS_RESERVE(d->srcs, d->srcCap, (int)n)) return CmFail(R, "out of memory");
+    const char *mainName;
+    if (!CmString(R, h->sourceName, false, "source name", &mainName)) return false;
+    for (uint32_t i = 0; i < n; i++) {
+        CmSource c;
+        CmRecord(R, CM_SOURCES, i, &c);
+        const char *rel;
+        if (!CmString(R, c.path, false, "source", &rel)) return false;
+
+        // Check: [0] repeats the header; the others are what an import line can name
+        bool ok = c.pad == 0 && c.size <= MS_FILE_MAX;
+        if (i == 0)
+            ok = ok && strcmp(rel, mainName) == 0 && c.size == h->sourceSize && c.hash == h->sourceHash &&
+                 c.importFile == -1 && c.importLine == 0;
+        else
+            ok = ok && InsidePackage(rel) && IsNormalisedPath(rel) &&
+                 c.importFile >= 0 && (uint32_t)c.importFile < i && c.importLine >= 1;
+#ifdef MONOLITH_EDITOR
+        ok = ok && (i == 0 || IsMapTextName(rel));     // (a game build reads no map text: only names)
+#endif
+        ok = ok && SrcFind(d, rel) < 0;     // (each file once)
+        if (!ok) return CmFail(R, "source %u: value out of range", i);
+
+        // Store: its name for messages ([0]: the header's, set above)
+        char full[MS_PATH_MAX];
+        if (snprintf(full, sizeof(full), "%s%s", d->root, rel) >= (int)sizeof(full))
+            return CmFail(R, "path too long: \"%s\"", rel);
+        MapSrc *m = &d->srcs[i];
+        *m = (MapSrc){ .path = MS_StrDup(rel), .fullPath = MS_StrDup(i == 0 ? d->srcPath : full) };
+        d->srcCount = (int)i + 1;
+        if (!m->path || !m->fullPath || !SrcSetAdd(d, (int)i)) return CmFail(R, "out of memory");
+#ifdef MONOLITH_EDITOR
+        m->pub = (MS_MapFile){
+            .path = m->path, .fullPath = m->fullPath, .hash = c.hash, .size = (long long)c.size,
+            .importFile = c.importFile, .importLine = c.importLine
+        };
+#endif
+    }
     return true;
 }
 
@@ -4507,11 +4858,15 @@ static bool CmReadGroups(CmReader *R)
 }
 
 // A material's lines and enum fields: what the parser accepts in a `material` line (lines are never
-// negative, each enum one of its key's names, the priority within the parser's range)
-static bool CmMaterialInRange(const CmMaterial *c)
+// negative and their files are sources, each enum one of its key's names, the priority within the
+// parser's range)
+static bool CmMaterialInRange(const CmMaterial *c, int files)
 {
-    bool lines = c->line >= 0 && c->shaderLine >= 0;
-    for (int k = 0; k < MAP_COUNT; k++) lines = lines && c->mapLine[k] >= 0;
+    bool lines = c->line >= 0 && c->shaderLine >= 0 && c->paintLine >= 0 &&
+                 c->file >= 0 && c->file < files &&
+                 c->shaderFile >= 0 && c->shaderFile < files &&
+                 c->paintFile >= 0 && c->paintFile < files;
+    for (int k = 0; k < MAP_COUNT; k++) lines = lines && c->mapLine[k] >= 0 && c->mapFile[k] >= 0 && c->mapFile[k] < files;
     return lines &&
            c->cull >= 0 && c->cull <= 2 &&
            c->transparency >= 0 && c->transparency <= 2 &&
@@ -4548,6 +4903,7 @@ static void CmFillMaterial(const CmMaterial *c, MS_Material *M, MatDef *D)
     // What R3D draws with
     R3D_Material *m = &M->material;
     M->line = c->line;
+    M->file = c->file;
     M->drawDistance = c->drawDistance;
     M->noCollide = c->noCollide == 1;
     m->albedo.color = (Color){ c->albedo[0], c->albedo[1], c->albedo[2], c->albedo[3] };
@@ -4569,7 +4925,13 @@ static void CmFillMaterial(const CmMaterial *c, MS_Material *M, MatDef *D)
 
     // What the load needs besides (texture lines, wrap, inheritance, instancing)
     D->shaderLine = c->shaderLine;
-    for (int k = 0; k < MAP_COUNT; k++) D->mapLine[k] = c->mapLine[k];
+    D->shaderFile = c->shaderFile;
+    for (int k = 0; k < MAP_COUNT; k++) {
+        D->mapLine[k] = c->mapLine[k];
+        D->mapFile[k] = c->mapFile[k];
+    }
+    D->paintLine = c->paintLine;
+    D->paintFile = c->paintFile;
     D->wrap = c->wrap;
     D->inherit = c->inherit;
     D->instanced = c->instanced == 1;
@@ -4619,9 +4981,10 @@ static bool CmReadMaterialParams(CmReader *R, const CmMaterial *c, MatDef *D, co
         MatSampler *S = &D->samplers[D->samplerCount++];
         if (!CmName(R, sm.name, "sampler", &S->name) || !CmPath(R, sm.path, false, "sampler", &S->path))
             return false;
-        if (sm.line < 0 || sm.data > 1)
+        if (sm.line < 0 || sm.file < 0 || sm.file >= R->d->srcCount || sm.data > 1)
             return CmFail(R, "material \"%s\": sampler line or kind out of range", name);
         S->line = sm.line;
+        S->file = sm.file;
         S->data = sm.data == 1;
     }
     return true;
@@ -4653,7 +5016,6 @@ static bool CmReadMaterial(CmReader *R, uint32_t i, uint32_t *uniformsUsed, uint
     for (int k = 0; k < MAP_COUNT; k++)
         if (!CmPath(R, c.maps[k], true, "material texture", &D->maps[k])) return false;
     if (!CmPath(R, c.paint, true, "material paint atlas", &D->paint)) return false;
-    D->paintLine = c.line;
 
     // Numbers, lines and enums
     float f[] = {
@@ -4661,7 +5023,7 @@ static bool CmReadMaterial(CmReader *R, uint32_t i, uint32_t *uniformsUsed, uint
         c.uvScale[0], c.uvScale[1], c.uvOffset[0], c.uvOffset[1], c.alphaCutoff
     };
     if (!FiniteN(f, COUNT(f))) return CmFail(R, "material \"%s\": number out of range", name);
-    if (!CmMaterialInRange(&c)) return CmFail(R, "material \"%s\": value out of range", name);
+    if (!CmMaterialInRange(&c, d->srcCount)) return CmFail(R, "material \"%s\": value out of range", name);
     if (!CmMaterialFaces(&c)) return CmFail(R, "material \"%s\": bad uv_faces", name);
 
     CmFillMaterial(&c, M, D);
@@ -4771,9 +5133,10 @@ static bool CmReadModelFiles(CmReader *R)
         CmRecord(R, CM_MODEL_FILES, i, &c);
         char *path;
         if (!CmPath(R, c.path, false, "model file", &path)) return false;
-        d->modelFiles[i] = (MS_ModelFile){ .path = path, .line = c.line };
+        d->modelFiles[i] = (MS_ModelFile){ .path = path, .line = c.line, .file = c.file };
         d->modelFileCount = (int)i + 1;
-        if (c.line < 0) return CmFail(R, "model file \"%s\": line out of range", path);
+        if (c.line < 0 || c.file < 0 || c.file >= d->srcCount)
+            return CmFail(R, "model file \"%s\": line out of range", path);
     }
     return true;
 }
@@ -4890,7 +5253,7 @@ static bool CmReadPaint(CmReader *R)
                   (c.kind == PAINT_BOX ? c.facesOrSlot >= 1 && c.facesOrSlot <= 0x3F : c.facesOrSlot <= MS_MAX_OBJECTS) &&
                   c.x <= 1000000 && c.y <= 1000000 && c.w >= 1 && c.w <= 1000000 && c.h >= 1 && c.h <= 1000000 &&
                   c.filter <= TEX_NEAREST && (own || c.filter == 0) &&
-                  c.line >= 0;
+                  c.line >= 0 && c.file >= 0 && c.file < d->srcCount;
         if (!ok) return CmFail(R, "paint %u: value out of range", i);
         int prim = c.kind == PAINT_BOX ? d->boxRefs[c.object].prim : d->models[c.object].ref.prim;
         if (d->stmtKeys[prim] & 0x80000000u) return CmFail(R, "paint %u: its line has no id", i);
@@ -4900,7 +5263,7 @@ static bool CmReadPaint(CmReader *R)
             .faces = c.kind == PAINT_BOX ? (unsigned char)c.facesOrSlot : 0,
             .slot = c.kind == PAINT_BOX ? -1 : (int)c.facesOrSlot,
             .x = (int)c.x, .y = (int)c.y, .w = (int)c.w, .h = (int)c.h,
-            .nearest = c.filter == TEX_NEAREST, .line = c.line, .ownAtlas = -1,
+            .nearest = c.filter == TEX_NEAREST, .line = c.line, .file = c.file, .ownAtlas = -1,
         };
         if (own) {
             if ((e.ownAtlas = OwnAtlasOf(d, d->models[e.object].file, e.slot)) < 0) return CmFail(R, "out of memory");
@@ -5170,7 +5533,8 @@ static bool ReadCompiled(SceneData *d, const char *bytes, int size)
     if (!CmReadSourceName(&R, &h)) return false;
 
     // Then the sections, each after the ones it points into
-    return CmReadStatements(&R) &&      // every MS_Ref points at a statement,
+    return CmReadSources(&R, &h) &&     // every line is in a source file,
+           CmReadStatements(&R) &&      // every MS_Ref points at a statement,
            CmReadGroups(&R) &&          // a group (or none)
            CmReadMaterials(&R) &&       // and a material; slots name materials too
            CmReadBoxes(&R) &&
@@ -5189,12 +5553,12 @@ static bool ReadCompiled(SceneData *d, const char *bytes, int size)
 }
 
 #ifdef MONOLITH_EDITOR
-// The source text of a compiled map (next to it) against the hash and size it was compiled from
-static MS_SourceState SourceState(const SceneData *d)
+// One map-text file of a compiled map against the size and hash it was compiled from: 0 the same,
+// 1 changed, 2 not there
+static unsigned char SourceFileState(const MapSrc *m)
 {
-    if (!d->compiled) return MS_SOURCE_TEXT;
-    FILE *f = fopen(d->srcPath, "rb");
-    if (!f) return MS_SOURCE_MISSING;
+    FILE *f = fopen(m->fullPath, "rb");
+    if (!f) return 2;
 
     // FNV-1a 64 and size of the whole file, as the writer computed them
     unsigned long long h = FNV_OFFSET;
@@ -5205,16 +5569,37 @@ static MS_SourceState SourceState(const SceneData *d)
         h = Fnv1a64Update(h, buf, got);
         n += (long long)got;
     }
-    if (fclose(f) != 0) fprintf(stderr, "monolith: %s: %s\n", d->srcPath, strerror(errno));
-    return h == d->srcHash && n == d->srcSize ? MS_SOURCE_CURRENT : MS_SOURCE_STALE;
+    if (fclose(f) != 0) fprintf(stderr, "monolith: %s: %s\n", m->fullPath, strerror(errno));
+    return h == m->pub.hash && n == m->pub.size ? 0 : 1;
 }
 
-// A warning in the log when the compiled map is older than its source text
+// The source texts of a compiled map (in its package) against what it was compiled from: stale when
+// any of them changed, missing when one is gone and none changed. *which: the first such file.
+static MS_SourceState SourceState(const SceneData *d, int *which)
+{
+    if (which) *which = 0;
+    if (!d->compiled) return MS_SOURCE_TEXT;
+    int missing = -1;
+    for (int i = 0; i < d->srcCount; i++) {
+        unsigned char st = SourceFileState(&d->srcs[i]);
+        if (st == 1) {
+            if (which) *which = i;
+            return MS_SOURCE_STALE;
+        }
+        if (st == 2 && missing < 0) missing = i;
+    }
+    if (missing < 0) return MS_SOURCE_CURRENT;
+    if (which) *which = missing;
+    return MS_SOURCE_MISSING;
+}
+
+// A warning in the log when the compiled map is older than one of its source texts
 static void WarnStale(const SceneData *d)
 {
-    if (SourceState(d) == MS_SOURCE_STALE)
+    int which;
+    if (SourceState(d, &which) == MS_SOURCE_STALE)
         TraceLog(LOG_WARNING, "monolith_scene: %s was compiled from an older %s: compile it again",
-                 d->path, d->srcPath);
+                 d->path, SrcName(d, which));
 }
 
 // --- Writer (editor): a parsed SceneData (before FinishParse) as a compiled map
@@ -5290,7 +5675,7 @@ static uint32_t CmStr(CmWriter *W, const char *s)
 }
 
 // An MS_Ref as its record
-static CmRef CmRefOf(MS_Ref r) { return (CmRef){ r.line, r.prim, r.group, r.material, r.copy, r.part }; }
+static CmRef CmRefOf(MS_Ref r) { return (CmRef){ r.line, r.file, r.prim, r.group, r.material, r.copy, r.part }; }
 
 // A vector or colour as the float / byte array of a record field (in an initializer)
 #define CM_XY(v)    { (v).x, (v).y }
@@ -5393,6 +5778,7 @@ static void CmPutMaterials(CmWriter *W, const SceneData *d)
         CmMaterial c = {
             .name = name, .shader = shader,
             .line = M->line, .shaderLine = D->shaderLine,
+            .file = M->file, .shaderFile = D->shaderFile,
             .albedo = CM_RGBA(m->albedo.color), .emission = CM_RGBA(m->emission.color),
             .emissionEnergy = m->emission.energy, .normalScale = m->normal.scale,
             .occlusion = m->orm.occlusion, .roughness = m->orm.roughness,
@@ -5406,11 +5792,13 @@ static void CmPutMaterials(CmWriter *W, const SceneData *d)
             .uvFaces = { 255, 255, 255, 255, 255, 255 }, .filter = D->filter,
             .paintFilter = D->paintFilter, .noPrepass = D->noPrepass, .drawDistance = M->drawDistance,
             .paintGrid = D->paintGrid, .noCollide = M->noCollide,
+            .paintLine = D->paintLine, .paintFile = D->paintFile,
         };
         if (D->hasFaces) memcpy(c.uvFaces, D->uvFaces, sizeof(c.uvFaces));
         for (int k = 0; k < MAP_COUNT; k++) {
             c.maps[k] = CmStr(W, D->maps[k]);
             c.mapLine[k] = D->mapLine[k];
+            c.mapFile[k] = D->mapFile[k];
         }
         c.paint = CmStr(W, D->paint);
         CmPut(W, CM_MATERIALS, &c);
@@ -5424,7 +5812,7 @@ static void CmPutMaterials(CmWriter *W, const SceneData *d)
         for (int k = 0; k < D->samplerCount; k++) {
             const MatSampler *S = &D->samplers[k];
             uint32_t sname = CmStr(W, S->name), path = CmStr(W, S->path);
-            CmSampler sm = { sname, path, S->line, S->data };
+            CmSampler sm = { sname, path, S->line, S->file, S->data };
             CmPut(W, CM_SAMPLERS, &sm);
         }
     }
@@ -5449,7 +5837,7 @@ static void CmPutBoxes(CmWriter *W, const SceneData *d)
 static void CmPutModels(CmWriter *W, const SceneData *d)
 {
     for (int i = 0; i < d->modelFileCount; i++) {
-        CmModelFile c = { CmStr(W, d->modelFiles[i].path), d->modelFiles[i].line };
+        CmModelFile c = { CmStr(W, d->modelFiles[i].path), d->modelFiles[i].line, d->modelFiles[i].file };
         CmPut(W, CM_MODEL_FILES, &c);
     }
     for (int i = 0; i < d->localColliderCount; i++) {
@@ -5485,7 +5873,7 @@ static void CmPutPaint(CmWriter *W, const SceneData *d)
             .kind = (uint32_t)e->kind, .object = (uint32_t)e->object,
             .facesOrSlot = e->kind == PAINT_BOX ? e->faces : (uint32_t)e->slot,
             .x = (uint32_t)e->x, .y = (uint32_t)e->y, .w = (uint32_t)e->w, .h = (uint32_t)e->h,
-            .filter = e->nearest ? TEX_NEAREST : TEX_TRILINEAR, .line = e->line,
+            .filter = e->nearest ? TEX_NEAREST : TEX_TRILINEAR, .line = e->line, .file = e->file,
         };
         CmPut(W, CM_PAINT, &c);
     }
@@ -5543,6 +5931,19 @@ static void CmPutDeps(CmWriter *W, const SceneData *d)
     }
 }
 
+// The map-text files in file order ([0] the main file: its name is the header's sourceName string)
+static void CmPutSources(CmWriter *W, const SceneData *d)
+{
+    for (int i = 0; i < d->srcCount; i++) {
+        const MS_MapFile *F = &d->srcs[i].pub;
+        CmSource c = {
+            .path = CmStr(W, F->path), .importFile = F->importFile, .importLine = F->importLine,
+            .size = (uint64_t)F->size, .hash = F->hash
+        };
+        CmPut(W, CM_SOURCES, &c);
+    }
+}
+
 // The file from the written sections: the header, the section table (every section, in id
 // order), then the sections in id order, each at a multiple of 8 with zero padding. *outSize and
 // the malloc'd bytes, or NULL with a message (out of memory, too large).
@@ -5592,11 +5993,12 @@ static unsigned char *CmAssemble(const CmWriter *W, const SceneData *d, uint32_t
     return out;
 }
 
-// The compiled file of d (parsed, before FinishParse) in a malloc'd buffer; srcName, srcHash,
-// srcSize describe the map text it came from. NULL with a message on failure.
-static unsigned char *WriteCompiled(const SceneData *d, const char *srcName, unsigned long long srcHash,
-                                    long long srcSize, int *outSize)
+// The compiled file of d (parsed, before FinishParse) in a malloc'd buffer: the whole map, every
+// imported file flattened into it (d->srcs[] say which files it came from; [0], the main map text,
+// also goes into the header). NULL with a message on failure.
+static unsigned char *WriteCompiled(const SceneData *d, int *outSize)
 {
+    const MS_MapFile *src = &d->srcs[0].pub;
     if (!IsLittleEndianHost()) {
         ErrSet("%s: compiled maps are little-endian; this host is not", d->path);
         return NULL;
@@ -5605,7 +6007,7 @@ static unsigned char *WriteCompiled(const SceneData *d, const char *srcName, uns
     // The sections. This order is the order of the strings in the string table: keep it.
     CmWriter W = { 0 };
     CmPut(&W, CM_STRINGS, "");      // offset 0: the empty string (the table starts with a NUL)
-    uint32_t srcNameOff = CmStr(&W, srcName);
+    uint32_t srcNameOff = CmStr(&W, src->path);
     CmPutStatements(&W, d);
     CmPutGroups(&W, d);
     CmPutMaterials(&W, d);
@@ -5617,9 +6019,10 @@ static unsigned char *WriteCompiled(const SceneData *d, const char *srcName, uns
     CmPutSpawn(&W, d);
     CmPutEnvironment(&W, &d->env);
     CmPutDeps(&W, d);
+    CmPutSources(&W, d);
 
     // The file, then the writer's buffers freed
-    unsigned char *out = CmAssemble(&W, d, srcNameOff, srcHash, srcSize, outSize);
+    unsigned char *out = CmAssemble(&W, d, srcNameOff, src->hash, src->size, outSize);
     for (int id = 1; id <= CM_SECTIONS; id++) free(W.sec[id].b);
     free(W.strSlot);
     return out;
@@ -6303,7 +6706,7 @@ static bool BuildEntities(SceneData *d)
         MS_EntityId id = { r->prim >= 0 && r->prim < d->stmtCount ? d->stmtKeys[r->prim] : 0, index };
         d->entityIds[e] = id;
         d->entityTransforms[e] = tr;
-        d->entitySources[e] = (MS_Source){ r->line, r->prim, r->copy, r->part };
+        d->entitySources[e] = (MS_Source){ .line = r->line, .file = r->file, .prim = r->prim, .copy = r->copy, .part = r->part };
         d->entityModels[e] = model;
         unsigned int h = EntityHash(id, cap);
         while (d->entityHash[h]) h = (h + 1) & (unsigned int)(cap - 1);
@@ -6405,17 +6808,61 @@ static bool InitData(SceneData *d, const char *mapPath)
 }
 
 #ifdef MONOLITH_EDITOR
-// Fills d (after InitData) from the map text: the parsed scene, before FinishParse
-static bool ParseScene(SceneData *d, const char *text, int size)
+// Where each line of a map-text file starts (MS_LineText is called every frame for the hovered line;
+// walking a 4 MB text to it took ~0.05 ms): a line starts at 0 and after each newline, inside the text
+static void IndexLines(MapSrc *m)
 {
-    if (!DefaultMaterial(d)) {
+    int n = m->textSize > 0;
+    for (int i = 0; i + 1 < m->textSize; i++) n += m->text[i] == '\n';
+    m->lineStarts = malloc(sizeof(int) * (size_t)(n > 0 ? n : 1));
+    if (!m->lineStarts) return;
+    m->lineCount = 0;
+    if (m->textSize > 0) m->lineStarts[m->lineCount++] = 0;
+    for (int i = 0; i + 1 < m->textSize; i++)
+        if (m->text[i] == '\n') m->lineStarts[m->lineCount++] = i + 1;
+}
+
+// The map text's hash (MS_Scene.hash): without imports the FNV-1a 64 of the main file's bytes; with
+// imports FNV-1a 64 over, for every map-text file in order, its path, a NUL, its size in decimal, a
+// NUL and its bytes (docs/code/monolith_scene.md, "Imports"). Each file's own hash is in its pub.
+static unsigned long long MapTextHash(const SceneData *d)
+{
+    if (d->srcCount == 1) return d->srcs[0].pub.hash;
+    unsigned long long h = FNV_OFFSET;
+    for (int i = 0; i < d->srcCount; i++) {
+        const MapSrc *m = &d->srcs[i];
+        char size[24];
+        int n = snprintf(size, sizeof(size), "%d", m->textSize);
+        h = Fnv1a64Update(h, m->path, strlen(m->path) + 1);
+        h = Fnv1a64Update(h, size, (size_t)n + 1);
+        h = Fnv1a64Update(h, m->text, (size_t)m->textSize);
+    }
+    return h;
+}
+
+// Fills d (after InitData) from the map text: the parsed scene, before FinishParse. Takes the main
+// file's text (malloc'd, NUL-terminated) as d->srcs[0].text, freed with d: the caller still owns it
+// only when d->srcCount is 0 afterwards (out of memory before the parse began); `given`: a live edit's
+// texts for imported files (MS_EditSetText), NULL = read them. The map-text files get their line
+// index and hashes, and d->hash the map text's, also when the parse fails.
+static bool ParseScene(SceneData *d, char *text, int size, const MS_MapFileText *given, int givenCount)
+{
+    if (AddSrc(d, GetFileName(d->path), d->path, text, size, -1, 0) != 0 || !DefaultMaterial(d)) {
         ErrSet("%s: out of memory", d->path);
         return false;
     }
-    Parser P = { .d = d, .path = d->path };
+    Parser P = { .d = d, .path = d->srcPath, .given = given, .givenCount = givenCount };
     bool ok = ParseText(&P, text, size);
     free(P.lineBuf);
     free(P.tok);
+    free(P.open);
+    for (int i = 0; i < d->srcCount; i++) {
+        MapSrc *m = &d->srcs[i];
+        IndexLines(m);
+        m->pub.hash = Fnv1a64Update(FNV_OFFSET, m->text, (size_t)m->textSize);
+        m->pub.size = m->textSize;
+    }
+    d->hash = MapTextHash(d);
     return ok;
 }
 #endif
@@ -6423,7 +6870,7 @@ static bool ParseScene(SceneData *d, const char *text, int size)
 // A material's texture (or a sampler's: filter TEX_TRILINEAR; a paint atlas: premul), loaded once per
 // path, colour space, kind, wrap and filter
 static Texture2D GetTextureEx(SceneData *d, const char *rel, bool isColor, bool data, bool premul, int wrap, int filter,
-                              int line)
+                              int file, int line)
 {
     char full[MS_PATH_MAX + MS_PATH_MAX];
     snprintf(full, sizeof(full), "%s%s", d->root, rel);
@@ -6443,7 +6890,7 @@ static Texture2D GetTextureEx(SceneData *d, const char *rel, bool isColor, bool 
     char *path = MS_StrDup(full);
     if (!path || !MS_RESERVE(d->textures, d->textureCap, d->textureCount + 1)) {
         free(path);
-        ErrSet("%s:%d: out of memory", d->srcPath, line);
+        ErrSet("%s:%d: out of memory", SrcName(d, file), line);
         return (Texture2D){ 0 };
     }
     // R3D's default wrap is clamp, which would make uv_scale > 1 useless; map materials repeat
@@ -6486,7 +6933,7 @@ static Texture2D GetTextureEx(SceneData *d, const char *rel, bool isColor, bool 
     d->times.textures += (GetTime() - t0) * 1000.0;
     if (tex.id == 0) {
         free(path);
-        ErrSet("%s:%d: cannot load the texture \"%s\"", d->srcPath, line, rel);
+        ErrSet("%s:%d: cannot load the texture \"%s\"", SrcName(d, file), line, rel);
         return tex;
     }
     TexEntry *e = &d->textures[d->textureCount++];
@@ -6500,9 +6947,10 @@ static Texture2D GetTextureEx(SceneData *d, const char *rel, bool isColor, bool 
     return tex;
 }
 
-static Texture2D GetTexture(SceneData *d, const char *rel, bool isColor, bool data, int wrap, int filter, int line)
+static Texture2D GetTexture(SceneData *d, const char *rel, bool isColor, bool data, int wrap, int filter, int file,
+                            int line)
 {
-    return GetTextureEx(d, rel, isColor, data, false, wrap, filter, line);
+    return GetTextureEx(d, rel, isColor, data, false, wrap, filter, file, line);
 }
 
 // --- Models: load, pick data (BVH), transforms, draw groups
@@ -6683,7 +7131,7 @@ static bool LoadModelFile(SceneData *d, int i)
     snprintf(full, sizeof(full), "%s%s", d->root, F->path);
     F->model = R3D_LoadModelEx(full, R3D_IMPORT_RETAIN_MESH_DATA);
     if (F->model.meshCount <= 0 || !F->model.meshes) {
-        ErrSet(MODEL_LOAD_ERROR, d->srcPath, F->line, F->path);
+        ErrSet(MODEL_LOAD_ERROR, SrcName(d, F->file), F->line, F->path);
         return false;
     }
     F->loaded = true;
@@ -6734,7 +7182,7 @@ static bool CheckModelFiles(SceneData *d)
                                                                          ? aiGetErrorString() : "no meshes in the file");
         if (sc) aiReleaseImport(sc);
         if (!ok) {
-            ErrSet(MODEL_LOAD_ERROR, d->srcPath, F->line, F->path);
+            ErrSet(MODEL_LOAD_ERROR, SrcName(d, F->file), F->line, F->path);
             return false;
         }
     }
@@ -6968,9 +7416,9 @@ static bool BuildModelGroups(SceneData *d)
         const MS_ModelFile *F = &d->modelFiles[M->file];
         int slots = F->model.materialCount;
         for (int k = 0; k < M->slotCount; k++)
-            if (d->modelSlots[M->slotFirst + k].slot >= F->model.materialCount && (i == 0 || d->models[i - 1].ref.line != M->ref.line))
+            if (d->modelSlots[M->slotFirst + k].slot >= F->model.materialCount && (i == 0 || d->models[i - 1].ref.prim != M->ref.prim))
                 TraceLog(LOG_WARNING, "monolith_scene: %s:%d: material.%d: \"%s\" has %d material slot%s (0..%d); ignored",
-                         d->srcPath, M->ref.line, d->modelSlots[M->slotFirst + k].slot, F->path, F->model.materialCount,
+                         SrcName(d, M->ref.file), M->ref.line, d->modelSlots[M->slotFirst + k].slot, F->path, F->model.materialCount,
                          F->model.materialCount == 1 ? "" : "s", F->model.materialCount - 1);
         for (int s = 0; s < slots; s++) tmp[s] = SlotMaterial(d, M, s);
         int g = 0;
@@ -7808,7 +8256,7 @@ static char *ShaderSourceText(const SceneData *d, const char *rel)
 
 // A material's shader file (rel NULL: the empty shader of painted materials without one): found or
 // added with its source scanned. NULL when out of memory (the last error says so).
-static ShaderFile *ShaderFileOf(SceneData *d, const char *rel, int line)
+static ShaderFile *ShaderFileOf(SceneData *d, const char *rel, int file, int line)
 {
     for (int i = 0; i < d->shaderFileCount; i++) {
         const char *r = d->shaderFiles[i].rel;
@@ -7816,7 +8264,7 @@ static ShaderFile *ShaderFileOf(SceneData *d, const char *rel, int line)
     }
     ShaderFile *f = MS_PUSH(d->shaderFiles, d->shaderFileCount, d->shaderFileCap);
     if (!f) {
-        ErrSet("%s:%d: out of memory", d->srcPath, line);
+        ErrSet("%s:%d: out of memory", SrcName(d, file), line);
         return NULL;
     }
     *f = (ShaderFile){ .rel = rel, .scanned = true };
@@ -7835,7 +8283,7 @@ static ShaderFile *ShaderFileOf(SceneData *d, const char *rel, int line)
 // it. NULL when it fails to load or out of memory (the last error says which).
 static ShaderFile *GetShaderFile(SceneData *d, const MS_Material *M, const MatDef *D)
 {
-    ShaderFile *f = ShaderFileOf(d, M->shader, D->shaderLine);
+    ShaderFile *f = ShaderFileOf(d, M->shader, D->shaderFile, D->shaderLine);
     if (!f || f->shader) return f;
     double t0 = GetTime();
 #ifdef MONOLITH_EDITOR
@@ -7853,7 +8301,8 @@ static ShaderFile *GetShaderFile(SceneData *d, const MS_Material *M, const MatDe
     d->times.shaderLoads++;
     d->times.shaders += (GetTime() - t0) * 1000.0;
     if (!f->shader) {
-        ErrSet("%s:%d: cannot load the surface shader \"%s\" (see the log)", d->srcPath, D->shaderLine, M->shader);
+        ErrSet("%s:%d: cannot load the surface shader \"%s\" (see the log)", SrcName(d, D->shaderFile), D->shaderLine,
+               M->shader);
         return NULL;
     }
     return f;
@@ -8056,7 +8505,7 @@ static void PaintLogInactive(const SceneData *d, const PaintDef *e)
                                       e->gridH, e->w, e->h); break;
     default:                 snprintf(why, sizeof(why), "can't be drawn: %s's shader can't take the paint stage", mat); break;
     }
-    TraceLog(LOG_WARNING, "monolith_scene: %s:%d: paint: %u:%d %s %s; inactive", d->srcPath, e->line, e->entity.stmt,
+    TraceLog(LOG_WARNING, "monolith_scene: %s:%d: paint: %u:%d %s %s; inactive", SrcName(d, e->file), e->line, e->entity.stmt,
              e->entity.index, what, why);
 }
 
@@ -8121,7 +8570,7 @@ static void PaintPublish(SceneData *d)
     for (int i = 0; i < d->paintCount; i++) {
         const PaintDef *e = &d->paints[i];
         d->paintPub[i] = (MS_PaintEntry){
-            .material = e->material, .line = e->line, .entity = e->entity,
+            .material = e->material, .line = e->line, .file = e->file, .entity = e->entity,
             .obj = { e->kind == PAINT_BOX ? MS_OBJ_BOX : MS_OBJ_MODEL, e->object },
             .faces = e->faces, .slot = e->slot,
             .x = e->x, .y = e->y, .w = e->w, .h = e->h,
@@ -8167,7 +8616,7 @@ static bool BuildPaintedShader(SceneData *d, int i)
     MS_Material *M = &d->materials[i];
     MatDef *D = &d->matDefs[i];
     R3D_Material *m = &M->material;
-    ShaderFile *f = ShaderFileOf(d, M->shader, D->shaderLine);
+    ShaderFile *f = ShaderFileOf(d, M->shader, D->shaderFile, D->shaderLine);
     if (!f) return false;
     R3D_SurfaceShader *ps = PaintShaderOf(d, f);
     if (!ps) {
@@ -8175,18 +8624,18 @@ static bool BuildPaintedShader(SceneData *d, int i)
         return true;
     }
     if (!(m->shader = R3D_LoadSurfaceShaderAlias(ps))) {
-        ErrSet("%s:%d: out of memory", d->srcPath, D->shaderLine);
+        ErrSet("%s:%d: out of memory", SrcName(d, D->shaderFile), D->shaderLine);
         return false;
     }
     ShaderSortKey(m->shader, M->shader ? (unsigned int)i + 1 : 0);
     for (int u = 0; u < D->uniformCount; u++) R3D_SetSurfaceShaderUniform(m->shader, D->uniforms[u].name, D->uniforms[u].v);
     for (int s = 0; s < D->samplerCount; s++) {
         Texture2D tex = GetTexture(d, D->samplers[s].path, true, D->samplers[s].data, D->wrap, TEX_TRILINEAR,
-                                   D->samplers[s].line);
+                                   D->samplers[s].file, D->samplers[s].line);
         if (!tex.id) return false;
         R3D_SetSurfaceShaderSampler(m->shader, D->samplers[s].name, tex);
     }
-    D->paintTex = GetTextureEx(d, D->paint, true, false, true, 1, D->paintFilter, D->paintLine);
+    D->paintTex = GetTextureEx(d, D->paint, true, false, true, 1, D->paintFilter, D->paintFile, D->paintLine);
     if (!D->paintTex.id) return false;
     R3D_SetSurfaceShaderSampler(m->shader, "ms_paint", D->paintTex);
     return true;
@@ -8199,7 +8648,7 @@ static bool BuildOwnAtlases(SceneData *d)
     for (int a = 0; a < d->ownAtlasCount; a++) {
         OwnAtlas *A = &d->ownAtlases[a];
         if (!A->painted || A->shader) continue;
-        ShaderFile *f = ShaderFileOf(d, NULL, d->modelFiles[A->file].line);
+        ShaderFile *f = ShaderFileOf(d, NULL, d->modelFiles[A->file].file, d->modelFiles[A->file].line);
         if (!f) return false;
         R3D_SurfaceShader *ps = PaintShaderOf(d, f);
         if (!ps) {
@@ -8207,7 +8656,7 @@ static bool BuildOwnAtlases(SceneData *d)
             continue;
         }
         A->tex = GetTextureEx(d, A->rel, true, false, true, 1, A->nearest ? TEX_NEAREST : TEX_TRILINEAR,
-                              d->modelFiles[A->file].line);
+                              d->modelFiles[A->file].file, d->modelFiles[A->file].line);
         if (!A->tex.id) return false;
         if (!(A->shader = R3D_LoadSurfaceShaderAlias(ps))) {
             ErrSet("%s: out of memory", d->path);
@@ -8427,7 +8876,7 @@ static bool BuildMaterialMaps(SceneData *d, int i)
     Texture2D *slot[MAP_COUNT] = { &m->albedo.texture, &m->normal.texture, &m->orm.texture, &m->emission.texture };
     for (int k = 0; k < MAP_COUNT; k++) {
         if (!D->maps[k]) continue;
-        *slot[k] = GetTexture(d, D->maps[k], IS_COLOR[k], false, D->wrap, D->filter, D->mapLine[k]);
+        *slot[k] = GetTexture(d, D->maps[k], IS_COLOR[k], false, D->wrap, D->filter, D->mapFile[k], D->mapLine[k]);
         if (!slot[k]->id) return false;
     }
     return true;
@@ -8451,14 +8900,14 @@ static bool BuildMaterialShader(SceneData *d, int i)
         // compiled shader per material
         ShaderFile *f = GetShaderFile(d, M, D);
         if (f) m->shader = R3D_LoadSurfaceShaderAlias(f->shader);
-        if (f && !m->shader) ErrSet("%s:%d: out of memory", d->srcPath, D->shaderLine);
+        if (f && !m->shader) ErrSet("%s:%d: out of memory", SrcName(d, D->shaderFile), D->shaderLine);
         if (!m->shader) return false;
         ShaderSortKey(m->shader, (unsigned int)i + 1);
         for (int u = 0; u < D->uniformCount; u++)
             R3D_SetSurfaceShaderUniform(m->shader, D->uniforms[u].name, D->uniforms[u].v);
         for (int s = 0; s < D->samplerCount; s++) {
             Texture2D tex = GetTexture(d, D->samplers[s].path, true, D->samplers[s].data, D->wrap, TEX_TRILINEAR,
-                                       D->samplers[s].line);
+                                       D->samplers[s].file, D->samplers[s].line);
             if (!tex.id) return false;
             R3D_SetSurfaceShaderSampler(m->shader, D->samplers[s].name, tex);
         }
@@ -8479,12 +8928,13 @@ static void MaterialDrawMode(SceneData *d, int i)
     R3D_Material *m = &M->material;
     bool needsCube = false, cutout = false;
     if (M->shader) {
-        const ShaderFile *f = ShaderFileOf(d, M->shader, D->shaderLine);    // (scanned)
+        const ShaderFile *f = ShaderFileOf(d, M->shader, D->shaderFile, D->shaderLine);    // (scanned)
         needsCube = !f || f->needsCube;
         cutout = !f || f->cutout;
         if (f && f->scanned && f->needsCube && !D->instanced)
             TraceLog(LOG_WARNING, "monolith_scene: %s:%d: material \"%s\": shader \"%s\" reads the box instance (INSTANCE_*, "
-                     "or POSITION in vertex()): add `instanced on` to the material", d->srcPath, D->shaderLine, M->name, M->shader);
+                     "or POSITION in vertex()): add `instanced on` to the material", SrcName(d, D->shaderFile), D->shaderLine,
+                     M->name, M->shader);
     }
     // Boxes are merged into a visible-face mesh unless the shader needs the instanced cubes. Only
     // opaque materials: R3D picks the lights of a blended (forward) draw by the mesh's own bounds,
@@ -8634,6 +9084,7 @@ static void FreeData(SceneData *d)
     free(d->lights);
     free(d->stmtKeys);
     free(d->stmtLines);
+    free(d->stmtFiles);
     free(d->stmtSet);
     free(d->entityIds);
     free(d->entityObjects);
@@ -8645,12 +9096,20 @@ static void FreeData(SceneData *d)
     free(d->path);
     free(d->srcPath);
     free(d->root);
+    for (int i = 0; i < d->srcCount; i++) {
+        free(d->srcs[i].path);
+        free(d->srcs[i].fullPath);
+#ifdef MONOLITH_EDITOR
+        free(d->srcs[i].text);
+        free(d->srcs[i].lineStarts);
+#endif
+    }
+    free(d->srcs);
+    free(d->srcSet);
 #ifdef MONOLITH_EDITOR
     for (int i = 0; i < d->depCount; i++) free(d->deps[i]);
     free(d->deps);
     free(d->brief);
-    free(d->text);
-    free(d->lineStarts);
     free(d->matLookHash);
     free(d->matShapeHash);
     free(d->matPaintlessHash);
@@ -8770,19 +9229,6 @@ static bool FinishLoad(SceneData *d, const MS_LoadOptions *opt, bool gpu)
 }
 
 #ifdef MONOLITH_EDITOR
-// Where each line of the map text starts (MS_LineText is called every frame for the hovered line;
-// walking a 4 MB text to it took ~0.05 ms): a line starts at 0 and after each newline, inside the text
-static void IndexLines(SceneData *d)
-{
-    int n = d->textSize > 0;
-    for (int i = 0; i + 1 < d->textSize; i++) n += d->text[i] == '\n';
-    d->lineStarts = malloc(sizeof(int) * (size_t)(n > 0 ? n : 1));
-    if (!d->lineStarts) return;
-    d->lineCount = 0;
-    if (d->textSize > 0) d->lineStarts[d->lineCount++] = 0;
-    for (int i = 0; i + 1 < d->textSize; i++)
-        if (d->text[i] == '\n') d->lineStarts[d->lineCount++] = i + 1;
-}
 #endif
 
 // One line per load with GPU upload: where the time went (ms). The first frame after it, which
@@ -8828,20 +9274,18 @@ static bool LoadBytes(MS_Scene *s, const char *mapPath, char *bytes, int size)
         ErrSet("%s: cannot read file (or larger than 4 MB)", mapPath);
         ok = false;
     }
-    if (ok && !compiled) ok = ParseScene(d, bytes, size);
+    if (ok && !compiled) ok = ParseScene(d, bytes, size, NULL, 0);     // (d keeps bytes as srcs[0].text)
+    bool owned = !compiled && d->srcCount > 0;
     d->times.parse = (GetTime() - tLoad) * 1000.0;
     if (ok && compiled) WarnStale(d);
-    d->text = compiled ? NULL : bytes;
-    d->textSize = compiled ? 0 : size;
-    if (!compiled) IndexLines(d);
-    d->hash = Fnv1a64Update(FNV_OFFSET, bytes, (size_t)size);
+    if (!owned) d->hash = Fnv1a64Update(FNV_OFFSET, bytes, (size_t)size);
     d->mtime = GetFileModTime(mapPath);
     // Watch the files of this attempt (also after a failure: a shader that is still missing
     // reloads the package once it appears)
     SetWatch(p, d);
     p->triedHash = CombinedHash(bytes, size, p->watch, p->watchCount);
     p->settleTime = 0.0f;
-    if (compiled) free(bytes);
+    if (!owned) free(bytes);
 #else
     d->times.parse = (GetTime() - tLoad) * 1000.0;
     if (ok && !compiled) {
@@ -9064,34 +9508,61 @@ const char *MS_Error(const MS_Scene *s)
     return p->error ? p->error : p->errorOom ? "out of memory" : "";
 }
 
-const char *MS_LineText(const MS_Scene *s, int line, int *length)
+int MS_MapFileCount(const MS_Scene *s)
 {
     const SceneData *d = s->priv->d;
-    if (!d || !d->text || line < 1) return NULL;
+    return d ? d->srcCount : 0;
+}
+
+const MS_MapFile *MS_MapFileAt(const MS_Scene *s, int file)
+{
+    const SceneData *d = s->priv->d;
+    return d && file >= 0 && file < d->srcCount ? &d->srcs[file].pub : NULL;
+}
+
+int MS_MapFileFind(const MS_Scene *s, const char *path)
+{
+    const SceneData *d = s->priv->d;
+    for (int i = 0; d && path && i < d->srcCount; i++)
+        if (strcmp(d->srcs[i].path, path) == 0) return i;
+    return -1;
+}
+
+// Map-text file `file`'s source when it has text (a text load), else NULL
+static const MapSrc *TextSrc(const MS_Scene *s, int file)
+{
+    const SceneData *d = s->priv->d;
+    return d && file >= 0 && file < d->srcCount && d->srcs[file].text ? &d->srcs[file] : NULL;
+}
+
+const char *MS_LineText(const MS_Scene *s, int file, int line, int *length)
+{
+    const MapSrc *m = TextSrc(s, file);
+    if (!m || line < 1) return NULL;
     int pos = 0;
-    if (d->lineStarts) {
-        if (line > d->lineCount) return NULL;
-        pos = d->lineStarts[line - 1];
+    if (m->lineStarts) {
+        if (line > m->lineCount) return NULL;
+        pos = m->lineStarts[line - 1];
     } else {
         for (int l = 1; l < line; l++) {
-            while (pos < d->textSize && d->text[pos] != '\n') pos++;
-            if (pos >= d->textSize) return NULL;
+            while (pos < m->textSize && m->text[pos] != '\n') pos++;
+            if (pos >= m->textSize) return NULL;
             pos++;
         }
     }
-    if (pos >= d->textSize) return NULL;
+    if (pos >= m->textSize) return NULL;
     int len = 0;
-    while (pos + len < d->textSize && d->text[pos + len] != '\n') len++;
-    if (len > 0 && d->text[pos + len - 1] == '\r') len--;
+    while (pos + len < m->textSize && m->text[pos + len] != '\n') len++;
+    if (len > 0 && m->text[pos + len - 1] == '\r') len--;
     *length = len;
-    return d->text + pos;
+    return m->text + pos;
 }
 
-const char *MS_MapText(const MS_Scene *s, int *size)
+const char *MS_MapText(const MS_Scene *s, int file, int *size)
 {
-    const SceneData *d = s->priv->d;
-    *size = d && d->text ? d->textSize : 0;
-    return d && d->text ? d->text : "";
+    const MapSrc *m = TextSrc(s, file);
+    *size = m ? m->textSize : 0;
+    return m ? m->text : "";
 }
 
 int MS_PrimitiveArgs(const char *name, unsigned char axes[8])
@@ -9104,10 +9575,10 @@ int MS_PrimitiveArgs(const char *name, unsigned char axes[8])
     return -1;
 }
 
-bool MS_GetLine(const MS_Scene *s, int line, char *out, int outSize)
+bool MS_GetLine(const MS_Scene *s, int file, int line, char *out, int outSize)
 {
     int len;
-    const char *text = outSize > 0 ? MS_LineText(s, line, &len) : NULL;
+    const char *text = outSize > 0 ? MS_LineText(s, file, line, &len) : NULL;
     if (!text) return false;
     if (len > outSize - 1) len = outSize - 1;
     memcpy(out, text, len);
@@ -9118,8 +9589,8 @@ bool MS_GetLine(const MS_Scene *s, int line, char *out, int outSize)
 MS_SourceState MS_CompiledSource(const MS_Scene *s, const char **sourcePath)
 {
     const SceneData *d = s->priv->d;
-    if (sourcePath) *sourcePath = d ? d->srcPath : s->path;
-    return d ? SourceState(d) : MS_SOURCE_TEXT;
+    if (sourcePath) *sourcePath = d ? d->srcPath : s->path;     // (the main map text)
+    return d ? SourceState(d, NULL) : MS_SOURCE_TEXT;
 }
 
 bool MS_Compile(const char *mapPath, const char *outPath)
@@ -9137,16 +9608,15 @@ bool MS_Compile(const char *mapPath, const char *outPath)
     SceneData *d = calloc(1, sizeof(*d));
     bool ok = d && InitData(d, path);
     if (!ok) ErrSet("%s: out of memory", path);
-    if (ok) ok = ParseScene(d, text, size);
+    if (ok) ok = ParseScene(d, text, size, NULL, 0);
+    if (!d || d->srcCount == 0) free(text);        // (else d keeps it)
     unsigned char *out = NULL;
     int outSize = 0;
-    if (ok) ok = (out = WriteCompiled(d, GetFileName(path), Fnv1a64Update(FNV_OFFSET, text, (size_t)size), size,
-                                      &outSize)) != NULL;
+    if (ok) ok = (out = WriteCompiled(d, &outSize)) != NULL;
     // The package check a noGpu load makes (model files included), then the compiled bytes read
     // back as a game would (relative to the source's package folder): what compiles, loads
     if (ok) ok = FinishLoad(d, &(MS_LoadOptions){ .noGpu = true }, false);
     FreeData(d);
-    free(text);
     if (ok) {
         SceneData *r = calloc(1, sizeof(*r));
         ok = r && InitData(r, path);
@@ -10192,8 +10662,11 @@ static void Restamp(MS_Scene *s, unsigned int oldVersion, const SceneData *old, 
 
 // --- MS_EditSetText
 
-MS_ReloadResult MS_EditSetText(MS_Scene *s, const char *text, int size, MS_EditStats *stats)
+MS_ReloadResult MS_EditSetText(MS_Scene *s, const MS_MapFileText *files, int count, MS_EditStats *stats)
 {
+    // files[0]: the main file's text; the others are taken by the imports that name their paths
+    const char *text = count > 0 && files ? files[0].text : NULL;
+    int size = count > 0 && files ? files[0].size : -1;
     MS_Private *p = s->priv;
     SceneData *old = p->d;
     MS_EditStats st = { 0 };
@@ -10215,12 +10688,8 @@ MS_ReloadResult MS_EditSetText(MS_Scene *s, const char *text, int size, MS_EditS
         d->live = p;                    // (the provided textures count as files: MS_PaintAtlasProvide)
         memcpy(bytes, text, (size_t)size);
         bytes[size] = '\0';
-        ok = ParseScene(d, bytes, size);
-        d->text = bytes;
-        d->textSize = size;
-        bytes = NULL;
-        IndexLines(d);
-        d->hash = Fnv1a64Update(FNV_OFFSET, d->text, (size_t)size);
+        ok = ParseScene(d, bytes, size, files, count);
+        if (d->srcCount > 0) bytes = NULL;      // (d keeps it)
         d->mtime = old->mtime;
         d->shaderDefines = p->opt.shaderDefines;
         d->shaderDefinesFile = p->opt.shaderDefinesFile;
@@ -10480,11 +10949,12 @@ void MS_EditMarkSaved(MS_Scene *s)
 {
     MS_Private *p = s->priv;
     SceneData *d = p->d;
-    if (!d || !d->text) return;
+    if (!d || d->srcCount == 0 || !d->srcs[0].text) return;
     // As if the package had been loaded from disk now: watched files, their mtimes, the hash
-    // MS_Poll compares with (the written bytes are the text the scene shows)
+    // MS_Poll compares with (the written bytes are the texts the scene shows; CombinedHash reads
+    // the imported files, like every other watched file, from disk)
     SetWatch(p, d);
-    p->triedHash = CombinedHash(d->text, d->textSize, p->watch, p->watchCount);
+    p->triedHash = CombinedHash(d->srcs[0].text, d->srcs[0].textSize, p->watch, p->watchCount);
     p->settleTime = 0.0f;
     d->mtime = GetFileModTime(d->path);
     s->mtime = d->mtime;

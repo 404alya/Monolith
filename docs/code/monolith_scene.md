@@ -295,11 +295,61 @@ env <key> <value...>
 | Cap | Value |
 |---|---|
 | `MS_MAX_OBJECTS` | 1 000 000 boxes + models + lights; a `repeat` grid multiplying to more fails |
-| `MS_MAX_FILE_BYTES` | a 4 MB file |
+| `MS_MAX_FILE_BYTES` | 4 MB per map-text file (the main file and each imported one) |
 | positions | spawn / viewpoint / light positions within ±1 000 000 m |
 
-**Source lines.** Every box remembers the map line of the statement that made it (`boxRefs[]`).
+**Source lines.** Every box remembers the map line of the statement that made it and that line's map-text file (`boxRefs[]`: `line`, `file`).
 
 **Entities.** Every box, model and light is an entity (the `MS_Scene` `entity*` arrays) with a stable id: the line's `id` (or a key derived from the statement's text) and its index within the line.
 
-**Errors** are reported as `file:line: message`. Besides syntax errors (unknown keyword, wrong argument count, bad number) these include a missing file, a path outside the package, an undefined material, too many objects, a spot light whose `inner` angle exceeds `outer` (`spot light: inner must be <= outer`), and a map with no boxes and no models (`map is empty (no boxes and no models)`; the compiled-map reader refuses it too).
+**Errors** are reported as `file:line: message`. Besides syntax errors (unknown keyword, wrong argument count, bad number) these include a missing file, a path outside the package, an undefined material, too many objects, a spot light whose `inner` angle exceeds `outer` (`spot light: inner must be <= outer`), and a map with no boxes and no models (`map is empty (no boxes and no models)`; the compiled-map reader refuses it too). A line in an imported file is reported with that file's path (`maps/x/parts/lake.map:41: …`); the imports' own messages are in the next section.
+
+## Imports: a map in several map-text files
+
+The format is [map-format.md §2.10](../map-format.md#210-imports-one-map-in-several-files). This is how the runtime and its API carry it (design of 2026-11-21).
+
+**Sources are per file.** The scene keeps a list of its map-text files (`MS_MapFile`: package-relative `path`, `fullPath`, `hash`, `size`, and the `import` line that reached it): `[0]` is the main map file, then each imported file in the order the parser first reached it. Every source line is a pair (file, line):
+
+- `MS_Ref.file`, `MS_Source.file`, `MS_Material.file`, `MS_ModelFile.file` and `MS_PaintEntry.file` say which file their `line` is in (0 = the main file, so a map without imports has every `file` 0);
+- the source-line API takes the file: `MS_LineText(scene, file, line, &len)`, `MS_GetLine(scene, file, line, …)`, `MS_MapText(scene, file, &size)`; `MS_MapFileCount` / `MS_MapFileAt` / `MS_MapFileFind` list the files;
+- the live edit takes the text of every file: `MS_EditSetText(scene, files, count, stats)` with `MS_MapFileText { path, text, size }`, `files[0]` the main file; an `import` takes the text given for its path, else reads the file (a newly imported file). The new scene's file list is the parse's own, so the editor keys its working copies by path.
+
+*Rejected:* one expanded text (every import pasted in) with a line map back to the files. The editor's working copy is whole text that it patches and hands to the live edit; with one expanded text it could not tell which file an inserted line (a split `repeat`, a duplicate, a new model or `paint` line) belongs to, and a line at a file boundary would be ambiguous. Per-file texts make every edit a patch of one file.
+
+**Parsing.** An `import "<path>.map"` line (exactly one quoted path; no `id` / `repeat` prefix) parses that file's statements where it stands: `Parser.path` and the line number switch to the imported file while it is read, so every message is `<that file>:<line>: …`. The path goes through `InsidePackage` and `PackagePath` (so it is watched by hot reload even while missing, then must exist), is normalised (empty and `.` components dropped) and must end in `.map`. Each file is read with `ReadWholeFile(…, MS_FILE_MAX, …)`: the 4 MB cap is per file. A set of the files reached so far (the main file included; a hash set by path, also in the compiled reader, so many parts stay linear; files are told apart by their normalised path, so a symlink to a part counts as another file) refuses a second import (`"parts/a.map" is already imported (at x.map:12): a file is read once per map`) and a cycle (the chain of open imports is in the message). Before the import the parser saves `cur.group`, `cur.material` and its format-line state, clears them (group -1, material 0 = `"default"`, no format line seen), and restores them afterwards. A part must begin with `monolith N` equal to the main file's (in practice `MS_FORMAT_VERSION`: an older or missing one gives the usual migration message, naming the part's line). `env`, `spawn` and `viewpoint` in a part fail with `<file>:<line>: env lines belong in the main map file (<main>)`. The empty-map check runs once, for the whole map.
+
+**Entity ids keep today's rule.** Implicit keys come from the statement's tokens (not its file), assigned in the order of the expanded text; explicit `id n` values are unique across the whole map (`StmtSlot` is per scene); the duplicate-id message names the other line as `<file>:<line>` when it is in another file (today's `also on line N` when both are in the same file). The next free id for an edit is the largest in any file + 1. A map split into parts (with `use` / `group` restated as §2.10 says) has the same ids as the single file, because every statement's tokens and their order are unchanged.
+
+**Hash.**
+
+- `scene->hash` without imports: FNV-1a 64 of the main file's bytes, as before.
+- With imports: FNV-1a 64 over the concatenation, for every map-text file in file order (`[0]` first), of `<path>` `\0` `<size in decimal ASCII>` `\0` `<the file's bytes>`, where `<path>` is `MS_MapFile.path` (the main file: its file name). For example, in Python: `h=0xcbf29ce484222325; for p,b in files: for c in p.encode()+b"\0"+str(len(b)).encode()+b"\0"+b: h=((h^c)*0x100000001b3)&(2**64-1)`.
+- Each file's own FNV-1a 64 is `MS_MapFileAt(scene, i)->hash` (bundles, and the editor's check that a file on disk is still the one loaded).
+
+Hot reload is unchanged in kind: imported files are dependencies (`AddDep`, in `MS_Dependency` order), so `MS_Poll` watches them and its combined hash covers them.
+
+**Compiled maps.** One `<name>.mapb` per map, never one per part: the compiler writes the whole parsed map, parts included, into that single file, and the reader needs nothing from the parts to load it (a game loads the one file as today). `CmRef` and every record field that holds a map line get the line's file; a new section `sources` lists every map-text file (`[0]` the main file, equal to the header's `sourceName` / `sourceHash` / `sourceSize`) with its package-relative name, size and FNV-1a 64. Only `SourceState` (`MS_CompiledSource`) reads the parts' text: stale when any file differs, missing when one is gone. `CM_VERSION` 9 → 10, so every existing `.mapb` must be compiled again.
+
+**Dumps.** A line in the main file still prints `line <l>`, so the dumps of every map without imports stay byte-identical; a line in a part prints `line <path>:<l>` (package-relative). The dumps have no version line to bump, and no field is added that every dump shows.
+
+**Defaults chosen** (the developer may change them): sources per file (above); each part has its own `monolith N`, equal to the main file's; nesting allowed, each file read once per map, cycles an error; `use` and `group` restored after an import; new lines go into the file of the line they come from (a split `repeat`, a duplicate, an `add`ed model next to an object) and a new `paint` line into the file of the painted object's line; import paths relative to the package; dumps and `scene->hash` unchanged without imports; the 4 MB cap per file.
+
+**Messages** (`tests/unit/parse_error_test.c` has a case for each):
+
+| Case | Message (at the line named) |
+|---|---|
+| a file imported a second time | `"parts/a.map" is already imported (at x.map:12): a file is read once per map` (the first import's file and line) |
+| a cycle (a file importing itself, directly or not) | `import cycle: "parts/a.map" is already being read: parts/a.map -> parts/b.map -> parts/a.map` (the open files from the one imported again) |
+| an `id` or `repeat` prefix on an import | `import takes no id or repeat prefix: import "parts/name.map"` |
+| imports nested deeper than 256 files (`MS_IMPORT_DEPTH_MAX`: each level is a recursion of the parser) | `imports nested more than 256 files deep` |
+| outside the package, missing, not quoted | the path checks every quoted path gets (`path must stay inside the package: …`, `file not found: … (paths are relative to the package folder)`, `a path must be in double quotes: …`) |
+| not a `.map` file | `import: "textures/a.png" is not a map-text file (an imported file's name ends in .map)` |
+| not one path | `import takes one path in double quotes: import "parts/name.map"` |
+| `env` / `spawn` / `viewpoint` in a part | `env lines belong in the main map file (x.map)` (at the part's line) |
+| a part without the current format line | the migration message at the part's line, naming the main map: `run /migrate-map <main map> …` |
+| a duplicate `id` in another file | `duplicate id 5 (also at x.map:2)` (`also on line 2` when both lines are in one file) |
+
+Other messages that name a second line (paint entries: `line 12 makes no boxes`, `overlaps line 12's`) write a line in an imported file as `line parts/a.map:12`, as the dumps do.
+
+**Implementation** (`runtime/monolith_scene.c`). The file list is `SceneData.srcs[]` (`MapSrc`: `path`, `fullPath`, and in editor builds the public `MS_MapFile`, the text and its line index); `[0]` is made by `ParseScene` before the first line, each part by `ParseImport` (region "Parser") when its import line is read, and a compiled load fills it from the `sources` section, so both builds can name a line's file. Every later message that names a map line (textures, shaders, model files, paint entries) takes the line's file through `SrcName(d, file)`, so each object, material key (`MatDef.shaderFile`, `mapFile[]`, `paintFile`, `MatSampler.file`), model file, `paint` entry and statement (`stmtFiles`) records its file next to its line. `ParseImport` copies the path before it parses the part (the parser's line buffer and tokens are reused by the part's lines) and keeps the open files in `Parser.open` (the cycle check). An `import` line goes into the live edit's look hash like a `material` or `env` line: adding, removing or moving one makes the edit a full upload.
+

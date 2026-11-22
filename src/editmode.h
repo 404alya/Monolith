@@ -23,7 +23,7 @@ typedef struct {
     // The id panel (CTRL+I with objects of one line selected): the number being typed
     bool idOpen;
     char idText[12];
-    int idLine, idHas, idNext; // the line, its id (0 = implicit), the next free id
+    int idLine, idFile, idHas, idNext; // the line and its map-text file, its id (0 = implicit), the next free id
     TransformModal modal;   // G / ALT+R / S and the rotate gizmo (transform.c)
 } EditMode;
 

@@ -12,7 +12,8 @@
 
 typedef struct {
     int id;                         // N of `id N`
-    int line;                       // map line
+    int line;                       // map line (in its map-text file)
+    int file;                       // the scene's map-text file of that line (0: the main file; MS_MapFileAt)
     int stmt;                       // statement index (MS_Ref.prim)
     int firstEntity;                // its objects are entities firstEntity .. firstEntity + objects - 1
     char kind[16];                  // box primitive name, "model", "light" (bounded: a keyword)

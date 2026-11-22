@@ -126,6 +126,7 @@ typedef struct {
     MS_ObjKind kind;
     BoundingBox box;        // world AABB (boxes: the box; models: their bounds)
     int line;               // map line of the object
+    int file;               // the scene's map-text file of that line (MS_Ref.file)
     int nth;                // index among the objects of that kind on that line
     int group;              // group index at selection time (compared by name after a reload)
     char *groupName;        // heap copy, NULL = no group
@@ -257,7 +258,8 @@ void DesignerMessagef(Designer *d, bool error, const char *fmt, ...) MSG_PRINTF(
 
 // Selection helpers (also used by --select)
 void DesignerClearSelection(Designer *d);
-void DesignerSelectLine(Designer *d, int line);
+// Every box and model of line `line` of map-text file `file` (0: the main file)
+void DesignerSelectLine(Designer *d, int file, int line);
 // Adds one box or model to the selection (the edit mode's selection after an edit)
 bool DesignerSelectObject(Designer *d, MS_ObjRef o);
 

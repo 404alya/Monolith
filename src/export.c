@@ -641,6 +641,13 @@ static char *MakeReadme(const MS_Scene *s, const char *name, const char *assetsP
         "```\n\n"
         "A compiled map from an older or newer monolith is refused with a message to compile it again.\n\n",
         name, name, name, s->formatVersion, name, name, name, name, name);
+    if (MS_MapFileCount(s) > 1) {       // a map with imports: the parts are source too, flattened into the .mapb
+        fprintf(f, "`%s.map` imports %d more map-text files, which are part of its source (edit them like it):", name,
+                MS_MapFileCount(s) - 1);
+        for (int i = 1; i < MS_MapFileCount(s); i++) fprintf(f, "%s `%s/%s`", i > 1 ? "," : "", name, MS_MapFileAt(s, i)->path);
+        fprintf(f, ". They are compiled into the same `%s.mapb`, which holds the whole map: the program never reads "
+                   "them either, and there is no compiled file per part.\n\n", name);
+    }
 
     fprintf(f,
         "## Use the map in your own program\n\n"
@@ -924,6 +931,37 @@ void ExportShutdown(void)
 
 static unsigned char Export(const MS_Scene *s, const char *outDirIn);
 
+// A map-text file of a compiled map against what it was compiled from (MS_MapFile: size, FNV-1a 64):
+// 0 the same, 1 changed, 2 not there
+static unsigned char MapFileState(const MS_MapFile *F)
+{
+    FILE *f = fopen(F->fullPath, "rb");
+    if (!f) return 2;
+    unsigned long long h = 14695981039346656037ULL;     // FNV-1a 64 of the whole file
+    long long n = 0;
+    unsigned char buf[65536];
+    size_t got;
+    while ((got = fread(buf, 1, sizeof(buf), f)) > 0) {
+        for (size_t i = 0; i < got; i++) h = (h ^ buf[i]) * 1099511628211ULL;
+        n += (long long)got;
+    }
+    fclose(f);
+    return h == F->hash && n == F->size ? 0 : 1;
+}
+
+// The map-text file that makes a compiled map stale (the first one that changed) or missing (the
+// first one that is gone), so the message names a part when it is a part; `fallback` (the main
+// file) when none is found
+static const char *SourceFileFor(const MS_Scene *s, MS_SourceState state, const char *fallback)
+{
+    unsigned char want = state == MS_SOURCE_STALE ? 1 : 2;
+    for (int i = 0; i < MS_MapFileCount(s); i++) {
+        const MS_MapFile *F = MS_MapFileAt(s, i);
+        if (F && MapFileState(F) == want) return F->fullPath;
+    }
+    return fallback;
+}
+
 // 0: exported (note); 1: nothing written (err). Prints its own result line (see export.h)
 unsigned char ExportScene(const MS_Scene *s, const char *outDir, bool console)
 {
@@ -943,12 +981,13 @@ static unsigned char Export(const MS_Scene *s, const char *outDirIn)
     MS_SourceState state = MS_CompiledSource(s, &source);
     if (state != MS_SOURCE_TEXT) {
         if (state != MS_SOURCE_CURRENT) {
+            const char *file = SourceFileFor(s, state, source);
             if (state == MS_SOURCE_STALE)
                 MS_SetError("export: %s was compiled from an older %s: export the .map (or compile it again); nothing written",
-                            s->path, source);
+                            s->path, file);
             else
                 MS_SetError("export: %s is a compiled map and its source %s is not next to it: the export needs the map's text; "
-                            "nothing written", s->path, source);
+                            "nothing written", s->path, file);
             return 1;
         }
         MS_Scene *text = MS_Load(source, &(MS_LoadOptions){ .noGpu = true });
@@ -996,7 +1035,9 @@ static unsigned char Export(const MS_Scene *s, const char *outDirIn)
     const char *root = s->root;
     size_t rootLen = strlen(root);
 
-    // --- Plan: the map package (the map file renamed to <name>.map, every referenced file + model parts)
+    // --- Plan: the map package (the map file renamed to <name>.map, every referenced file + model parts).
+    // The dependencies include the files the map imports (docs/map-format.md 2.10): they are copied at
+    // their package paths as source, like the .map, and compiled into the one <name>.mapb below
     Plan P = { 0 };
     char mapRel[MS_PATH_MAX + 8];
     snprintf(mapRel, sizeof(mapRel), "%s.map", name);

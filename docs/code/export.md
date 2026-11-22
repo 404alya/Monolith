@@ -38,6 +38,8 @@ R3D and the runtime load nothing from disk at run time besides the map package: 
 
 The loader only accepts package-relative paths (no absolute paths, no `..`), so the map file is copied byte for byte and every path in it stays valid. The map file is renamed to `<name>.map` only so that the folder loads by its name. Files of the source package that nothing refers to are not copied; the export lists them.
 
+**A map with imports** ([map-format.md](../map-format.md) §2.10): the files it imports are dependencies of the scene (`MS_Dependency`), so the copy loop copies each at its package path (`parts/lake.map` stays `parts/lake.map`; import paths are package-relative, so the renamed main file still finds them). They ship as source only, like the `.map`: step 3 below compiles the whole map, parts included, into the one `<name>.mapb`, and there is never a `.mapb` per part. The README lists them under "The compiled map". The compiled map's dependency list (`CM_DEPS`) names the parts too; the exported runtime only checks those paths and loads nothing from them.
+
 ## Nothing partial
 
 1. Every source is checked before anything is written: a referenced file that is missing fails the export with the list of missing files.
@@ -48,7 +50,7 @@ The loader only accepts package-relative paths (no absolute paths, no `..`), so 
 
 If writing, compiling or the check fails, the files written into `<dir>.partial` are removed again.
 
-A compiled map exports from its source text, which must be next to it and unchanged since it was compiled.
+A compiled map exports from its source text, which must be next to it and unchanged since it was compiled: every map-text file it lists (`MS_MapFileCount` / `MS_MapFileAt`: main file and parts) must be there with the size and FNV-1a 64 it was compiled from. The refusal names the file: the first one that changed (stale), else the first one that is gone (missing), so a changed or moved part is named, not the main file.
 
 ## Sources
 

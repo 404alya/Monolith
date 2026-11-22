@@ -17,11 +17,20 @@ static char dir[1024], fuzzPath[1100];
 
 // The header and section table fields this test changes (docs/compiled-map.md, section 2)
 enum { H_VERSION = 8, H_SIZE = 12, H_ORDER = 16, H_FORMAT = 20, H_COUNT = 24, H_TABLE = 28, H_FILESIZE = 32 };
-enum { S_STRINGS = 1, S_BOXES = 2, S_MATERIALS = 4, S_STATEMENTS = 13, S_ENV = 14, S_BOX_TURNS = 17, S_PAINT = 18, S_SECTIONS = 18 };
-// A material record and its face layout, filter and padding bytes, its paint atlas path,
-// paint filter and padding, noPrepass, drawDistance, paintGrid
-enum { MAT_SIZE = 180, MAT_UV_FACES = 148, MAT_FILTER = 154, MAT_PAD = 155, MAT_PAINT = 156, MAT_PAINT_FILTER = 160, MAT_PAD2 = 161, MAT_NO_PREPASS = 164,
-       MAT_DRAW_DISTANCE = 168, MAT_PAINT_GRID = 172, MAT_NO_COLLIDE = 176 };
+enum { S_STRINGS = 1, S_BOXES = 2, S_MATERIALS = 4, S_LIGHTS = 7, S_MODEL_FILES = 9, S_STATEMENTS = 13, S_ENV = 14,
+       S_BOX_TURNS = 17, S_PAINT = 18, S_SOURCES = 19, S_SECTIONS = 19 };
+// A material record and its line files, face layout, filter and padding bytes, its paint atlas path,
+// paint filter and padding, noPrepass, drawDistance, paintGrid, the paint key's line and file
+enum { MAT_SIZE = 212, MAT_FILE = 48, MAT_SHADER_FILE = 52, MAT_MAP_FILE = 56, MAT_UV_SCALE = 104, MAT_CULL = 124,
+       MAT_UNIFORM_FIRST = 156, MAT_UNIFORM_COUNT = 160, MAT_UV_FACES = 172, MAT_FILTER = 178, MAT_PAD = 179, MAT_PAINT = 180,
+       MAT_PAINT_FILTER = 184, MAT_PAD2 = 185, MAT_NO_PREPASS = 188, MAT_DRAW_DISTANCE = 192, MAT_PAINT_GRID = 196,
+       MAT_NO_COLLIDE = 200, MAT_PAINT_LINE = 204, MAT_PAINT_FILE = 208 };
+// A box record (corners, then its source reference: line, file, statement, group, material, copy, part)
+// and a light record (its direction, clip switch and box, then the same reference)
+enum { BOX_SIZE = 52, BOX_FILE = 28, BOX_STATEMENT = 32, BOX_GROUP = 36, BOX_MATERIAL = 40,
+       LIGHT_SIZE = 120, LIGHT_DIRECTION = 16, LIGHT_CLIP = 64, LIGHT_CLIP_MIN = 68, LIGHT_CLIP_MAX = 80, LIGHT_FILE = 96 };
+// A source record: path, the import line's file and line, padding, size, hash
+enum { SRC_PATH = 0, SRC_IMPORT_FILE = 4, SRC_IMPORT_LINE = 8, SRC_PAD = 12, SRC_SIZE = 16, SRC_HASH = 24 };
 
 static uint32_t Rd32(const unsigned char *b, uint32_t at) { uint32_t v; memcpy(&v, b + at, 4); return v; }
 static void Wr32(unsigned char *b, uint32_t at, uint32_t v) { memcpy(b + at, &v, 4); }
@@ -304,7 +313,7 @@ int main(int argc, char **argv)
         free(ok);
     }
     // A layout needs uv_scale 1 1 (tests/models: material 2, "tiles", has 2 2); material 0 loads with one
-    if (Rd32(orig, mats + 2 * MAT_SIZE + 80) != 0x3F800000u)       // (its uvScale.x is not 1)
+    if (Rd32(orig, mats + 2 * MAT_SIZE + MAT_UV_SCALE) != 0x3F800000u)       // (its uvScale.x is not 1)
         CASE("uv_faces on a material with uv_scale 2 2", memcpy(c + mats + 2 * MAT_SIZE + MAT_UV_FACES, ALL, 6));
     {
         unsigned char *ok = Copy(orig, size);
@@ -314,10 +323,10 @@ int main(int argc, char **argv)
         else printf("ok   uv_faces 0 1 2 3 4 5 and filter nearest on material 0 load\n");
         free(ok);
     }
-    CASE("material cull mode 7", Wr32(c, mats + 100, 7));
-    CASE("box material 9999", Wr32(c, boxes + 36, 9999));
-    CASE("box statement -1", Wr32(c, boxes + 28, 0xFFFFFFFFu));
-    CASE("box group 9999", Wr32(c, boxes + 32, 9999));
+    CASE("material cull mode 7", Wr32(c, mats + MAT_CULL, 7));
+    CASE("box material 9999", Wr32(c, boxes + BOX_MATERIAL, 9999));
+    CASE("box statement -1", Wr32(c, boxes + BOX_STATEMENT, 0xFFFFFFFFu));
+    CASE("box group 9999", Wr32(c, boxes + BOX_GROUP, 9999));
     CASE("box min.x NaN", Wr32(c, boxes, 0x7FC00000u));
     CASE("box min.x infinite", Wr32(c, boxes, 0x7F800000u));
     CASE("box min.x above max.x", Wr32(c, boxes, 0x7149F2CAu));     // (1e30)
@@ -325,6 +334,61 @@ int main(int argc, char **argv)
     CASE("statement key 0", Wr32(c, stmts, 0));
     CASE("env key unknown", Wr32(c, env, Rd32(c, mats)));     // (the name "default")
     CASE("env value type wrong", Wr32(c, env + 4, Rd32(c, env + 4) + 1));
+
+    // The map-text files (section "sources"): [0] repeats the header's source name, size and hash;
+    // every line's file is one of them (tests/models and tests/rotated have one: the main file)
+    uint32_t srcE, srcs = Section(orig, S_SOURCES, &srcE), srcCount = Rd32(orig, srcE + 8);
+    uint32_t lightE, lights0 = Section(orig, S_LIGHTS, &lightE), mfE, modelFiles = Section(orig, S_MODEL_FILES, &mfE);
+    if (srcCount == 1) {
+        CASE("no sources", Wr32(c, srcE + 8, 0));
+        CASE("source 0 not the header's name", Wr32(c, srcs + SRC_PATH, Rd32(c, mats)));      // ("default")
+        CASE("source 0 size not the header's", Wr32(c, srcs + SRC_SIZE, Rd32(c, srcs + SRC_SIZE) + 1));
+        CASE("source 0 hash not the header's", c[srcs + SRC_HASH] ^= 1);
+        CASE("source 0 imported from file 0", Wr32(c, srcs + SRC_IMPORT_FILE, 0));
+        CASE("source 0 imported at line 1", Wr32(c, srcs + SRC_IMPORT_LINE, 1));
+        CASE("source padding 1", Wr32(c, srcs + SRC_PAD, 1));
+        CASE("box file 1 (one source)", Wr32(c, boxes + BOX_FILE, 1));
+        CASE("box file -1", Wr32(c, boxes + BOX_FILE, 0xFFFFFFFFu));
+        CASE("material file 1", Wr32(c, mats + MAT_FILE, 1));
+        CASE("material shader file -1", Wr32(c, mats + MAT_SHADER_FILE, 0xFFFFFFFFu));
+        CASE("material map file 1", Wr32(c, mats + MAT_MAP_FILE + 8, 1));
+        CASE("material paint file 1", Wr32(c, mats + MAT_PAINT_FILE, 1));
+        CASE("material paint line -1", Wr32(c, mats + MAT_PAINT_LINE, 0xFFFFFFFFu));
+        if (Rd32(orig, lightE + 8) > 0) CASE("light file 1", Wr32(c, lights0 + LIGHT_FILE, 1));
+        if (Rd32(orig, mfE + 8) > 0) CASE("model file's line file 1", Wr32(c, modelFiles + 8, 1));
+    } else {
+        // A map in several map-text files (tests/imports: 4 sources, [1] imported from [0]): every
+        // record names an import line of a file before it, each path once, at most 4 MB per file
+        enum { SRC_REC = 32 };
+        uint32_t last = srcs + SRC_REC * (srcCount - 1);
+        CASE("source imported from itself", Wr32(c, last + SRC_IMPORT_FILE, srcCount - 1));
+        CASE("source imported from a later one", Wr32(c, srcs + SRC_REC + SRC_IMPORT_FILE, 2));
+        CASE("source imported from -2", Wr32(c, last + SRC_IMPORT_FILE, 0xFFFFFFFEu));
+        CASE("source imported at line 0", Wr32(c, last + SRC_IMPORT_LINE, 0));
+        CASE("source path twice", Wr32(c, last + SRC_PATH, Rd32(c, srcs + SRC_REC + SRC_PATH)));
+        CASE("source path the main file's", Wr32(c, last + SRC_PATH, Rd32(c, srcs + SRC_PATH)));
+        CASE("source larger than 4 MB", Wr32(c, last + SRC_SIZE, 4 * 1024 * 1024 + 1));
+        CASE("source padding 1", Wr32(c, last + SRC_PAD, 1));
+        char what[96];
+        snprintf(what, sizeof(what), "box file %u (= the source count)", srcCount);
+        CASE(what, Wr32(c, boxes + BOX_FILE, srcCount));
+        CASE("material file = the source count", Wr32(c, mats + MAT_FILE, srcCount));
+        // Valid: a box of the main file named as a line of the last file (any file, any line)
+        unsigned char *ok = Copy(orig, size);
+        Wr32(ok, boxes + BOX_FILE, srcCount - 1);
+        if (!Load(ok, size)) { printf("FAIL box file %u (the last source): %s\n", srcCount - 1, MS_LastError()); fails++; }
+        else printf("ok   box file %u (the last source) loads\n", srcCount - 1);
+        free(ok);
+        printf("ok   %u sources in the file\n", srcCount);
+    }
+    if (srcCount > 1) {
+        // (the package-specific cases below are tests/models' and tests/rotated's)
+        printf("%s: %d loads, %d valid scenes, %d failures\n", fails ? "FAILED" : "PASSED", loads, accepted, fails);
+        free(orig);
+        remove(fuzzPath);
+        MS_ClearError();
+        return fails ? 1 : 0;
+    }
     uint32_t turnsE, turns = Section(orig, S_BOX_TURNS, &turnsE), turnCount = Rd32(orig, turnsE + 8);
     if (turnCount >= 2) {
         // Box turns: { u32 box; f32 rotationDeg[3]; }, sorted by box, each box once, finite, not 0 0 0
@@ -344,7 +408,7 @@ int main(int argc, char **argv)
         CASE("box turn -0 0 -0", { Wr32(c, turns + 4, 0x80000000u); Wr32(c, turns + 8, 0); Wr32(c, turns + 12, 0x80000000u); });
         // A turned box whose centre overflows: its written box is flat at x = 3e38 (the box record
         // alone is valid; the turned record is not)
-        CASE("turned box centre out of range", { Wr32(c, boxes + 48 * b0, 0x7F61B1E6u); Wr32(c, boxes + 48 * b0 + 12, 0x7F61B1E6u); });
+        CASE("turned box centre out of range", { Wr32(c, boxes + BOX_SIZE * b0, 0x7F61B1E6u); Wr32(c, boxes + BOX_SIZE * b0 + 12, 0x7F61B1E6u); });
         // Loaded as valid: the same turns with another (finite) angle
         unsigned char *ok = Copy(orig, size);
         Wr32(ok, turns + 4, 0x42340000u);    // (yaw 45)
@@ -354,19 +418,23 @@ int main(int argc, char **argv)
         printf("ok   %u box turns in the file\n", turnCount);
     } else if (turnCount == 0) {
         // Damage the parser could never produce (found by review): shared uniform ranges, light directions
-        uint32_t uniE, lightE, lights = Section(orig, 7, &lightE);
+        uint32_t uniE, lights = lights0;
         Section(orig, 5, &uniE);
         // (tests/models: material 3, "awning", has the uniforms; light 1 is the spot light)
         uint32_t awning = mats + 3 * MAT_SIZE, bark = mats + 4 * MAT_SIZE;
-        if (Rd32(orig, uniE + 8) > 0 && Rd32(orig, awning + 136) > 0)
+        if (Rd32(orig, uniE + 8) > 0 && Rd32(orig, awning + MAT_UNIFORM_COUNT) > 0)
             CASE("two materials sharing one uniform range",
-                 { Wr32(c, bark + 132, Rd32(c, awning + 132)); Wr32(c, bark + 136, Rd32(c, awning + 136)); });
+                 { Wr32(c, bark + MAT_UNIFORM_FIRST, Rd32(c, awning + MAT_UNIFORM_FIRST));
+                   Wr32(c, bark + MAT_UNIFORM_COUNT, Rd32(c, awning + MAT_UNIFORM_COUNT)); });
         else { printf("FAIL the test package needs uniforms on material 3\n"); fails++; }
         if (Rd32(orig, lightE + 8) > 1) {
-            CASE("point light with a direction", Wr32(c, lights + 16, 0x3F800000u));
-            CASE("spot light direction scaled", Wr32(c, lights + 116 + 16, Rd32(c, lights + 116 + 16) ^ 0x01000000u));
-            CASE("spot light direction zero", { for (int k = 0; k < 3; k++) Wr32(c, lights + 116 + 16 + 4 * k, 0); });
-            CASE("light clip box flat", { Wr32(c, lights + 64, 1); for (int k = 0; k < 3; k++) { Wr32(c, lights + 68 + 4 * k, 0); Wr32(c, lights + 80 + 4 * k, 0); } });
+            uint32_t spot = lights + LIGHT_SIZE + LIGHT_DIRECTION;
+            CASE("point light with a direction", Wr32(c, lights + LIGHT_DIRECTION, 0x3F800000u));
+            CASE("spot light direction scaled", Wr32(c, spot, Rd32(c, spot) ^ 0x01000000u));
+            CASE("spot light direction zero", { for (int k = 0; k < 3; k++) Wr32(c, spot + 4 * k, 0); });
+            CASE("light clip box flat", { Wr32(c, lights + LIGHT_CLIP, 1);
+                                          for (int k = 0; k < 3; k++) { Wr32(c, lights + LIGHT_CLIP_MIN + 4 * k, 0);
+                                                                        Wr32(c, lights + LIGHT_CLIP_MAX + 4 * k, 0); } });
         } else { printf("FAIL the test package needs two lights\n"); fails++; }
         // A path that leaves the package: the first "models/" in the string table becomes "../els/"
         unsigned char *m = memmem(orig + strings, strCount, "models/", 7);

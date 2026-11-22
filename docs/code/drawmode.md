@@ -12,7 +12,7 @@ This file owns each atlas's pixels in memory while it paints: the runtime gets `
 
 ## Allocation and undo
 
-The first stroke on a face or slot without a rectangle is one undoable edit (`EDIT_PAINT_ADD`, `mapedit.c`): the object's line gets an id, the material its `paint` key, and the file's paint block a statement with the rectangle the packer chose (bottom-left on 4-texel cells with a 2-texel border, around the rectangles the text holds; the atlas grows by doubling up to 4096 x 4096). A stroke that goes on onto another face of the same box allocates there too, amended onto the same step (`MapEditAmendPaint`). Strokes on surfaces that have a rectangle are steps of paint alone.
+The first stroke on a face or slot without a rectangle is one undoable edit (`EDIT_PAINT_ADD`, `mapedit.c`): the object's line gets an id, the material its `paint` key, and the paint block of the object's file (the main map file, or the part that holds its line) a statement with the rectangle the packer chose (bottom-left on 4-texel cells with a 2-texel border, around the rectangles the text holds; the atlas grows by doubling up to 4096 x 4096). A stroke that goes on onto another face of the same box allocates there too, amended onto the same step (`MapEditAmendPaint`). Strokes on surfaces that have a rectangle are steps of paint alone.
 
 Every step keeps the 64 x 64 tiles it touched as they were before it, and the atlas's size before and after; undo and redo swap them with the atlas (`mapedit.c` calls the hooks of this file).
 

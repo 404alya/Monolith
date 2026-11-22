@@ -4,9 +4,9 @@ F5 in spectator mode, in or out of the edit mode ([live-editing.md](../live-edit
 
 ## The list
 
-It lists every explicit `id N` of the map (a line's prefix that names its objects for good: `runtime/monolith_scene.h`, "Entities"), one row per line in map order: the id, the line, the kind (the box primitive's name, model, light), how many objects the line makes, the model file or the material, and the group.
+It lists every explicit `id N` of the map (a line's prefix that names its objects for good: `runtime/monolith_scene.h`, "Entities"), one row per line in map order: the id, the line (`line 41`; a line of a part the map imports: `parts/lake.map:41`, in a wider column, cut to fit), the kind (the box primitive's name, model, light), how many objects the line makes, the model file or the material, and the group.
 
-The list is the shared `UiList` widget (`ui.h`): UP / DOWN / PGUP / PGDN / HOME / END move, and typing filters (the id, the line, the kind, the file or material and the group; case-insensitive).
+The list is the shared `UiList` widget (`ui.h`): UP / DOWN / PGUP / PGDN / HOME / END move, and typing filters (the id, the line, a part's path, the kind, the file or material and the group; case-insensitive).
 
 ## Keys of the panel
 

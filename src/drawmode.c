@@ -1675,8 +1675,11 @@ static int RefusalPrint(char *out, size_t size, unsigned char code, const MS_Sur
                             scene->materials[h->material].name);
     case 6: return snprintf(out, size, "%s is skinned: its bone channels are in use (can't be painted)", name);
     case 7: return snprintf(out, size, "%s slot %d can't be painted", name, h->slot);
-    case 8: return snprintf(out, size, "its paint entry (map line %d) is inactive (see the log): fix or remove that line",
-                            inactive >= 0 ? MS_PaintEntryAt(scene, inactive)->line : 0);
+    case 8: {
+        const MS_PaintEntry *E = inactive >= 0 ? MS_PaintEntryAt(scene, inactive) : NULL;
+        return snprintf(out, size, "its paint entry (map line %s%s%d) is inactive (see the log): fix or remove that line",
+                        MAPEDIT_LINE_AT(E ? E->file : 0, E ? E->line : 0));
+    }
     case 9: {
         float rho = MS_PaintGridOf(scene, h->material);
         if (HitIsBox(h)) {
@@ -1692,8 +1695,8 @@ static int RefusalPrint(char *out, size_t size, unsigned char code, const MS_Sur
         const MS_PaintEntry *E = inactive >= 0 ? MS_PaintEntryAt(scene, inactive) : NULL;
         FaceCells c = { 0 };
         if (HitIsBox(h)) FaceGridCells(h->hit.obj.index, h->face, MS_PaintGridOf(scene, h->material), &c);
-        return snprintf(out, size, "its paint (map line %d, %dx%d) is smaller than the face's %dx%d cells of the grid: Fit to grid",
-                        E ? E->line : 0, E ? E->w : 0, E ? E->h : 0, c.w, c.h);
+        return snprintf(out, size, "its paint (map line %s%s%d, %dx%d) is smaller than the face's %dx%d cells of the grid: Fit to grid",
+                        MAPEDIT_LINE_AT(E ? E->file : 0, E ? E->line : 0), E ? E->w : 0, E ? E->h : 0, c.w, c.h);
     }
     default: return snprintf(out, size, "%s", "");
     }
@@ -2073,7 +2076,7 @@ static bool StrokeBegin(DrawMode *dm, EditMode *em, const MS_SurfaceHit *h)
     DrawGeom g;
     unsigned char refused = Resolve(dm, h, &g);
     if (refused != 0) { SayRefusal(dm, refused, h, "nothing to paint here"); return false; }
-    if (!em->ed.work && !MapEditBegin(&em->ed)) { SayStatic(dm, true, "this map can't be painted (a compiled map?): load its .map"); return false; }
+    if (!MapEditHasWork(&em->ed) && !MapEditBegin(&em->ed)) { SayStatic(dm, true, "this map can't be painted (a compiled map?): load its .map"); return false; }
     bool model = HitIsModel(h);
     int file = model ? scene->models[h->hit.obj.index].file : -1;
     if (g.needsUnwrap && EnsureUnwrap(dm, h->hit.obj.index, h->slot, h->material) != 0) { Sayf(dm, true, "%s", MS_LastError()); return false; }
@@ -2899,7 +2902,7 @@ unsigned char DrawModeSave(DrawMode *dm, EditMode *em)
 {
     MapEditor *E = &em->ed;
     if (dm->stroking) StrokeEnd(dm, em);
-    if (E->work && !MapEditDiskUnchanged(E)) {
+    if (MapEditHasWork(E) && !MapEditDiskUnchanged(E)) {
         MS_SetError("not saved: %s changed on disk (a request? another editor?); it reloads and the edits are applied again",
                     scene->path);
         return 2;           // (not logged here: the caller says it, as before)
@@ -3052,7 +3055,7 @@ static bool ActionEntry(DrawMode *dm, const MS_SurfaceHit *h, const char *what, 
         Sayf(dm, true, "%s: point at a painted box or model first (the panel acts on the surface the cursor rests on)", what);
         return false;
     }
-    if (!dm->em->ed.work && !MapEditBegin(&dm->em->ed)) { SayStatic(dm, true, "this map can't be painted (a compiled map?)"); return false; }
+    if (!MapEditHasWork(&dm->em->ed) && !MapEditBegin(&dm->em->ed)) { SayStatic(dm, true, "this map can't be painted (a compiled map?)"); return false; }
     int inactive;
     *entry = EntryFor(h->hit.obj, h->material, h->face, h->slot, &inactive);
     if (*entry < 0 && small) *entry = GridTooSmall(h, inactive);
@@ -3142,7 +3145,7 @@ static void BoxGroups(const MS_SurfaceHit *h, unsigned char groups[6], int entri
 static DrawModeResult ActFaces(DrawMode *dm, const MS_SurfaceHit *h, const unsigned char want[6])
 {
     if (!HitIsBox(h)) { SayStatic(dm, true, "faces: point at a box (its faces are grouped here)"); return DRAWMODE_NONE; }
-    if (!dm->em->ed.work && !MapEditBegin(&dm->em->ed)) { SayStatic(dm, true, "this map can't be painted (a compiled map?)"); return DRAWMODE_NONE; }
+    if (!MapEditHasWork(&dm->em->ed) && !MapEditBegin(&dm->em->ed)) { SayStatic(dm, true, "this map can't be painted (a compiled map?)"); return DRAWMODE_NONE; }
     // The entries before (a snapshot: the ops change the scene's list)
     typedef struct { int x, y, w, h; unsigned char faces; bool kept; } Snap;
     Snap snaps[6];
@@ -3362,7 +3365,7 @@ static DrawModeResult ActPixelLook(DrawMode *dm, const MS_SurfaceHit *h, bool on
         else SayStatic(dm, false, on ? "pixel look on: new atlases get paint_filter nearest" : "pixel look off: new atlases are filtered");
         return DRAWMODE_NONE;
     }
-    if (!dm->em->ed.work && !MapEditBegin(&dm->em->ed)) return DRAWMODE_NONE;
+    if (!MapEditHasWork(&dm->em->ed) && !MapEditBegin(&dm->em->ed)) return DRAWMODE_NONE;
     MS_EntityId *ids;
     int count;
     unsigned char r = 1;
@@ -3628,12 +3631,13 @@ static void TargetText(DrawMode *dm)
         int e = MS_ObjectEntity(scene, h->hit.obj), first = e;
         while (first > 0 && e >= 0 && scene->entitySources[first - 1].prim == scene->entitySources[e].prim) first--;
         bool turned = scene->boxTurned && scene->boxTurned[h->hit.obj.index] >= 0;
-        MsgSetf(&T->what, "%s line %d #%d, face %s", turned ? "turned box" : "box", r ? r->line : 0, e >= 0 ? e - first : 0,
-                FACE_NAMES[h->face]);
+        MsgSetf(&T->what, "%s line %s%s%d #%d, face %s", turned ? "turned box" : "box", MAPEDIT_LINE_AT(r ? r->file : 0, r ? r->line : 0),
+                e >= 0 ? e - first : 0, FACE_NAMES[h->face]);
     } else if (HitIsModel(h)) {
         const MS_Ref *r = MS_ObjectRef(scene, h->hit.obj);
         int file = scene->models[h->hit.obj.index].file;
-        MsgSetf(&T->what, "model %s slot %d, line %d", GetFileName(scene->modelFiles[file].path), h->slot, r ? r->line : 0);
+        MsgSetf(&T->what, "model %s slot %d, line %s%s%d", GetFileName(scene->modelFiles[file].path), h->slot,
+                MAPEDIT_LINE_AT(r ? r->file : 0, r ? r->line : 0));
     } else if (h->hit.obj.kind == MS_OBJ_LIGHT) {
         MsgSetStatic(&T->what, "a light: nothing to paint");
         return;
@@ -3798,7 +3802,7 @@ void DrawModeOpen(DrawMode *dm, EditMode *em, Designer *d)
     dm->hoverVersion = 0;
     dm->hoverOk = false;
     dm->hover.hit.obj.kind = MS_OBJ_NONE;
-    if (!em->ed.work && !MapEditBegin(&em->ed)) SayStatic(dm, true, "this map can't be painted (a compiled map?): load its .map");
+    if (!MapEditHasWork(&em->ed) && !MapEditBegin(&em->ed)) SayStatic(dm, true, "this map can't be painted (a compiled map?): load its .map");
 }
 
 // Leaving: a shape in progress and the selection are dropped (docs/painting.md 18.5)
@@ -3815,7 +3819,7 @@ void DrawModeClose(DrawMode *dm)
 static DrawModeResult History(DrawMode *dm, EditMode *em, Designer *d, bool undo)
 {
     if (!EditModeConfirm(em, undo ? KEY_Z : KEY_Y)) return DRAWMODE_NONE;
-    if (!em->ed.work && !MapEditBegin(&em->ed)) return DRAWMODE_NONE;
+    if (!MapEditHasWork(&em->ed) && !MapEditBegin(&em->ed)) return DRAWMODE_NONE;
     MS_EntityId *ids;
     int count;
     unsigned char r = undo ? MapEditUndo(&em->ed, &ids, &count) : MapEditRedo(&em->ed, &ids, &count);
@@ -4227,8 +4231,7 @@ void DrawModeSync(DrawMode *dm, EditMode *em, bool newScene)
     // paint alone change no text: one live edit of the same text loads the atlases from memory (an
     // atlas of another size than its PNG: a new texture), then their pixels go up
     MapEditor *E = &dm->em->ed;
-    if (provided > 0 && E->work && E->workHash == scene->hash &&
-        MS_EditSetText(scene, E->work, E->workSize, &E->lastStats) != MS_RELOADED)
+    if (provided > 0 && MapEditHasWork(E) && E->workHash == scene->hash && MapEditShowWork(E) != MS_RELOADED)
         TraceLog(LOG_WARNING, "monolith: draw: the paint atlases could not be loaded again: %s", MS_LastError());
     for (int i = 0; i < dm->atlasCount; i++)
         if (dm->atlases[i].provided) Upload(&dm->atlases[i], 0, 0, dm->atlases[i].img.width, dm->atlases[i].img.height);
@@ -5016,7 +5019,7 @@ static void PrintState(DrawMode *dm, EditMode *em)
             BoxGroupCells(e->obj.index, e->faces, grid, &cw, &ch, &big, &many);
             snprintf(cells, sizeof(cells), " cells %dx%d", cw, ch);
         }
-        printf("paint:   entry line %d %s%s%s %u:%d %s %d %d %d %d%s%s%s\n", e->line, e->material >= 0 ? "\"" : "own",
+        printf("paint:   entry line %s%s%d %s%s%s %u:%d %s %d %d %d %d%s%s%s\n", MAPEDIT_LINE_AT(e->file, e->line), e->material >= 0 ? "\"" : "own",
                e->material >= 0 ? scene->materials[e->material].name : "", e->material >= 0 ? "\"" : "", e->entity.stmt, e->entity.index, where,
                e->x, e->y, e->w, e->h, cells, e->nearest ? " nearest" : "", e->active ? "" : " (inactive)");
     }
@@ -5071,7 +5074,7 @@ static unsigned char ScriptStroke(DrawMode *dm, EditMode *em, Camera3D cam, int 
             // (the unwrap goes live with a text edit; until the first stroke's, the script makes one now
             // to read the paint coordinates: the same text again)
             MapEditor *E = &em->ed;
-            if (MS_EditSetText(scene, E->work, E->workSize, &E->lastStats) != MS_RELOADED) {
+            if (MapEditShowWork(E) != MS_RELOADED) {
                 MsgSetf(line, "the unwrap can't go live: %s", MS_LastError());
                 return 1;
             }
@@ -5296,7 +5299,7 @@ int DrawModeRunScript(DrawMode *dm, EditMode *em, Designer *d, Camera3D cam, int
 {
     char *text = LoadFileText(path);
     if (!text) { fprintf(stderr, "monolith: cannot read the paint script %s\n", path); return 1; }
-    if (!em->ed.work && !MapEditBegin(&em->ed)) {
+    if (!MapEditHasWork(&em->ed) && !MapEditBegin(&em->ed)) {
         fprintf(stderr, "monolith: --paint-script: %s has no map text to paint (a compiled map?)\n", scene->path);
         UnloadFileText(text);
         return 1;

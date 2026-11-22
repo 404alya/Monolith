@@ -137,7 +137,7 @@ bool EditModeConfirm(EditMode *m, int key) { return Confirmed(m, key); }
 // The working copy starts at the first edit (the map as loaded); false for a compiled map
 static bool EnsureWork(EditMode *m)
 {
-    return m->ed.work || MapEditBegin(&m->ed);
+    return MapEditHasWork(&m->ed) || MapEditBegin(&m->ed);
 }
 
 // After an edit / undo / redo (r: MapEditApply's / MapEditUndo's code): the selection becomes the
@@ -292,6 +292,7 @@ void EditModeOpenIdPanel(EditMode *m, Designer *d, const char *text)
     MS_EntityId id = scene->entityIds[e];
     m->idOpen = true;
     m->idLine = scene->entitySources[e].line;
+    m->idFile = scene->entitySources[e].file;
     m->idHas = MS_ENTITY_EXPLICIT(id) ? (int)id.stmt : 0;
     m->idNext = MapEditNextId();
     if (text) snprintf(m->idText, sizeof(m->idText), "%s", text);
@@ -511,12 +512,12 @@ void EditModeSync(EditMode *m, Designer *d, bool newScene)
         TransformEnd(&m->modal, d);
         SayStatic(m, true, "the map was reloaded: the transform was cancelled");
     }
-    if (!E->work || (!newScene && scene->loadVersion == E->loadVersion)) return;
-    if (newScene && scene->hash == E->diskHash) {
-        // The renderer restarted and loaded the same file: the working copy goes live again
+    if (!MapEditHasWork(E) || (!newScene && scene->loadVersion == E->loadVersion)) return;
+    if (newScene && MapEditSceneOnDisk(E)) {
+        // The renderer restarted and loaded the same files: the working copy goes live again
         E->loadVersion = scene->loadVersion;
         if (E->workHash != scene->hash) {
-            if (MS_EditSetText(scene, E->work, E->workSize, &E->lastStats) != MS_RELOADED)
+            if (MapEditShowWork(E) != MS_RELOADED)
                 Sayf(m, true, "the unsaved edits could not be shown again: %s", MS_LastError());
             DesignerSync(d);
         }
@@ -679,7 +680,7 @@ int EditModeDrawHud(const EditMode *m, const Designer *d, int x, int y)
     if (m->idOpen) {
         // The id panel: a boxed number field under the mode's lines
         y += 8;
-        const char *title = TextFormat("ID for line %d  (now: %s)", m->idLine,
+        const char *title = TextFormat("ID for line %s%s%d  (now: %s)", MAPEDIT_LINE_AT(m->idFile, m->idLine),
                                        m->idHas ? TextFormat("id %d", m->idHas) : "implicit, changes when the line does");
         const char *hint = TextFormat("{ENTER} set|{ESC} cancel|empty: the next free id (%d)|1..2147483647, unique in the map",
                                       m->idNext);

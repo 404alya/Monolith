@@ -1,0 +1,7 @@
+monolith 3
+# parts/nested/c.map -- imported by parts/a.map (nesting)
+group "part c (nested)"
+block -3 0 -14 1 1 1
+use "brick"
+block -1 0 -14 1 1.5 1
+light spot -4 4 -8 0 -1 -0.5 inner 15 outer 30 energy 6 range 15

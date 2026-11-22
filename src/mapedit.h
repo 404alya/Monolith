@@ -1,5 +1,6 @@
 // Manual map edits: remove, move, turn, scale, duplicate and add objects as minimal text edits to the
-// map file (mapedit.c), with undo / redo; the edit script of --apply-edits
+// map's text (mapedit.c; each edit in the map-text file that holds the line: the main file or a part
+// it imports), with undo / redo; the edit script of --apply-edits
 #ifndef MONOLITH_MAPEDIT_H
 #define MONOLITH_MAPEDIT_H
 
@@ -33,6 +34,9 @@ typedef enum {
     EDIT_PAINT_REMOVE,      // the object's entries in paint.material lose the faces of paint.faces (an
                             // entry left without faces goes) or the entry of paint.slot goes (faces 0 and
                             // slot -1: every entry of the object in that material)
+    EDIT_MOVE_TO_FILE,      // the selected objects' whole lines (a `repeat` copy split out first) move to
+                            // map-text file filePath, with the `group` / `use` they had (docs/code/mapedit.md
+                            // "move-to-file"; the edit script only)
 } EditOpKind;
 
 // Faces of a paint entry (bits of EditOp.paint.faces): +x -x +y -y +z -z
@@ -60,6 +64,7 @@ typedef struct {
     double size[3];         // EDIT_SIZE: box / block size in metres about its centre, 0 = keep
     double ypr[3];          // EDIT_SET_ROTATION: yaw, pitch, roll in degrees (R = Ry Rx Rz)
     const char *modelPath;  // EDIT_ADD: package-relative model file
+    const char *filePath;   // EDIT_MOVE_TO_FILE: the package-relative map-text file the lines go to
     double pos[3];          // EDIT_ADD: where it stands (origin bottom)
     MS_ObjRef anchor;       // EDIT_ADD: the new line goes right after this object's line (its group)
     int id;                 // EDIT_ID: the id the selected objects' line gets (1..2147483647, unique in
@@ -78,23 +83,30 @@ typedef struct {
     } paint;
 } EditOp;
 
-// One part of an edit: bytes [offset, offset + oldLen) of the file before it became newText
+// One part of an edit: bytes [offset, offset + oldLen) of map-text file `path` before it became
+// newText. A step's hunks of one file are next to each other, in ascending order. created: the step
+// made the file (move-to-file into a new part: offset 0, nothing old); undone, the working copy no
+// longer has it (a file on disk stays: nothing is deleted)
 typedef struct {
+    char *path;             // package-relative, as MS_MapFile.path ("forest.map", "parts/lake.map")
     int offset;
     char *oldText, *newText;
     int oldLen, newLen;
+    unsigned long long fileBefore, fileAfter;   // FNV-1a 64 of the whole file before / after the step
+    bool created;
 } EditHunk;
 
 // A step's paint (docs/painting.md 10): the saved tiles of the strokes and the canvases they
 // belong to. Owned by drawmode.c; mapedit.c only keeps it in the history and calls the hooks.
 typedef struct PaintStep PaintStep;
 
-// One manual edit, reversible: the hunks against the file as it was, the file hashes before
-// and after, and the selection (entity ids) to restore on undo / redo; the op, so a rebase can
-// apply it again to another text (op.modelPath then points into modelPath)
+// One manual edit, reversible: the hunks against the files as they were, the map text's hashes
+// (scene->hash) before and after, and the selection (entity ids) to restore on undo / redo; the op,
+// so a rebase can apply it again to another text (op.modelPath then points into modelPath, op.filePath
+// into filePath)
 typedef struct {
     EditOp op;
-    char *modelPath;
+    char *modelPath, *filePath;
     MS_EntityId anchorId;   // EDIT_ADD: the entity of op.anchor (a rebase finds it by this)
     EditHunk *hunks;
     int hunkCount, hunkCap;
@@ -135,22 +147,32 @@ typedef struct {
     unsigned char (*save)(void *user);
 } MapEditPaintHooks;
 
+// One map-text file of the working copy: its text as the edits left it, and the file on disk as it
+// was last read or written. Kept by package-relative path (the scene's file order can change after
+// an edit); files[0] is the main map file.
+typedef struct {
+    char *path;                     // package-relative (MS_MapFile.path)
+    char *text;                     // the working text (heap, NUL-terminated); NULL: the working copy
+    int size;                       //   doesn't have the file (a new part whose move was undone)
+    unsigned long long hash;        // FNV-1a 64 of text
+    unsigned long long diskHash;    // of the file on disk when last read or written
+    bool onDisk;                    // the file was on disk then (false: a new part, not saved yet)
+} MapEditFile;
+
 typedef struct {
     EditStep *undo, *redo;  // heap stacks, top = last
     int undoCount, undoCap, redoCount, redoCap;
-    unsigned long long knownHash;   // the map file the stacks belong to (FNV-1a 64)
-    // The working copy (docs/live-editing.md 2; phase 1 switches the edits over to it): the
-    // map text the scene shows, the file's hash as last read or written, the undo depth that
-    // matches the file (-1 = none), the steps a rebase could not apply again
-    // The working copy exists once MapEditBegin ran (edit mode, --edit-script): from then on edits,
-    // undo and redo change it and go live (MS_EditSetText) instead of writing the file. Without it
-    // (--apply-edits) every edit writes the map file and reloads it.
-    char *work;
-    int workSize;
-    unsigned long long workHash;    // FNV-1a 64 of work (= scene->hash while the scene shows it)
-    unsigned long long diskHash;
+    unsigned long long knownHash;   // the map text the stacks belong to (scene->hash)
+    // The working copy (docs/live-editing.md 2): the map text the scene shows, one entry per
+    // map-text file (files[]), the undo depth that matches the files on disk (-1 = none), the steps
+    // a rebase could not apply again. It exists once MapEditBegin ran (edit mode, --edit-script):
+    // from then on edits, undo and redo change it and go live (MS_EditSetText) instead of writing
+    // the files. Without it (--apply-edits) every edit writes the files it changes and reloads.
+    MapEditFile *files;
+    int fileCount, fileCap;
+    unsigned long long workHash;    // scene->hash while the scene shows the working copy
     unsigned int loadVersion;       // scene->loadVersion the working copy belongs to
-    int savedAt;            // the undo depth both the file and the working copy have
+    int savedAt;            // the undo depth both the files and the working copy have
     EditStep *lost;         // steps the file has beyond savedAt that the working copy undid (a new edit
     int lostCount, lostCap; // dropped the redo stack holding them); they count as unsaved
     EditStep *failed;
@@ -208,6 +230,20 @@ unsigned char MapEditRedo(MapEditor *E, MS_EntityId **outSel, int *outSelCount);
 // Frees the history, the working copy and the note
 void MapEditFree(MapEditor *E);
 
+// The working copy exists (MapEditBegin ran since the last load)
+bool MapEditHasWork(const MapEditor *E);
+// The scene shows the working copy again (MS_EditSetText with every file's working text: after a
+// renderer restart, or to load provided textures again); E->workHash follows. MS_RELOADED or
+// MS_RELOAD_FAILED (MS_LastError())
+MS_ReloadResult MapEditShowWork(MapEditor *E);
+// The scene's map-text files are the files on disk as the working copy last read or wrote them
+bool MapEditSceneOnDisk(const MapEditor *E);
+// The package path of the scene's map-text file `file` ("parts/lake.map"), "" for the main file (and
+// out of range). A line is named the way dumps and the edit script name it ("line 41", "line
+// parts/lake.map:41") with "%s%s%d" and MAPEDIT_LINE_AT(file, line)
+const char *MapEditFilePath(int file);
+#define MAPEDIT_LINE_AT(file, line) MapEditFilePath(file), MapEditFilePath(file)[0] ? ":" : "", (line)
+
 // The working copy (docs/live-editing.md): MapEditBegin takes the loaded map text as the
 // working copy (after a load); MapEditSave writes it to the map file (MS_EditMarkSaved);
 // MapEditUnsaved counts the steps the file doesn't have; MapEditRebase applies the unsaved
@@ -229,7 +265,8 @@ unsigned char MapEditSave(MapEditor *E);
 unsigned char MapEditSaveAll(MapEditor *E);
 // The paint memory of the history (undo, redo and lost steps)
 long long MapEditPaintBytes(const MapEditor *E);
-// The map file on disk is the one the working copy was last read from or written to
+// Every map-text file on disk is the one the working copy was last read from or written to (and a
+// new part not saved yet is still not there)
 bool MapEditDiskUnchanged(const MapEditor *E);
 int MapEditUnsaved(const MapEditor *E);
 // MapEditRebase returns
@@ -242,7 +279,8 @@ int MapEditUnsaved(const MapEditor *E);
 // failed[] also gets the steps undone past the save point (with every code but 3).
 unsigned char MapEditRebase(MapEditor *E, MS_EntityId **outSel, int *outSelCount, int *failedCount);
 void MapEditClearFailed(MapEditor *E);
-// Writes the working copy to `path` (closing with unsaved edits)
+// Writes the working copy to `path` (closing with unsaved edits): the main file's text to path, and
+// every other file that differs from disk to <path without ".map">/<its package path>
 bool MapEditWriteWork(const MapEditor *E, const char *path);
 // "38.4 ms (parse 23.9, bvh 8.1, hidden 1.2, meshes 0.9 (3 of 324 rebuilt), ...)" for the log
 void MapEditStatsText(const MS_EditStats *st, char *out, int outSize);
@@ -255,10 +293,11 @@ void MapEditAnchor(MS_ObjRef o, double out[3]);
 // written there and in `select id 12`), else "id a7d95ba7:0 (implicit)" (hex, as --dump-entities
 // and `select entity` write it); "" when the object has no entity
 void MapEditIdText(MS_ObjRef o, char *out, int outSize);
-// The next free `id` of the loaded map file (the largest one + 1)
+// The next free `id` of the loaded map (the largest one in any of its map-text files + 1)
 int MapEditNextId(void);
 
-// A short description of where an object comes from: "line 120 (copy 3 of 8, id 7)"
+// A short description of where an object comes from: "line 120 (copy 3 of 8, id 7)", "line
+// parts/lake.map:41, id 7" for a line in a part
 void MapEditDescribe(MS_ObjRef o, char *out, int outSize);
 
 // What made each object (its line's statement), for the transform modal: what it can do
@@ -276,7 +315,7 @@ void MapEditClassify(const MS_ObjRef *objs, int count, unsigned char *classes);
 bool MapEditPreviewTransform(const EditOp *op, int cls, const MS_Transform *in, MS_Transform *out);
 
 // --apply-edits <script>: runs an edit script against the loaded scene (a noGpu load of
-// --map), writing the map file after every edit. Returns the exit status (0 = every line
+// --map), writing the map-text files each edit changes after it. Returns the exit status (0 = every line
 // worked). Format: docs/code/mapedit.md#edit-script.
 int MapEditRunScript(const char *scriptPath);
 // --edit-script <script>: the same language applied live to the loaded GPU scene (working copy,

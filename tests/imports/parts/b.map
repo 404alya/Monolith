@@ -1,0 +1,10 @@
+monolith 3
+# parts/b.map -- imported by imports.map: a model and a painted box
+group "part b"
+material "painted" albedo 200 200 200 roughness 0.8 paint "textures/paint/painted.png"
+use "painted"
+id 1 block 4 0 -4 2 2 2
+paint "painted" 1:0 +z 0 0 64 64
+use "default"
+model "models/rock_largeA.glb" 6 0 -1 rot 30 0 0 scale 2 origin bottom
+light point -4 2 4 color 150 180 255 energy 2 range 8

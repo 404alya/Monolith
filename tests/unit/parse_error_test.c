@@ -2,13 +2,16 @@
 // <message>", built straight into the runtime's last error (MS_LastError), with no message buffer in
 // between and no length limit. A bad token of any length (here up to 100 000 bytes) arrives whole and
 // valid UTF-8; a successful load after a failure clears the message. Short messages keep their exact
-// text. Built like the editor (the runtime with MONOLITH_EDITOR) with ASan + UBSan:
+// text. The messages of imports (a map in several map-text files) name the file that holds the line;
+// LiveEditCases checks the file list, the hashes and a live edit of an imported file. Built like the
+// editor (the runtime with MONOLITH_EDITOR) with ASan + UBSan:
 //   ./build.sh test parse_error          (builds it and runs it in build/parse-error-test/)
 //   parse_error_test <scratch folder>
 #include "monolith_scene.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 static int fails, loads;
 static char dir[1024];
@@ -98,6 +101,118 @@ static void ExpectLong(const char *what, const char *text, int line, const char 
     free(first);
 }
 
+// Writes `text` as <dir>/<rel>, a map-text file another map imports (rel may name a subfolder of
+// dir: it is made)
+static void WritePart(const char *rel, const char *text)
+{
+    char path[1100];
+    snprintf(path, sizeof(path), "%s/%s", dir, rel);
+    char *slash = strrchr(path, '/');
+    if (slash && strchr(rel, '/')) {
+        *slash = '\0';
+        mkdir(path, 0755);
+        *slash = '/';
+    }
+    FILE *f = fopen(path, "wb");
+    if (!f || fputs(text, f) == EOF) { printf("FAIL cannot write %s\n", path); exit(1); }
+    fclose(f);
+}
+
+// A map with imports, refused with exactly "<dir>/<errRel>:<line>: <message>": the message names the
+// map-text file that holds the line (errRel: package-relative; the main file is <what>.map)
+static void ExpectIn(const char *what, const char *text, const char *errRel, int line, const char *message)
+{
+    char path[1100], want[4096];
+    WriteMap(what, text, path, sizeof(path));
+    snprintf(want, sizeof(want), "%s/%s:%d: %s", dir, errRel, line, message);
+    if (!Refused(path)) { printf("FAIL %s: loaded\n", what); fails++; }
+    else if (strcmp(MS_LastError(), want) != 0) { printf("FAIL %s:\n  got  %s\n  want %s\n", what, MS_LastError(), want); fails++; }
+    else printf("ok   %s: %s\n", what, MS_LastError());
+}
+
+// FNV-1a 64 of n bytes, continuing from h
+static unsigned long long Fnv(unsigned long long h, const void *data, size_t n)
+{
+    for (size_t i = 0; i < n; i++) h = (h ^ ((const unsigned char *)data)[i]) * 1099511628211ULL;
+    return h;
+}
+
+// A check of the live-edit cases: prints ok / FAIL with what
+static void Check(bool ok, const char *what)
+{
+    if (ok) printf("ok   %s\n", what);
+    else { printf("FAIL %s (last error: %s)\n", what, MS_LastError()); fails++; }
+}
+
+// A map with an import, loaded and edited live (MS_EditSetText, noGpu): the file list, the lines of
+// each file, the map text's hash (docs/code/monolith_scene.md, "Imports": path NUL size NUL bytes of
+// each file), and an import taking the text given for its path (an error in it names the part's
+// line; the scene stays as it was), else the file on disk
+static void LiveEditCases(void)
+{
+    const char *mainText = "monolith 3\nbox 0 0 0 1 1 1\nimport \"parts/live.map\"\n";
+    const char *partText = "monolith 3\nbox 2 0 0 3 1 1\n";
+    char path[1100], want[2048];
+    WritePart("parts/live.map", partText);
+    WriteMap("live", mainText, path, sizeof(path));
+    loads++;
+    MS_Scene *s = MS_Load(path, &(MS_LoadOptions){ .noGpu = true });
+    if (!s) { printf("FAIL live: refused: %s\n", MS_LastError()); fails++; return; }
+
+    // The file list and the lines
+    const MS_MapFile *mainFile = MS_MapFileAt(s, 0), *part = MS_MapFileAt(s, 1);
+    Check(MS_MapFileCount(s) == 2 && mainFile && part && strcmp(mainFile->path, "live.map") == 0 &&
+          strcmp(part->path, "parts/live.map") == 0 && part->importFile == 0 && part->importLine == 3 &&
+          mainFile->importFile == -1 && MS_MapFileFind(s, "parts/live.map") == 1 && !MS_MapFileAt(s, 2),
+          "live: two map-text files, the part imported at live.map:3");
+    int len;
+    const char *line = MS_LineText(s, 1, 2, &len);
+    Check(line && len == 15 && memcmp(line, "box 2 0 0 3 1 1", 15) == 0 && !MS_LineText(s, 1, 3, &len) &&
+          s->boxCount == 2 && s->boxRefs[1].file == 1 && s->boxRefs[1].line == 2 && s->boxRefs[0].file == 0,
+          "live: the part's lines, its box at parts/live.map:2");
+    unsigned long long h = 0xcbf29ce484222325ULL;
+    const char *names[2] = { "live.map", "parts/live.map" }, *texts[2] = { mainText, partText };
+    for (int i = 0; i < 2; i++) {
+        char size[24];
+        int n = snprintf(size, sizeof(size), "%zu", strlen(texts[i]));
+        h = Fnv(h, names[i], strlen(names[i]) + 1);
+        h = Fnv(h, size, (size_t)n + 1);
+        h = Fnv(h, texts[i], strlen(texts[i]));
+    }
+    Check(s->hash == h && mainFile->hash == Fnv(0xcbf29ce484222325ULL, mainText, strlen(mainText)) &&
+          part->hash == Fnv(0xcbf29ce484222325ULL, partText, strlen(partText)) && part->size == (long long)strlen(partText),
+          "live: the combined hash and each file's own");
+    bool watched = false;
+    for (int i = 0; i < MS_DependencyCount(s); i++) {
+        const char *dep = MS_Dependency(s, i);
+        size_t n = strlen(dep);
+        watched = watched || (n >= 14 && strcmp(dep + n - 14, "parts/live.map") == 0);
+    }
+    Check(watched, "live: the part is a dependency (hot reload watches it)");
+
+    // A broken text given for the part: refused at the part's line, the scene unchanged
+    const char *bad = "monolith 3\nbox 2 0 0 3 1 abc\n";
+    MS_MapFileText files[2] = { { "live.map", mainText, (int)strlen(mainText) }, { "parts/live.map", bad, (int)strlen(bad) } };
+    snprintf(want, sizeof(want), "%s/parts/live.map:2: bad number 'abc'", dir);
+    Check(MS_EditSetText(s, files, 2, NULL) == MS_RELOAD_FAILED && strcmp(MS_LastError(), want) == 0 && s->boxCount == 2,
+          "live: a broken part text is refused with the part's line");
+
+    // A good one: the part's text is the given one (a box more), the hash follows it
+    const char *more = "monolith 3\nbox 2 0 0 3 1 1\nbox 4 0 0 5 1 1\n";
+    files[1].text = more;
+    files[1].size = (int)strlen(more);
+    int size;
+    Check(MS_EditSetText(s, files, 2, NULL) == MS_RELOADED && s->boxCount == 3 && s->boxRefs[2].file == 1 &&
+          s->boxRefs[2].line == 3 && strcmp(MS_MapText(s, 1, &size), more) == 0 && size == (int)strlen(more) &&
+          MS_MapFileAt(s, 1)->hash == Fnv(0xcbf29ce484222325ULL, more, strlen(more)) && s->hash != h,
+          "live: the text given for the part is parsed");
+
+    // Only the main file's text: the part is read from disk again
+    Check(MS_EditSetText(s, files, 1, NULL) == MS_RELOADED && s->boxCount == 2 && s->hash == h,
+          "live: without a text for the part, the file on disk");
+    MS_Unload(s);
+}
+
 // Writes `text` as a map that loads: the load must succeed and leave MS_LastError() ""
 static void ExpectCleared(const char *what, const char *text)
 {
@@ -147,8 +262,76 @@ int main(int argc, char **argv)
                 "map format 4 is newer than this monolith (3): update monolith");
     ExpectExact("format-3-at", "monolith 3\nrepeat 2 0 0 1 at 0 0 5 box 0 0 0 1 1 1\n", 2,
                 "unknown keyword 'at' (expected group, box, block, stairs, waffle, model, light, material, use, env, "
-                "paint, spawn, viewpoint, id or repeat)");
+                "paint, import, spawn, viewpoint, id or repeat)");
     ExpectFile("comments-only", "# nothing\n\n   # but comments\n", "map is empty (no boxes and no models)");
+
+    // Imports (docs/map-format.md 2.10): each file once (a second import names where it was first
+    // imported; a cycle shows the chain of open files), inside the package, there, a .map file, one
+    // quoted path; env / spawn / viewpoint only in the main file; each part with the current format
+    // line (the migration named for the main file); an error in a part names the part and its line;
+    // a duplicate id names both files' lines
+    char msg[2048];
+    WritePart("imp-a.map", "monolith 3\nbox 0 0 0 1 1 1\n");
+    ExpectExact("import-twice", "monolith 3\nimport \"imp-a.map\"\nimport \"./imp-a.map\"\n", 3,
+                "\"imp-a.map\" is already imported (at import-twice.map:2): a file is read once per map");
+    ExpectExact("import-self", "monolith 3\nbox 0 0 0 1 1 1\nimport \"import-self.map\"\n", 3,
+                "import cycle: \"import-self.map\" is already being read: import-self.map -> import-self.map");
+    WritePart("cyc-a.map", "monolith 3\nimport \"cyc-b.map\"\n");
+    WritePart("cyc-b.map", "monolith 3\nbox 0 0 0 1 1 1\nimport \"cyc-a.map\"\n");
+    ExpectIn("import-cycle", "monolith 3\nimport \"cyc-a.map\"\n", "cyc-b.map", 3,
+             "import cycle: \"cyc-a.map\" is already being read: cyc-a.map -> cyc-b.map -> cyc-a.map");
+    ExpectExact("import-outside", "monolith 3\nimport \"../imp-a.map\"\n", 2,
+                "path must stay inside the package: \"../imp-a.map\"");
+    ExpectExact("import-missing", "monolith 3\nbox 0 0 0 1 1 1\nimport \"parts/nope.map\"\n", 3,
+                "file not found: \"parts/nope.map\" (paths are relative to the package folder)");
+    ExpectExact("import-not-map", "monolith 3\nimport \"textures/a.png\"\n", 2,
+                "import: \"textures/a.png\" is not a map-text file (an imported file's name ends in .map)");
+    ExpectExact("import-unquoted", "monolith 3\nimport imp-a.map\n", 2, "a path must be in double quotes: \"imp-a.map\"");
+    ExpectExact("import-two-paths", "monolith 3\nimport \"imp-a.map\" \"cyc-a.map\"\n", 2,
+                "import takes one path in double quotes: import \"parts/name.map\"");
+    ExpectExact("import-none", "monolith 3\nimport\n", 2, "import takes one path in double quotes: import \"parts/name.map\"");
+    ExpectExact("import-id-prefix", "monolith 3\nid 4 import \"imp-a.map\"\n", 2,
+                "import takes no id or repeat prefix: import \"parts/name.map\"");
+    ExpectExact("import-repeat-prefix", "monolith 3\nrepeat 3 1 0 0 import \"imp-a.map\"\n", 2,
+                "import takes no id or repeat prefix: import \"parts/name.map\"");
+    // Nesting cap: deep/d1.map imports deep/d2.map ... each one level deeper; the main file is
+    // level 1, so deep/d256.map's import is the 257th open file
+    for (int k = 1; k <= 257; k++) {
+        char rel[64], text[128];
+        snprintf(rel, sizeof(rel), "deep/d%d.map", k);
+        snprintf(text, sizeof(text), "monolith 3\nbox 0 0 0 1 1 1\nimport \"deep/d%d.map\"\n", k + 1);
+        WritePart(rel, text);
+    }
+    ExpectIn("import-too-deep", "monolith 3\nimport \"deep/d1.map\"\n", "deep/d255.map", 3,
+             "imports nested more than 256 files deep");
+    WritePart("parts/env.map", "monolith 3\nbox 0 0 0 1 1 1\nenv fog.density 0.01\n");
+    WritePart("parts/spawn.map", "monolith 3\nspawn 0 0 3 0\n");
+    WritePart("parts/view.map", "monolith 3\n\nviewpoint \"v\" 0 1 5 0 1 0\n");
+    ExpectIn("import-env", "monolith 3\nimport \"parts/env.map\"\n", "parts/env.map", 3,
+             "env lines belong in the main map file (import-env.map)");
+    ExpectIn("import-spawn", "monolith 3\nbox 0 0 0 1 1 1\nimport \"parts/spawn.map\"\n", "parts/spawn.map", 2,
+             "spawn lines belong in the main map file (import-spawn.map)");
+    ExpectIn("import-viewpoint", "monolith 3\nbox 0 0 0 1 1 1\nimport \"parts/view.map\"\n", "parts/view.map", 3,
+             "viewpoint lines belong in the main map file (import-viewpoint.map)");
+    WritePart("parts/old.map", "monolith 2\nbox 0 0 0 1 1 1\n");
+    WritePart("parts/none.map", "# no format line\nbox 0 0 0 1 1 1\n");
+    snprintf(msg, sizeof(msg), "map format 2 is older than this monolith (3): run /migrate-map %s/import-old.map in "
+             "Claude Code (docs/map-format.md \xC2\xA7" "1.3)", dir);
+    ExpectIn("import-old", "monolith 3\nimport \"parts/old.map\"\n", "parts/old.map", 1, msg);
+    snprintf(msg, sizeof(msg), "map format 1 is older than this monolith (3): run /migrate-map %s/import-format-none.map in "
+             "Claude Code (docs/map-format.md \xC2\xA7" "1.3)", dir);
+    ExpectIn("import-format-none", "monolith 3\nimport \"parts/none.map\"\n", "parts/none.map", 2, msg);
+    WritePart("parts/bad.map", "monolith 3\n# a part\nbox 0 0 0 1 1 abc\n");
+    ExpectIn("import-error-in-part", "monolith 3\nbox 0 0 0 1 1 1\nimport \"parts/bad.map\"\nbox 0 0 0 1 1 1\n",
+             "parts/bad.map", 3, "bad number 'abc'");
+    WritePart("parts/dup.map", "monolith 3\n\nid 5 box 0 0 0 1 1 1\n");
+    ExpectIn("import-duplicate-id", "monolith 3\nid 5 box 0 0 0 1 1 1\nimport \"parts/dup.map\"\n", "parts/dup.map", 3,
+             "duplicate id 5 (also at import-duplicate-id.map:2)");
+    ExpectExact("duplicate-id", "monolith 3\nid 5 box 0 0 0 1 1 1\nid 5 box 0 0 0 1 1 1\n", 3, "duplicate id 5 (also on line 2)");
+    WritePart("parts/empty.map", "monolith 3\n# nothing\n");
+    ExpectFile("import-empty", "monolith 3\nimport \"parts/empty.map\"\n", "map is empty (no boxes and no models)");
+
+    LiveEditCases();
 
     // A bad token of 300 'é' (600 bytes) and 400 'x': longer than the parser's old message buffers
     char token[1200] = "", text[1400];

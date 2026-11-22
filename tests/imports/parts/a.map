@@ -1,0 +1,13 @@
+monolith 3
+# parts/a.map -- imported by imports.map; imports parts/nested/c.map
+group "part a"
+material "stone" metalness 0.1
+material "moss" albedo 70 110 60 roughness 0.95
+block -4 0 -6 1 1 1
+use "moss"
+repeat 4 1.5 0 0 block -6 0 -12 1 0.5 1
+import "parts/nested/c.map"
+group "part a: after c"
+block -6 0 -14 1 2 1
+use "stone"
+box -2 0 -10 -1 2 -9

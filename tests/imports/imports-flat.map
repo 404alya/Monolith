@@ -1,0 +1,68 @@
+monolith 3
+# imports-flat.map -- the single-file twin of imports.map (MAP.md): the same lines with every import
+# pasted in and the scope rules written out (`use "default"` where a part starts, the importing
+# file's `use` again where an import ends). Keep the two in step.
+
+env sun.direction 0.4 -0.8 0.45
+env shadow.size 2048
+env sun.range 60
+env volumetricFog.enabled off
+
+spawn 0 0 14 180
+viewpoint "Overview" 0 9 18 0 1 -6
+viewpoint "Parts" -12 3 4 -4 0.5 -10
+viewpoint "Paint" 7 2.5 2 4 1 -4
+
+material "ground" albedo 118 112 100 roughness 0.95
+material "stone" albedo 150 146 138 roughness 0.85
+material "brick" albedo 160 80 60 roughness 0.9
+
+group "ground"
+use "ground"
+box -30 -1 -30 30 0 30
+
+group "main: before the imports"
+use "stone"
+block -8 0 -8 2 3 2
+# --- parts/a.map
+use "default"
+group "part a"
+material "stone" metalness 0.1
+material "moss" albedo 70 110 60 roughness 0.95
+block -4 0 -6 1 1 1
+use "moss"
+repeat 4 1.5 0 0 block -6 0 -12 1 0.5 1
+# --- parts/nested/c.map
+use "default"
+group "part c (nested)"
+block -3 0 -14 1 1 1
+use "brick"
+block -1 0 -14 1 1.5 1
+light spot -4 4 -8 0 -1 -0.5 inner 15 outer 30 energy 6 range 15
+# --- end of parts/nested/c.map
+use "moss"
+group "part a: after c"
+block -6 0 -14 1 2 1
+use "stone"
+box -2 0 -10 -1 2 -9
+# --- end of parts/a.map
+use "stone"
+group "main: between the imports"
+box -10 0 -4 -8 1 -2
+use "brick"
+# --- parts/b.map
+use "default"
+group "part b"
+material "painted" albedo 200 200 200 roughness 0.8 paint "textures/paint/painted.png"
+use "painted"
+id 1 block 4 0 -4 2 2 2
+paint "painted" 1:0 +z 0 0 64 64
+use "default"
+model "models/rock_largeA.glb" 6 0 -1 rot 30 0 0 scale 2 origin bottom
+light point -4 2 4 color 150 180 255 energy 2 range 8
+# --- end of parts/b.map
+use "brick"
+group "main: after the imports"
+block 8 0 -8 2 3 2
+use "default"
+light point 0 3 0 color 255 200 150 energy 4 range 12 shadow on

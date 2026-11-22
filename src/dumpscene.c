@@ -10,7 +10,16 @@ static void HexBox(FILE *f, BoundingBox b) { Hex3(f, b.min); Hex3(f, b.max); }
 
 // Index prefix (" <i>") and "line <l> " only in the plain dump
 static void Index(FILE *f, bool diff, int i) { if (!diff) fprintf(f, " %d", i); }
-static void Line(FILE *f, bool diff, int line) { if (!diff) fprintf(f, " line %d", line); }
+
+// " line <l>" for a line of the main map file (file 0: every dump of a map without imports stays as
+// it was), " line <path>:<l>" for a line of an imported file (its package-relative path)
+static void Line(FILE *f, const MS_Scene *s, bool diff, int file, int line)
+{
+    if (diff) return;
+    const MS_MapFile *F = file > 0 ? MS_MapFileAt(s, file) : NULL;
+    if (F) fprintf(f, " line %s:%d", F->path, line);
+    else fprintf(f, " line %d", line);
+}
 
 static void GroupRef(FILE *f, const MS_Scene *s, bool diff, int g)
 {
@@ -46,7 +55,7 @@ bool DumpScene(const MS_Scene *s, const char *path, bool diff)
         fprintf(f, "box");
         Index(f, diff, i);
         HexBox(f, s->boxes[i]);
-        Line(f, diff, s->boxRefs[i].line);
+        Line(f, s, diff, s->boxRefs[i].file, s->boxRefs[i].line);
         GroupRef(f, s, diff, s->boxRefs[i].group);
         MaterialRef(f, s, diff, "material", s->boxRefs[i].material);
         if (s->boxTurned && s->boxTurned[i] >= 0) {
@@ -76,7 +85,7 @@ bool DumpScene(const MS_Scene *s, const char *path, bool diff)
         Index(f, diff, i);
         if (diff) fprintf(f, " file \"%s\"", s->modelFiles[M->file].path);
         else fprintf(f, " file %d", M->file);
-        Line(f, diff, M->ref.line);
+        Line(f, s, diff, M->ref.file, M->ref.line);
         GroupRef(f, s, diff, M->ref.group);
         MaterialRef(f, s, diff, "material", M->ref.material);
         fprintf(f, " origin %s collide %s shadow %s position", ORIGIN[M->origin % 3], COLLIDE[M->collide % 3],
@@ -111,7 +120,7 @@ bool DumpScene(const MS_Scene *s, const char *path, bool diff)
         fprintf(f, "material");
         Index(f, diff, i);
         fprintf(f, " \"%s\"", m->name);
-        Line(f, diff, m->line);
+        Line(f, s, diff, m->file, m->line);
         fprintf(f, " shader \"%s\" unlit %s", m->shader ? m->shader : "", m->material.unlit ? "on" : "off");
         // (only when set, so the dumps of maps without the key stay as they were)
         if (m->drawDistance < 0.0f) fprintf(f, " draw_distance off");
@@ -124,7 +133,7 @@ bool DumpScene(const MS_Scene *s, const char *path, bool diff)
         fprintf(f, "light");
         Index(f, diff, i);
         fprintf(f, " %s", LIGHT[L->type % 3]);
-        Line(f, diff, s->lights[i].ref.line);
+        Line(f, s, diff, s->lights[i].ref.file, s->lights[i].ref.line);
         fprintf(f, " position");
         Hex3(f, L->position);
         fprintf(f, " direction"); Hex3(f, L->direction);
@@ -150,9 +159,10 @@ bool DumpEntities(const MS_Scene *s, const char *path)
         MS_EntityId id = s->entityIds[e];
         const MS_Source *src = &s->entitySources[e];
         const MS_Transform *t = &s->entityTransforms[e];
-        fprintf(f, "entity %d id %08x:%d %s %s %d line %d copy %d part %d position", e, id.stmt, id.index,
-                MS_ENTITY_EXPLICIT(id) ? "explicit" : "implicit", KIND[s->entityObjects[e].kind % 4], s->entityObjects[e].index,
-                src->line, src->copy, src->part);
+        fprintf(f, "entity %d id %08x:%d %s %s %d", e, id.stmt, id.index,
+                MS_ENTITY_EXPLICIT(id) ? "explicit" : "implicit", KIND[s->entityObjects[e].kind % 4], s->entityObjects[e].index);
+        Line(f, s, false, src->file, src->line);
+        fprintf(f, " copy %d part %d position", src->copy, src->part);
         Hex3(f, t->position);
         fprintf(f, " rotationDeg"); Hex3(f, t->rotationDeg);
         fprintf(f, " scale"); Hex3(f, t->scale);

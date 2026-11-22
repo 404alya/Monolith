@@ -351,7 +351,7 @@ For testing without a visible window.
 |---|---|
 | `--pick` | with `--shot`: print what the crosshair (screen centre) hits on the shot frame: box or model index, group, map line + its text, point, normal, distance (models: file, position, rotation, scale, origin, bounds); then a `pick: surface` line: the material it is drawn with, the box face or the model's slot, mesh and triangle, the position on the face / texture coordinate, the sampled `uv` and barycentric coordinates ([painting.md](../painting.md) §6) |
 | `--pick-at x y` | with `--shot`: the same for the ray through pixel (x, y) of the shot (top-left origin, as `--region` and `view.png`), e.g. the edges of a gap; repeatable, each printed after a `pick-at x y` line |
-| `--select <line>` | select every box / model made by this map line (repeatable) |
+| `--select [<file>:]<line>` | select every box / model made by this line of the main map file, or of a part it imports (`parts/lake.map:41`; repeatable) |
 | `--region x y w h` | attach a screen region (pixels of the shot, top-left origin), as if dragged out in snip mode (repeatable); with `--shot-hud` the shot shows the snip-mode drawing, with `--submit` the bundle gets the regions |
 | `--volume x0 y0 z0 x1 y1 z1` | attach a volume: an axis-aligned box between two opposite corners in map coordinates, as if made in volume mode (repeatable); `--shot-hud` draws it, `--submit` puts it into the bundle (`volumes[]`) |
 | `--submit "text"` | with `--shot`: run the real submit path (see below) |

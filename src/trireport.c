@@ -11,7 +11,8 @@
 //       no frustum: what the camera could draw from there)
 //   group "<name>" boxes <n> models <n> triangles <t> (<p>%)
 //   material "<name>" boxes <n> triangles <t> (<p>%) draw_distance <auto|off|m> ranges <n> distance <min>..<max>
-//   line <l> boxes <n> models <n> triangles <t> group "<name>" material "<name>"     (the first 60)
+//   line <l> boxes <n> models <n> triangles <t> group "<name>" material "<name>"     (the first 60; a line
+//                                       of an imported file: line <path>:<l>)
 //   range <r> <merged|instanced|models> "<material or model file>" objects <n> triangles <t>
 //         distance <m|always> bounds <x0 y0 z0 x1 y1 z1>       (distance: at detail_distance 1)
 #include "trireport.h"
@@ -49,9 +50,20 @@ static float BoxDistance(Vector3 p, BoundingBox b)
 bool WriteTriReport(const MS_Scene *s, const char *path, float detailDistance)
 {
     int nr = MS_DrawRangeCount(s);
-    int maxLine = 0;
-    for (int i = 0; i < s->boxCount; i++) if (s->boxRefs[i].line > maxLine) maxLine = s->boxRefs[i].line;
-    for (int i = 0; i < s->modelCount; i++) if (s->models[i].ref.line > maxLine) maxLine = s->models[i].ref.line;
+    // Line rows: one per (map-text file, line), file f's lines at rowBase[f] + line (one file: the line)
+    int fileCount = MS_MapFileCount(s) > 0 ? MS_MapFileCount(s) : 1;
+    int *rowBase = calloc((size_t)fileCount + 1, sizeof(int));
+    if (!rowBase) return false;
+    for (int i = 0; i < s->boxCount; i++) {
+        const MS_Ref *R = &s->boxRefs[i];
+        if (R->file >= 0 && R->file < fileCount && R->line > rowBase[R->file + 1]) rowBase[R->file + 1] = R->line;
+    }
+    for (int i = 0; i < s->modelCount; i++) {
+        const MS_Ref *R = &s->models[i].ref;
+        if (R->file >= 0 && R->file < fileCount && R->line > rowBase[R->file + 1]) rowBase[R->file + 1] = R->line;
+    }
+    for (int k = 1; k <= fileCount; k++) rowBase[k] += rowBase[k - 1] + 1;     // (max line + 1 rows per file)
+    int maxLine = rowBase[fileCount] - 1;       // the last row
     // groups: [groupCount] = no group
     Count *groups = calloc((size_t)s->groupCount + 1, sizeof(Count));
     Count *mats = calloc((size_t)s->materialCount + 1, sizeof(Count));
@@ -73,7 +85,8 @@ bool WriteTriReport(const MS_Scene *s, const char *path, float detailDistance)
         int g = R->group >= 0 && R->group < s->groupCount ? R->group : s->groupCount;
         groups[g].tris += t; groups[g].boxes++;
         if (R->material >= 0 && R->material < s->materialCount) { mats[R->material].tris += t; mats[R->material].boxes++; }
-        if (R->line > 0) { lines[R->line].tris += t; lines[R->line].boxes++; lineGroup[R->line] = g; lineMat[R->line] = R->material; }
+        int row = R->line > 0 && R->file >= 0 && R->file < fileCount ? rowBase[R->file] + R->line : -1;
+        if (row >= 0) { lines[row].tris += t; lines[row].boxes++; lineGroup[row] = g; lineMat[row] = R->material; }
         boxTris += t;
     }
     for (int i = 0; ok && i < s->modelCount; i++) {
@@ -81,7 +94,9 @@ bool WriteTriReport(const MS_Scene *s, const char *path, float detailDistance)
         long long t = s->modelFiles[M->file].triangleCount;
         int g = M->ref.group >= 0 && M->ref.group < s->groupCount ? M->ref.group : s->groupCount;
         groups[g].tris += t; groups[g].models++;
-        if (M->ref.line > 0) { lines[M->ref.line].tris += t; lines[M->ref.line].models++; lineGroup[M->ref.line] = g; lineMat[M->ref.line] = -1; }
+        const MS_Ref *R = &M->ref;
+        int row = R->line > 0 && R->file >= 0 && R->file < fileCount ? rowBase[R->file] + R->line : -1;
+        if (row >= 0) { lines[row].tris += t; lines[row].models++; lineGroup[row] = g; lineMat[row] = -1; }
         modelTris += t;
     }
     for (int m = 0; m < s->materialCount && mats; m++) { mats[m].dMin = INFINITY; mats[m].dMax = 0.0f; }
@@ -150,8 +165,13 @@ bool WriteTriReport(const MS_Scene *s, const char *path, float detailDistance)
         for (int k = 0; ok && k < 60 && k <= maxLine; k++) {
             int l = order[k];
             if (lines[l].boxes + lines[l].models == 0) break;
-            int g = lineGroup[l], m = lineMat[l];
-            fprintf(f, "line %d boxes %d models %d triangles %lld group \"%s\" material \"%s\"\n", l, lines[l].boxes,
+            int g = lineGroup[l], m = lineMat[l], file = 0;
+            while (file + 1 < fileCount && l >= rowBase[file + 1]) file++;
+            // (a line of an imported file: "line parts/a.map:12", as the dumps write it)
+            const MS_MapFile *F = file > 0 ? MS_MapFileAt(s, file) : NULL;
+            if (F) fprintf(f, "line %s:%d", F->path, l - rowBase[file]);
+            else fprintf(f, "line %d", l - rowBase[file]);
+            fprintf(f, " boxes %d models %d triangles %lld group \"%s\" material \"%s\"\n", lines[l].boxes,
                     lines[l].models, lines[l].tris, g < s->groupCount ? s->groups[g] : "",
                     m >= 0 && m < s->materialCount ? s->materials[m].name : "");
         }
@@ -174,6 +194,6 @@ bool WriteTriReport(const MS_Scene *s, const char *path, float detailDistance)
     }
 
     bool written = f && fclose(f) == 0;
-    free(groups); free(mats); free(lines); free(ranges); free(lineGroup); free(lineMat); free(info);
+    free(groups); free(mats); free(lines); free(ranges); free(lineGroup); free(lineMat); free(info); free(rowBase);
     return ok && written;
 }

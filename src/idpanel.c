@@ -13,13 +13,13 @@ static bool Ctrl(void) { return IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIG
 
 // #region The items
 
-// The statement keyword of a map line after its prefixes (`id n`, `repeat n dx dy dz [from k]`),
-// into out (cut to outSize - 1); "" when there is none
-static void LineKeyword(int line, char *out, int outSize)
+// The statement keyword of line `line` of map-text file `file` after its prefixes (`id n`, `repeat n
+// dx dy dz [from k]`), into out (cut to outSize - 1); "" when there is none
+static void LineKeyword(int file, int line, char *out, int outSize)
 {
     out[0] = '\0';
     int len;
-    const char *s = MS_LineText(scene, line, &len);
+    const char *s = MS_LineText(scene, file, line, &len);
     if (!s) return;
     int p = 0, skip = 0;
     if (len >= 3 && memcmp(s, "\xEF\xBB\xBF", 3) == 0) p = 3;
@@ -55,7 +55,8 @@ static void Rebuild(IdPanel *p)
             if (!it) break;     // (out of memory: the list stops there)
             MS_ObjRef o = scene->entityObjects[e];
             const MS_Ref *r = MS_ObjectRef(scene, o);
-            *it = (IdEntry){ .id = (int)id.stmt, .line = scene->entitySources[e].line, .stmt = prim, .firstEntity = e,
+            *it = (IdEntry){ .id = (int)id.stmt, .line = scene->entitySources[e].line, .file = scene->entitySources[e].file,
+                             .stmt = prim, .firstEntity = e,
                              .objects = end - e, .group = r && r->group >= 0 && r->group < scene->groupCount ? scene->groups[r->group] : NULL };
             if (o.kind == MS_OBJ_MODEL) {
                 snprintf(it->kind, sizeof(it->kind), "model");
@@ -66,7 +67,7 @@ static void Rebuild(IdPanel *p)
                 R3D_LightType t = scene->lights[o.index].light.type;
                 it->what = t == R3D_LIGHT_DIR ? "directional" : t == R3D_LIGHT_SPOT ? "spot" : "point";
             } else {
-                LineKeyword(it->line, it->kind, (int)sizeof(it->kind));
+                LineKeyword(it->file, it->line, it->kind, (int)sizeof(it->kind));
                 if (!it->kind[0]) snprintf(it->kind, sizeof(it->kind), "box");      // (a compiled map has no text)
                 int mat = r ? r->material : -1;
                 it->what = mat >= 0 && mat < scene->materialCount ? scene->materials[mat].name : NULL;
@@ -103,7 +104,8 @@ static bool MatchItem(int item, const char *filter, void *user)
     snprintf(num, sizeof(num), "%d", it->id);
     if (Contains(num, filter)) return true;
     snprintf(num, sizeof(num), "%d", it->line);
-    return Contains(num, filter) || Contains(it->kind, filter) || Contains(it->what, filter) || Contains(it->group, filter);
+    return Contains(num, filter) || Contains(it->kind, filter) || Contains(it->what, filter) || Contains(it->group, filter) ||
+           (it->file > 0 && Contains(MapEditFilePath(it->file), filter));
 }
 
 // The items describe the current scene (after any reload, live edit or renderer restart)
@@ -193,7 +195,8 @@ EditModeResult IdPanelUpdate(IdPanel *p, EditMode *m, Designer *d, Spectator *sp
         DesignerClearSelection(d);
         for (int k = 0; k < n; k++) DesignerSelectObject(d, p->objs[k]);     // (lights can't be selected)
         FlyTo(spec, b);
-        SpectatorMessagef(spec, "id %d: line %d (%d object%s)", it->id, it->line, it->objects, it->objects == 1 ? "" : "s");
+        SpectatorMessagef(spec, "id %d: line %s%s%d (%d object%s)", it->id, MAPEDIT_LINE_AT(it->file, it->line), it->objects,
+                          it->objects == 1 ? "" : "s");
         IdPanelClose(p);
         return EDITMODE_NONE;
     }
@@ -244,8 +247,11 @@ static void DrawItemRow(int item, Rectangle row, bool selected, void *user)
     Color ink = selected ? UI_HOT : UI_BODY;
     UiTextBold(TextFormat("id %d", it->id), x, ty, UI_M, selected ? UI_HOT : UI_INK);
     x += 96;
-    UiText(TextFormat("line %d", it->line), x, sy, UI_S, UI_DIM);
-    x += 86;
+    // (a map with parts: a wider column, "parts/lake.map:41" for a line in a part, cut to fit)
+    int lineW = MS_MapFileCount(scene) > 1 ? 180 : 86;
+    if (it->file > 0) FitText(TextFormat("%s:%d", MapEditFilePath(it->file), it->line), x, sy, lineW - 6, UI_S, UI_DIM);
+    else UiText(TextFormat("line %d", it->line), x, sy, UI_S, UI_DIM);
+    x += lineW;
     FitText(it->kind, x, sy, 62, UI_S, ink);
     x += 68;
     const char *count = TextFormat("%d obj", it->objects);
