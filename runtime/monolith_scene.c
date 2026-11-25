@@ -333,6 +333,8 @@ typedef struct {
     int lightCount, lightCap;
     MS_Viewpoint *viewpoints;
     int viewpointCount, viewpointCap;
+    MS_FogZone *fogZones;               // `fogzone` lines (main file only, like env)
+    int fogZoneCount, fogZoneCap;
     bool hasSpawn;
     Vector3 spawnFeet;
     float spawnYawDeg, spawnPitchDeg;
@@ -595,6 +597,12 @@ struct MS_Private {
     unsigned int frameVersion;                  // scene version MS_PushLights last saw
     Vector3 viewPos;                            // its camera position (MS_DrawGeometry's draw distances)
     double frameStart;                          // time of its last call
+    // Fog zones (ApplyFogZones): the fog values the zones blend from and the ones they last wrote
+    // into R3D's environment. When the environment no longer holds what was written, something
+    // else set it (MS_ApplyEnvironment, a quality preset, the program itself): that is the new base.
+    bool fogZoneWrote;
+    float fogBase[4], fogWritten[4];            // density, start, end, skyAffect
+    Color fogBaseColor, fogWrittenColor;
     int firstFrames;                            // frames timed since the last load (first two)
     double firstFrameMs[2];
 };
@@ -2909,6 +2917,7 @@ static bool ParseLight(Parser *P, Token *args, int n, const Placement *pl)
     bool shadow = false;
     bool clip = false;
     float cb[6] = { 0 };
+    float bias[2] = { -1.0f, -1.0f };   // depthBias, slopeBias; < 0 = R3D's default for the type
 
     for (int t = 1 + nPos + nDir; t < n; ) {
         const char *k = args[t].s;
@@ -2926,12 +2935,19 @@ static bool ParseLight(Parser *P, Token *args, int n, const Placement *pl)
             for (int i = 0; i < 6; i++) if (!NumPos(P, val[i], &cb[i])) return false;
             for (int i = 0; i < 3; i++) if (cb[i] == cb[i + 3]) return Fail(P, "light clip box must not be flat", NULL);
             clip = true;
+        } else if (strcmp(k, "depthBias") == 0 || strcmp(k, "slopeBias") == 0) {
+            // The shadow map's biases, in R3D_ShadowMap's units (metres for a point light): a long-range
+            // point light lighting the ground at a low angle needs more than R3D's default to avoid acne
+            if (nv != 1) return Fail(P, "light key '%s' takes one number", k);
+            if (!NumF(P, val[0], &f)) return false;
+            if (f < 0.0f) return Fail(P, "light key '%s' must not be negative", k);
+            bias[k[0] == 's'] = f;
         } else {
             float *dst = strcmp(k, "energy") == 0 ? &L.energy : strcmp(k, "range") == 0 ? &L.range :
                          strcmp(k, "falloff") == 0 ? &L.falloff : strcmp(k, "specular") == 0 ? &L.specular :
                          strcmp(k, "fogEnergy") == 0 ? &L.fogEnergy : strcmp(k, "inner") == 0 ? &L.innerCutOff :
                          strcmp(k, "outer") == 0 ? &L.outerCutOff : NULL;
-            if (!dst) return Fail(P, "unknown light key '%s' (color energy range falloff specular fogEnergy inner outer shadow clip)", k);
+            if (!dst) return Fail(P, "unknown light key '%s' (color energy range falloff specular fogEnergy inner outer shadow clip depthBias slopeBias)", k);
             if (nv != 1) return Fail(P, "light key '%s' takes one number", k);
             if (!NumF(P, val[0], &f)) return false;
             *dst = f;
@@ -2965,7 +2981,7 @@ static bool ParseLight(Parser *P, Token *args, int n, const Placement *pl)
         }
         MS_LightDef *slot = MS_PUSH(d->lights, d->lightCount, d->lightCap);
         if (!slot) return Fail(P, "out of memory", NULL);
-        *slot = (MS_LightDef){ c, shadow, P->cur, clip, cbox };
+        *slot = (MS_LightDef){ c, shadow, P->cur, clip, cbox, bias[0], bias[1] };
     }
     return true;
 }
@@ -3163,6 +3179,12 @@ static bool ParseMaterial(Parser *P, Token *tok, int n)
             ONE_WORD();
             if (!OnOff(P, v[0], &on)) return false;
             M->noCollide = !on;
+        } else if (strcmp(k, "shadow") == 0) {
+            // `shadow off`: its boxes cast no shadow (sky features in front of a shadowed light); still lit
+            bool on;
+            ONE_WORD();
+            if (!OnOff(P, v[0], &on)) return false;
+            M->noShadow = !on;
         } else if (strcmp(k, "blend") == 0) {
             static const char *const BL[] = { "alpha", "additive", "add_alpha", "multiply", "premultiplied" };
             int e;
@@ -3467,6 +3489,56 @@ static bool ParseEnv(Parser *P, Token *tok, int n)
         }
     }
     return Fail(P, "unknown env key '%s' (see docs/code/monolith_scene.md, section Environment)", key);
+}
+
+// The distance-fog keys a `fogzone` line may set, with their MS_FOGZONE_* bit and type
+static const struct { const char *key; unsigned int bit; unsigned char type; } FOGZONE_KEYS[] = {
+    { "fog.density", MS_FOGZONE_DENSITY, T_F }, { "fog.color", MS_FOGZONE_COLOR, T_COLOR },
+    { "fog.start", MS_FOGZONE_START, T_F }, { "fog.end", MS_FOGZONE_END, T_F },
+    { "fog.skyAffect", MS_FOGZONE_SKYAFFECT, T_F },
+};
+
+// fogzone x0 y0 z0 x1 y1 z1 fade <m> <key> <value...> [<key> <value...> ...]
+// (docs/map-format.md 2.5, "Fog zones"): a box (two opposite corners, like `box`), a fade distance >= 0 and at
+// least one of FOGZONE_KEYS, each at most once, its values checked like the same `env` key's
+static bool ParseFogZone(Parser *P, Token *tok, int n)
+{
+    static const char *USAGE = "fogzone takes a box, a fade and fog keys: "
+                               "fogzone x0 y0 z0 x1 y1 z1 fade 20 fog.density 0.015 fog.color 114 94 230";
+    if (n < 11 || !NoStrings(P, tok, 0, n)) return n < 11 ? Fail(P, "%s", USAGE) : false;
+    MS_FogZone z = { 0 };
+    float c[6];
+    for (int i = 0; i < 6; i++)
+        if (!NumPos(P, tok[1 + i], &c[i])) return false;
+    z.box = (BoundingBox){ { fminf(c[0], c[3]), fminf(c[1], c[4]), fminf(c[2], c[5]) },
+                           { fmaxf(c[0], c[3]), fmaxf(c[1], c[4]), fmaxf(c[2], c[5]) } };
+    if (strcmp(tok[7].s, "fade") != 0) return Fail(P, "%s", USAGE);
+    if (!NumF(P, tok[8], &z.fade)) return false;
+    if (!(z.fade >= 0.0f && z.fade <= MS_COORD_LIMIT)) return Fail(P, "fogzone: fade must be 0 or more metres", NULL);
+
+    // The keys: each one's values run up to the next key (or the line's end)
+    for (int t = 9; t < n;) {
+        int k = -1;
+        for (int i = 0; i < COUNT(FOGZONE_KEYS); i++)
+            if (strcmp(tok[t].s, FOGZONE_KEYS[i].key) == 0) k = i;
+        if (k < 0) return Fail(P, "fogzone: unknown key '%s' (fog.density, fog.color, fog.start, fog.end, fog.skyAffect)",
+                               tok[t].s);
+        if (z.set & FOGZONE_KEYS[k].bit) return Fail(P, "fogzone: %s given twice", tok[t].s);
+        int e = t + 1;
+        while (e < n && strncmp(tok[e].s, "fog.", 4) != 0) e++;
+        void *dst = FOGZONE_KEYS[k].bit == MS_FOGZONE_DENSITY ? (void *)&z.density
+                  : FOGZONE_KEYS[k].bit == MS_FOGZONE_COLOR ? (void *)&z.color
+                  : FOGZONE_KEYS[k].bit == MS_FOGZONE_START ? (void *)&z.start
+                  : FOGZONE_KEYS[k].bit == MS_FOGZONE_END ? (void *)&z.end : (void *)&z.skyAffect;
+        if (!ParseValue(P, FOGZONE_KEYS[k].type, &tok[t + 1], e - t - 1, dst)) return false;
+        if (!CheckEnvValue(FOGZONE_KEYS[k].key, FOGZONE_KEYS[k].type, dst, P->path, P->line)) return false;
+        z.set |= FOGZONE_KEYS[k].bit;
+        t = e;
+    }
+    MS_FogZone *slot = MS_PUSH(P->d->fogZones, P->d->fogZoneCount, P->d->fogZoneCap);
+    if (!slot) return Fail(P, "out of memory", NULL);
+    *slot = z;
+    return true;
 }
 
 // --- Models (docs/map-format.md 2.7)
@@ -3990,10 +4062,10 @@ static bool OlderFormat(Parser *P, int v)
                     "(docs/map-format.md \xC2\xA7" "1.3)", v, MS_FORMAT_VERSION, P->d->path);
 }
 
-// A statement that is not an object, group, use, spawn or viewpoint (format, material, env, import):
+// A statement that is not an object, group, use, spawn or viewpoint (format, material, env, fogzone, import):
 // its tokens go into d->lookHash, so a live edit knows whether the text changed anything but objects
 // (an import line added, removed or moved: a full upload, whatever the file holds).
-// The format and env lines also go into restLookHash (a material line into its own hashes:
+// The format, env and fogzone lines also go into restLookHash (a material line into its own hashes:
 // ParseMaterial), so it can tell materials appended or changed from anything else. `env paint.grid`
 // is a paint key (docs/painting.md 17.1): it changes only the paint table, so it goes into paintHash
 // and a live edit of it keeps everything else (as a `paint` line does).
@@ -4141,7 +4213,8 @@ static bool ParseStatement(Parser *P, Token *tok, int n)
 {
     SceneData *d = P->d;
     const char *kw = tok[0].quoted ? "" : tok[0].s;
-    if (strcmp(kw, "monolith") == 0 || strcmp(kw, "material") == 0 || strcmp(kw, "env") == 0 || strcmp(kw, "import") == 0)
+    if (strcmp(kw, "monolith") == 0 || strcmp(kw, "material") == 0 || strcmp(kw, "env") == 0 || strcmp(kw, "import") == 0 ||
+        strcmp(kw, "fogzone") == 0)
         HashLook(d, tok, n);
 
     if (strcmp(kw, "monolith") == 0) {
@@ -4159,7 +4232,8 @@ static bool ParseStatement(Parser *P, Token *tok, int n)
 
     if (strcmp(kw, "import") == 0) return ParseImport(P, tok, n);
     // The map's environment, spawn and viewpoints are in its main file (docs/map-format.md 2.10)
-    if (P->cur.file != 0 && (strcmp(kw, "env") == 0 || strcmp(kw, "spawn") == 0 || strcmp(kw, "viewpoint") == 0))
+    if (P->cur.file != 0 &&
+        (strcmp(kw, "env") == 0 || strcmp(kw, "fogzone") == 0 || strcmp(kw, "spawn") == 0 || strcmp(kw, "viewpoint") == 0))
         return FailF(P, "%s lines belong in the main map file (%s)", kw, d->srcs[0].path);
 
     if (strcmp(kw, "group") == 0) {
@@ -4187,6 +4261,7 @@ static bool ParseStatement(Parser *P, Token *tok, int n)
         return true;
     }
     if (strcmp(kw, "env") == 0) return ParseEnv(P, tok, n);
+    if (strcmp(kw, "fogzone") == 0) return ParseFogZone(P, tok, n);
     if (strcmp(kw, "paint") == 0) return ParsePaint(P, tok, n);
     if (strcmp(kw, "spawn") == 0) {
         float v[5] = { 0 };
@@ -4239,7 +4314,7 @@ static bool ParseStatement(Parser *P, Token *tok, int n)
     for (int i = 0; i < COUNT(PRIMS); i++)
         if (strcmp(prim, PRIMS[i].name) == 0) return ParsePrimitive(P, &PRIMS[i], &tok[t + 1], n - t - 1, &pl);
     return Fail(P, "unknown keyword '%s' (expected group, box, block, stairs, waffle, model, light, material, use, env, "
-                   "paint, import, spawn, viewpoint, id or repeat)", prim);
+                   "fogzone, paint, import, spawn, viewpoint, id or repeat)", prim);
 }
 
 // The lines of one map-text file (P->cur.file), each statement parsed in turn
@@ -4305,7 +4380,7 @@ static bool ParseText(Parser *P, const char *text, int size)
 // (CmRead*) in ReadCompiled's list after the sections its records point into, and the matching
 // section writer (CmPut*). The layout goes into docs/compiled-map.md.
 
-#define CM_VERSION          10          // MS_COMPILED_VERSION: bump on any change to a record or section
+#define CM_VERSION          13         // MS_COMPILED_VERSION: bump on any change to a record or section
 #define CM_BYTE_ORDER       0x01020304u
 #define CM_NONE             0xFFFFFFFFu // a string field without a string
 #define CM_MAX_ENV          4096        // env records (the key tables have ~120 keys)
@@ -4356,7 +4431,8 @@ typedef struct {
 // `paint_grid` (texels per metre; 0 none, -1 not set: the map's `env paint.grid` applies).
 // noCollide: 0 or 1 (`collide off`: MS_Material.noCollide). file, shaderFile, mapFile: the map-text
 // files of line, shaderLine and mapLine (a material can get keys in several files); paintLine /
-// paintFile: the `paint` key's line and file (0 0 without one).
+// paintFile: the `paint` key's line and file (0 0 without one). noShadow: 0 or 1 (`shadow off`:
+// MS_Material.noShadow).
 typedef struct {
     uint32_t name, shader, maps[MAP_COUNT];     // maps: albedo, normal, orm, emission
     int32_t line, shaderLine, mapLine[MAP_COUNT];
@@ -4375,6 +4451,7 @@ typedef struct {
     float paintGrid;
     uint32_t noCollide;
     int32_t paintLine, paintFile;
+    uint32_t noShadow;
 } CmMaterial;
 
 // A `paint` statement, its entity resolved to the object: material (CM_NONE: the model
@@ -4405,7 +4482,7 @@ typedef struct {
 
 // A `light` line as the parser leaves it (direction normalised, defaults filled in, clip box
 // shifted). type: R3D_LightType; inner / outer: a spot's cut-off angles; shadow / clip: 0 or 1;
-// clipMin / clipMax: the clip box (zeros without one).
+// clipMin / clipMax: the clip box (zeros without one); depthBias / slopeBias: the shadow biases, -1 = R3D's default.
 typedef struct {
     uint32_t type;
     float position[3], direction[3];
@@ -4413,6 +4490,7 @@ typedef struct {
     float energy, specular, range, falloff, inner, outer, fogEnergy;
     uint32_t shadow, clip;
     float clipMin[3], clipMax[3];
+    float depthBias, slopeBias;
     CmRef ref;
 } CmLight;
 
@@ -4421,6 +4499,16 @@ typedef struct {
     uint32_t name;
     float eye[3], target[3];
 } CmViewpoint;
+
+// A `fogzone` line: its box (min, max), fade, which values it gives (MS_FOGZONE_* bits; the others
+// are 0) and the values; color is sRGB RGBA
+typedef struct {
+    float min[3], max[3];
+    float fade;
+    uint32_t set;
+    float density, start, end, skyAffect;
+    uint8_t color[4];
+} CmFogZone;
 
 // A model file the map's `model` lines use: its path and the line that first names it (and its file)
 typedef struct {
@@ -4485,8 +4573,8 @@ typedef struct {
 enum {
     CM_STRINGS = 1, CM_BOXES, CM_GROUPS, CM_MATERIALS, CM_UNIFORMS, CM_SAMPLERS, CM_LIGHTS, CM_VIEWPOINTS,
     CM_MODEL_FILES, CM_MODELS, CM_COLLIDERS, CM_SLOTS, CM_STATEMENTS, CM_ENV, CM_SPAWN, CM_DEPS,
-    CM_BOX_TURNS, CM_PAINT, CM_SOURCES,
-    CM_SECTIONS = CM_SOURCES
+    CM_BOX_TURNS, CM_PAINT, CM_SOURCES, CM_FOG_ZONES,
+    CM_SECTIONS = CM_FOG_ZONES
 };
 
 // What the code knows about one section: its name (for messages), its record size and the most
@@ -4518,6 +4606,7 @@ static const CmSectionInfo CM_SECTION[CM_SECTIONS + 1] = {
     [CM_BOX_TURNS]   = { "box turns", sizeof(CmBoxTurn), MS_MAX_OBJECTS },
     [CM_PAINT]       = { "paint", sizeof(CmPaint), MS_MAX_OBJECTS },
     [CM_SOURCES]     = { "sources", sizeof(CmSource), MS_MAX_OBJECTS },
+    [CM_FOG_ZONES]   = { "fog zones", sizeof(CmFogZone), MS_MAX_OBJECTS },
 };
 
 // --- Reader
@@ -4878,6 +4967,7 @@ static bool CmMaterialInRange(const CmMaterial *c, int files)
            c->instanced <= 1 &&
            c->noPrepass <= 1 &&
            c->noCollide <= 1 &&
+           c->noShadow <= 1 &&
            (c->drawDistance == 0.0f || c->drawDistance == -1.0f || (c->drawDistance > 0.0f && c->drawDistance <= 1e6f)) &&
            c->filter <= TEX_NEAREST &&
            c->pad == 0 &&
@@ -4906,6 +4996,7 @@ static void CmFillMaterial(const CmMaterial *c, MS_Material *M, MatDef *D)
     M->file = c->file;
     M->drawDistance = c->drawDistance;
     M->noCollide = c->noCollide == 1;
+    M->noShadow = c->noShadow == 1;
     m->albedo.color = (Color){ c->albedo[0], c->albedo[1], c->albedo[2], c->albedo[3] };
     m->emission.color = (Color){ c->emission[0], c->emission[1], c->emission[2], c->emission[3] };
     m->emission.energy = c->emissionEnergy;
@@ -5292,7 +5383,9 @@ static bool CmLightInRange(const CmLight *c)
               Finite3(c->direction) &&
               c->shadow <= 1 &&
               c->clip <= 1 &&
-              FiniteN(f, COUNT(f));
+              FiniteN(f, COUNT(f)) &&
+              (c->depthBias >= 0.0f || c->depthBias == -1.0f) && isfinite(c->depthBias) &&
+              (c->slopeBias >= 0.0f || c->slopeBias == -1.0f) && isfinite(c->slopeBias);
 
     // The direction by type: none for a point light, unit length otherwise
     float len = ok ? Vector3Length(V3(c->direction)) : 0.0f;
@@ -5341,6 +5434,8 @@ static bool CmReadLights(CmReader *R)
         L.shadow = c.shadow == 1;
         L.clip = c.clip == 1;
         if (L.clip) L.clipBox = (BoundingBox){ V3(c.clipMin), V3(c.clipMax) };
+        L.depthBias = c.depthBias;
+        L.slopeBias = c.slopeBias;
         d->lights[d->lightCount++] = L;
     }
     return true;
@@ -5364,6 +5459,36 @@ static bool CmReadViewpoints(CmReader *R)
         d->viewpointCount = (int)i + 1;
         if (!InCoordLimit(c.eye) || !InCoordLimit(c.target) || Vector3Equals(v->eye, v->target))
             return CmFail(R, "viewpoint \"%s\": position out of range", name);
+    }
+    return true;
+}
+
+// The fog zones, checked as the parser checks a `fogzone` line: the box within the coordinate
+// limit and min <= max, the fade 0 or more, only known bits, each value set as its `env` key's
+static bool CmReadFogZones(CmReader *R)
+{
+    SceneData *d = R->d;
+    uint32_t n = R->sec[CM_FOG_ZONES].count;
+    if (!MS_RESERVE(d->fogZones, d->fogZoneCap, (int)n)) return CmFail(R, "out of memory");
+    const unsigned int known = MS_FOGZONE_DENSITY | MS_FOGZONE_COLOR | MS_FOGZONE_START | MS_FOGZONE_END |
+                               MS_FOGZONE_SKYAFFECT;
+    for (uint32_t i = 0; i < n; i++) {
+        CmFogZone c;
+        CmRecord(R, CM_FOG_ZONES, i, &c);
+        MS_FogZone z = {
+            .box = { V3(c.min), V3(c.max) }, .fade = c.fade, .set = c.set,
+            .density = c.density, .start = c.start, .end = c.end, .skyAffect = c.skyAffect,
+            .color = { c.color[0], c.color[1], c.color[2], c.color[3] },
+        };
+        if (!InCoordLimit(c.min) || !InCoordLimit(c.max) || c.min[0] > c.max[0] || c.min[1] > c.max[1] ||
+            c.min[2] > c.max[2] || !(c.fade >= 0.0f && c.fade <= MS_COORD_LIMIT) || (c.set & ~known) != 0 || c.set == 0)
+            return CmFail(R, "fog zone %u: box, fade or keys out of range", (unsigned)i);
+        if (((c.set & MS_FOGZONE_DENSITY) && !CheckEnvValue("fog.density", T_F, &z.density, d->path, 0)) ||
+            ((c.set & MS_FOGZONE_START) && !CheckEnvValue("fog.start", T_F, &z.start, d->path, 0)) ||
+            ((c.set & MS_FOGZONE_END) && !CheckEnvValue("fog.end", T_F, &z.end, d->path, 0)) ||
+            ((c.set & MS_FOGZONE_SKYAFFECT) && !CheckEnvValue("fog.skyAffect", T_F, &z.skyAffect, d->path, 0)))
+            return false;
+        d->fogZones[d->fogZoneCount++] = z;
     }
     return true;
 }
@@ -5546,6 +5671,7 @@ static bool ReadCompiled(SceneData *d, const char *bytes, int size)
            CmReadPaint(&R) &&           // a paint entry names a material and a box or model
            CmReadLights(&R) &&
            CmReadViewpoints(&R) &&
+           CmReadFogZones(&R) &&
            CmReadSpawn(&R) &&
            CmReadEnv(&R) &&
            CmReadDeps(&R) &&
@@ -5792,7 +5918,7 @@ static void CmPutMaterials(CmWriter *W, const SceneData *d)
             .uvFaces = { 255, 255, 255, 255, 255, 255 }, .filter = D->filter,
             .paintFilter = D->paintFilter, .noPrepass = D->noPrepass, .drawDistance = M->drawDistance,
             .paintGrid = D->paintGrid, .noCollide = M->noCollide,
-            .paintLine = D->paintLine, .paintFile = D->paintFile,
+            .paintLine = D->paintLine, .paintFile = D->paintFile, .noShadow = M->noShadow,
         };
         if (D->hasFaces) memcpy(c.uvFaces, D->uvFaces, sizeof(c.uvFaces));
         for (int k = 0; k < MAP_COUNT; k++) {
@@ -5892,6 +6018,8 @@ static void CmPutLights(CmWriter *W, const SceneData *d)
             .energy = l->energy, .specular = l->specular, .range = l->range, .falloff = l->falloff,
             .inner = l->innerCutOff, .outer = l->outerCutOff, .fogEnergy = l->fogEnergy,
             .shadow = L->shadow, .clip = L->clip,
+            .depthBias = L->depthBias < 0.0f ? -1.0f : L->depthBias,
+            .slopeBias = L->slopeBias < 0.0f ? -1.0f : L->slopeBias,
             .ref = CmRefOf(L->ref),
         };
         if (L->clip) {
@@ -5909,6 +6037,19 @@ static void CmPutViewpoints(CmWriter *W, const SceneData *d)
         const MS_Viewpoint *v = &d->viewpoints[i];
         CmViewpoint c = { CmStr(W, v->name), CM_XYZ(v->eye), CM_XYZ(v->target) };
         CmPut(W, CM_VIEWPOINTS, &c);
+    }
+}
+
+// The fog zones in map order
+static void CmPutFogZones(CmWriter *W, const SceneData *d)
+{
+    for (int i = 0; i < d->fogZoneCount; i++) {
+        const MS_FogZone *z = &d->fogZones[i];
+        CmFogZone c = {
+            CM_XYZ(z->box.min), CM_XYZ(z->box.max), z->fade, z->set, z->density, z->start, z->end, z->skyAffect,
+            { z->color.r, z->color.g, z->color.b, z->color.a },
+        };
+        CmPut(W, CM_FOG_ZONES, &c);
     }
 }
 
@@ -6016,6 +6157,7 @@ static unsigned char *WriteCompiled(const SceneData *d, int *outSize)
     CmPutPaint(&W, d);
     CmPutLights(&W, d);
     CmPutViewpoints(&W, d);
+    CmPutFogZones(&W, d);
     CmPutSpawn(&W, d);
     CmPutEnvironment(&W, &d->env);
     CmPutDeps(&W, d);
@@ -8950,6 +9092,16 @@ static void MaterialDrawMode(SceneData *d, int i)
 
 // Creates every GPU resource of `d` (a previous load's are still alive: new before old, see
 // the instance-buffer note in LoadBytes). On failure everything created so far is freed.
+// A shadowed light's shadow map, with the light's `depthBias` / `slopeBias` where the map sets them
+// (R3D's defaults for the type otherwise)
+static R3D_ShadowMap LoadLightShadow(const MS_LightDef *L)
+{
+    R3D_ShadowMap m = R3D_LoadShadowMap(L->light.type);
+    if (L->depthBias >= 0.0f) m.depthBias = L->depthBias;
+    if (L->slopeBias >= 0.0f) m.slopeBias = L->slopeBias;
+    return m;
+}
+
 static bool UploadGpu(SceneData *d)
 {
     d->gpu = true;
@@ -9019,7 +9171,7 @@ static bool UploadGpu(SceneData *d)
 
     for (int i = 0; i < d->lightCount; i++) {
         d->lightShadowDrawn[i] = false;
-        if (d->lights[i].shadow) d->lightShadow[i] = R3D_LoadShadowMap(d->lights[i].light.type);
+        if (d->lights[i].shadow) d->lightShadow[i] = LoadLightShadow(&d->lights[i]);
     }
     for (int f = 0; d->filePaint && f < d->modelFileCount; f++)
         if (d->filePaint[f].painted && !BuildPaintMeshes(d, f)) {
@@ -9076,6 +9228,7 @@ static void FreeData(SceneData *d)
     free(d->groups);
     for (int i = 0; i < d->viewpointCount; i++) free((char *)d->viewpoints[i].name);
     free(d->viewpoints);
+    free(d->fogZones);
     free(d->boxes);
     free(d->boxRefs);
     free(d->turned);
@@ -9157,6 +9310,8 @@ static void Publish(MS_Scene *s, SceneData *d)
     s->spawnPitchDeg = d->spawnPitchDeg;
     s->viewpoints = d->viewpoints;
     s->viewpointCount = d->viewpointCount;
+    s->fogZones = d->fogZones;
+    s->fogZoneCount = d->fogZoneCount;
     s->bounds = d->bounds;
     s->entityCount = d->entityCount;
     s->entityIds = d->entityIds;
@@ -9991,7 +10146,8 @@ static bool LightSame(const SceneData *a, int i, const SceneData *b, int j)
            memcmp(&x->color, &y->color, sizeof(Color)) == 0 && x->energy == y->energy && x->specular == y->specular &&
            x->range == y->range && x->falloff == y->falloff && x->innerCutOff == y->innerCutOff &&
            x->outerCutOff == y->outerCutOff && x->fogEnergy == y->fogEnergy && x->type == y->type &&
-           A->shadow == B->shadow && A->clip == B->clip && (!A->clip || memcmp(&A->clipBox, &B->clipBox, sizeof(BoundingBox)) == 0);
+           A->shadow == B->shadow && A->depthBias == B->depthBias && A->slopeBias == B->slopeBias &&
+           A->clip == B->clip && (!A->clip || memcmp(&A->clipBox, &B->clipBox, sizeof(BoundingBox)) == 0);
 }
 
 // Matches every new object of one kind to an old one: from[j] = old index or -1; *changed counts
@@ -10894,7 +11050,7 @@ MS_ReloadResult MS_EditSetText(MS_Scene *s, const MS_MapFileText *files, int cou
                 d->lightShadow[j] = old->lightShadow[i];
                 d->lightShadowDrawn[j] = old->lightShadowDrawn[i];
             } else if (d->lights[j].shadow) {
-                d->lightShadow[j] = R3D_LoadShadowMap(d->lights[j].light.type);
+                d->lightShadow[j] = LoadLightShadow(&d->lights[j]);
                 st.lightShadowsDirty++;
             }
         }
@@ -11477,13 +11633,15 @@ static void PreviewDraw(MS_Private *p)
     const SceneData *d = p->d;
     for (int r = 0; v && r < v->drawRanges; r++) {
         int c = d->matDefs[v->drawMat[r]].faceCube;     // (a face layout's cube, else R3D's)
+        bool noShadow = d->materials[v->drawMat[r]].noShadow;   // (`shadow off`, as DrawBoxRange)
+        R3D_Mesh cube = c > 0 ? d->faceCubes[c - 1].mesh : p->cube, turn = v->turnMesh[r];
+        if (noShadow) cube.shadowCastMode = turn.shadowCastMode = R3D_SHADOW_CAST_DISABLED;
         R3D_BeginCluster(v->drawBounds[r]);
-        R3D_DrawMeshInstancedEx(c > 0 ? d->faceCubes[c - 1].mesh : p->cube, d->materials[v->drawMat[r]].material, v->buf,
-                                v->drawFirst[r], v->drawCount[r]);
+        R3D_DrawMeshInstancedEx(cube, d->materials[v->drawMat[r]].material, v->buf, v->drawFirst[r], v->drawCount[r]);
         R3D_EndCluster();
-        if (v->turnMesh[r].vertexCount > 0) {
+        if (turn.vertexCount > 0) {
             R3D_BeginCluster(v->turnBounds[r]);
-            R3D_DrawMeshInstancedEx(v->turnMesh[r], d->materials[v->drawMat[r]].material, d->unit, 0, 1);
+            R3D_DrawMeshInstancedEx(turn, d->materials[v->drawMat[r]].material, d->unit, 0, 1);
             R3D_EndCluster();
         }
     }
@@ -11574,6 +11732,7 @@ bool MS_GetDrawRange(const MS_Scene *s, int range, MS_DrawRangeInfo *out)
         // (a merged range drawn by a transform preview lacks the selected boxes' faces)
         out->triangles = merged ? R->mesh.indexCount / 3 : 12LL * R->count;
         out->drawDistance = RangeDrawDistance(d, R, true);
+        out->castShadow = !d->materials[R->group].noShadow;
         return true;
     }
     const DrawRange *R = &d->modelRanges[range - d->boxRangeCount];
@@ -12600,11 +12759,70 @@ static bool SunOn(const MS_Private *p)
     return p->d->env.sun.enabled;
 }
 
+// The fog zones (`fogzone`, MS_FogZone) for a camera at `eye`: from the base fog values (what
+// R3D's environment held when something other than this function last set it), each zone in map
+// order blends the values it gives toward its own by its weight, 1 inside its box and a smoothstep
+// down to 0 at `fade` metres outside; the result goes into R3D's environment, which R3D_End reads.
+// A map without zones returns at once and never touches the environment.
+static void ApplyFogZones(MS_Private *p, Vector3 eye)
+{
+    const SceneData *d = p->d;
+    if (d->fogZoneCount == 0) return;
+    R3D_Environment *env = R3D_GetEnvironment();
+    float cur[4] = { env->fog.density, env->fog.start, env->fog.end, env->fog.skyAffect };
+    bool same = p->fogZoneWrote && memcmp(cur, p->fogWritten, sizeof(cur)) == 0 &&
+                env->fog.color.r == p->fogWrittenColor.r && env->fog.color.g == p->fogWrittenColor.g &&
+                env->fog.color.b == p->fogWrittenColor.b && env->fog.color.a == p->fogWrittenColor.a;
+    if (!same) {
+        memcpy(p->fogBase, cur, sizeof(cur));
+        p->fogBaseColor = env->fog.color;
+    }
+
+    float v[4];
+    memcpy(v, p->fogBase, sizeof(v));
+    float col[4] = { p->fogBaseColor.r, p->fogBaseColor.g, p->fogBaseColor.b, p->fogBaseColor.a };
+    for (int i = 0; i < d->fogZoneCount; i++) {
+        const MS_FogZone *z = &d->fogZones[i];
+        // The camera's distance to the box (0 inside), then the weight
+        float dx = fmaxf(fmaxf(z->box.min.x - eye.x, eye.x - z->box.max.x), 0.0f);
+        float dy = fmaxf(fmaxf(z->box.min.y - eye.y, eye.y - z->box.max.y), 0.0f);
+        float dz = fmaxf(fmaxf(z->box.min.z - eye.z, eye.z - z->box.max.z), 0.0f);
+        float dist = sqrtf(dx * dx + dy * dy + dz * dz);
+        float w;
+        if (z->fade > 0.0f) {
+            float t = 1.0f - fminf(dist / z->fade, 1.0f);
+            w = t * t * (3.0f - 2.0f * t);
+        } else {
+            w = dist > 0.0f ? 0.0f : 1.0f;
+        }
+        if (w <= 0.0f) continue;
+        const float zv[4] = { z->density, z->start, z->end, z->skyAffect };
+        const unsigned int bit[4] = { MS_FOGZONE_DENSITY, MS_FOGZONE_START, MS_FOGZONE_END, MS_FOGZONE_SKYAFFECT };
+        for (int k = 0; k < 4; k++)
+            if (z->set & bit[k]) v[k] += (zv[k] - v[k]) * w;
+        if (z->set & MS_FOGZONE_COLOR) {
+            const float zc[4] = { z->color.r, z->color.g, z->color.b, z->color.a };
+            for (int k = 0; k < 4; k++) col[k] += (zc[k] - col[k]) * w;
+        }
+    }
+
+    env->fog.density = v[0];
+    env->fog.start = v[1];
+    env->fog.end = v[2];
+    env->fog.skyAffect = v[3];
+    env->fog.color = (Color){ (unsigned char)lroundf(col[0]), (unsigned char)lroundf(col[1]),
+                              (unsigned char)lroundf(col[2]), (unsigned char)lroundf(col[3]) };
+    memcpy(p->fogWritten, v, sizeof(v));
+    p->fogWrittenColor = env->fog.color;
+    p->fogZoneWrote = true;
+}
+
 bool MS_PushLights(MS_Scene *s, Camera3D camera, float aspect)
 {
     MS_Private *p = s->priv;
     SceneData *d = p->d;
     bool update = false;
+    ApplyFogZones(p, camera.position);
     // The first frames after a load compile the shader variants they draw with (some only in the
     // second frame): the first two are logged, each from this call to the next one (the whole
     // frame, its present included)
@@ -12684,9 +12902,12 @@ static inline void DrawBoxRange(const MS_Private *p, const SceneData *d, const D
 {
     const R3D_Material mat = d->materials[R->group].material;
     bool far = RangeFar(p, d, R, true);
+    bool noShadow = d->materials[R->group].noShadow;
+    if (far && noShadow) return;                    // (a shadow-only draw of a material without shadows)
     if (!d->matDefs[R->group].merge) {
         int c = d->matDefs[R->group].faceCube;     // (a face layout's cube, else R3D's)
         R3D_Mesh cube = c > 0 ? d->faceCubes[c - 1].mesh : p->cube;
+        if (noShadow) cube.shadowCastMode = R3D_SHADOW_CAST_DISABLED;
         R3D_BeginCluster(R->bounds);
         R3D_DrawMeshInstancedEx(far ? ShadowOnlyMesh(cube) : cube, mat, d->inst[R->group], R->first, R->count);
         R3D_EndCluster();
@@ -12694,8 +12915,10 @@ static inline void DrawBoxRange(const MS_Private *p, const SceneData *d, const D
         // A merged range is its mesh drawn as one instance at the origin: it stays in R3D's
         // instanced draw list, sorted like the cubes were (where boxes overlap exactly, the
         // draw order decides which one shows), and the cluster culls it the same way
+        R3D_Mesh mesh = R->mesh;
+        if (noShadow) mesh.shadowCastMode = R3D_SHADOW_CAST_DISABLED;
         R3D_BeginCluster(R->bounds);
-        R3D_DrawMeshInstancedEx(far ? ShadowOnlyMesh(R->mesh) : R->mesh, mat, d->unit, 0, 1);
+        R3D_DrawMeshInstancedEx(far ? ShadowOnlyMesh(mesh) : mesh, mat, d->unit, 0, 1);
         R3D_EndCluster();
     }
 }

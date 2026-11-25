@@ -19,9 +19,10 @@ model <i> file <f> line <[path:]l> group <g> material <m|-1> origin <o> collide 
       position <3 hex> rotationDeg <3 hex> scale <3 hex> translation <3 hex> rotation <4 hex>
       bounds <6 hex> colliders <first> <count> slots <N=m,...|->
 collider <i> <6 hex>
-material <i> "<name>" line <[path:]l> shader "<path>" unlit <on|off> [draw_distance <off|hex>] [collide off]
-light <i> <point|spot|dir> line <[path:]l> position <3 hex> direction <3 hex> color r g b energy <hex> range <hex> shadow <on|off> [clip <3 hex> <3 hex>]
+material <i> "<name>" line <[path:]l> shader "<path>" unlit <on|off> [draw_distance <off|hex>] [collide off] [shadow off]
+light <i> <point|spot|dir> line <[path:]l> position <3 hex> direction <3 hex> color r g b energy <hex> range <hex> shadow <on|off> [depthBias <hex>] [slopeBias <hex>] [clip <3 hex> <3 hex>]
 sun direction <3 hex> energy <hex> range <hex> shadow <on|off>
+fogzone <i> <6 hex: min, max> fade <hex> [fog.density <hex>] [fog.color r g b a] [fog.start <hex>] [fog.end <hex>] [fog.skyAffect <hex>]
 ```
 
 **Lines of imported files.** `line <l>` is a line of the main map file. A line in a file the map imports (`docs/map-format.md` §2.10) prints `line <path>:<l>`, with the file's package-relative path (`line parts/lake.map:41`). So the dumps of a map without imports are byte for byte what they were before imports existed. The same holds for the `line` field of `--dump-entities`.

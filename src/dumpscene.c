@@ -126,6 +126,7 @@ bool DumpScene(const MS_Scene *s, const char *path, bool diff)
         if (m->drawDistance < 0.0f) fprintf(f, " draw_distance off");
         else if (m->drawDistance > 0.0f) fprintf(f, " draw_distance %a", m->drawDistance);
         if (m->noCollide) fprintf(f, " collide off");
+        if (m->noShadow) fprintf(f, " shadow off");
         fprintf(f, "\n");
     }
     for (int i = 0; i < s->lightCount; i++) {
@@ -139,6 +140,9 @@ bool DumpScene(const MS_Scene *s, const char *path, bool diff)
         fprintf(f, " direction"); Hex3(f, L->direction);
         fprintf(f, " color %d %d %d energy %a range %a shadow %s", L->color.r, L->color.g, L->color.b, L->energy, L->range,
                 s->lights[i].shadow ? "on" : "off");
+        // Only when the map sets them, so dumps of maps without them stay as they were
+        if (s->lights[i].depthBias >= 0.0f) fprintf(f, " depthBias %a", s->lights[i].depthBias);
+        if (s->lights[i].slopeBias >= 0.0f) fprintf(f, " slopeBias %a", s->lights[i].slopeBias);
         if (s->lights[i].clip) { fprintf(f, " clip"); Hex3(f, s->lights[i].clipBox.min); Hex3(f, s->lights[i].clipBox.max); }
         fprintf(f, "\n");
     }
@@ -146,6 +150,20 @@ bool DumpScene(const MS_Scene *s, const char *path, bool diff)
     Hex3(f, s->sun.light.direction);
     fprintf(f, " energy %a range %a shadow %s enabled %s\n", s->sun.light.energy, s->sun.light.range,
             s->sun.shadow ? "on" : "off", s->sun.enabled ? "on" : "off");
+    // The `fogzone` lines, each with only the keys it gives (a map without zones dumps as before)
+    for (int i = 0; i < s->fogZoneCount; i++) {
+        const MS_FogZone *z = &s->fogZones[i];
+        fprintf(f, "fogzone");
+        Index(f, diff, i);
+        HexBox(f, z->box);
+        fprintf(f, " fade %a", z->fade);
+        if (z->set & MS_FOGZONE_DENSITY) fprintf(f, " fog.density %a", z->density);
+        if (z->set & MS_FOGZONE_COLOR) fprintf(f, " fog.color %d %d %d %d", z->color.r, z->color.g, z->color.b, z->color.a);
+        if (z->set & MS_FOGZONE_START) fprintf(f, " fog.start %a", z->start);
+        if (z->set & MS_FOGZONE_END) fprintf(f, " fog.end %a", z->end);
+        if (z->set & MS_FOGZONE_SKYAFFECT) fprintf(f, " fog.skyAffect %a", z->skyAffect);
+        fprintf(f, "\n");
+    }
     return fclose(f) == 0;
 }
 

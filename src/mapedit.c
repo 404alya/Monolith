@@ -3229,6 +3229,8 @@ static bool TakeSnapshot(Snapshot *S)
             g = HashBytes(g, f, sizeof(f));
             g = HashBytes(g, &q->type, sizeof(q->type));
             g = HashBytes(g, &L->shadow, sizeof(L->shadow));
+            float bias[2] = { L->depthBias, L->slopeBias };
+            g = HashBytes(g, bias, sizeof(bias));
             g = HashBytes(g, &L->clip, sizeof(L->clip));
             if (L->clip) g = HashBytes(g, &L->clipBox, sizeof(BoundingBox));
         }

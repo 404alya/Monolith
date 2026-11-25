@@ -18,17 +18,19 @@ static char dir[1024], fuzzPath[1100];
 // The header and section table fields this test changes (docs/compiled-map.md, section 2)
 enum { H_VERSION = 8, H_SIZE = 12, H_ORDER = 16, H_FORMAT = 20, H_COUNT = 24, H_TABLE = 28, H_FILESIZE = 32 };
 enum { S_STRINGS = 1, S_BOXES = 2, S_MATERIALS = 4, S_LIGHTS = 7, S_MODEL_FILES = 9, S_STATEMENTS = 13, S_ENV = 14,
-       S_BOX_TURNS = 17, S_PAINT = 18, S_SOURCES = 19, S_SECTIONS = 19 };
+       S_BOX_TURNS = 17, S_PAINT = 18, S_SOURCES = 19, S_FOG_ZONES = 20, S_SECTIONS = 20 };
 // A material record and its line files, face layout, filter and padding bytes, its paint atlas path,
-// paint filter and padding, noPrepass, drawDistance, paintGrid, the paint key's line and file
-enum { MAT_SIZE = 212, MAT_FILE = 48, MAT_SHADER_FILE = 52, MAT_MAP_FILE = 56, MAT_UV_SCALE = 104, MAT_CULL = 124,
+// paint filter and padding, noPrepass, drawDistance, paintGrid, the paint key's line and file, noShadow
+enum { MAT_SIZE = 216, MAT_FILE = 48, MAT_SHADER_FILE = 52, MAT_MAP_FILE = 56, MAT_UV_SCALE = 104, MAT_CULL = 124,
        MAT_UNIFORM_FIRST = 156, MAT_UNIFORM_COUNT = 160, MAT_UV_FACES = 172, MAT_FILTER = 178, MAT_PAD = 179, MAT_PAINT = 180,
        MAT_PAINT_FILTER = 184, MAT_PAD2 = 185, MAT_NO_PREPASS = 188, MAT_DRAW_DISTANCE = 192, MAT_PAINT_GRID = 196,
-       MAT_NO_COLLIDE = 200, MAT_PAINT_LINE = 204, MAT_PAINT_FILE = 208 };
+       MAT_NO_COLLIDE = 200, MAT_PAINT_LINE = 204, MAT_PAINT_FILE = 208,
+       MAT_NO_SHADOW = 212 };
 // A box record (corners, then its source reference: line, file, statement, group, material, copy, part)
-// and a light record (its direction, clip switch and box, then the same reference)
+// and a light record (its direction, clip switch and box, shadow biases, then the same reference)
 enum { BOX_SIZE = 52, BOX_FILE = 28, BOX_STATEMENT = 32, BOX_GROUP = 36, BOX_MATERIAL = 40,
-       LIGHT_SIZE = 120, LIGHT_DIRECTION = 16, LIGHT_CLIP = 64, LIGHT_CLIP_MIN = 68, LIGHT_CLIP_MAX = 80, LIGHT_FILE = 96 };
+       LIGHT_SIZE = 128, LIGHT_DIRECTION = 16, LIGHT_CLIP = 64, LIGHT_CLIP_MIN = 68, LIGHT_CLIP_MAX = 80,
+       LIGHT_DEPTH_BIAS = 92, LIGHT_SLOPE_BIAS = 96, LIGHT_FILE = 104 };
 // A source record: path, the import line's file and line, padding, size, hash
 enum { SRC_PATH = 0, SRC_IMPORT_FILE = 4, SRC_IMPORT_LINE = 8, SRC_PAD = 12, SRC_SIZE = 16, SRC_HASH = 24 };
 
@@ -296,6 +298,7 @@ int main(int argc, char **argv)
     CASE("material padding 2 nonzero", c[mats + MAT_PAD2 + 2] = 1);
     CASE("material prepass flag 2", Wr32(c, mats + MAT_NO_PREPASS, 2));
     CASE("material collide flag 2", Wr32(c, mats + MAT_NO_COLLIDE, 2));
+    CASE("material shadow flag 2", Wr32(c, mats + MAT_NO_SHADOW, 2));
     // The draw distance: 0 auto, -1 off, else above 0 and at most 1e6 m
     CASE("material draw distance -2", Wr32(c, mats + MAT_DRAW_DISTANCE, 0xC0000000u));
     CASE("material draw distance 2e6", Wr32(c, mats + MAT_DRAW_DISTANCE, 0x49F42400u));
@@ -435,6 +438,8 @@ int main(int argc, char **argv)
             CASE("light clip box flat", { Wr32(c, lights + LIGHT_CLIP, 1);
                                           for (int k = 0; k < 3; k++) { Wr32(c, lights + LIGHT_CLIP_MIN + 4 * k, 0);
                                                                         Wr32(c, lights + LIGHT_CLIP_MAX + 4 * k, 0); } });
+            CASE("light depth bias negative", Wr32(c, lights + LIGHT_DEPTH_BIAS, 0xBF000000u));   // -0.5
+            CASE("light slope bias not finite", Wr32(c, lights + LIGHT_SLOPE_BIAS, 0x7F800000u)); // +inf
         } else { printf("FAIL the test package needs two lights\n"); fails++; }
         // A path that leaves the package: the first "models/" in the string table becomes "../els/"
         unsigned char *m = memmem(orig + strings, strCount, "models/", 7);

@@ -127,6 +127,7 @@ light dir   dx dy dz [key value ...]         extra directional light (no static 
 | `fogEnergy f` | | 1 |
 | `inner deg`, `outer deg` | the spot cone | 22.5 / 45 |
 | `shadow on\|off` | | off |
+| `depthBias f`, `slopeBias f` | The shadow map's constant and slope-scaled biases (`R3D_ShadowMap`; metres for a point light), >= 0; set on the map when `LoadLightShadow` loads it, part of `LightSame`, printed by `--dump-scene` only when set | R3D's default for the type |
 | `clip x0 y0 z0 x1 y1 z1` | A world box, shifted like the position. The light reaches only points inside it, so an unshadowed light stays out of the room below or beside it. R3D patch 16; ignored with upstream R3D. | none |
 
 ### Models
@@ -204,6 +205,7 @@ use "name"
 | `transparency off\|prepass\|alpha` | |
 | `prepass on\|off` | Default on. `off`: this material is never drawn in the depth pre-pass, only once in the shading pass (for a cheap shader on very many triangles, where the pre-pass would only double the vertex cost). With R3D patch 28; upstream R3D always pre-passes, so the key changes nothing there. |
 | `collide on\|off` | Default on. `off`: the material's boxes don't block the player (`MS_Collides` / `MS_FirstCollision` skip them: grass, foliage, anything to walk through); they are still drawn, picked, cast shadows and hide other boxes' faces, and stay in `boxes[]` / `colliders[]` (`MS_Material.noCollide`). Models ignore it (their own `collide`). |
+| `shadow on\|off` | Default on. `off`: the material's boxes cast no shadow: `DrawBoxRange` draws them with `R3D_SHADOW_CAST_DISABLED`, so they stay out of the sun's tiles / camera-fitted map and every point / spot shadow, and a range past its draw distance is not drawn at all (its shadow-only draw would draw nothing). They are still drawn, lit, shadowed by other objects, picked and collide (`MS_Material.noShadow`; `MS_GetDrawRange`'s `castShadow`). Models ignore it (their own `shadow`). |
 | `draw_distance <m>\|auto\|off` | Default auto. Beyond this distance from the camera (to the bounds of a map cell's boxes of the material) the camera skips its boxes; their shadows stay. Multiplied by the detail distance setting (0 there: always drawn). `auto`: 400 × the size of its largest box (the square root of its largest face). `off`: always drawn. With R3D patch 30. |
 | `blend alpha\|additive\|add_alpha\|multiply\|premultiplied` | |
 | `unlit on\|off` | |
@@ -278,6 +280,8 @@ env <key> <value...>
 **Cache hints** (optional; derived from the map bounds without them, see the region "Caches" in the source): `shadow.home x y z`, `fogCache.region x0 y0 z0 x1 y1 z1`.
 
 **Defaults and checks.** Every key has a built-in default (`BuiltinEnvironment()`: the values the default map was built with), so a map without `env` lines renders with those. Numeric values outside sane ranges (`ENV_RANGES`, e.g. `volumetricFog.stepSize` ≥ 0.05) and zero directions are rejected.
+
+**Fog zones.** `fogzone x0 y0 z0 x1 y1 z1 fade <m> <key> <value...> ...` (main file only, like `env`): while the camera is inside the box the distance fog takes the line's values for `fog.density`, `fog.color`, `fog.start`, `fog.end`, `fog.skyAffect` (each at most once, checked like the `env` key); over `fade` m outside it they blend back (smoothstep of the camera's distance to the box). Stored in `SceneData.fogZones` (`MS_Scene.fogZones`, `MS_FogZone`), compiled as section 20. `ApplyFogZones`, called at the top of `MS_PushLights`, blends from the fog values R3D's environment held when something else last set them (it keeps the values it wrote, `MS_Private.fogWritten*`; when the environment holds others, `MS_ApplyEnvironment`, a quality setting or the program changed it, and those become the base), zones in map order, and writes the result for `R3D_End` to upload. A map without zones returns at once, so its image is unchanged. The line goes into the look hash, so a live edit of it is a full upload. User-facing description: `docs/map-format.md` §2.5.
 
 ### Player and cameras
 

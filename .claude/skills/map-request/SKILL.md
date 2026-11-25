@@ -83,6 +83,7 @@ Write it **last**, in one go. The editor picks it up as soon as it has a complet
   - **what changed**: map lines before → after (quote them, with line numbers; `parts/lake.map:41` for a line in a part), and `MAP.md` / `ASSETS.md` changes;
   - the **paths of the before/after images**;
   - **assets**: every downloaded file with its source and licence (or why none was acceptable);
+  - **draw panel**: for every new or rebuilt object, its draw-mode `hover` line (paintable, its cells and grid; `map-editing` §2, "Every new object supports the draw panel fully"), or why it can't be;
   - **anything left open**: assumptions, departures from the brief, things you couldn't do, side effects;
   - **"restart needed"** if you changed code.
 - If you couldn't do the request, still write `result.md`, with a summary line that says so (e.g. `Not done: the developer chose to skip it` or `Not done: no model with an acceptable licence`). Otherwise the HUD shows the request as running until the coordinator gives up on it.

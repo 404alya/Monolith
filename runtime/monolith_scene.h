@@ -106,6 +106,8 @@ typedef struct {
                             // < 0 = `off` (always drawn); see MS_RenderSettings.detailDistance
     bool noCollide;         // `collide off`: its boxes don't block (MS_Collides / MS_FirstCollision skip
                             // them); they stay in boxes[] and colliders[], are drawn, picked and cast shadows
+    bool noShadow;          // `shadow off`: its boxes cast no shadow (the sun's, nor any light's); they still
+                            // receive shadows, are drawn, picked and collide as usual. Models use their own `shadow`
 } MS_Material;
 
 // A model file (glTF/GLB, OBJ, FBX, DAE through R3D's importer), loaded once per map load
@@ -149,12 +151,31 @@ typedef struct {
     MS_Ref ref;
     bool clip;                  // `clip x0 y0 z0 x1 y1 z1`: the light only reaches points in clipBox
     BoundingBox clipBox;        //   (world space; needs the patched R3D, ignored with upstream R3D)
+    float depthBias, slopeBias; // `depthBias` / `slopeBias`: the shadow map's biases (R3D_ShadowMap's units:
+                                //   metres for a point light); < 0 = R3D's default for the light type
 } MS_LightDef;
 
 typedef struct {
     const char *name;
     Vector3 eye, target;
 } MS_Viewpoint;
+
+// A `fogzone` line: while the camera is inside `box`, the distance fog takes the zone's values;
+// over `fade` metres outside it they blend back to the map's (smoothstep of the camera's distance
+// to the box). Zones apply in map order, each blending from the result of the ones before it.
+// Applied by MS_PushLights every frame; a map without zones never touches the fog there.
+#define MS_FOGZONE_DENSITY   1u     // MS_FogZone.set: which values the line gives
+#define MS_FOGZONE_COLOR     2u
+#define MS_FOGZONE_START     4u
+#define MS_FOGZONE_END       8u
+#define MS_FOGZONE_SKYAFFECT 16u
+typedef struct {
+    BoundingBox box;            // world space
+    float fade;                 // m; 0 = a hard switch at the box's faces
+    unsigned int set;           // MS_FOGZONE_* bits
+    float density, start, end, skyAffect;
+    Color color;                // sRGB, as `env fog.color`
+} MS_FogZone;
 
 // The sun: the one directional light with the static shadow tiles
 typedef struct {
@@ -215,6 +236,8 @@ typedef struct {
     float spawnYawDeg, spawnPitchDeg;
     const MS_Viewpoint *viewpoints;
     int viewpointCount;
+    const MS_FogZone *fogZones;     // `fogzone` lines, in map order
+    int fogZoneCount;
 
     BoundingBox bounds;             // everything (boxes, models, lights)
 
@@ -673,6 +696,8 @@ bool MS_Draw(MS_Scene *scene, Camera3D camera, RenderTexture target);
 // The parts, for use inside your own R3D_Begin*/R3D_End. aspect = target width / height.
 // MS_DrawGeometry submits R3D clusters (R3D_BeginCluster / R3D_EndCluster, one per map cell,
 // so R3D frustum-culls the level): don't call it between your own BeginCluster and EndCluster.
+// MS_PushLights also sets the distance fog for the camera's position when the map has `fogzone`
+// lines (MS_FogZone): change R3D's fog after MS_ApplyEnvironment as usual; the zones blend from it.
 bool MS_PushLights(MS_Scene *scene, Camera3D camera, float aspect);
 void MS_DrawGeometry(MS_Scene *scene);
 

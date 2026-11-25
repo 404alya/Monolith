@@ -253,6 +253,11 @@ int main(int argc, char **argv)
                 "paint.grid must be >= 0 and <= 1024");
     ExpectExact("env-paint-grid-negative", "monolith 3\nenv paint.grid -1\nbox 0 0 0 1 1 1\n", 2,
                 "paint.grid must be >= 0 and <= 1024");
+    // A light's shadow biases: one number each, not negative
+    ExpectExact("light-depth-bias-negative", "monolith 3\nlight point 0 1 0 shadow on depthBias -0.1\nbox 0 0 0 1 1 1\n", 2,
+                "light key 'depthBias' must not be negative");
+    ExpectExact("light-slope-bias-none", "monolith 3\nlight point 0 1 0 slopeBias shadow on\nbox 0 0 0 1 1 1\n", 2,
+                "light key 'slopeBias' takes one number");
 
     // The format line: exactly the current format (3). Without one a file is format 1, reported at
     // its first statement; a file of only comments has nothing to migrate
@@ -262,7 +267,7 @@ int main(int argc, char **argv)
                 "map format 4 is newer than this monolith (3): update monolith");
     ExpectExact("format-3-at", "monolith 3\nrepeat 2 0 0 1 at 0 0 5 box 0 0 0 1 1 1\n", 2,
                 "unknown keyword 'at' (expected group, box, block, stairs, waffle, model, light, material, use, env, "
-                "paint, import, spawn, viewpoint, id or repeat)");
+                "fogzone, paint, import, spawn, viewpoint, id or repeat)");
     ExpectFile("comments-only", "# nothing\n\n   # but comments\n", "map is empty (no boxes and no models)");
 
     // Imports (docs/map-format.md 2.10): each file once (a second import names where it was first
@@ -313,6 +318,21 @@ int main(int argc, char **argv)
              "spawn lines belong in the main map file (import-spawn.map)");
     ExpectIn("import-viewpoint", "monolith 3\nbox 0 0 0 1 1 1\nimport \"parts/view.map\"\n", "parts/view.map", 3,
              "viewpoint lines belong in the main map file (import-viewpoint.map)");
+    WritePart("parts/fogzone.map", "monolith 3\nfogzone 0 0 0 1 1 1 fade 5 fog.density 0.01\n");
+    ExpectIn("import-fogzone", "monolith 3\nbox 0 0 0 1 1 1\nimport \"parts/fogzone.map\"\n", "parts/fogzone.map", 2,
+             "fogzone lines belong in the main map file (import-fogzone.map)");
+    // fogzone (docs/map-format.md 2.6): the fade, the keys and their values
+    ExpectExact("fogzone-no-fade", "monolith 3\nbox 0 0 0 1 1 1\nfogzone 0 0 0 1 1 1 fog.density 0.01\n", 3,
+                "fogzone takes a box, a fade and fog keys: fogzone x0 y0 z0 x1 y1 z1 fade 20 fog.density 0.015 "
+                "fog.color 114 94 230");
+    ExpectExact("fogzone-key", "monolith 3\nbox 0 0 0 1 1 1\nfogzone 0 0 0 1 1 1 fade 5 fog.mode exp\n", 3,
+                "fogzone: unknown key 'fog.mode' (fog.density, fog.color, fog.start, fog.end, fog.skyAffect)");
+    ExpectExact("fogzone-twice", "monolith 3\nbox 0 0 0 1 1 1\nfogzone 0 0 0 1 1 1 fade 5 fog.density 1 fog.density 2\n", 3,
+                "fogzone: fog.density given twice");
+    ExpectExact("fogzone-fade", "monolith 3\nbox 0 0 0 1 1 1\nfogzone 0 0 0 1 1 1 fade -1 fog.density 0.01\n", 3,
+                "fogzone: fade must be 0 or more metres");
+    ExpectExact("fogzone-density", "monolith 3\nbox 0 0 0 1 1 1\nfogzone 0 0 0 1 1 1 fade 5 fog.density -1\n", 3,
+                "fog.density must be >= 0 and <= 1000000");
     WritePart("parts/old.map", "monolith 2\nbox 0 0 0 1 1 1\n");
     WritePart("parts/none.map", "# no format line\nbox 0 0 0 1 1 1\n");
     snprintf(msg, sizeof(msg), "map format 2 is older than this monolith (3): run /migrate-map %s/import-old.map in "

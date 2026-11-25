@@ -35,11 +35,11 @@ Little-endian only, every field a fixed-width integer or an IEEE-754 `float`, ev
 | Offset | Type | Field |
 |---|---|---|
 | 0 | `u8[8]` | magic `89 4D 41 50 42 0D 0A 1A` (`\x89MAPB\r\n\x1a`: not text, and catches a file mangled by newline conversion) |
-| 8 | `u32` | binary-format version, `MS_COMPILED_VERSION` (10; see *Versions* below). Separate from the map format version `MS_FORMAT_VERSION`; bumped whenever a record or section changes |
+| 8 | `u32` | binary-format version, `MS_COMPILED_VERSION` (13; see *Versions* below). Separate from the map format version `MS_FORMAT_VERSION`; bumped whenever a record or section changes |
 | 12 | `u32` | header size (64) |
 | 16 | `u32` | byte-order tag `0x01020304` (a big-endian reader sees `0x04030201` and refuses the file) |
 | 20 | `u32` | map format version of the source (`MS_FORMAT_VERSION`, 3) |
-| 24 | `u32` | section count (19) |
+| 24 | `u32` | section count (20) |
 | 28 | `u32` | offset of the section table |
 | 32 | `u64` | file size in bytes (a truncated file fails here) |
 | 40 | `u64` | FNV-1a 64 of the source `.map` bytes (the main file; `sources[0]` repeats it) |
@@ -56,10 +56,10 @@ Little-endian only, every field a fixed-width integer or an IEEE-754 `float`, ev
 | 1 | strings | the string table: NUL-terminated UTF-8, `count` bytes, first byte and last byte `0` | 1 |
 | 2 | boxes | `f32 min[3], max[3]; i32 line, file, prim, group, material, copy, part` | 52 |
 | 3 | groups | `u32 name` | 4 |
-| 4 | materials | names and paths (`name`, `shader`, `maps[4]`: albedo, normal, orm, emission), `i32 line, shaderLine, mapLine[4]`, `i32 file, shaderFile, mapFile[4]` (the files of those lines: a material can get keys in several files), `u8 albedo[4], emission[4]` (RGBA), `f32 emissionEnergy, normalScale, occlusion, roughness, metalness, specular, uvScale[2], uvOffset[2], alphaCutoff`, `i32 cull, transparency, blend, priority, wrap`, `u32 inherit, unlit, instanced`, `u32 uniformFirst, uniformCount, samplerFirst, samplerCount`, `u8 uvFaces[6], filter, pad` (the box face layout `uv_faces`, a cell per face +x −x +y −y +z −z, all 255 = none; `filter` 0 trilinear, 1 nearest; `pad` 0), `paint` (the paint atlas path, `paint`, or none), `u8 paintFilter, pad2[3]` (`paint_filter` 0 trilinear, 1 nearest; padding 0), `u32 noPrepass` (`prepass off` = 1, else 0), `f32 drawDistance` (`draw_distance` in m, 0 = auto, −1 = off), `f32 paintGrid` (`paint_grid` in texels per metre: −1 = not set, the map's `env paint.grid` applies; 0 = none; else 1..1024), `u32 noCollide` (`collide off` = 1, else 0), `i32 paintLine, paintFile` (the `paint` key's line and file; 0 0 without one) | 212 |
+| 4 | materials | names and paths (`name`, `shader`, `maps[4]`: albedo, normal, orm, emission), `i32 line, shaderLine, mapLine[4]`, `i32 file, shaderFile, mapFile[4]` (the files of those lines: a material can get keys in several files), `u8 albedo[4], emission[4]` (RGBA), `f32 emissionEnergy, normalScale, occlusion, roughness, metalness, specular, uvScale[2], uvOffset[2], alphaCutoff`, `i32 cull, transparency, blend, priority, wrap`, `u32 inherit, unlit, instanced`, `u32 uniformFirst, uniformCount, samplerFirst, samplerCount`, `u8 uvFaces[6], filter, pad` (the box face layout `uv_faces`, a cell per face +x −x +y −y +z −z, all 255 = none; `filter` 0 trilinear, 1 nearest; `pad` 0), `paint` (the paint atlas path, `paint`, or none), `u8 paintFilter, pad2[3]` (`paint_filter` 0 trilinear, 1 nearest; padding 0), `u32 noPrepass` (`prepass off` = 1, else 0), `f32 drawDistance` (`draw_distance` in m, 0 = auto, −1 = off), `f32 paintGrid` (`paint_grid` in texels per metre: −1 = not set, the map's `env paint.grid` applies; 0 = none; else 1..1024), `u32 noCollide` (`collide off` = 1, else 0), `i32 paintLine, paintFile` (the `paint` key's line and file; 0 0 without one), `u32 noShadow` (`shadow off` = 1, else 0) | 216 |
 | 5 | uniforms | `u32 name, count; f32 v[4]` | 24 |
 | 6 | samplers | `u32 name, path; i32 line, file; u32 data` (1 = `data_sampler`) | 20 |
-| 7 | lights | `u32 type; f32 position[3], direction[3]; u8 color[4]; f32 energy, specular, range, falloff, inner, outer, fogEnergy; u32 shadow, clip; f32 clipMin[3], clipMax[3]; i32 ref[7]` | 120 |
+| 7 | lights | `u32 type; f32 position[3], direction[3]; u8 color[4]; f32 energy, specular, range, falloff, inner, outer, fogEnergy; u32 shadow, clip; f32 clipMin[3], clipMax[3]; f32 depthBias, slopeBias; i32 ref[7]` | 128 |
 | 8 | viewpoints | `u32 name; f32 eye[3], target[3]` | 28 |
 | 9 | model files | `u32 path; i32 line, file` (the line that first names it) | 12 |
 | 10 | models | `i32 file; f32 position[3], rotationDeg[3], scale[3]; u32 origin, collide, castShadow; i32 colliderFirst, colliderCount, slotFirst, slotCount; i32 ref[7]` | 96 |
@@ -72,17 +72,21 @@ Little-endian only, every field a fixed-width integer or an IEEE-754 `float`, ev
 | 17 | box turns | `u32 box; f32 rotationDeg[3]` (yaw, pitch, roll as written): one record per turned box, sorted by box, each box at most once | 16 |
 | 18 | paint | `u32 material` (`0xFFFFFFFF`: the model slot's own material), `u32 kind` (0 a box, 1 a model instance), `u32 object` (index into boxes or models), `u32 facesOrSlot` (a box: bit f for face f, +x −x +y −y +z −z; a model: the slot), `u32 x, y, w, h` (texels of the atlas), `u32 filter` (`paint own … paint_filter`: 0 trilinear, 1 nearest; 0 for a material's entry), `i32 line, file`: one record per `paint` line in map order, also the ones that don't draw | 44 |
 | 19 | sources | `u32 path; i32 importFile, importLine; u32 pad; u64 size, hash`: every map-text file the map was compiled from, `[0]` the main file (its name, size and hash equal the header's; `importFile` −1, `importLine` 0), then each imported file in the order the parser first reached it (`path` package-relative as normalised, a `.map` file, each once; `importFile` an earlier source, `importLine` ≥ 1: the `import` line that reached it); `size` at most 4 MB; `pad` 0 | 32 |
+| 20 | fog zones | `f32 min[3], max[3], fade; u32 set; f32 density, start, end, skyAffect; u8 color[4]`: one record per `fogzone` line in map order; `set` says which values the line gives (bit 0 `fog.density`, 1 `fog.color`, 2 `fog.start`, 3 `fog.end`, 4 `fog.skyAffect`; the other values 0), `color` sRGB RGBA. The reader checks them as the parser does (box within the coordinate limit, min ≤ max, `fade` ≥ 0, at least one known bit, each value in its `env` key's range) | 52 |
 
 **Turned boxes:** for a box with a box turn record, its `boxes` record holds the box **as written** (the two corners before the turn, ordered), not its world AABB; the reader rebuilds the turned-box record (centre, size, axes) and the AABB with the parser's own code, so the bits match a text load. Every other box is stored as its corners.
 
-**Versions:** the reader reads exactly one binary-format version, 10, and only files compiled from the current map format (3); the writer writes the same. Any other file is refused and nothing is loaded:
+**Versions:** the reader reads exactly one binary-format version, 12, and only files compiled from the current map format (3); the writer writes the same. Any other file is refused and nothing is loaded:
 
-- another binary-format version: `compiled map version 9; this runtime reads compiled map version 10: compile the map again`;
+- another binary-format version: `compiled map version 12; this runtime reads compiled map version 13: compile the map again`;
 - compiled from an older map format (every file an earlier monolith wrote): `compiled map of map format 2; this runtime reads map format 3: compile the map again`;
 - compiled from a newer map format: `compiled map of map format 4 is newer than this runtime (3): update monolith`.
 
 **Version history** (the versions before 7 are in the git history of this file and of `CM_VERSION`):
 
+- 13 (2026-11-25, fog zones, [map-format.md](map-format.md) §2.5): the new section 20, `fog zones`, one record per `fogzone` line. Every existing `.mapb` must be compiled again.
+- 12 (2026-11-22, materials that cast no shadow): materials gain `u32 noShadow` at the end (`shadow off`; 212 → 216 bytes). Every existing `.mapb` must be compiled again.
+- 11 (2026-11-22, light shadow biases): lights gain `depthBias, slopeBias` after `clipMax` (-1 = R3D's default for the type; 120 → 128 bytes). Every existing `.mapb` must be compiled again.
 - 10 (2026-11-21, imports, [map-format.md](map-format.md) §2.10): every line gets its map-text file: `ref` gains `file` after `line` (boxes 48 → 52, lights 116 → 120, models 92 → 96 bytes), materials gain `file, shaderFile, mapFile[4]` after the lines and `paintLine, paintFile` at the end (180 → 212; the paint key's line was the material's first line before), samplers, model files and paint entries a `file` after their `line` (16 → 20, 8 → 12, 40 → 44); the new section 19, `sources`, lists the map-text files. Every existing `.mapb` must be compiled again.
 - 9: the layout before 10 (`noCollide` on materials).
 - 8 (2026-11-21, the paint grid, [painting.md](painting.md) §17): materials gain `f32 paintGrid` (record 172 → 176 bytes). The map-wide `env paint.grid` needs no layout change (an env record by name).
