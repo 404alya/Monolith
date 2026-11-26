@@ -32,7 +32,7 @@ typedef enum {
     R3D_TARGET_ORM,             //< Full - Mip 1 - RGBA8
     R3D_TARGET_DEPTH,           //< Full - Mip N - R16F
     R3D_TARGET_SELECTOR,        //< Half - Mip N - R8UI
-    R3D_TARGET_RADIANCE,        //< Full - Mip 2 - RGB16F
+    R3D_TARGET_RADIANCE,        //< Full - Mip 2 + R3D_TARGET_AO_MIPS - RGB16F
     R3D_TARGET_SPECULAR,        //< Full - Mip 2 - RGB16F
     R3D_TARGET_VFOG_RAD,        //< Half - Mip 1 - R11G11B10F
     R3D_TARGET_SSAO_0,          //< Half - Mip 1 - R8
@@ -111,6 +111,11 @@ do {                                            \
 
 #define R3D_TARGET_MAX_FRAMEBUFFERS 32
 #define R3D_TARGET_MAX_ATTACHMENTS  8
+
+// Monolith patch 32: SSAO and SSIL read their far taps from the depth (and SSIL also the
+// radiance) levels 1 .. 1 + R3D_TARGET_AO_MIPS, as Scalable Ambient Obscurance does.
+// Must equal AO_MAX_MIP in shaders/prepare/ssao.frag and ssil.frag.
+#define R3D_TARGET_AO_MIPS 5
 
 typedef struct {
     r3d_target_t targets[R3D_TARGET_MAX_ATTACHMENTS];

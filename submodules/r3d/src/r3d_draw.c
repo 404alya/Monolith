@@ -395,13 +395,24 @@ void R3D_End(void)
         if (ssao || ssil || ssgi || ssr || vfog || dof)
         {
             PROF_BEGIN(R3D_PROFILER_PYRAMID);
-            // Monolith patch 10: only SSR reads depth levels above 1 (SSAO, SSIL, SSGI, the
-            // fog and DoF use levels 0 and 1), so without SSR the pyramid stops at level 1
-            pass_prepare_pyramid(ssr ? r3d_target_get_max_level(R3D_TARGET_DEPTH) : 1);
+            // Monolith patch 10: only SSR reads the whole depth pyramid (SSGI, the fog and DoF
+            // use levels 0 and 1), so without SSR the pyramid stops at the last level SSAO and
+            // SSIL read (patch 32: 1 + R3D_TARGET_AO_MIPS), or at level 1
+            int aoTop = (ssao || ssil) ? 1 + R3D_TARGET_AO_MIPS : 1;
+            pass_prepare_pyramid(ssr ? r3d_target_get_max_level(R3D_TARGET_DEPTH) : aoTop);
 
             if (ssao || ssil || ssgi || ssr) pass_prepare_downsample(R3D_TARGET_NORMAL, 1);
             // skip ssr check for radiance, we re-downsample during ssr for the full ambient reflection
-            if (ssil || ssgi) pass_prepare_downsample(R3D_TARGET_RADIANCE, 1);
+            // Monolith patch 32: SSIL's far taps read radiance levels 2 .. 1 + R3D_TARGET_AO_MIPS,
+            // downsampled with the pyramid's selector so each level matches its depth level
+            int radianceTop = ssil ? 1 + R3D_TARGET_AO_MIPS : 1;
+            if (ssil || ssgi)
+            {
+                for (int level = 1; level <= radianceTop; level++)
+                {
+                    pass_prepare_downsample(R3D_TARGET_RADIANCE, level);
+                }
+            }
             PROF_END();
         }
 
@@ -2387,7 +2398,8 @@ r3d_target_t pass_prepare_ssao(void)
     R3D_SHADER_USE(prepare.ssao);
 
     R3D_SHADER_BIND_SAMPLER(prepare.ssao, uNormalTex, r3d_target_get_level(R3D_TARGET_NORMAL, 1));
-    R3D_SHADER_BIND_SAMPLER(prepare.ssao, uDepthTex, r3d_target_get_level(R3D_TARGET_DEPTH, 1));
+    // Monolith patch 32: levels above 1 for the far taps
+    R3D_SHADER_BIND_SAMPLER(prepare.ssao, uDepthTex, r3d_target_get_levels(R3D_TARGET_DEPTH, 1, 1 + R3D_TARGET_AO_MIPS));
 
     R3D_RENDER_SCREEN();
 
@@ -2431,9 +2443,10 @@ r3d_target_t pass_prepare_ssil(void)
     R3D_TARGET_BIND_CLEAR(1, true, R3D_TARGET_SSIL_0);
     R3D_SHADER_USE(prepare.ssil);
 
-    R3D_SHADER_BIND_SAMPLER(prepare.ssil, uRadianceTex, r3d_target_get_level(R3D_TARGET_RADIANCE, 1));
+    // Monolith patch 32: levels above 1 for the far taps
+    R3D_SHADER_BIND_SAMPLER(prepare.ssil, uRadianceTex, r3d_target_get_levels(R3D_TARGET_RADIANCE, 1, 1 + R3D_TARGET_AO_MIPS));
     R3D_SHADER_BIND_SAMPLER(prepare.ssil, uNormalTex, r3d_target_get_level(R3D_TARGET_NORMAL, 1));
-    R3D_SHADER_BIND_SAMPLER(prepare.ssil, uDepthTex, r3d_target_get_level(R3D_TARGET_DEPTH, 1));
+    R3D_SHADER_BIND_SAMPLER(prepare.ssil, uDepthTex, r3d_target_get_levels(R3D_TARGET_DEPTH, 1, 1 + R3D_TARGET_AO_MIPS));
 
     R3D_RENDER_SCREEN();
 

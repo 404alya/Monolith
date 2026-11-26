@@ -5166,3 +5166,58 @@ Files: `shaders/deferred/lighting.frag`, `src/modules/r3d_shader.h`, `src/module
 ```
 
 **Verification.** Against the build before it: 91 shots pixel-identical (every viewpoint of `maps/monolith`, `maps/pine_forest` and `maps/voxel-test` at ultra, high, medium and low, yaw sweeps in `voxel-test` and on the `monolith` terrace, `tests/models`, a `--reload-test`). Machine C (Intel HD 5500, Mesa 25.2.8, i5-5300U), headless 1366 × 768, `preset = low` + `render_scale = 1`, 2 interleaved pairs each: `maps/voxel-test` still at viewpoints 1, 3, 4 (100 frames): lights 30.0 → 14.2 ms (**−15.8 ms, −53 %**), frame 77.7 → 62.3 ms (**−15.4 ms, −20 %**); `maps/monolith` spinning, all 7 viewpoints (150 frames): lights 1.81 → 1.88 ms (+0.08 ms; pairs +0.06 / +0.10), GPU total +0.06 ms, frame −0.01 ms: no measurable change. The first version (one program) had cost the developer's GTX 1660 Ti ~3 % on `maps/monolith`. Machine B (GTX 1660 Ti, NVIDIA 615.71.09, i5-10400F), headless 1920 × 1006, ultra, full runs, 3 interleaved pairs each: two programs against the build before patch 31, `maps/monolith` lights 0.091 → 0.090 ms (the regression gone), `maps/voxel-test` lights 0.510 → 0.382 ms (−25 %; frame times too noisy that session to quote). Spot cone test (2026-11-16) against the two-program build: 0 pixels changed on every viewpoint of the three maps and of a scratch copy of `maps/monolith` with the spot lights' `clip` removed (162 unmarked spots, 7 viewpoints + yaw sweeps 0–300° at three positions); on that copy lights 0.112 → 0.096 ms (pairs −0.014 / −0.016 / −0.018, −14 %; Terrace 0.28 → 0.23), on `maps/monolith` unchanged (its spots are all marked and use the plain program). `./build.sh --win` not run on machine B either (no mingw-w64). **Rejected:** the same discard on the volumetric fog's per-light early-out (`vfog_radiance.frag`, rays that miss the sphere): pixel-identical but vfog radiance +0.9 ms (2 pairs), frame +1.3 ms. `./build.sh` and `./build.sh examples` without warnings; `./build.sh --win` not run (no mingw-w64 on machine C); `glslangValidator` not installed there (Mesa compiles both variants at load); `build/tools/leakcheck`: OK, zero leaks of ours (160 runs).
+
+## Patch 32: SSAO and SSIL read their far taps from the depth pyramid (2026-11-22)
+
+**Symptom.** SSIL grows much faster than the pixel count. Machine B (GTX 1660 Ti, NVIDIA 620.70.06, i5-10400F), headless, ultra, 5-minute runs: at 3840 × 2012 (a scratch build standing in for render scale 2.0, which R3D doesn't offer) against 1920 × 1006, 4× the pixels, SSIL took 7.4× as long on `maps/voxel-test` (1.32 → 9.79 ms) and 6.4× on `maps/monolith` (0.85 → 5.45 ms; close views 8×: Canyon 1.70 → 13.58 ms, far views ~4.5×: Tower 0.33 → 1.48 ms); SSAO 4.3–4.8×. Scratch copies of `voxel-test` split it: with 1 sample SSIL scaled 4.2× (0.48 → 2.00 ms: the denoiser and the centre reads, linear), each further tap cost 0.054 ms at 1× and 0.517 ms at 2× (2.4× per pixel); `ssil.radius 1` still scaled 6.2×.
+
+**Cause.** Both shaders are "adapted from" Scalable Ambient Obscurance but read every tap with `texelFetch(…, 0)` from the half-resolution level. The screen radius `projScale * radius / depth` has no bound (at 2 m and radius 5 it is ~900 px at 1×, ~1800 px at 2×), and the spiral's spin is a per-pixel hash, so the 32 lanes of a warp read 32 scattered texels per tap: no texture-cache reuse, and at 2× the depth (3.9 MB) and radiance (~15 MB) levels no longer fit the 1.5 MB L2 either. SAO's own answer, the part that makes it "scalable", was left out: a tap `ssR` pixels away reads the depth mip `log2(ssR) − LOG_MAX_OFFSET`, so neighbouring lanes stay a few texels apart at any radius and resolution. Patch 10 had also stopped the pyramid at level 1 without SSR, and the radiance had only levels 0 and 1.
+
+**Change.** Each tap reads depth (SSIL also radiance) from level `TapMip(ssR)` = `clamp(exponent(ssR) − 3, 0, 5)` above the bound base level 1 (`AO_LOG_MAX_OFFSET` 3 as in SAO, `AO_MAX_MIP` 5 = `R3D_TARGET_AO_MIPS`); taps under 16 px read level 1 exactly as before. The exponent is taken from the float's bits (`floatBitsToInt`, GLSL 3.30: exact on every GPU; `findMSB` needs 4.00). The view position keeps the tap's own screen point (SAO's choice), only its depth comes from the coarse level. The pyramid's min-depth selector (`pyramid.frag`, `pass_prepare_downsample`) makes the radiance levels pick the same texel as the depth levels. Without SSR the pyramid now goes up to level 1 + `R3D_TARGET_AO_MIPS` when SSAO or SSIL run (levels 0–1 otherwise, as before), and with SSIL the radiance is downsampled to the same level. The radiance target gets those levels and a mipmap min filter: with `GL_NEAREST` only the base level is complete and `texelFetch` above it is undefined. Presets without SSAO and SSIL (low, medium, high) are unchanged.
+
+Files: `shaders/prepare/ssao.frag`, `shaders/prepare/ssil.frag`, `src/modules/r3d_target.h`, `src/modules/r3d_target.c`, `src/r3d_draw.c`.
+
+```diff
+--- shaders/prepare/ssao.frag, ssil.frag
++#define AO_MAX_MIP 5
++#define AO_LOG_MAX_OFFSET 3
++int TapMip(float ssR)
++{
++    int exponent = ((floatBitsToInt(max(ssR, 1.0)) >> 23) & 0xff) - 127;
++    return clamp(exponent - AO_LOG_MAX_OFFSET, 0, AO_MAX_MIP);
++}
+ ...
+-        float sampleDepth = texelFetch(uDepthTex, pixelOffset, 0).r;
++        int mip = TapMip(ssRadius * rNorm);
++        ivec2 mipCoord = min(pixelOffset >> mip, textureSize(uDepthTex, mip) - 1);
++        float sampleDepth = texelFetch(uDepthTex, mipCoord, mip).r;
+         vec3 samplePos = V_GetViewPosition((vec2(pixelOffset) + 0.5) * depthTexInv, sampleDepth);
+ (ssil.frag)
+-        giSum += texelFetch(uRadianceTex, pixelOffset, 0).rgb * w;
++        giSum += texelFetch(uRadianceTex, mipCoord, mip).rgb * w;
+--- src/modules/r3d_target.h
++#define R3D_TARGET_AO_MIPS 5
+--- src/modules/r3d_target.c
+-    [R3D_TARGET_RADIANCE]    = { FORMAT_RGB16F,     1, GL_NEAREST,                GL_NEAREST, 2, {0} },
++    [R3D_TARGET_RADIANCE]    = { FORMAT_RGB16F,     1, GL_NEAREST_MIPMAP_NEAREST, GL_NEAREST, 2 + R3D_TARGET_AO_MIPS, {0} },
+--- src/r3d_draw.c   (R3D_End, pass_prepare_ssao, pass_prepare_ssil)
+-            pass_prepare_pyramid(ssr ? r3d_target_get_max_level(R3D_TARGET_DEPTH) : 1);
++            int aoTop = (ssao || ssil) ? 1 + R3D_TARGET_AO_MIPS : 1;
++            pass_prepare_pyramid(ssr ? r3d_target_get_max_level(R3D_TARGET_DEPTH) : aoTop);
+-            if (ssil || ssgi) pass_prepare_downsample(R3D_TARGET_RADIANCE, 1);
++            int radianceTop = ssil ? 1 + R3D_TARGET_AO_MIPS : 1;
++            if (ssil || ssgi) for (level = 1 .. radianceTop) pass_prepare_downsample(R3D_TARGET_RADIANCE, level);
+-    ... uDepthTex, r3d_target_get_level(R3D_TARGET_DEPTH, 1));
++    ... uDepthTex, r3d_target_get_levels(R3D_TARGET_DEPTH, 1, 1 + R3D_TARGET_AO_MIPS));   (SSAO and SSIL; SSIL's radiance likewise)
+```
+
+**Verification.** The look changes slightly, as a trade-off the developer accepted in advance, to be judged on these shots (2026-11-22): every viewpoint of the three maps at ultra, 1600 × 900, against the build before: mean difference 0.001–0.23 / 255, largest 22 / 255 (`voxel-test` Diner), 0.3–40 % of the pixels touched (the 40 % is `monolith` Canyon, max 13 / 255): the wide-scale indirect light on floors and walls, invisible side by side. Machine B, headless, ultra, screening runs (300 frames, every viewpoint), 3 interleaved pairs each, averages of the pairs (A → B):
+
+| | SSIL | SSAO | depth pyramid (+ radiance levels) | GPU total | frame |
+|---|---:|---:|---:|---:|---:|
+| `voxel-test` 1920 × 1006 | 1.261 → 0.717 (−43 %) | 0.327 → 0.337 | 0.199 → 0.261 | 5.905 → 5.434 (−0.47 ms, −8 %) | −0.44 ms |
+| `voxel-test` 3840 × 2012 | 9.689 → 2.847 (−71 %) | 1.636 → 1.333 (−19 %) | 0.548 → 0.654 | 26.80 → 19.84 (−6.96 ms, −26 %) | −6.93 ms |
+| `monolith` 1920 × 1006 | 0.846 → 0.586 (−31 %) | 0.242 → 0.264 | 0.083 → 0.197 | 4.047 → 3.887 (−0.16 ms, −4 %) | −0.08 ms (noise) |
+| `monolith` 3840 × 2012 | 5.445 → 2.243 (−59 %) | 1.047 → 1.034 | 0.283 → 0.464 | 17.08 → 14.07 (−3.01 ms, −18 %) | −3.00 ms |
+
+Paired GPU-total differences: `voxel-test` 1× −0.52 / −0.42 / −0.47, 2× −6.43 / −7.29 / −7.16; `monolith` 1× −0.14 / −0.11 / −0.23, 2× −2.85 / −2.71 / −3.48. The pyramid's extra cost is the five small levels' draws (and five radiance downsamples): `monolith` has no SSR, so its depth levels 2–6 are new too. SSAO reads only the depth (1 MB at 1×, inside L2): no gain at 1×. These are screening runs, not full runs: the gains are clear well beyond the noise at 2×, but the 1× rows (above all `monolith`'s frame −0.08 ms) are still to be confirmed with full runs. Low, medium and high run neither SSAO nor SSIL, so the pyramid and the radiance downsample take the same path as before; that is read from the code, not shown with shots. `./build.sh` without warnings; `./build.sh --win` not run (no mingw-w64 on machine B); `check_r3d_shaders.py prepare/ssao.frag prepare/ssil.frag`: ok; `build/tools/leakcheck`: OK, zero leaks of ours (machine B, 2026-11-26).

@@ -35,6 +35,11 @@ const int ROTATIONS[98] = int[98](
     19, 27, 21, 25, 39, 29, 17, 21, 27
 );
 
+// Monolith patch 32: the depth pyramid levels the far taps read (TapMip): AO_MAX_MIP must equal
+// R3D_TARGET_AO_MIPS (src/modules/r3d_target.h); AO_LOG_MAX_OFFSET is SAO's LOG_MAX_OFFSET
+#define AO_MAX_MIP 5
+#define AO_LOG_MAX_OFFSET 3
+
 // ================================
 // Includes
 // ================================
@@ -77,6 +82,17 @@ vec2 TapLocation(int i, float numSpiralTurns, float spin, out float rNorm)
     return vec2(cos(angle), sin(angle));
 }
 
+// Monolith patch 32: the depth level a tap ssR pixels from the centre reads, as in Scalable
+// Ambient Obscurance: level 0 below 2^(AO_LOG_MAX_OFFSET + 1) = 16 px, then one level per doubling, so
+// the taps of neighbouring pixels stay a few texels apart (texture cache hits) at any radius
+// and resolution. The exponent is read from the float's bits: exact on every GPU, and
+// findMSB needs GLSL 4.00.
+int TapMip(float ssR)
+{
+    int exponent = ((floatBitsToInt(max(ssR, 1.0)) >> 23) & 0xff) - 127;
+    return clamp(exponent - AO_LOG_MAX_OFFSET, 0, AO_MAX_MIP);
+}
+
 // ================================
 // Main Function
 // ================================
@@ -111,7 +127,12 @@ void main()
         ivec2 pixelOffset = clamp(rawOffset, ivec2(0), depthTexSize - 1);
         bool inBounds = all(equal(pixelOffset, rawOffset));
 
-        float sampleDepth = texelFetch(uDepthTex, pixelOffset, 0).r;
+        // Monolith patch 32: the tap's depth from its pyramid level; the position keeps the
+        // tap's own screen point, as in SAO
+        int mip = TapMip(ssRadius * rNorm);
+        ivec2 mipCoord = min(pixelOffset >> mip, textureSize(uDepthTex, mip) - 1);
+
+        float sampleDepth = texelFetch(uDepthTex, mipCoord, mip).r;
         vec3 samplePos = V_GetViewPosition((vec2(pixelOffset) + 0.5) * depthTexInv, sampleDepth);
         vec3 v = samplePos - position;
 
@@ -123,7 +144,7 @@ void main()
         float w = f * f * f * max((vn - uSsil.bias) / (epsilon + vv), 0.0) * float(inBounds);
 
         aoSum += w;
-        giSum += texelFetch(uRadianceTex, pixelOffset, 0).rgb * w;
+        giSum += texelFetch(uRadianceTex, mipCoord, mip).rgb * w;  // patch 32: same level as the depth
     }
 
     float temp = radiusSq * uSsil.radius;

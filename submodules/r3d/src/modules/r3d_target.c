@@ -86,7 +86,9 @@ static const target_config_t TARGET_CONFIG[] = {
     [R3D_TARGET_ORM]         = { FORMAT_RGBA8,      1, GL_NEAREST,                GL_NEAREST, 1, {0} },
     [R3D_TARGET_DEPTH]       = { FORMAT_R16F,       1, GL_NEAREST_MIPMAP_NEAREST, GL_NEAREST, 0, {65504.0f, 65504.0f, 65504.0f, 65504.0f} },
     [R3D_TARGET_SELECTOR]    = { FORMAT_R8UI,       2, GL_NEAREST,                GL_NEAREST, 0, {0} },
-    [R3D_TARGET_RADIANCE]    = { FORMAT_RGB16F,     1, GL_NEAREST,                GL_NEAREST, 2, {0} },
+    // Monolith patch 32: levels 2 .. 1 + R3D_TARGET_AO_MIPS for SSIL's far taps; a mipmap min
+    // filter, or texelFetch above the base level is undefined (only the base level is complete)
+    [R3D_TARGET_RADIANCE]    = { FORMAT_RGB16F,     1, GL_NEAREST_MIPMAP_NEAREST, GL_NEAREST, 2 + R3D_TARGET_AO_MIPS, {0} },
     [R3D_TARGET_SPECULAR]    = { FORMAT_RGB16F,     1, GL_NEAREST,                GL_NEAREST, 2, {0} },
     [R3D_TARGET_VFOG_RAD]    = { FORMAT_R11G11B10F, 2, GL_LINEAR,                 GL_LINEAR,  1, {0} },
     [R3D_TARGET_SSAO_0]      = { FORMAT_R8,         2, GL_LINEAR,                 GL_LINEAR,  1, {0} },
