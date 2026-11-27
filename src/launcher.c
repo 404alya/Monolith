@@ -13,6 +13,7 @@
 #include "classifier.h"
 #include "ui.h"
 #include "png.h"
+#include "dirscan.h"
 #include <ctype.h>
 #include <errno.h>
 #include <limits.h>
@@ -2645,6 +2646,7 @@ static long lastDoneSeq;        // most recently finished request (by finish ord
 static long doneCounter;
 static Vector3 lastDoneEye;
 static float lastDoneYaw, lastDonePitch;
+static bool launcherActive;     // this run restored the list or submitted: only then may it close the coordinator on exit
 static long confirmSeq;         // running request whose close waits for a second key press
 static double confirmUntil;     // ... until this clockTime
 
@@ -3538,20 +3540,63 @@ bool LauncherClosing(void)
 static bool QueueMode(void);
 static bool CoordinatorAlive(void);
 static int OpenQueueRequests(void);
+static int QueueBusy(void);
+static bool CoordinatorStarting(void);
+static pid_t CoordinatorPid(void);
+static void SignalCoordinator(pid_t pid, int sig);
+
+// On exit, the coordinator is idle: closes its terminal, whichever editor run started it. The WM route first
+// (its mark is fixed per requests folder), else SIGTERM to the lock wrapper's process group (the pid in
+// requests/.coordinator/pid, checked against /proc), else to our own terminal child. No escalation: the
+// editor is gone after this. 0: a close was sent; 1: no route reached it
+static unsigned char CloseIdleCoordinator(void)
+{
+    const char *method = getenv("MONOLITH_CLOSE_METHOD");
+    bool useWm = !method || strcmp(method, "signal") != 0;
+    bool useSignal = !method || strcmp(method, "wm") != 0;
+    int wm = useWm ? WmCloseMarked(&coord.term) : -1;
+    if (wm == 1) {
+        TraceLog(LOG_INFO, "monolith: closing the coordinator: window manager closed its window");
+        return 0;
+    }
+    if (!useSignal) return 1;
+    pid_t pid = CoordinatorPid();
+    if (pid > 0) {
+        SignalCoordinator(pid, SIGTERM);
+        return 0;
+    }
+    return CloseTerm(&coord.term, "the coordinator") == CLOSED_WINDOW ? 0 : 1;
+}
 
 void LauncherCloseOnExit(void)
 {
     FlushPending();             // (the classifiers still running: their bundles go on the default tier)
     const char *e = getenv("MONOLITH_CLOSE_ON_EXIT");
-    if (!e || !*e || strcmp(e, "0") == 0) return;
+    bool off = e && strcmp(e, "0") == 0;
     // No escalation after this (the editor is gone): the WM close, or SIGTERM where the WM
     // route isn't available, is all there is
     if (QueueMode()) {
-        int open = OpenQueueRequests();
-        if (open) TraceLog(LOG_INFO, "monolith: on exit: %d request%s still queued or running, the coordinator stays open", open, open == 1 ? "" : "s");
-        else if (CoordinatorAlive()) CloseTerm(&coord.term, "the coordinator");
+        // Coordinator mode, on by default: close the coordinator when no bundle on disk needs it. Only in a run
+        // that used the launcher (interactive, or a --shot run that submitted or restored): a request session's
+        // own --shot must never close the coordinator it runs under
+        if (off || !launcherActive) return;
+        // Busy = queued, claimed or question in requests/*/state (FlushPending above queued the bundles still
+        // classifying, so they count). request-queue writes done only after the request's commit and map.patch
+        // (docs/request-queue.md section 4a), so nothing of a finished request is cut short
+        int busy = QueueBusy();
+        if (busy == 0 && !CoordinatorAlive()) return;           // (nothing to close)
+        // Again right before closing: a bundle queued (by another editor) in the meantime keeps it open
+        if (busy == 0) busy = QueueBusy();
+        if (busy < 0) TraceLog(LOG_WARNING, "monolith: on exit: %s can't be read, the coordinator stays open", requestsDir);
+        else if (busy > 0 && !CoordinatorAlive() && !CoordinatorStarting())     // (starting: this run just started one)
+            TraceLog(LOG_INFO, "monolith: on exit: %d request%s still queued or running, no coordinator runs (the next submit starts one)", busy, busy == 1 ? "" : "s");
+        else if (busy > 0) TraceLog(LOG_INFO, "monolith: on exit: %d request%s still queued or running, the coordinator stays open", busy, busy == 1 ? "" : "s");
+        else if (CloseIdleCoordinator() == 0) TraceLog(LOG_INFO, "monolith: on exit: coordinator closed (idle)");
+        else TraceLog(LOG_INFO, "monolith: on exit: the coordinator is idle, but no route reaches its window (no i3 / sway mark, no pid): it stays open");
         return;
     }
+    // Per-request mode: opt-in, MONOLITH_CLOSE_ON_EXIT=1 closes the finished requests' terminals
+    if (!e || !*e || off) return;
     if (LauncherCloseAllDone() > 0) TraceLog(LOG_INFO, "monolith: on exit: %s", LauncherNote());
 }
 
@@ -3620,22 +3665,254 @@ static bool WriteState(const char *dir, const char *state)
     return WriteText(tmp, line) && rename(tmp, path) == 0;
 }
 
-static void ReadState(OpenRequest *q)
+// The state file of the bundle in dir (trailing slash), "<state> <YYYY-MM-DDTHH:MM:SS> <writer>": its first
+// word into word[wordSize] and its time into *at (0 when the time can't be read). Returns
+//   0: read; 1: no state file (or unreadable); 2: empty or half written (no word yet)
+static unsigned char ReadStateFile(const char *dir, char *word, int wordSize, time_t *at)
 {
     char path[1400], buf[64] = "";
-    snprintf(path, sizeof(path), "%sstate", q->dir);
+    word[0] = 0;
+    *at = 0;
+    snprintf(path, sizeof(path), "%sstate", dir);
     FILE *f = fopen(path, "rb");
-    if (!f) return;
+    if (!f) return 1;
     size_t n = fread(buf, 1, sizeof(buf) - 1, f);
     if (fclose(f) != 0) fprintf(stderr, "monolith: %s: %s\n", path, strerror(errno));
     buf[n] = 0;
-    char word[16];
     int len = 0;
-    while (len < (int)sizeof(word) - 1 && isalpha((unsigned char)buf[len])) { word[len] = buf[len]; len++; }
+    while (len < wordSize - 1 && isalpha((unsigned char)buf[len])) { word[len] = buf[len]; len++; }
     word[len] = 0;
-    if (!len || strcmp(word, q->state) == 0) return;     // half written (or unchanged)
+    if (!len) return 2;
+    if (buf[len] == ' ') *at = ParseStamp(buf + len + 1);
+    return 0;
+}
+
+static void ReadState(OpenRequest *q)
+{
+    char word[16];
+    time_t at;
+    if (ReadStateFile(q->dir, word, (int)sizeof(word), &at) != 0 || strcmp(word, q->state) == 0) return;   // half written (or unchanged)
     TraceLog(LOG_INFO, "monolith: request %s: %s -> %s", q->id, q->state[0] ? q->state : "(new)", word);
     snprintf(q->state, sizeof(q->state), "%s", word);
+}
+
+// A state that still needs the coordinator: queued, claimed, or question (the developer answers in its terminal)
+static bool StateOpen(const char *s)
+{
+    return strcmp(s, "queued") == 0 || strcmp(s, "claimed") == 0 || strcmp(s, "question") == 0;
+}
+
+// The ids of the bundles in the requests folder that have a state file (heap strings), sorted, which is
+// submit order (an id starts with its time stamp). Dot folders (.coordinator) are left out. Per-request
+// bundles have no state file and so never appear.
+typedef struct {
+    char **ids;
+    int count, cap;
+    bool oom;                   // out of memory while listing: the list is incomplete
+} BundleIds;
+
+// DirScan's callback: keeps "<id>/state" (exactly one level down)
+static void CollectBundle(const char *path, const char *rel, void *user)
+{
+    (void)path;
+    BundleIds *b = user;
+    const char *slash = strchr(rel, '/');
+    if (rel[0] == '.' || !slash || slash == rel || strcmp(slash + 1, "state") != 0) return;
+    char *id = malloc((size_t)(slash - rel) + 1);
+    char **slot = id ? MS_PUSH(b->ids, b->count, b->cap) : NULL;
+    if (!slot) { free(id); b->oom = true; return; }
+    memcpy(id, rel, (size_t)(slash - rel));
+    id[slash - rel] = 0;
+    *slot = id;
+}
+
+static int CompareIds(const void *a, const void *b)
+{
+    return strcmp(*(char *const *)a, *(char *const *)b);
+}
+
+static void FreeBundleIds(BundleIds *b)
+{
+    for (int i = 0; i < b->count; i++) free(b->ids[i]);
+    free(b->ids);
+    memset(b, 0, sizeof(*b));
+}
+
+// Lists the bundles (BundleIds; free it with FreeBundleIds). false: the folder doesn't exist or can't be
+// read (an empty list then), or out of memory (logged; the list holds what was found)
+static bool ListBundles(BundleIds *b)
+{
+    memset(b, 0, sizeof(*b));
+    DirScanStats st;
+    // (recursive: DirScan reports files only, and state lies one level down; the walk visits every bundle's
+    // files, a few thousand stat calls for a hundred bundles)
+    if (!DirScan(requestsDir, true, CollectBundle, b, &st)) return false;
+    if (b->count > 1) qsort(b->ids, (size_t)b->count, sizeof(*b->ids), CompareIds);
+    if (st.stopped) TraceLog(LOG_WARNING, "monolith: %s: too many files, the bundle list is incomplete", requestsDir);
+    if (b->oom) TraceLog(LOG_WARNING, "monolith: out of memory listing the bundles in %s", requestsDir);
+    return !b->oom;
+}
+
+// How many bundles on disk are queued, claimed or asking a question (-1: the folder can't be listed). Read from
+// the state files, not from the list, so requests of earlier editor runs (and of other editors) count too.
+static int QueueBusy(void)
+{
+    BundleIds b;
+    bool listed = ListBundles(&b);
+    int busy = 0;
+    for (int i = 0; i < b.count; i++) {
+        char *dir = MonoStrf("%s%s/", requestsDir, b.ids[i]);
+        char word[16];
+        time_t at;
+        // (no state word yet: a bundle being queued this very moment counts as busy)
+        unsigned char r = dir ? ReadStateFile(dir, word, (int)sizeof(word), &at) : 2;
+        busy += r == 2 || (r == 0 && StateOpen(word));
+        free(dir);
+    }
+    FreeBundleIds(&b);
+    return listed || busy ? busy : (DirectoryExists(requestsDir) ? -1 : 0);
+}
+
+// A JSON string value starting at s (just after its opening quote) into out[outSize], with the escapes \" \\ \/.
+// false (out = "") for anything else (\u…, a control escape), a missing closing quote, or a value that doesn't
+// fit: a cut path would name another file
+static bool JsonStringValue(const char *s, char *out, int outSize)
+{
+    int n = 0;
+    for (; *s && *s != '"'; s++) {
+        char c = *s;
+        if (c == '\\') {
+            c = *++s;
+            if (c != '"' && c != '\\' && c != '/') { out[0] = 0; return false; }
+        }
+        if (n >= outSize - 1) { out[0] = 0; return false; }
+        out[n++] = c;
+    }
+    out[n] = 0;
+    if (*s != '"') { out[0] = 0; return false; }
+    return true;
+}
+
+// What the restored list needs from a bundle's request.json (LauncherRestore)
+typedef struct {
+    char slug[SLUG_MAX + 1];
+    char map[1024];             // map.path (absolute, as the editor wrote it)
+    bool hasCamera;             // camera.eye, yawDeg and pitchDeg all read
+    Vector3 eye;
+    float yawDeg, pitchDeg;
+} BundleInfo;
+
+// Reads slug, map.path and camera (eye, yawDeg, pitchDeg) from <dir>request.json, line by line: the editor
+// writes one key per line, top-level keys indented by 2 spaces and their members by 4 (WriteRequestJsonParts).
+// The file can be megabytes (hit and selection tables come before map), so lines go through getline's heap
+// buffer and the read stops once everything is found, or after REQUEST_JSON_READ_MAX bytes. false: no file
+#define REQUEST_JSON_READ_MAX (64L << 20)
+static bool ReadBundleInfo(const char *dir, BundleInfo *info)
+{
+    memset(info, 0, sizeof(*info));
+    char path[1400];
+    snprintf(path, sizeof(path), "%srequest.json", dir);
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t len;
+    long total = 0;
+    enum { TOP_OTHER, TOP_CAMERA, TOP_MAP } top = TOP_OTHER;
+    bool eye = false, yaw = false, pitch = false, map = false, slug = false;
+    while (!(slug && map && eye && yaw && pitch) && total < REQUEST_JSON_READ_MAX && (len = getline(&line, &cap, f)) > 0) {
+        total += (long)len;
+        // A top-level key: 2 spaces, then a quote
+        if (len > 3 && line[0] == ' ' && line[1] == ' ' && line[2] == '"') {
+            top = strncmp(line + 2, "\"camera\":", 9) == 0 ? TOP_CAMERA : strncmp(line + 2, "\"map\":", 6) == 0 ? TOP_MAP : TOP_OTHER;
+            if (strncmp(line + 2, "\"slug\": \"", 9) == 0) slug = JsonStringValue(line + 11, info->slug, (int)sizeof(info->slug));
+            continue;
+        }
+        if (strncmp(line, "    \"", 5) != 0) continue;
+        const char *key = line + 4;
+        if (top == TOP_MAP && strncmp(key, "\"path\": \"", 9) == 0) map = JsonStringValue(key + 9, info->map, (int)sizeof(info->map));
+        else if (top == TOP_CAMERA && strncmp(key, "\"eye\": [", 8) == 0)
+            eye = sscanf(key + 8, "%f , %f , %f", &info->eye.x, &info->eye.y, &info->eye.z) == 3;
+        else if (top == TOP_CAMERA && strncmp(key, "\"yawDeg\": ", 10) == 0) yaw = sscanf(key + 10, "%f", &info->yawDeg) == 1;
+        else if (top == TOP_CAMERA && strncmp(key, "\"pitchDeg\": ", 12) == 0) pitch = sscanf(key + 12, "%f", &info->pitchDeg) == 1;
+    }
+    free(line);
+    if (fclose(f) != 0) TraceLog(LOG_WARNING, "monolith: %s: %s", path, strerror(errno));
+    info->hasCamera = eye && yaw && pitch;
+    return true;
+}
+
+// The time stamp an id starts with ("YYYY-MM-DD_HHMMSS_<slug>"), local time; 0 if it has none
+static time_t IdStamp(const char *id)
+{
+    char iso[20];
+    if (strlen(id) < 17 || id[10] != '_') return 0;
+    snprintf(iso, sizeof(iso), "%.10sT%.2s:%.2s:%.2s", id, id + 11, id + 13, id + 15);
+    return ParseStamp(iso);
+}
+
+// Adds the bundle `id` to the list if it is unfinished, or finished less than DONE_SHOW_TIME s ago. now: time(NULL)
+static void RestoreBundle(const char *id, time_t now)
+{
+    char dir[1300];
+    if (snprintf(dir, sizeof(dir), "%s%s/", requestsDir, id) >= (int)sizeof(dir)) return;
+    char word[16];
+    time_t at;
+    if (ReadStateFile(dir, word, (int)sizeof(word), &at) != 0) return;
+    bool final = StateFinal(word);
+    if (!final && !StateOpen(word)) return;                     // (a state this editor doesn't know)
+    if (final && (!at || difftime(now, at) >= DONE_SHOW_TIME)) return;
+    BundleInfo info;
+    ReadBundleInfo(dir, &info);
+    OpenRequest *q = NewSlot();
+    if (!q) { TraceLog(LOG_WARNING, "monolith: out of memory restoring request %s", id); return; }
+    q->queue = true;
+    snprintf(q->id, sizeof(q->id), "%s", id);
+    // (the slug from request.json, else the id after its stamp)
+    snprintf(q->slug, sizeof(q->slug), "%s", info.slug[0] ? info.slug : strlen(id) > 18 ? id + 18 : id);
+    snprintf(q->dir, sizeof(q->dir), "%s", dir);
+    snprintf(q->state, sizeof(q->state), "%s", word);
+    if (info.map[0]) AbsPath(info.map, q->map, sizeof(q->map));
+    if (info.hasCamera) {
+        q->eye = info.eye;
+        q->yaw = info.yawDeg * DEG2RAD;
+        q->pitch = info.pitchDeg * DEG2RAD;
+    }
+    // The timer counts from the real submit: its stamp (the id's), mapped onto clockTime
+    time_t submitted = IdStamp(id);
+    q->submitTime = clockTime - (submitted ? fmax(difftime(now, submitted), 0.0) : 0.0);
+    char *cancel = MonoStrf("%scancel", dir);
+    q->cancelAsked = cancel && FileExists(cancel);
+    free(cancel);
+    if (final) {
+        // Finished while the editor was closed: shown and fading by its age. R doesn't fly to it (lastDoneSeq is
+        // left alone): the developer hasn't seen it finish
+        q->done = true;
+        q->doneTime = clockTime - fmax(difftime(now, at), 0.0);
+        if (!ReadFirstLine(q, "result.md", NULL, q->summary, (int)sizeof(q->summary)))
+            snprintf(q->summary, sizeof(q->summary), "%s (no result.md)", word);
+    } else if (strcmp(word, "question") == 0 && !ReadFirstLine(q, "question.md", NULL, q->summary, (int)sizeof(q->summary)))
+        snprintf(q->summary, sizeof(q->summary), "see the coordinator terminal");
+    TraceLog(LOG_INFO, "monolith: request %s restored [%d]: %s%s", q->id, q->number, word, q->cancelAsked ? " (cancel asked)" : "");
+}
+
+void LauncherRestore(void)
+{
+    if (!QueueMode()) return;       // per-request bundles have no state file
+    InitPaths();
+    launcherActive = true;
+    BundleIds b;
+    ListBundles(&b);
+    time_t now = time(NULL);
+    int before = 0, after = 0;
+    for (int i = 0; i < reqCount; i++) before += Listed(&reqs[i]);
+    for (int i = 0; i < b.count; i++) RestoreBundle(b.ids[i], now);
+    for (int i = 0; i < reqCount; i++) after += Listed(&reqs[i]);
+    FreeBundleIds(&b);
+    // The coordinator line needs the lock's state now, not at the first poll (a --shot run polls never)
+    coord.alive = after > before ? CoordinatorAlive() : coord.alive;
+    if (after > before) TraceLog(LOG_INFO, "monolith: %d request%s restored from %s; coordinator %s", after - before,
+                                 after - before == 1 ? "" : "s", requestsDir, coord.alive == 1 ? "running" : "not running");
 }
 
 // Is a coordinator running (does anyone hold its lock)?
@@ -4252,6 +4529,7 @@ unsigned char LauncherSubmit(const DesignRequest *req, Image view, Image marked,
         return 1;
     }
     InitPaths();
+    launcherActive = true;
     Bundle *Bp = calloc(1, sizeof(Bundle));
     if (!Bp) { MS_SetError("out of memory"); return 1; }
     unsigned char result = 1;

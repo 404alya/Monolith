@@ -193,9 +193,13 @@ The editor saves the request with screenshots and everything it knows about the 
 
 The HUD lists the requests, numbered: `classifying` (the AI classifier is picking its model; then the HUD says `request queued [n] (<model>): … (AI: <its reason>)`), `queued`, `running`, `[?]` (a question is waiting for you), and for 20 seconds after it finishes `[done]`, `[failed]` or `[cancelled]` with a one-line summary.
 
+The list survives a restart: when you start the editor again, the requests still queued, running or asking a question come back with their numbers (in submit order), the real time since you sent them, and the open-requests warning on their map; a request that finished in the last 20 seconds shows as finished and fades. R doesn't fly to a request that finished while the editor was closed, only to one you see finish.
+
+When you quit the editor and no request is queued, running or waiting for an answer, the coordinator's terminal closes with it (`MONOLITH_CLOSE_ON_EXIT=0` keeps it open). While a request is still being worked on, or a question waits in the terminal, the terminal stays and the request finishes.
+
 | Key | Action |
 |---|---|
-| R | fly back to where the most recently finished request was made |
+| R | fly back to where the most recently finished request was made (one you saw finish in this editor run) |
 | K / Shift+K | take the latest / all finished requests off the list |
 | Ctrl+K, then a number | that request: finished → off the list; classifying or queued → cancel; running → press the number again within 3 s to cancel |
 | Ctrl+Shift+K | close the coordinator's terminal (press again within 3 s if requests are still open; the next coordinator picks them up) |

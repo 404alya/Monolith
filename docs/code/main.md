@@ -207,9 +207,9 @@ The first stroke on a face or model slot gives it a rectangle in its material's 
 
 ### Requests in the HUD
 
-**R** flies back to the camera of the last finished request.
+**R** flies back to the camera of the last request seen finishing in this run (not to one that finished while the editor was closed).
 
-The HUD lists the coordinator ("running", "starting", "not running") and the open requests ("classifying": the AI classifier is picking its model; "queued", "running", "[?]" = a question waits in the coordinator terminal) and, for 20 s, finished ones ([done] / [failed] / [cancelled]) with the first line of their `result.md`. Each has a number [n], kept while it is listed.
+The HUD lists the coordinator ("running", "starting", "not running") and the open requests ("classifying": the AI classifier is picking its model; "queued", "running", "[?]" = a question waits in the coordinator terminal) and, for 20 s, finished ones ([done] / [failed] / [cancelled]) with the first line of their `result.md`. Each has a number [n], kept while it is listed. At startup (coordinator mode; `LauncherRestore`, called once before the main loop in interactive runs, and in `--shot --shot-hud` runs only with `MONOLITH_REQUESTS_DIR` set, so other HUD shots don't depend on the real `requests/`) the list is rebuilt from `requests/*/state`: every queued, claimed or question bundle and the ones finished in the last 20 s. On exit `LauncherCloseOnExit` closes the coordinator when nothing on disk is queued, claimed or question (only in runs that restored the list or submitted).
 
 | Key | Action |
 |---|---|
@@ -431,7 +431,7 @@ Read by `launcher.c` ([launcher.md](launcher.md)), except the driver variables a
 | `MONOLITH_CLAUDE_SAFE=1` | drop those two permission flags (also dropped when the working folder has no `CLAUDE.md`) |
 | `MONOLITH_ALLOW_WINDOW=1` | open the editor window even in an AI agent's shell (`CLAUDECODE` or `AI_AGENT` set), where it otherwise refuses every mode that would show it |
 | `MONOLITH_WORKSPACE` | i3/sway workspace for the terminal (default 10, empty = don't move) |
-| `MONOLITH_CLOSE_ON_EXIT=1` | close the terminals of finished requests when the editor quits (coordinator mode: the coordinator, if none of this run's requests is still queued or running) |
+| `MONOLITH_CLOSE_ON_EXIT` | coordinator mode: unless `0`, the coordinator's terminal closes when the editor quits and no bundle in `requests/` is queued, claimed or question (whichever run started it). Per-request mode: `1` (non-empty, not `0`) closes the finished requests' terminals |
 | `MONOLITH_CLAUDE` | the claude program to run (tests: `build/tools/stub-coordinator`) |
 | `MONOLITH_REQUESTS_DIR` | requests folder instead of `<repo>/requests` (tests only: bundles, queue and coordinator lock in a scratch folder) |
 | `MONOLITH_CLOSE_METHOD` | `wm` / `signal`: close terminals only through i3/sway or only by signals (tests; default both, WM first) |

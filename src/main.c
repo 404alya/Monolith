@@ -1794,6 +1794,12 @@ static int Run(int argc, char **argv)
     float closePickTime = 0.0f; // CTRL+K: seconds left to press a request's number
     int exitStatus = benchBadViews ? 1 : 0;
 
+    // The request list of earlier editor runs (coordinator mode: requests/*/state). Interactive runs, and for
+    // tests a --shot --shot-hud run on a scratch MONOLITH_REQUESTS_DIR (never the real requests/: other
+    // HUD shots stay what they were)
+    const char *requestsOverride = getenv("MONOLITH_REQUESTS_DIR");
+    if (!automated || (shotPath && shotHud && requestsOverride && *requestsOverride)) LauncherRestore();
+
     // (a scripted run: the shot waits until 10 frames after the script's last step)
     if (scripted && pickerShotFrame < 10 + InputScriptFrames() + 10) pickerShotFrame = 10 + InputScriptFrames() + 10;
     while (!benchBadViews && !WindowShouldClose())
@@ -2579,7 +2585,7 @@ static int Run(int argc, char **argv)
     }
     PanelClose(&panel);             // (switches the GPU profiler off if the panel switched it on)
     PanelFree(&panel);
-    LauncherCloseOnExit();          // MONOLITH_CLOSE_ON_EXIT=1: close finished requests' terminals
+    LauncherCloseOnExit();          // the coordinator when idle (MONOLITH_CLOSE_ON_EXIT=0: never); per-request mode, =1: finished terminals
     R3D_SetProfilerEnabled(false);  // frees its GL queries
     BenchFree();
     DesignerFree(&designer);

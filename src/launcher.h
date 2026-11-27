@@ -119,15 +119,25 @@ unsigned char LauncherCloseNumber(int number);
 unsigned char LauncherCloseCoordinator(void);
 // Number of the newest listed request (0 if none)
 int LauncherNewestNumber(void);
-// Requests of this editor run that are queued or running on the map file mapPath (absolute or
-// relative): how many, and the HUD number of the newest one (*newest, 0 = none)
+// Listed requests (this editor run's, and those LauncherRestore brought back) that are queued or running
+// on the map file mapPath (absolute or relative): how many, and the HUD number of the newest one
+// (*newest, 0 = none)
 int LauncherOpenOnMap(const char *mapPath, int *newest);
 // A closed request's terminal process is still running (being shut down)
 bool LauncherClosing(void);
 // When quitting: kills the classifiers still running and queues (sends) their bundles on the
-// default tier ("editor quit while classifying"); then MONOLITH_CLOSE_ON_EXIT=1 closes every
-// finished request's terminal, or the coordinator if none of this run's requests is still open
+// default tier ("editor quit while classifying"). Then, coordinator mode (unless
+// MONOLITH_CLOSE_ON_EXIT=0), in a run that restored the list or submitted: closes the coordinator's
+// terminal when no bundle in requests/ is queued, claimed or question (whichever editor run started
+// it); logs either way. Per-request mode: MONOLITH_CLOSE_ON_EXIT=1 closes the finished requests' terminals.
 void LauncherCloseOnExit(void);
+
+// Coordinator mode, once at startup: rebuilds the request list from requests/*/state, so requests of
+// earlier editor runs show again: every queued, claimed or question bundle, and the finished ones (done,
+// failed, cancelled) of the last 20 s (fading out). Numbers in submit order, timers from the real submit,
+// map and camera from request.json (the open-requests warning, R after they finish here). Per-request
+// mode: nothing (its bundles have no state file).
+void LauncherRestore(void);
 
 // Camera of the most recently finished request, for "fly back" (false if none)
 bool LauncherLastDone(Vector3 *eye, float *yaw, float *pitch);
@@ -165,6 +175,7 @@ static inline int LauncherNewestNumber(void) { return 0; }
 static inline int LauncherOpenOnMap(const char *mapPath, int *newest) { (void)mapPath; *newest = 0; return 0; }
 static inline bool LauncherClosing(void) { return false; }
 static inline void LauncherCloseOnExit(void) { }
+static inline void LauncherRestore(void) { }
 static inline bool LauncherLastDone(Vector3 *eye, float *yaw, float *pitch) { (void)eye; (void)yaw; (void)pitch; return false; }
 static inline void LauncherShutdown(void) { }
 #endif

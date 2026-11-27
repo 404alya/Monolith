@@ -92,4 +92,16 @@ Region "Closing request windows". The HUD list numbers the requests.
 - **Coordinator mode:** K / SHIFT+K take finished requests off the list, CTRL+K n cancels request n (a running one on a second press: the coordinator stops its subagent), CTRL+SHIFT+K closes the coordinator's terminal.
 - **Per-request mode:** K / SHIFT+K / CTRL+K n close a request's terminal.
 
-Closing goes through the mark (`i3-msg [con_mark=...] kill`), else SIGTERM / SIGKILL to the terminal's process group. `MONOLITH_CLOSE_ON_EXIT=1` closes the finished requests' terminals (coordinator mode: the coordinator, if none of this run's requests is still open) when the editor quits.
+Closing goes through the mark (`i3-msg [con_mark=...] kill`), else SIGTERM / SIGKILL to the terminal's process group.
+
+**On exit** (`LauncherCloseOnExit`): coordinator mode, by default, closes the coordinator when `QueueBusy()` (a scan of `requests/*/state` for `queued`, `claimed`, `question`, or a state file without its word yet) finds nothing, checked twice, the second time right before closing. `CloseIdleCoordinator`: the WM route on the fixed mark, else `SignalCoordinator(CoordinatorPid(), SIGTERM)` (the wrapper's group, also for a coordinator an earlier run started), else `CloseTerm` on our own terminal child; no escalation. Only when `launcherActive` (this run called `LauncherRestore` or `LauncherSubmit`), so a request session's `--shot` never closes its coordinator. `MONOLITH_CLOSE_ON_EXIT=0` turns it off. Per-request mode: `MONOLITH_CLOSE_ON_EXIT=1` (opt-in) closes the finished requests' terminals.
+
+### The list after a restart
+
+`LauncherRestore` (coordinator mode, once from `main.c` before the main loop: interactive runs, and `--shot --shot-hud` runs with `MONOLITH_REQUESTS_DIR` set) rebuilds `reqs[]` from disk:
+- `ListBundles`: `DirScan` (recursive, files only) over `requestsDir`, keeping `<id>/state` one level down, dot folders left out; the ids sorted, which is submit order. `QueueBusy` shares it.
+- `ReadStateFile(dir, …)`: the first word and the time of a `state` file (`ReadState` on an `OpenRequest` uses it too).
+- Per bundle (`RestoreBundle`): `queued`, `claimed`, `question`, plus `done` / `failed` / `cancelled` whose `state` time is under `DONE_SHOW_TIME` old. An entry through `NewSlot` (numbers in id order, oldest [1]) with `queue = true`; `slug`, `map.path` (made absolute) and `camera` (eye, yaw, pitch) from `request.json` by `ReadBundleInfo` (line by line through `getline`, stopping once found: `request.json` can be megabytes, the hit and selection tables come before `map`); `submitTime` = `clockTime` minus the age of the id's stamp; `cancelAsked` from a `cancel` file; finished ones get `done` and a `doneTime` by their age (they fade as usual) and their `result.md` line. A restored finished request doesn't set `lastDoneSeq`: R flies only to requests seen finishing in this run (a restored unfinished one that finishes later does).
+- Then one lock test (`coord.alive`), so the coordinator line is right before the first poll. `CoordinatorLine`, `CoordinatorCheck`, `LauncherOpenOnMap` and CTRL+K n work on restored entries unchanged.
+
+Per-request mode restores nothing: its bundles have no `state` file and its terminals aren't children of the new run.

@@ -624,6 +624,60 @@ static void AppendLine(const char *path, const char *line)
     }
 }
 
+// A finished bundle <gR>/<id> made by hand, as request-queue leaves one: request.json (slug, map.path and camera,
+// on the lines the editor writes them), result.md, and state "done <time> coordinator" with its time `age`
+// seconds ago (section 10).
+static void MakeDoneBundle(const char *id, const char *slug, const char *map, int age)
+{
+    const char *dir = nob_temp_sprintf("%s/%s", gR, id);
+    ToolMkdirP(dir);
+    FILE *f = fopen(nob_temp_sprintf("%s/request.json", dir), "wb");
+    if (f) {
+        fprintf(f, "{\n  \"format\": 9,\n  \"id\": \"%s\",\n  \"slug\": \"%s\",\n  \"prompt\": \"test %s\",\n"
+                   "  \"camera\": {\n    \"eye\": [1.5000, 2.0000, -3.2500],\n    \"yawDeg\": 90.0000,\n    \"pitchDeg\": -10.0000\n  },\n"
+                   "  \"map\": {\n    \"path\": \"%s/%s.map\",\n    \"package\": \"%s\"\n  }\n}\n",
+                id, slug, slug, map, strrchr(map, '/') ? strrchr(map, '/') + 1 : map, map);
+        if (fclose(f) != 0) ToolErr("request.json: %s", strerror(errno));
+    }
+    AppendLine(nob_temp_sprintf("%s/result.md", dir), nob_temp_sprintf("Stub result of %s", slug));
+    time_t at = time(NULL) - age;
+    struct tm tm;
+    localtime_r(&at, &tm);
+    char stamp[32];
+    strftime(stamp, sizeof stamp, "%Y-%m-%dT%H:%M:%S", &tm);
+    AppendLine(nob_temp_sprintf("%s/state", dir), nob_temp_sprintf("done %s coordinator", stamp));
+}
+
+// A hidden editor run with the HUD in its shot and no submit (`--shot <scratch>/<name>.png --shot-hud --map <map>`):
+// with MONOLITH_REQUESTS_DIR set it restores the request list, and it quits like the editor does. Its output goes
+// to <scratch>/<name>.out; returns that path (heap string).
+static char *EditorRun(const char *name, const char *map)
+{
+    char *out = strdup(nob_temp_sprintf("%s/%s.out", gT, name));
+    Nob_Cmd cmd = {0};
+    nob_cmd_append(&cmd, gGame, "--shot", nob_temp_sprintf("%s/%s.png", gT, name), "--shot-hud", "--shot-size", "960", "540",
+                   "--map", map);
+    ToolRun(&cmd, (ToolIo){.out = out, .errToOut = true});
+    nob_cmd_free(cmd);
+    return out;
+}
+
+// Whether a process group is gone (`kill -0 -- -<group>` fails with ESRCH).
+static bool GroupGone(const char *group)
+{
+    char *end;
+    long pg = strtol(group, &end, 10);
+    if (!*group || *end || pg <= 0) return false;
+    return kill(-(pid_t)pg, 0) != 0 && errno == ESRCH;
+}
+
+// LockHeld: someone holds the coordinator's lock (the opposite of LockFree).
+static bool LockFree(const char **ids, size_t count);
+static bool LockHeld(void)
+{
+    return !LockFree(NULL, 0);
+}
+
 // #endregion
 
 // #region main
@@ -741,6 +795,10 @@ int main(int argc, char **argv)
     setenv("MONOLITH_LAUNCH", "coordinator", 1);
     setenv("MONOLITH_STUB_WORK", "6", 1);
     setenv("MONOLITH_CLASSIFIER", "off", 1);
+    // sections 1-9 count terminals across editor runs: each run leaves the coordinator open (section 10 tests
+    // the default, which closes an idle coordinator on exit)
+    setenv("MONOLITH_CLOSE_ON_EXIT", "0", 1);
+    unsetenv("MONOLITH_CLOSE_METHOD");
     unsetenv("MONOLITH_STUB_LOG");
     unsetenv("MONOLITH_CLAUDE_ARGS");
     unsetenv("MONOLITH_MODEL");
@@ -1582,6 +1640,95 @@ int main(int argc, char **argv)
         free(codeIndex);
         RestoreEnv(cr);
         RestoreEnv(r);
+    }
+
+    // 10. a restarted editor lists the requests again; an idle coordinator closes with the editor
+    Echo("10. restart: the request list comes back from requests/*/state; an idle coordinator closes on exit");
+    {
+        // a requests folder of its own: no coordinator of the earlier sections holds its lock
+        const char *R1 = gR;
+        gR = strdup(nob_temp_sprintf("%s/requests-restart", gT));
+        ToolMkdirP(gR);
+        SavedEnv rd = SetEnvFor("MONOLITH_REQUESTS_DIR", gR);
+        SavedEnv co = SetEnvFor("MONOLITH_CLOSE_ON_EXIT", "");
+        unsetenv("MONOLITH_CLOSE_ON_EXIT");     // (the default)
+        SavedEnv cm = SetEnvFor("MONOLITH_CLOSE_METHOD", "signal");
+        SavedEnv wk = SetEnvFor("MONOLITH_STUB_WORK", "15");
+
+        // two submits on one package: the first runs, the second waits; each editor run quits with work open
+        char *E1 = Submit(A, "test restart one", NULL, 0);
+        const char *outE1 = strdup(nob_temp_sprintf("%s/submit-%d.out", gT, gN));
+        char *E2 = Submit(A, "test restart two", NULL, 0);
+        const char *e1[] = {E1};
+        if (!WaitFor(20, AllClaimed, e1, 1)) Bad("%s not claimed after 20 s", E1 ? E1 : "");
+        char *group = LastGroup();
+        if (FileHas(outE1, Contains, "monolith: on exit: 1 request still queued or running, the coordinator stays open") && LockHeld())
+            Ok("(b) the editor quit with a request queued: \"1 request still queued or running, the coordinator stays open\"");
+        else Bad("(b) the first submit's run: no \"stays open\" line, or the lock is free (see %s)", outE1);
+
+        // a restarted editor: E1 claimed [2], E2 queued [3], a bundle done 5 s ago [1] (fading), one done an hour
+        // ago not listed
+        MakeDoneBundle("2026-01-01_000000_old-done", "old-done", A, 3600);
+        MakeDoneBundle("2026-01-01_000001_fresh-done", "fresh-done", A, 5);
+        char *out = EditorRun("restart-1", A);
+        bool listed = FileHas(out, Contains, "monolith: request 2026-01-01_000001_fresh-done restored [1]: done") &&
+                      FileHas(out, Contains, nob_temp_sprintf("monolith: request %s restored [2]: claimed", E1 ? E1 : "")) &&
+                      FileHas(out, Contains, nob_temp_sprintf("monolith: request %s restored [3]: queued", E2 ? E2 : "")) &&
+                      !FileHas(out, Contains, "2026-01-01_000000_old-done restored") &&
+                      FileHas(out, Contains, "monolith: 3 requests restored from ") && FileHas(out, Contains, "; coordinator running");
+        if (listed) Ok("restored: [1] done 5 s ago, [2] %s claimed, [3] %s queued, the one done an hour ago left out; coordinator running",
+                       E1 ? E1 : "", E2 ? E2 : "");
+        else Bad("the restored list (see %s)", out);
+        if (FileHas(out, Contains, "monolith: on exit: 2 requests still queued or running, the coordinator stays open") && LockHeld())
+            Ok("(b) the restarted editor quit with one claimed and one queued: the coordinator still holds the lock");
+        else Bad("(b) the restarted editor's exit (see %s)", out);
+        free(out);
+
+        // idle: MONOLITH_CLOSE_ON_EXIT=0 leaves it open, the default closes it (started by an earlier editor run)
+        const char *e12[] = {E1, E2};
+        if (!WaitFor(60, AllFinal, e12, 2)) Bad("%s and %s not finished after 60 s", E1 ? E1 : "", E2 ? E2 : "");
+        SavedEnv off = SetEnvFor("MONOLITH_CLOSE_ON_EXIT", "0");
+        out = EditorRun("restart-off", A);
+        RestoreEnv(off);
+        if (!FileHas(out, Contains, "monolith: on exit:") && LockHeld()) Ok("MONOLITH_CLOSE_ON_EXIT=0, nothing open: the coordinator stays");
+        else Bad("MONOLITH_CLOSE_ON_EXIT=0 (see %s)", out);
+        free(out);
+        out = EditorRun("restart-2", A);
+        bool closed = FileHas(out, Contains, "monolith: on exit: coordinator closed (idle)") && WaitFor(10, LockFree, NULL, 0);
+        for (int i = 0; i < 50 && !GroupGone(group); i++) Sleep(0.1);
+        if (closed && GroupGone(group))
+            Ok("(c) a coordinator an earlier editor run started: closed on exit when idle (lock free, wrapper %s gone)", group);
+        else Bad("(c) the idle coordinator of an earlier run was not closed (see %s; group %s %s)", out, group,
+                 GroupGone(group) ? "gone" : "still there");
+        free(out);
+        free(group);
+
+        // (a) the same editor run starts it, its request finishes, the editor quits: closed
+        SavedEnv quick = SetEnvFor("MONOLITH_STUB_WORK", "2");
+        const char *waitA[] = {"--submit-wait", "8"};
+        char *E3 = Submit(A, "test close when idle", waitA, 2);
+        const char *outE3 = strdup(nob_temp_sprintf("%s/submit-%d.out", gT, gN));
+        group = LastGroup();
+        const char *e3[] = {E3};
+        bool done = AllFinal(e3, 1);
+        closed = FileHas(outE3, Contains, "monolith: on exit: coordinator closed (idle)") && WaitFor(10, LockFree, NULL, 0);
+        for (int i = 0; i < 50 && !GroupGone(group); i++) Sleep(0.1);
+        if (done && closed && GroupGone(group)) Ok("(a) every bundle finished, the editor quit: coordinator closed, lock free, wrapper %s gone", group);
+        else Bad("(a) state %s, closed %d, group %s (see %s)", done ? "final" : "not final", closed, group, outE3);
+        RestoreEnv(quick);
+        free(group);
+        free(E1);
+        free(E2);
+        free(E3);
+        free((char *)outE1);
+        free((char *)outE3);
+
+        RestoreEnv(wk);
+        RestoreEnv(cm);
+        RestoreEnv(co);
+        RestoreEnv(rd);
+        free((char *)gR);
+        gR = R1;
     }
 
     // the main repo: the queue never touched its HEAD, index or status
