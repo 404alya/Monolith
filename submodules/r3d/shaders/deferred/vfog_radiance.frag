@@ -338,11 +338,32 @@ void main()
         rayDist = 0.0;  // skip the generic loop
     }
 
+    // Spot lights (local patch 33): the march runs through the whole range sphere, but a step
+    // outside the outer cone adds exactly 0 (the cone factor's smoothstep is 0 there). Such a
+    // step only advances the transmittance, by the same expression as below, so the result is
+    // bit-identical. The test widens the cone by 1e-3 in cosine, so rounding can't skip a step
+    // the full code would light. The widened cone is convex (half angle < 90 deg), so a ray
+    // leaves it at most once: after its last step inside, nothing more can be added.
+    float spotCullCos = uLight.outerCutOff - 1e-3;
+    bool spotCull = uLight.type == LIGHT_SPOT && spotCullCos > 0.0;
+    bool inSpot = false;
+
     for (float l = 0; l < rayDist; l += uVFog.stepSize)
     {
         // Compute light direction and distance at each march step
         vec3 Ldelta = uLight.position - marchPos;
         float Ldist = length(Ldelta);
+
+        if (spotCull && -dot(Ldelta, uLight.direction) < spotCullCos * Ldist)
+        {
+            if (inSpot) break;
+            if (fadeOn) transmittance *= exp(-sigmaT * uVFog.stepSize * VFog_DensityFade(tStart + l));
+            else transmittance *= transmittanceStep;
+            marchPos += deltaStep;
+            continue;
+        }
+        inSpot = true;
+
         float invLdist = 1.0 / max(Ldist, 1e-4);
         vec3 L = (uLight.type == LIGHT_DIR) ? -uLight.direction : Ldelta * invLdist;
 

@@ -529,3 +529,46 @@ Machine A (RTX 4050 Laptop GPU, driver 615.71.09, Ryzen 7 7435HS, Linux 7.2.5-ca
 | N = 1000 | +0.013 ms (+0.33 %) | −0.15 % | −0.022 .. +0.068 ms |
 
 Editor, N = 1000 (`--bench --headless`, per-pass GPU table): geometry pass (where the paint stage runs) 0.463 → 0.464 ms (+0.001 ms, per pair +0.003 / −0.003 / +0.003); GPU total −0.022 ms (−0.70 %); frame −0.025 ms (−0.61 %). Within noise everywhere; per-view differences change sign between N (±5 %), i.e. noise.
+
+## Spot fog cut to the cone (R3D patch 33; patch 32 on its branch) and the automatic depth pre-pass for plain materials (2026-11-23, machine C)
+
+Machine C (Intel HD 5500, Mesa 25.2.8, i5-5300U), headless 1920 × 1006, ultra, screening runs (100–150 frames, spinning). Map: `maps/liverpool`, a local package that is **not in git** (`maps/*` is ignored): a stadium of 3 814 boxes (1 258 turned), 33 plain materials (no shader, no texture, no `alpha_cutoff` anywhere), 13 lights: 4 spots (range 150, outer 36°, `fogEnergy 0.05`), 5 unclipped lamp-post points (range 22, `fogEnergy` unset = 1), 4 clipped garage points; sun shadow 8192, volumetric fog, SSAO + SSIL on.
+
+**Where the frame went** (7 viewpoints, 150 frames): 159 ms frame, 147 ms GPU; vfog radiance 62.4 ms (43 %; 92–100 ms at the viewpoints inside the spots' spheres, 22–27 elsewhere), geometry 16.8, SSIL 14.9, ambient 13.3, lights 12.6, SSAO 5.2, the fixed full-screen chain ~19, shadows 0 (static tiles, 0 updates). On/off sweep of scratch copies (4 viewpoints, 100 frames): spot fog 42.5 ms of vfog, lamp-post fog 9.4 (Start −25), sun fog 16–18; `alpha_cutoff 0` on every material: geometry 17.6 → 7.3 ms, pixel-identical; forest (615 pines) and grass (460 tufts) ≈ 0 ms of GPU. Spot `fogEnergy 0` (vfog 67 → 25 ms) is a look change (up to 22/255 on 92 % of the pixels at the pitch), not taken. The bench's *CPU until finish* drifted 8.8 → 23.6 ms over one session with nothing changed (shared CPU/iGPU power budget, inferred): on this laptop it can't attribute CPU cost; frame = CPU + GPU + ~3 ms in `--headless`, so that drift lands in frame time too: judge GPU changes by *GPU total* against the nearest base.
+
+**The change** (patch 33 + `MaterialDrawMode` in `runtime/monolith_scene.c`), 2 interleaved pairs, viewpoints Start, Kop end, Garage, Road:
+
+| | base | change | |
+|---|---:|---:|---:|
+| geometry | 17.4 ms | 7.0 ms | −60 % (the pre-pass) |
+| vfog radiance | 66.8 ms | 57.9 ms | −13 % (patch 33; Start −17, Garage −16, Kop end ≈ 0, Road −4) |
+| lights | 12.9 ms | 11.0 ms | −1.9 ms (comes with the pre-pass, cause unknown) |
+| GPU total | 147.6 ms | 124.5 ms | −15.6 % (pairs −23.3 / −22.7 ms) |
+| frame | 155.6 ms | 133.1 ms | −14.5 % (pairs −24.9 / −20.1 ms) |
+
+Patch 33 saves less than a model of the march predicted (−23 of 42 ms): the skipped steps still loop (transmittance only). At Kop end most steps are inside a cone, so nothing is skipped there.
+
+`maps/monolith` and `maps/voxel-test` (all viewpoints, 100 frames, 1 pair): no change beyond noise (monolith GPU 106.0 → 102.9, geometry 13.8 → 13.6; voxel-test GPU 139.7 → 140.8, geometry 9.80 → 9.78): most of their materials already say `alpha_cutoff 0`.
+
+**Pixels** (`--shot` 1600 × 900 against the same tree without the pre-pass line). Patch 33 is pixel-identical: every viewpoint of `maps/liverpool`, its yaw sweep, low and medium, a reload and a paint stroke (the other maps' spots have `fogEnergy 0` and never run the new code). The automatic pre-pass changes pixels on the maps where some materials were already pre-passed and others weren't: the draw order of nearly coincident faces changes, so single pixels at the edges of thin emissive boxes (neon letters, window corners, a lamp dot in a window) flip, and bloom and SSR spread that by 1–2/255. Approved by the developer on 2026-11-26 after before/after images.
+
+| View | changed px (of 1 440 000) | > 8/255 | > 32/255 | max |
+|---|---:|---:|---:|---:|
+| monolith 1 / 2 / 3 / 5 / 7 | 57 / 135 / 81 / 38 / 13 | 1 / 2 / 3 / 2 / 0 | 0 | 11 / 28 / 28 / 9 / 5 |
+| monolith 4, 6 | 0 | | | |
+| monolith 1 yaw 180 | 66 | 1 | 0 | 11 |
+| monolith low v1 / medium v1 | 13 / 33 | | | 13 / 12 |
+| voxel-test 1 / 2 / 3 / 4 / 6 | 19 900 / 23 241 / 16 285 / 1 188 / 34 288 | 200 / 385 / 185 / 9 / 389 | 25 / 75 / 53 / 0 / 55 | 66 / 78 / 68 / 26 / 73 |
+| voxel-test 5 | 0 | | | |
+| voxel-test 1 yaw 60–300 | 520 – 14 340 | | | 50 – 79 |
+| pine_forest 1 yaw 240 | 1 | 0 | 0 | 1 |
+| pine_forest (other views), liverpool (all), tests/models | 0 | | | |
+
+**Not done on machine C, to check on another machine:**
+1. `./build.sh --win` with zero warnings (no mingw-w64 here) and `python3 -I .claude/skills/shaders/check_r3d_shaders.py deferred/vfog_radiance.frag` (no `glslangValidator` here).
+2. The same pixel picture there: shots of every viewpoint of every map in `maps/` and `tests/models`, base (the parent commit) against this commit. Expected: the table above (the numbers can differ per GPU; the places shouldn't: edges of emissive boxes in voxel-test and monolith, nothing elsewhere). Anything outside those places is a finding.
+3. Patch 33 runs only with spot lights that have `fogEnergy > 0`; no map in git has one. Copy `maps/liverpool` over (or any map with a fogged spot) to see it: pixel-identical shots, lower vfog radiance where a view is inside a spot's sphere but looks past its cone.
+4. Full runs (600 frames), interleaved A/B pairs: every map in `maps/` (the pre-pass can cost vertices on a material with very many triangles; `prepass off` is the per-material way out), and liverpool if copied.
+5. `build/tools/leakcheck` (OK on machine C).
+
+**Checked on this repo's editor machine (2026-11-27, applied onto main as patch 33):** items 1 and 5 done (`./build.sh --win` and the examples without warnings, `check_r3d_shaders.py deferred/vfog_radiance.frag` ok, leakcheck OK). Item 2 (base = the tree without these two changes): voxel-test as expected (viewpoints 1/2/3/4/6: 19 154 / 24 573 / 16 534 / 522 / 28 916 px, max 89/255; 5 unchanged), pine_forest as expected (yaws 180 / 240: 2 / 1 px, max 1), monolith on viewpoints 2–6 instead (15 / 76 / 385 / 24 / 2 px), tests/models, tests/rotated, tests/imports unchanged. **Finding: `maps/hysteria`**, not in the table above, changes on every viewpoint (11 / 2 342 / 561 / 6 px) and its yaw sweep (yaw 180: 28 413 px, 1 634 above 8/255, max 45/255): a thin band along the horizon (distant nearly coincident faces drawn in another order), awaiting the developer's look. Item 3: a copy of `maps/monolith` with its 162 spots at `fogEnergy 0.05`: patch 33 pixel-identical on every view tried (its only differences there are the pre-pass's).

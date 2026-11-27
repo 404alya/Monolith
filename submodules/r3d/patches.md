@@ -5221,3 +5221,39 @@ Files: `shaders/prepare/ssao.frag`, `shaders/prepare/ssil.frag`, `src/modules/r3
 | `monolith` 3840 × 2012 | 5.445 → 2.243 (−59 %) | 1.047 → 1.034 | 0.283 → 0.464 | 17.08 → 14.07 (−3.01 ms, −18 %) | −3.00 ms |
 
 Paired GPU-total differences: `voxel-test` 1× −0.52 / −0.42 / −0.47, 2× −6.43 / −7.29 / −7.16; `monolith` 1× −0.14 / −0.11 / −0.23, 2× −2.85 / −2.71 / −3.48. The pyramid's extra cost is the five small levels' draws (and five radiance downsamples): `monolith` has no SSR, so its depth levels 2–6 are new too. SSAO reads only the depth (1 MB at 1×, inside L2): no gain at 1×. These are screening runs, not full runs: the gains are clear well beyond the noise at 2×, but the 1× rows (above all `monolith`'s frame −0.08 ms) are still to be confirmed with full runs. Low, medium and high run neither SSAO nor SSIL, so the pyramid and the radiance downsample take the same path as before; that is read from the code, not shown with shots. `./build.sh` without warnings; `./build.sh --win` not run (no mingw-w64 on machine B); `check_r3d_shaders.py prepare/ssao.frag prepare/ssil.frag`: ok; `build/tools/leakcheck`: OK, zero leaks of ours (machine B, 2026-11-26).
+
+## Patch 33: the volumetric fog marches a spot light's whole range sphere (2026-11-23)
+
+**Symptom.** On a map with large spot lights that have `fogEnergy > 0` (four floodlights, range 150, outer cone 36°, `fogEnergy 0.05`), the volumetric fog's radiance pass was the largest GPU cost: 62 ms of a 147 ms GPU frame averaged over 7 viewpoints, 89–100 ms at the viewpoints inside the lights' spheres (machine C of `.claude/skills/benchmarking/measurements.md`: Intel HD 5500, Mesa 25.2.8, headless 1920 × 1006, ultra). Setting the spots' `fogEnergy 0` took that pass from 67 to 25 ms.
+
+**Cause.** `vfog_radiance.frag` bounds the march of a point or spot light by its range sphere (`VFog_GetMarchRange`) and runs the full step (light vector, range attenuation `pow`, cone `smoothstep`, Schlick phase, in-scatter) on every step of it. For a spot light the cone factor is exactly 0 outside the outer cone, so most steps of a ray that only grazes or misses the cone add nothing, at full price.
+
+**Change.** In the generic march loop, a spot light's step first tests the outer cone, widened by 1e-3 in cosine (`-dot(Ldelta, direction) < (outerCutOff − 1e-3) · Ldist`). A step that fails it only advances the transmittance, by the same expression as the full step (`transmittanceStep`, or the fade's `exp(…)` with a density fade), and the march position; the full step is unchanged. Rounding of the test can't skip a lit step: the full code's cone factor is `smoothstep(0, 1, (theta − outer) · invEpsilon)`, exactly 0 for `theta ≤ outer`, and a skipped step has `theta < outer − 1e-3`. The widened cone is convex (only used for `outer − 1e-3 > 0`, half angle < 90°), so a ray is inside it on one interval: after its first step outside following a step inside, the loop ends (the remaining steps would add exactly 0). Point and directional lights and spots wider than ~90° run as before.
+
+Files: `shaders/deferred/vfog_radiance.frag`.
+
+```diff
+--- shaders/deferred/vfog_radiance.frag   (main, before the generic march loop)
++    float spotCullCos = uLight.outerCutOff - 1e-3;
++    bool spotCull = uLight.type == LIGHT_SPOT && spotCullCos > 0.0;
++    bool inSpot = false;
++
+     for (float l = 0; l < rayDist; l += uVFog.stepSize)
+     {
+         vec3 Ldelta = uLight.position - marchPos;
+         float Ldist = length(Ldelta);
++
++        if (spotCull && -dot(Ldelta, uLight.direction) < spotCullCos * Ldist)
++        {
++            if (inSpot) break;
++            if (fadeOn) transmittance *= exp(-sigmaT * uVFog.stepSize * VFog_DensityFade(tStart + l));
++            else transmittance *= transmittanceStep;
++            marchPos += deltaStep;
++            continue;
++        }
++        inSpot = true;
++
+         float invLdist = 1.0 / max(Ldist, 1e-4);
+```
+
+**Verification.** Against the build before it, `--shot` 1600 × 900: every viewpoint (7) of the map with the fogged spots, its yaw sweep 0–300° from viewpoint 1, viewpoints 1/3/5/6 at `preset = low` and `medium` (fog step ×2, fog cache), a `--reload-test` and a `--paint-script` stroke: 0 pixels changed. The other maps' spot lights all have `fogEnergy 0` (skipped before the march, `r3d_draw.c`), so their fog runs no new code. Machine C, 4 viewpoints spinning, 100 frames, 2 interleaved pairs, together with the runtime's automatic depth pre-pass for plain materials (which doesn't touch the fog): vfog radiance 66.8 → 57.9 ms (−8.9 ms, −13 %; Start −17, Garage −16, Kop end ≈ 0, where most steps are inside a cone, Road −4). `./build.sh` and `./build.sh examples` (and `test`) without warnings; `./build.sh --win` not run (no mingw-w64 on machine C); `glslangValidator` not installed there (Mesa compiles the shader at load).

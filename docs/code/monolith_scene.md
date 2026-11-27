@@ -213,7 +213,7 @@ use "name"
 | `occlusion f`, `roughness f`, `metalness f`, `specular f` | |
 | `emission R G B`, `emission_energy f`, `emission_map "p"` | |
 | `uv_scale u v`, `uv_offset u v` | |
-| `alpha_cutoff f` | 0 = never discards; allows the depth pre-pass. |
+| `alpha_cutoff f` | 0 = never discards; allows the depth pre-pass. An opaque cull-back material without shader and albedo_map whose albedo alpha is 255 can't discard and is pre-passed whatever its value. |
 | `cull back\|front\|none` | |
 | `transparency off\|prepass\|alpha` | |
 | `prepass on\|off` | Default on. `off`: this material is never drawn in the depth pre-pass, only once in the shading pass (for a cheap shader on very many triangles, where the pre-pass would only double the vertex cost). With R3D patch 28; upstream R3D always pre-passes, so the key changes nothing there. |

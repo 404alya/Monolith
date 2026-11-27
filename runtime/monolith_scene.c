@@ -9255,6 +9255,11 @@ static void MaterialDrawMode(SceneData *d, int i)
 #endif
     D->occluder = D->merge && !cutout && m->billboardMode == R3D_BILLBOARD_DISABLED && m->albedo.color.a == 255 &&
                   !D->maps[MAP_ALBEDO] && m->alphaCutoff <= 1.0f;
+    // Such a material without a shader has alpha 1 on every pixel, so its alpha test never discards;
+    // but R3D's default cutoff (0.5) alone keeps a material out of the depth pre-pass, and without
+    // it every hidden face drawn before the face in front of it is shaded into the G-buffer. Same
+    // pixels, cheaper geometry pass. Live edits restore the map's own value before calling this.
+    if (D->occluder && !M->shader) m->alphaCutoff = 0.0f;
 }
 
 // Creates every GPU resource of `d` (a previous load's are still alive: new before old, see
@@ -11192,6 +11197,7 @@ MS_ReloadResult MS_EditSetText(MS_Scene *s, const MS_MapFileText *files, int cou
                 if ((how & PLAN_MATERIAL) == PLAN_NEW) ok = BuildMaterial(d, i);
                 else {
                     R3D_Material m = old->materials[i].material, fresh = d->materials[i].material;
+                    m.alphaCutoff = fresh.alphaCutoff;      // the map's value: MaterialDrawMode may zero it
                     d->matDefs[i].paintTex = old->matDefs[i].paintTex;
                     if (how & PLAN_MAPS) {
                         m.albedo.texture = fresh.albedo.texture;
