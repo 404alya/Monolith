@@ -16,7 +16,7 @@ The editor edits and reaches the AI only on Linux (+ i3 / sway). Built for any o
 
 - walking / flying, the spectator camera (TAB, viewpoints, P, G);
 - 1..6, F1, F2 (without the Editor row; the settings file is saved), F3 / SHIFT+F3, F4 / SHIFT+F4;
-- F5 read-only (filter; ENTER flies there and selects);
+- F5 and F6 read-only (filter; ENTER flies there and selects);
 - F12;
 - selecting with the mouse (the HUD shows the object's line);
 - the ESC menu and keybindings panel (it lists only these keys);
@@ -26,7 +26,7 @@ The editor edits and reaches the AI only on Linux (+ i3 / sway). Built for any o
 **Refused:**
 
 - keys: M (the edit mode and everything in it: the transform modal, the rotate gizmo, I, CTRL+D, DELETE, CTRL+I), B, ENTER, C, V / SHIFT+V, CTRL+S, CTRL+Z / CTRL+Y, F9, K / SHIFT+K / CTRL+K / CTRL+SHIFT+K, R, and DELETE / SHIFT+DELETE / CTRL+I in the id panel. The HUD says "view-only build: editing and requests need the Linux editor" (`MSG_VIEW_ONLY`, `src/msg.h`).
-- flags: `--apply-edits`, `--edit-script`, `--paint-script`, `--new-map`, `--submit`, `--submit-wait`, `--close-submitted`, `--type`, `--classify`, `--edit-mode`, `--edit-id`, `--edit-modal`, `--edit-save`, `--model-picker`, `--model-picker-key`, `--draw-mode`, `--draw-panel`, `--draw-state`, `--cursor`, `--region`, `--volume`, `--bake-surface` (and its `--bake-*` options), `--export` and `--compile` print that message and exit 1 before anything is written.
+- flags: `--apply-edits`, `--edit-script`, `--paint-script`, `--new-map`, `--submit`, `--submit-wait`, `--close-submitted`, `--type`, `--classify`, `--edit-mode`, `--edit-id`, `--edit-modal`, `--edit-save`, `--model-picker`, `--model-picker-key`, `--draw-mode`, `--draw-panel`, `--draw-state`, `--cursor`, `--region`, `--volume`, `--sketch`, `--work-plane`, `--bake-surface` (and its `--bake-*` options), `--export` and `--compile` print that message and exit 1 before anything is written.
 
 The launcher (`launcher.c`) is not in that build.
 
@@ -45,6 +45,7 @@ The launcher (`launcher.c`) is not in that build.
 | SHIFT+F3 | the inspector panel (see below) |
 | F4 / SHIFT+F4 | R3D buffer view: scene, albedo, normal, orm, radiance, specular, ssao, ssil, ssgi, ssr, bloom, dof (named in the HUD) |
 | F5 | the id panel (see below) |
+| F6 | the groups panel (see below) |
 | F12 | screenshot into `screenshots/<date>_<time>.png` (`SCREENSHOTS_PATH`, else next to the executable) |
 | TAB | toggle spectator camera |
 | F9 | export the open map as a self-contained folder (package, scene runtime, R3D, `build.sh`, README) into `export/<map>-<YYYY-MM-DD_HHMMSS>/` next to `requests/` (`export.c`, like `--export`) |
@@ -57,6 +58,8 @@ The launcher (`launcher.c`) is not in that build.
 **F3, the render inspector** (spectator mode; `inspector.c`): outlines of what is drawn, cycling off → by material → by shader → by draw kind (merged cell mesh / instanced / model), with labels of the draw under the crosshair and the 24 nearest ones.
 
 **SHIFT+F3, the inspector panel:** materials, then shaders (draws, triangles). Type to filter, UP/DOWN select, SPACE hide / show (shadows too), I isolate (again: all back; CTRL+I while a filter is typed), ESC close. It takes the keys while open.
+
+**F6, the groups panel** (spectator mode; `groupspanel.c`, [groupspanel.md](groupspanel.md)): every group by name (every `group` statement with that name, in any file), sorted by area with an area row for an area of several groups (name, objects, file, lines). Type to filter, UP/DOWN select, ENTER select the group (an area: its groups) and fly there, CTRL+R rename (a text field), DELETE twice within 3 s delete (an area: each of its groups), CTRL+D duplicate as a new group, CTRL+N a new group from the selection (a text field), CTRL+G the selection into the group, ESC / F6 close. Edits are live and undoable (CTRL+S saves). It takes the keys while open; a scripted shot (`--input-script`) drives it too.
 
 **F5, the id panel** (spectator mode; `idpanel.c`): every `id N` line of the map (id, line, kind, objects, file or material, group). Type to filter, UP/DOWN select, ENTER fly there and select, DELETE remove the id prefix (the objects stay), SHIFT+DELETE remove the objects, CTRL+I id for the selection's line, ESC / F5 close. Edits are live and undoable (CTRL+S saves). It takes the keys while open.
 
@@ -106,8 +109,9 @@ The camera freezes and the cursor is free.
 - ENTER: the prompt box with the regions (and the object selection made before C) attached.
 - RMB / ESC / C: leave snip mode and drop the regions.
 - ESC in the prompt box returns to snip mode with the regions; a successful submit ends it.
+- D: the pen on / off (`designer.pen`; docs/editor-tools.md §4). With the pen, a LMB drag draws a stroke (`designer.sketches[]`, the one being drawn is the last); 1-4 colour (red, yellow, blue, white), F / L / A / O kind (free, line, arrow, circle), BACKSPACE removes the last stroke, SHIFT+BACKSPACE all. Strokes and regions go into one request; leaving snip mode drops both.
 
-The bundle lists what each region shows (`designer.c`).
+The bundle lists what each region shows and what each stroke passes over (`designer.c`: `DesignerAnalyzeRegion`, `DesignerAnalyzeSketch`); `Submit` draws the strokes into `view-marked.png` and alone into `sketch.png` (`DesignerDrawSketchesAlone` on the cleared target).
 
 ### Volume mode (V)
 
@@ -115,10 +119,13 @@ World-space boxes (the camera keeps flying).
 
 - LMB on a surface: the first corner; LMB again: the opposite footprint corner; then mouse up / down or the wheel sets the height (camera frozen; SHIFT x4), and LMB / ENTER adds the volume.
 - Points snap to N's step (0.1 / 0.25 / 0.5 / 1 / 2 m, default 0.5) on the axes along the clicked face; CTRL = no snap.
+- Corners in the air: a click on the sky lands on the work plane (`DesignerWorldPoint`, docs/editor-tools.md §1), ALT+click on it even over a surface; x and z snap to N's step. Its height: after the first corner that corner's; before it `designer.workPlaneY` once PGUP / PGDN (while the next click would use the plane; ALT+PGUP / PGDN stay the active volume's grow) or `--work-plane` set it, else the last volume's base, else the eye minus `MS_DEFAULT_EYE_HEIGHT` on the snap grid. Drawn live only (a grid patch, a cross and a tick down to the ground); the HUD's volume line says `work plane y …`. Leaving volume mode forgets a PGUP / PGDN height (not `--work-plane`'s).
 - RMB / ESC cancel the volume being made, else leave volume mode (as V does).
 - In the mode: `[` `]` = the active volume; arrows / PGUP / PGDN move it one step (arrows along the world axes nearest to the view; they don't fly to viewpoints then); ALT + them grows that side, ALT+SHIFT shrinks it; DELETE removes it, SHIFT+DELETE clears all; ENTER = prompt box.
 
 Volumes stay (through map reloads and submits too) until removed; they are never written to the map. The bundle lists what each volume holds (`designer.c`, `volumes[]`).
+
+X marks the active volume as a 3D snip, or unmarks it (`DesignVolume.snip`; dashed edges, label `V<n> snip`). At submit `RenderSnips` (`main.c`) renders each snip's four cameras (`DesignerSnipViews`: view, front, side, top; fovy 40, 1024 x 768, far enough back for the box's bounding sphere) into an offscreen target with R3D's resolution set to its size, the scene clipped to the box (`MS_SetClipBox`, which also turns the depth pre-pass off), the sky a flat grey (128) and distance and volumetric fog off (set after `MS_PushLights`, which applies fog zones), then restores R3D's environment byte for byte and its resolution; the launcher writes `snip-<n>-<side>.png`.
 
 SHIFT+V makes a volume from the selection's bounds (or the crosshair object's). H turns the active volume into a `barrier` line (EDIT_BARRIER_ADD through the edit mode's `BarrierAdd`; the volume stays).
 
@@ -272,6 +279,7 @@ Only the interactive editor reads the default settings file: `--shot`, `--bench`
 | `--inspector-panel` | with `--shot --shot-hud`: draw the open inspector panel (SHIFT+F3) |
 | `--keys-panel [section]` | with `--shot --shot-hud`: draw the open keybindings panel at the first section whose name contains `section` (e.g. edit) |
 | `--id-panel [filter]` | with `--shot --shot-hud`: draw the open id panel (F5), with this filter typed |
+| `--groups-panel [filter]` | with `--shot --shot-hud`: draw the open groups panel (F6), with this filter typed; `--input-script` drives its keys |
 | `--inspect-hide <name>` | hide a material (name) or shader (path) from every pass, as SPACE in the inspector panel (repeatable). A name the map has no material or shader for exits 1 |
 | `--inspect-isolate <name>` | draw only what uses it (I). A name the map has no material or shader for exits 1 |
 
@@ -330,7 +338,7 @@ The material's shader gets `#define MS_BAKE 1`, `MS_BAKE_FACE`, `MS_BAKE_LEVEL`,
 
 | Flag | Meaning |
 |---|---|
-| `--apply-edits <script>` | run an edit script (select / also / move / turn / rotation / scale / size / remove / duplicate / add / barrier-add / id / paint-add / paint-set / paint-remove / material-set / undo / redo / print; format: [mapedit.md](mapedit.md#edit-script)) against the map file of `--map`, which is required (the script rewrites that file), and exit without a window; exit 1 at the first failing command |
+| `--apply-edits <script>` | run an edit script (select / also / move / turn / rotation / scale / size / remove / duplicate / add / barrier-add / shape-add / id / paint-add / paint-set / paint-remove / material-set / undo / redo / print; format: [mapedit.md](mapedit.md#edit-script)) against the map file of `--map`, which is required (the script rewrites that file), and exit without a window; exit 1 at the first failing command |
 | `--edit-script <script>` | the same language applied live, as the edit mode does (see below) |
 | `--edit-save <manual\|auto>` | the edit save mode for this run (settings: `edit_save`) |
 | `--paint-script <script>` | strokes of the draw mode (see below) |
@@ -359,7 +367,9 @@ For testing without a visible window.
 | `--pick-at x y` | with `--shot`: the same for the ray through pixel (x, y) of the shot (top-left origin, as `--region` and `view.png`), e.g. the edges of a gap; repeatable, each printed after a `pick-at x y` line |
 | `--select [<file>:]<line>` | select every box / model made by this line of the main map file, or of a part it imports (`parts/lake.map:41`; repeatable) |
 | `--region x y w h` | attach a screen region (pixels of the shot, top-left origin), as if dragged out in snip mode (repeatable); with `--shot-hud` the shot shows the snip-mode drawing, with `--submit` the bundle gets the regions |
-| `--volume x0 y0 z0 x1 y1 z1` | attach a volume: an axis-aligned box between two opposite corners in map coordinates, as if made in volume mode (repeatable); `--shot-hud` draws it, `--submit` puts it into the bundle (`volumes[]`) |
+| `--volume x0 y0 z0 x1 y1 z1 [snip]` | attach a volume: an axis-aligned box between two opposite corners in map coordinates, as if made in volume mode (repeatable); `snip`: a 3D snip (X in volume mode); `--shot-hud` draws it, `--submit` puts it into the bundle (`volumes[]`, and for a snip `snip-<n>-<side>.png`, `RenderSnips`) |
+| `--sketch <free\|line\|arrow\|circle> <colour 1-4> x0 y0 …` | attach a pen stroke (pixels of the shot), as if drawn with the pen in snip mode (repeatable; snip mode starts as for `--region`); the x y pairs run to the next `--` word. `DesignerAddSketch`: a line / arrow keeps the first and last point, a circle is centre then rim (made 64 rim points), a free stroke is closed when it ends within 16 px of its start. `--shot-hud` draws it, `--submit` puts it into the bundle (`sketch.png`, `sketches[]`) |
+| `--work-plane <y>` | the work plane's height (docs/editor-tools.md §1.2) for the run: `designer.workPlaneY` with `workPlaneSet` and `workPlaneFixed` (leaving volume mode keeps it); an `--input-script` volume or barrier click on the sky, or with `down ALT`, lands on it |
 | `--submit "text"` | with `--shot`: run the real submit path (see below) |
 | `--type "text"` | open the prompt box with this text (cursor at the end) |
 | `--shot-hud` | with `--shot`: draw the HUD, crosshair, selection overlay, regions, volumes and prompt box into the shot (to look at the UI; plain shots never contain it) |
@@ -375,7 +385,7 @@ For testing without a visible window.
 
 In `--submit`, `--type` and `--classify` text, a literal `\n` becomes a new line.
 
-**`--submit "text"`.** After saving the shot, runs the real submit path: render view + view-marked offscreen, `LauncherSubmit` with the centre pick, the `--select` objects, the `--region` regions and the `--volume` volumes, and print the launcher's message. This writes a real bundle into `requests/` and queues it (and may start a real coordinator: terminal + Claude Code). For tests, set `MONOLITH_REQUESTS_DIR` to a scratch folder and `MONOLITH_TERMINAL` to a stub script that only logs its arguments (`build/tools/stub-terminal`; `build/tools/test-coordinator` runs the queue end to end with a stub coordinator). It is refused (nothing written) while `--edit-script` left unsaved edits, as ENTER is.
+**`--submit "text"`.** After saving the shot, runs the real submit path: render view + view-marked offscreen, `LauncherSubmit` with the centre pick, the `--select` objects, the `--region` regions, the `--sketch` strokes (and `sketch.png`, rendered on a transparent frame) and the `--volume` volumes, and print the launcher's message. This writes a real bundle into `requests/` and queues it (and may start a real coordinator: terminal + Claude Code). For tests, set `MONOLITH_REQUESTS_DIR` to a scratch folder and `MONOLITH_TERMINAL` to a stub script that only logs its arguments (`build/tools/stub-terminal`; `build/tools/test-coordinator` runs the queue end to end with a stub coordinator). It is refused (nothing written) while `--edit-script` left unsaved edits, as ENTER is.
 
 **`--edit-modal`.** After 10 frames, opens the edit mode and the transform modal (G / ALT+R / S) on the selection with that lock (capitals: plane locks; doubled, e.g. `xx`: local axes) and typed value, as with `--shot-hud`, to see its HUD. `commit` / `cancel` end it after 20 frames (one edit, as LMB; or everything back, as RMB). Exit 1 if it can't open or the commit is refused (or writes nothing: a value that changes nothing). Other forms:
 
@@ -399,7 +409,7 @@ In `--submit`, `--type` and `--classify` text, a literal `\n` becomes a new line
 
 **`--model-picker-key <enter|close>`.** Once the thumbnails are rendered, presses ENTER (place the selected model at the crosshair's point, as at the cursor; the shot follows 20 frames later, so it must equal `--apply-edits` of the `add` the log prints) or ESC (closed; the shot is that frame). Exit 1 if ENTER is refused.
 
-**`--classify "text"`.** Runs the launcher's model choice for this prompt and prints it (tier, model, classifier, classifier model, `classifier account` only with `MONOLITH_CLAUDE_FALLBACK`, reason, seconds, source), then exits without opening a window: the overrides, else the AI classifier (one `claude -p` on Fable, Opus as fallback; `launcher.c` "Model choice", `classifier.c`, [classifier.md](classifier.md)), run to its end. Context: the loaded map (its objects, `MAP.md`), the `--select` lines, the `--region` and `--volume` counts and a crosshair hit.
+**`--classify "text"`.** Runs the launcher's model choice for this prompt and prints it (tier, model, classifier, classifier model, `classifier account` only with `MONOLITH_CLAUDE_FALLBACK`, reason, seconds, source), then exits without opening a window: the overrides, else the AI classifier (one `claude -p` on Fable, Opus as fallback; `launcher.c` "Model choice", `classifier.c`, [classifier.md](classifier.md)), run to its end. Context: the loaded map (its objects, `MAP.md`), the `--select` lines, the `--region`, `--sketch` and `--volume` counts and a crosshair hit.
 
 ## Environment
 

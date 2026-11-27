@@ -217,13 +217,22 @@ static const char *GroupName(int g)
 static bool ObjValid(MS_ObjRef o) { return MS_ObjectRef(scene, o) != NULL; }
 static const char *ObjKindName(MS_ObjRef o)
 {
-    return o.kind == MS_OBJ_BOX ? "box" : o.kind == MS_OBJ_MODEL ? "model" : o.kind == MS_OBJ_BARRIER ? "barrier" : "none";
+    return o.kind == MS_OBJ_BOX ? "box" : o.kind == MS_OBJ_MODEL ? "model" : o.kind == MS_OBJ_BARRIER ? "barrier"
+         : o.kind == MS_OBJ_SHAPE ? "shape" : "none";
+}
+// A shape's kind word ("cylinder"; docs/editor-tools.md 2.2), "" for any other object
+static const char *ObjShapeKind(MS_ObjRef o)
+{
+    if (o.kind != MS_OBJ_SHAPE || o.index < 0 || o.index >= scene->shapeCount) return "";
+    const char *k = MS_ShapeKindName(scene->shapes[o.index].kind);
+    return k ? k : "";
 }
 static BoundingBox ObjBounds(MS_ObjRef o) { return MS_ObjectBounds(scene, o); }
-// A turned box's or barrier's record (a line with `rot`; its bounds are then its world AABB), NULL otherwise
+// A turned box's, barrier's or shape's record (a line with `rot`; its bounds are then its world AABB), NULL otherwise
 static const MS_TurnedBox *ObjTurn(MS_ObjRef o)
 {
     if (o.kind == MS_OBJ_BARRIER) return scene->barriers[o.index].turned ? &scene->barriers[o.index].shape : NULL;
+    if (o.kind == MS_OBJ_SHAPE) return scene->shapes[o.index].turned ? &scene->shapes[o.index].shape : NULL;
     return o.kind == MS_OBJ_BOX && scene->boxTurned && scene->boxTurned[o.index] >= 0 ? &scene->turnedBoxes[scene->boxTurned[o.index]]
                                                                                     : NULL;
 }
@@ -297,7 +306,8 @@ static CopyInfo ObjCopy(MS_ObjRef o)
 {
     CopyInfo c = { .nth = ObjNth(o), .perCopy = 1 };
     long long key = ObjKey(o);
-    int count = o.kind == MS_OBJ_MODEL ? scene->modelCount : o.kind == MS_OBJ_BARRIER ? scene->barrierCount : scene->boxCount;
+    int count = o.kind == MS_OBJ_MODEL ? scene->modelCount : o.kind == MS_OBJ_BARRIER ? scene->barrierCount
+              : o.kind == MS_OBJ_SHAPE ? scene->shapeCount : scene->boxCount;
     c.total = c.nth + 1;
     for (int i = o.index + 1; i < count && ObjKey((MS_ObjRef){ o.kind, i }) == key; i++) c.total++;
     // The line's placement prefixes: repeat n dx dy dz (up to 3)
@@ -1013,6 +1023,7 @@ static unsigned char StartClassifier(Classifier *c, ModelChoice *m, const ModelQ
         .prompt = (q->prompt ? q->prompt : "") + m->promptSkip, .package = q->package,
         .boxes = q->boxes, .models = q->models, .brief = q->brief,
         .selected = q->selected, .regions = q->regions, .volumes = q->volumes, .hit = q->hit,
+        .sketches = q->sketches, .snips = q->snips,
     };
     unsigned char r = ClassifierStart(c, &cq, dir, (const char *const *)words, wordCount, program, promptFile);
     free(promptFile);
@@ -1119,6 +1130,14 @@ static void FreeBundle(Bundle *B)
     free(B);
 }
 
+// Volumes marked as 3D snips (docs/editor-tools.md 5)
+static int SnipCount(const DesignRequest *r)
+{
+    int n = 0;
+    for (int i = 0; i < r->volumeCount; i++) n += r->volumes[i].snip;
+    return n;
+}
+
 // False when out of memory
 static bool BuildBundle(Bundle *B, const DesignRequest *req)
 {
@@ -1162,9 +1181,11 @@ static bool BuildBundle(Bundle *B, const DesignRequest *req)
     B->nearbyCenter = B->hit ? req->hit.point : req->eye;
     for (int g = 0; g <= scene->groupCount; g++)
         B->nearby[g] = (Nearby){ g < scene->groupCount ? g : -1, 1e30f, 0, LLONG_MAX, 0 };
-    // (boxes and models: a model counts by its bounds)
-    for (int i = 0; i < scene->boxCount + scene->modelCount; i++) {
-        MS_ObjRef o = i < scene->boxCount ? (MS_ObjRef){ MS_OBJ_BOX, i } : (MS_ObjRef){ MS_OBJ_MODEL, i - scene->boxCount };
+    // (boxes, models and shapes: a model or shape counts by its bounds)
+    for (int i = 0; i < scene->boxCount + scene->modelCount + scene->shapeCount; i++) {
+        MS_ObjRef o = i < scene->boxCount ? (MS_ObjRef){ MS_OBJ_BOX, i }
+                    : i < scene->boxCount + scene->modelCount ? (MS_ObjRef){ MS_OBJ_MODEL, i - scene->boxCount }
+                    : (MS_ObjRef){ MS_OBJ_SHAPE, i - scene->boxCount - scene->modelCount };
         int g = ObjGroup(o);
         Nearby *n = &B->nearby[(g >= 0 && g < scene->groupCount) ? g : scene->groupCount];
         float d = DistToBox(B->nearbyCenter, ObjBounds(o));
@@ -1252,11 +1273,24 @@ static void MdModel(FILE *f, int index, const char *bullet)
     fprintf(f, "\n");
 }
 
+// A shape's line of the crosshair hit: its kind, centre, size along its own axes and rotation as written
+static void MdShape(FILE *f, int index, const char *bullet)
+{
+    const MS_Shape *s = &scene->shapes[index];
+    fprintf(f, "%sshape `%s`: centre ", bullet, ObjShapeKind((MS_ObjRef){ MS_OBJ_SHAPE, index }));
+    MdVec(f, s->shape.center);
+    fprintf(f, ", size "); MdVec(f, s->shape.size);
+    fprintf(f, " (along its own axes), rotation "); MdVec(f, s->shape.rotationDeg);
+    fprintf(f, "; line `shape %s cx y0 cz sx sy sz [rot yaw pitch roll]` (y0 = the box's bottom)\n",
+            ObjShapeKind((MS_ObjRef){ MS_OBJ_SHAPE, index }));
+}
+
 static void MdRegionObject(FILE *f, MS_ObjRef o)
 {
     fprintf(f, "%s #%d, group \"%s\", line ", ObjKindName(o), o.index, GroupName(ObjGroup(o)));
     PutLine(f, ObjKey(o));
     if (o.kind == MS_OBJ_MODEL) fprintf(f, ", file `%s`", scene->modelFiles[scene->models[o.index].file].path);
+    if (o.kind == MS_OBJ_SHAPE) fprintf(f, ", shape `%s`", ObjShapeKind(o));
     fprintf(f, ", material \"%s\"", DesignerMaterialLabel(o));
 }
 
@@ -1274,28 +1308,31 @@ static int CompareLineShare(const void *pa, const void *pb)
     return (a->line > b->line) - (a->line < b->line);
 }
 
-// Heap array (free it) of the region's map lines, largest share first; NULL with *count 0
-// when the region has no objects or memory ran out
-static LineShare *RegionLines(const DesignRegionInfo *g, int *count)
+// Heap array (free it) of the map lines of objects[] (a region's, a sketch's), largest share first; NULL
+// with *count 0 when there are no objects or memory ran out
+static LineShare *ObjectLines(const DesignRegionObject *objects, int objectCount, int *count)
 {
     *count = 0;
-    LineShare *ls = g->objectCount > 0 ? malloc(sizeof(LineShare) * g->objectCount) : NULL;
+    LineShare *ls = objectCount > 0 ? malloc(sizeof(LineShare) * objectCount) : NULL;
     if (!ls) return NULL;
     int n = 0;
-    for (int k = 0; k < g->objectCount; k++) {
-        MS_ObjRef o = g->objects[k].obj;
+    for (int k = 0; k < objectCount; k++) {
+        MS_ObjRef o = objects[k].obj;
         if (!ObjValid(o)) continue;
         long long line = ObjKey(o);
         int j = 0;
         while (j < n && ls[j].line != line) j++;
         if (j == n) ls[n++] = (LineShare){ line, o, 0, 0.0f };
         ls[j].objects++;
-        ls[j].share += g->objects[k].share;
+        ls[j].share += objects[k].share;
     }
     if (n > 1) qsort(ls, n, sizeof(ls[0]), CompareLineShare);
     *count = n;
     return ls;
 }
+
+// The same for a region's objects
+static LineShare *RegionLines(const DesignRegionInfo *g, int *count) { return ObjectLines(g->objects, g->objectCount, count); }
 
 // Appends "<line>: <text>\n" of map line `line` (a LineKey; "parts/lake.map:41: ..." in a part) to the
 // heap text *block (*n bytes, *cap allocated) and counts it in *quoted; a line without text is left
@@ -1327,6 +1364,106 @@ static void MdSides(FILE *f, unsigned int sides)
         if (sides & (1u << k)) fprintf(f, "%s%s", n++ ? ", " : "", NAMES[k]);
 }
 
+// A region's analysis (table, edge objects, objects by map line and one by one, the quoted lines); also the
+// inside of a closed sketch
+static void MdRegionBody(FILE *f, const DesignRequest *r, const DesignRegionInfo *g)
+{
+    fprintf(f, "| | |\n|---|---|\n");
+    fprintf(f, "| rect | x %.0f, y %.0f, %.0f x %.0f px (normalised %.4f, %.4f, %.4f, %.4f) |\n",
+            g->rect.x, g->rect.y, g->rect.width, g->rect.height, g->rect.x / r->width, g->rect.y / r->height,
+            g->rect.width / r->width, g->rect.height / r->height);
+    fprintf(f, "| centre | ");
+    if (ObjValid(g->centerObj)) {
+        MdRegionObject(f, g->centerObj);
+        fprintf(f, "; point "); MdVec(f, g->centerPoint);
+        fprintf(f, ", normal "); MdVec(f, g->centerNormal);
+        fprintf(f, ", %.2f m |\n", g->centerDist);
+    } else fprintf(f, "sky (no object under the centre) |\n");
+    if (g->hasDepth) fprintf(f, "| depth | %.2f - %.2f m |\n", g->depthMin, g->depthMax);
+    else fprintf(f, "| depth | - (only sky) |\n");
+    fprintf(f, "| sky | %.1f%% |\n", 100.0f * g->sky);
+    if (g->samples != g->gridW * g->gridH) fprintf(f, "| rays | %d of a %d x %d grid |\n\n", g->samples, g->gridW, g->gridH);
+    else fprintf(f, "| rays | %d x %d |\n\n", g->gridW, g->gridH);
+
+    // Edge objects first: they matter most when the region is all sky or far away
+    if (g->edgeSamples > 0) {
+        fprintf(f, "Edge objects (%d rays %.0f px outside the border, sky %.1f%%), nearest first:\n\n",
+                g->edgeSamples, g->edgeOffset, 100.0f * g->edgeSky);
+        if (g->edgeCount == 0) fprintf(f, "None: only sky just outside the region.\n\n");
+        else {
+            fprintf(f, "| distance | object | group | line | sides | rays | nearest point |\n|---|---|---|---|---|---|---|\n");
+            int rows = g->edgeCount < MD_EDGE_ROWS ? g->edgeCount : MD_EDGE_ROWS;
+            for (int k = 0; k < rows; k++) {
+                const DesignRegionEdge *e = &g->edges[k];
+                if (!ObjValid(e->obj)) continue;
+                fprintf(f, "| %.2f m | %s #%d", e->dist, ObjKindName(e->obj), e->obj.index);
+                if (e->obj.kind == MS_OBJ_MODEL) fprintf(f, " `%s`", scene->modelFiles[scene->models[e->obj.index].file].path);
+                else if (e->obj.kind == MS_OBJ_SHAPE) fprintf(f, " `%s`", ObjShapeKind(e->obj));
+                fprintf(f, " | %s | ", GroupName(ObjGroup(e->obj)));
+                PutLine(f, ObjKey(e->obj));
+                fprintf(f, " | ");
+                MdSides(f, e->sides);
+                fprintf(f, " | %d | ", e->samples);
+                MdVec(f, e->point);
+                fprintf(f, " |\n");
+            }
+            if (g->edgeCount > rows) fprintf(f, "| | %d more (see `request.json`) | | | | | |\n", g->edgeCount - rows);
+            fprintf(f, "\n");
+        }
+    } else fprintf(f, "Edge objects: none (the region fills the frame to its borders).\n\n");
+
+    if (g->objectCount == 0) { fprintf(f, "No objects in this region.\n\n"); return; }
+    int lineCount = 0;
+    LineShare *ls = RegionLines(g, &lineCount);
+    if (ls && lineCount > 0) {
+        fprintf(f, "By map line:\n\n| share | line | group | objects |\n|---|---|---|---|\n");
+        int rows = lineCount < MD_REGION_ROWS ? lineCount : MD_REGION_ROWS;
+        for (int k = 0; k < rows; k++) {
+            fprintf(f, "| %.1f%% | ", 100.0f * ls[k].share);
+            PutLine(f, ls[k].line);
+            fprintf(f, " | %s | %d %s%s", GroupName(ObjGroup(ls[k].first)), ls[k].objects, ObjKindName(ls[k].first), ls[k].objects == 1 ? "" : ls[k].first.kind == MS_OBJ_BOX ? "es" : "s");
+            if (ls[k].first.kind == MS_OBJ_MODEL) fprintf(f, " (`%s`)", scene->modelFiles[scene->models[ls[k].first.index].file].path);
+            else if (ls[k].first.kind == MS_OBJ_SHAPE) fprintf(f, " (`%s`)", ObjShapeKind(ls[k].first));
+            fprintf(f, " |\n");
+        }
+        if (lineCount > rows) fprintf(f, "| | %d more lines (see `request.json`) | | |\n", lineCount - rows);
+        fprintf(f, "\n");
+    }
+    fprintf(f, "Objects:\n\n| share | object | group | line | min | max |\n|---|---|---|---|---|---|\n");
+    int rows = g->objectCount < MD_REGION_ROWS ? g->objectCount : MD_REGION_ROWS;
+    for (int k = 0; k < rows; k++) {
+        MS_ObjRef o = g->objects[k].obj;
+        if (!ObjValid(o)) continue;
+        BoundingBox b = ObjBounds(o);
+        fprintf(f, "| %.1f%% | %s #%d | %s | ", 100.0f * g->objects[k].share, ObjKindName(o), o.index,
+                GroupName(ObjGroup(o)));
+        PutLine(f, ObjKey(o));
+        fprintf(f, " | ");
+        MdVec(f, b.min); fprintf(f, " | "); MdVec(f, b.max); fprintf(f, " |\n");
+    }
+    int more = g->objectCount - rows;
+    if (more > 0) {
+        float share = 0.0f;
+        for (int k = rows; k < g->objectCount; k++) share += g->objects[k].share;
+        fprintf(f, "| %.1f%% | %d more object%s (see `request.json`) | | | | |\n", 100.0f * share, more, more == 1 ? "" : "s");
+    }
+    fprintf(f, "\n");
+
+    // The map lines of the region, largest share first, each quoted once (a heap text:
+    // lines have no length limit)
+    int quoted = 0, n = 0, cap = 0;
+    char *block = NULL;
+    for (int k = 0; ls && k < lineCount && k < MD_REGION_ROWS; k++) {
+        if (!QuoteLine(&block, &n, &cap, ls[k].line, &quoted)) break;
+    }
+    if (quoted > 0 && block) {
+        fprintf(f, "Map lines of these objects:\n\n");
+        MdFence(f, block, "");
+    }
+    free(block);
+    free(ls);
+}
+
 static void WriteRegionsMd(FILE *f, const Bundle *B)
 {
     const DesignRequest *r = B->req;
@@ -1347,97 +1484,100 @@ static void WriteRegionsMd(FILE *f, const Bundle *B)
     for (int i = 0; i < r->regionCount; i++) {
         const DesignRegionInfo *g = &r->regions[i];
         fprintf(f, "### Region %d (`region-%d.png`)\n\n", i + 1, i + 1);
+        MdRegionBody(f, r, g);
+    }
+}
+
+#define MD_SKETCH_PATH_STEP 32  // request.md lists every 32nd world sample of a stroke (request.json all)
+
+// A sketch end's hit in words (a table cell)
+static void MdSketchHit(FILE *f, DesignerHit h)
+{
+    if (!ObjValid(h.obj)) { fprintf(f, "sky (nothing hit)"); return; }
+    MdRegionObject(f, h.obj);
+    fprintf(f, "; point "); MdVec(f, h.point);
+    fprintf(f, ", normal "); MdVec(f, h.normal);
+    fprintf(f, ", %.2f m", h.dist);
+}
+
+static void WriteSketchesMd(FILE *f, const Bundle *B)
+{
+    const DesignRequest *r = B->req;
+    fprintf(f, "## Sketches (%d)\n\n", r->sketchCount);
+    if (r->sketchCount == 0) {
+        fprintf(f, "None: no stroke was drawn.\n\n");
+        return;
+    }
+    fprintf(f, "The developer drew these strokes over the frame with the pen (snip mode): gestures over `view.png`, whose pixels "
+               "the points are. `view-marked.png` draws them in their colours with the labels S1, S2, ...; `sketch.png` holds "
+               "only the strokes on a transparent background. A line or an arrow along a surface (\"a fence along here\") "
+               "follows its *world path*: the world points under evenly spaced samples along the stroke (`request.json` "
+               "`samples`, null where a sample hits the sky). An arrow points from its start to its end (\"slopes down to "
+               "there\", \"move it there\"). A closed stroke outlines an area: its inside is analysed like a screen region "
+               "over the rays inside the outline. *Objects along it* are what the samples hit: share = fraction of the "
+               "samples. Computed at submit time.\n\n");
+    for (int i = 0; i < r->sketchCount; i++) {
+        const DesignSketch *s = &r->sketches[i];
+        const DesignSketchInfo *si = &r->sketchInfos[i];
+        int n = s->pointCount;
+        fprintf(f, "### S%d (%s %s)\n\n", i + 1, DesignerSketchColorName(s->color), DesignerSketchKindName(s->kind));
         fprintf(f, "| | |\n|---|---|\n");
-        fprintf(f, "| rect | x %.0f, y %.0f, %.0f x %.0f px (normalised %.4f, %.4f, %.4f, %.4f) |\n",
-                g->rect.x, g->rect.y, g->rect.width, g->rect.height, g->rect.x / r->width, g->rect.y / r->height,
-                g->rect.width / r->width, g->rect.height / r->height);
-        fprintf(f, "| centre | ");
-        if (ObjValid(g->centerObj)) {
-            MdRegionObject(f, g->centerObj);
-            fprintf(f, "; point "); MdVec(f, g->centerPoint);
-            fprintf(f, ", normal "); MdVec(f, g->centerNormal);
-            fprintf(f, ", %.2f m |\n", g->centerDist);
-        } else fprintf(f, "sky (no object under the centre) |\n");
-        if (g->hasDepth) fprintf(f, "| depth | %.2f - %.2f m |\n", g->depthMin, g->depthMax);
-        else fprintf(f, "| depth | - (only sky) |\n");
-        fprintf(f, "| sky | %.1f%% |\n", 100.0f * g->sky);
-        fprintf(f, "| rays | %d x %d |\n\n", g->gridW, g->gridH);
+        fprintf(f, "| points | %d, first (%.0f, %.0f), last (%.0f, %.0f) px; %s |\n", n, s->points[0].x, s->points[0].y,
+                s->points[n - 1].x, s->points[n - 1].y, s->closed ? "closed" : "open");
+        fprintf(f, "| start | "); MdSketchHit(f, si->start); fprintf(f, " |\n");
+        fprintf(f, "| end | "); MdSketchHit(f, si->end); fprintf(f, " |\n");
+        int hits = 0;
+        for (int k = 0; k < si->sampleCount; k++) hits += si->worldHit[k];
+        fprintf(f, "| samples | %d along the stroke, %d hit something |\n\n", si->sampleCount, hits);
 
-        // Edge objects first: they matter most when the region is all sky or far away
-        if (g->edgeSamples > 0) {
-            fprintf(f, "Edge objects (%d rays %.0f px outside the border, sky %.1f%%), nearest first:\n\n",
-                    g->edgeSamples, g->edgeOffset, 100.0f * g->edgeSky);
-            if (g->edgeCount == 0) fprintf(f, "None: only sky just outside the region.\n\n");
-            else {
-                fprintf(f, "| distance | object | group | line | sides | rays | nearest point |\n|---|---|---|---|---|---|---|\n");
-                int rows = g->edgeCount < MD_EDGE_ROWS ? g->edgeCount : MD_EDGE_ROWS;
-                for (int k = 0; k < rows; k++) {
-                    const DesignRegionEdge *e = &g->edges[k];
-                    if (!ObjValid(e->obj)) continue;
-                    fprintf(f, "| %.2f m | %s #%d", e->dist, ObjKindName(e->obj), e->obj.index);
-                    if (e->obj.kind == MS_OBJ_MODEL) fprintf(f, " `%s`", scene->modelFiles[scene->models[e->obj.index].file].path);
-                    fprintf(f, " | %s | ", GroupName(ObjGroup(e->obj)));
-                    PutLine(f, ObjKey(e->obj));
-                    fprintf(f, " | ");
-                    MdSides(f, e->sides);
-                    fprintf(f, " | %d | ", e->samples);
-                    MdVec(f, e->point);
-                    fprintf(f, " |\n");
-                }
-                if (g->edgeCount > rows) fprintf(f, "| | %d more (see `request.json`) | | | | | |\n", g->edgeCount - rows);
-                fprintf(f, "\n");
-            }
-        } else fprintf(f, "Edge objects: none (the region fills the frame to its borders).\n\n");
-
-        if (g->objectCount == 0) { fprintf(f, "No objects in this region.\n\n"); continue; }
-        int lineCount = 0;
-        LineShare *ls = RegionLines(g, &lineCount);
-        if (ls && lineCount > 0) {
-            fprintf(f, "By map line:\n\n| share | line | group | objects |\n|---|---|---|---|\n");
-            int rows = lineCount < MD_REGION_ROWS ? lineCount : MD_REGION_ROWS;
-            for (int k = 0; k < rows; k++) {
-                fprintf(f, "| %.1f%% | ", 100.0f * ls[k].share);
-                PutLine(f, ls[k].line);
-                fprintf(f, " | %s | %d %s%s", GroupName(ObjGroup(ls[k].first)), ls[k].objects, ObjKindName(ls[k].first), ls[k].objects == 1 ? "" : ls[k].first.kind == MS_OBJ_BOX ? "es" : "s");
-                if (ls[k].first.kind == MS_OBJ_MODEL) fprintf(f, " (`%s`)", scene->modelFiles[scene->models[ls[k].first.index].file].path);
+        // The world path: the first and last hit samples and every MD_SKETCH_PATH_STEP-th one between
+        if (hits > 0) {
+            int first = 0, last = si->sampleCount - 1;
+            while (!si->worldHit[first]) first++;
+            while (!si->worldHit[last]) last--;
+            fprintf(f, "World path (samples that hit; `request.json` has all %d):\n\n| sample | point |\n|---|---|\n", si->sampleCount);
+            for (int k = first; k <= last; k++) {
+                if (!si->worldHit[k] || (k != first && k != last && k % MD_SKETCH_PATH_STEP != 0)) continue;
+                fprintf(f, "| %d | ", k);
+                MdVec(f, si->worldPoints[k]);
                 fprintf(f, " |\n");
             }
-            if (lineCount > rows) fprintf(f, "| | %d more lines (see `request.json`) | | |\n", lineCount - rows);
             fprintf(f, "\n");
-        }
-        fprintf(f, "Objects:\n\n| share | object | group | line | min | max |\n|---|---|---|---|---|---|\n");
-        int rows = g->objectCount < MD_REGION_ROWS ? g->objectCount : MD_REGION_ROWS;
-        for (int k = 0; k < rows; k++) {
-            MS_ObjRef o = g->objects[k].obj;
-            if (!ObjValid(o)) continue;
-            BoundingBox b = ObjBounds(o);
-            fprintf(f, "| %.1f%% | %s #%d | %s | ", 100.0f * g->objects[k].share, ObjKindName(o), o.index,
-                    GroupName(ObjGroup(o)));
-            PutLine(f, ObjKey(o));
-            fprintf(f, " | ");
-            MdVec(f, b.min); fprintf(f, " | "); MdVec(f, b.max); fprintf(f, " |\n");
-        }
-        int more = g->objectCount - rows;
-        if (more > 0) {
-            float share = 0.0f;
-            for (int k = rows; k < g->objectCount; k++) share += g->objects[k].share;
-            fprintf(f, "| %.1f%% | %d more object%s (see `request.json`) | | | | |\n", 100.0f * share, more, more == 1 ? "" : "s");
-        }
-        fprintf(f, "\n");
+        } else fprintf(f, "The whole stroke is over the sky: no world path.\n\n");
 
-        // The map lines of the region, largest share first, each quoted once (a heap text:
-        // lines have no length limit)
-        int quoted = 0, n = 0, cap = 0;
-        char *block = NULL;
-        for (int k = 0; ls && k < lineCount && k < MD_REGION_ROWS; k++) {
-            if (!QuoteLine(&block, &n, &cap, ls[k].line, &quoted)) break;
+        if (si->objectCount > 0) {
+            fprintf(f, "Objects along it:\n\n| share | object | group | line |\n|---|---|---|---|\n");
+            int rows = si->objectCount < MD_REGION_ROWS ? si->objectCount : MD_REGION_ROWS;
+            for (int k = 0; k < rows; k++) {
+                MS_ObjRef o = si->objects[k].obj;
+                if (!ObjValid(o)) continue;
+                fprintf(f, "| %.1f%% | %s #%d", 100.0f * si->objects[k].share, ObjKindName(o), o.index);
+                if (o.kind == MS_OBJ_MODEL) fprintf(f, " `%s`", scene->modelFiles[scene->models[o.index].file].path);
+                else if (o.kind == MS_OBJ_SHAPE) fprintf(f, " `%s`", ObjShapeKind(o));
+                fprintf(f, " | %s | ", GroupName(ObjGroup(o)));
+                PutLine(f, ObjKey(o));
+                fprintf(f, " |\n");
+            }
+            if (si->objectCount > rows) fprintf(f, "| | %d more (see `request.json`) | | |\n", si->objectCount - rows);
+            fprintf(f, "\n");
+            // Their map lines, largest share first, each quoted once
+            int lineCount = 0, quoted = 0, len = 0, cap = 0;
+            LineShare *ls = ObjectLines(si->objects, si->objectCount, &lineCount);
+            char *block = NULL;
+            for (int k = 0; ls && k < lineCount && k < MD_REGION_ROWS; k++)
+                if (!QuoteLine(&block, &len, &cap, ls[k].line, &quoted)) break;
+            if (quoted > 0 && block) {
+                fprintf(f, "Map lines along it:\n\n");
+                MdFence(f, block, "");
+            }
+            free(block);
+            free(ls);
         }
-        if (quoted > 0 && block) {
-            fprintf(f, "Map lines of these objects:\n\n");
-            MdFence(f, block, "");
+        if (si->hasRegion) {
+            fprintf(f, "Inside the closed stroke (analysed like a region over the %d rays inside it; rect = the stroke's bounds):\n\n",
+                    si->region.samples);
+            MdRegionBody(f, r, &si->region);
         }
-        free(block);
-        free(ls);
     }
 }
 
@@ -1514,6 +1654,12 @@ static void WriteVolumesMd(FILE *f, const Bundle *B)
         fprintf(f, "| max | "); MdVec(f, v->box.max); fprintf(f, " |\n");
         fprintf(f, "| centre | "); MdVec(f, Vector3Scale(Vector3Add(v->box.min, v->box.max), 0.5f)); fprintf(f, " |\n");
         fprintf(f, "| size | %.3f x %.3f x %.3f m (%.2f m^3), snap %g m |\n", size.x, size.y, size.z, size.x * size.y * size.z, v->snap);
+        if (v->snip) {
+            fprintf(f, "| 3D snip | ");
+            for (int k = 0, n = 0; k < SNIP_VIEW_COUNT; k++)
+                if (v->images[k].data) fprintf(f, "%s`snip-%d-%s.png`", n++ ? ", " : "", i + 1, v->views[k].side);
+            fprintf(f, " (only what is inside V%d: views from the camera's direction, the front (+z), the side (+x) and the top) |\n", i + 1);
+        }
         if (isfinite(v->empty)) fprintf(f, "| empty | %.1f%% (%d x %d x %d cells) |\n", 100.0f * v->empty, v->grid[0], v->grid[1], v->grid[2]);
         else fprintf(f, "| empty | unknown (out of memory) |\n");
         fprintf(f, "| floor | ");
@@ -1545,6 +1691,7 @@ static void WriteVolumesMd(FILE *f, const Bundle *B)
                 fprintf(f, " | %s | %d %s%s", GroupName(ObjGroup(t->first)), t->objects,
                         ObjKindName(t->first), t->objects == 1 ? "" : t->first.kind == MS_OBJ_BOX ? "es" : "s");
                 if (t->first.kind == MS_OBJ_MODEL) fprintf(f, " (`%s`)", scene->modelFiles[scene->models[t->first.index].file].path);
+                else if (t->first.kind == MS_OBJ_SHAPE) fprintf(f, " (`%s`)", ObjShapeKind(t->first));
                 fprintf(f, " | %d |\n", t->inside);
             }
             if (lineCount > rows) fprintf(f, "| | %d more lines (see `request.json`) | | | |\n", lineCount - rows);
@@ -1559,6 +1706,7 @@ static void WriteVolumesMd(FILE *f, const Bundle *B)
             fprintf(f, "| %.2f%% | %.1f%% | %s | %s #%d", 100.0f * vo->shareOfVolume, 100.0f * vo->shareOfObject,
                     vo->fullyInside ? "yes" : "no", ObjKindName(vo->obj), vo->obj.index);
             if (vo->obj.kind == MS_OBJ_MODEL) fprintf(f, " `%s`", scene->modelFiles[scene->models[vo->obj.index].file].path);
+            else if (vo->obj.kind == MS_OBJ_SHAPE) fprintf(f, " `%s`", ObjShapeKind(vo->obj));
             fprintf(f, " | %s | ", GroupName(ObjGroup(vo->obj)));
             PutLine(f, ObjKey(vo->obj));
             fprintf(f, " | ");
@@ -1659,10 +1807,11 @@ static void WriteMapFilesMd(FILE *f, const Bundle *B)
 static void WriteRequestMdBody(FILE *f, const Bundle *B)
 {
     const DesignRequest *r = B->req;
-    fprintf(f, "Request `%s`, submitted %s from the monolith map designer. Bundle format 8: besides the "
+    fprintf(f, "Request `%s`, submitted %s from the monolith map designer. Bundle format 9: besides the "
                "crosshair hit and the selected objects it may contain **screen regions** the developer "
-               "dragged over the frame and **volumes**, boxes marked in world space (see *Screen regions* and "
-               "*Volumes* below and `.claude/skills/map-request/bundle-reference.md`).\n\n", B->id, B->created);
+               "dragged over the frame, **sketches** (strokes drawn over it) and **volumes**, boxes marked in world space "
+               "(see *Screen regions*, *Sketches* and *Volumes* below and `.claude/skills/map-request/bundle-reference.md`).\n\n",
+               B->id, B->created);
     fprintf(f, "**First** read `CLAUDE.md` and the map-request skill `.claude/skills/map-request/SKILL.md` in the repository root (if they "
                "are not loaded already); they explain the workflow, the map format and how to verify an edit. "
                "Then carry out the request below.\n\n"
@@ -1691,7 +1840,9 @@ static void WriteRequestMdBody(FILE *f, const Bundle *B)
     fprintf(f, "- fovy %.1f deg (vertical), aspect %.4f, resolution %d x %d\n\n", r->fovy, B->aspect, r->width, r->height);
     fprintf(f, "Images in this folder: `view.png` (the frame without HUD) and `view-marked.png` (the same "
                "frame with the selection highlighted, the crosshair hit marked, the screen regions "
-               "outlined and numbered and the volumes drawn as green boxes labelled V1, V2, ...)%s.\n\n", r->regionCount ? ", plus one crop `region-<n>.png` per region" : "");
+               "outlined and numbered, the sketches drawn in their colours and labelled S1, S2, ... and the volumes drawn "
+               "as green boxes labelled V1, V2, ...)%s%s.\n\n", r->regionCount ? ", plus one crop `region-<n>.png` per region" : "",
+               r->sketchCount ? ", plus `sketch.png`, only the strokes on a transparent background" : "");
 
     fprintf(f, "## Crosshair hit\n\n");
     if (B->hit) {
@@ -1701,9 +1852,10 @@ static void WriteRequestMdBody(FILE *f, const Bundle *B)
         fprintf(f, "- face normal: "); MdVec(f, r->hit.normal); fprintf(f, "\n");
         fprintf(f, "- distance from the eye: %.2f m\n", r->hit.dist);
         fprintf(f, "- object: %s #%d (kind `%s`, index %d): %smin ", ObjKindName(o), o.index, ObjKindName(o), o.index,
-                o.kind == MS_OBJ_MODEL ? "world bounds " : "");
+                o.kind == MS_OBJ_MODEL || o.kind == MS_OBJ_SHAPE ? "world bounds " : "");
         MdVec(f, b.min); fprintf(f, ", max "); MdVec(f, b.max); fprintf(f, "\n");
         if (o.kind == MS_OBJ_MODEL) MdModel(f, o.index, "- ");
+        if (o.kind == MS_OBJ_SHAPE) MdShape(f, o.index, "- ");
         const MS_TurnedBox *t = ObjTurn(o);
         if (t) fprintf(f, "- turned: `rot %g %g %g` (yaw, pitch, roll in degrees, about its centre); min / max are its world "
                           "bounds\n", t->rotationDeg.x, t->rotationDeg.y, t->rotationDeg.z);
@@ -1720,13 +1872,16 @@ static void WriteRequestMdBody(FILE *f, const Bundle *B)
         fprintf(f, "Nothing: the crosshair points at the sky (no object hit).\n\n");
     }
 
-    int selModels = 0, selBarriers = 0;
+    int selModels = 0, selBarriers = 0, selShapes = 0;
     for (int i = 0; i < B->selCount; i++) {
         selModels += B->sel[i].kind == MS_OBJ_MODEL;
         selBarriers += B->sel[i].kind == MS_OBJ_BARRIER;
+        selShapes += B->sel[i].kind == MS_OBJ_SHAPE;
     }
-    int selBoxes = B->selCount - selModels - selBarriers;
+    int selBoxes = B->selCount - selModels - selBarriers - selShapes;
     fprintf(f, "## Selection (%d box%s, %d model%s", selBoxes, selBoxes == 1 ? "" : "es", selModels, selModels == 1 ? "" : "s");
+    // (shapes: untextured primitives, docs/map-format.md; named only when there are any)
+    if (selShapes > 0) fprintf(f, ", %d shape%s", selShapes, selShapes == 1 ? "" : "s");
     // (barriers: invisible walls, docs/map-format.md 2.1; named only when there are any)
     if (selBarriers > 0) fprintf(f, ", %d barrier%s", selBarriers, selBarriers == 1 ? "" : "s");
     fprintf(f, ")\n\n");
@@ -1734,8 +1889,8 @@ static void WriteRequestMdBody(FILE *f, const Bundle *B)
     for (int k = 0; k < B->selLineCount; k++) {
         const SelLine *sl = &B->selLines[k];
         MS_ObjRef first = B->selOrder[sl->first];
-        bool model = first.kind == MS_OBJ_MODEL;
-        const char *kind = ObjKindName(first);      // (box, model or barrier: one kind per line)
+        bool model = first.kind == MS_OBJ_MODEL, shape = first.kind == MS_OBJ_SHAPE;
+        const char *kind = ObjKindName(first);      // (box, model, barrier or shape: one kind per line)
         fprintf(f, "### Line ");
         PutLine(f, sl->line);
         fprintf(f, ", group \"%s\", material \"%s\", %d %s%s\n\n", GroupName(ObjGroup(first)),
@@ -1747,12 +1902,16 @@ static void WriteRequestMdBody(FILE *f, const Bundle *B)
         fprintf(f, ".\n\n");
         if (model) fprintf(f, "| model | copy | file | position | rotation (yaw pitch roll) | scale | world min | world max |\n"
                               "|---|---|---|---|---|---|---|---|\n");
+        if (shape) fprintf(f, "Shapes: the kind drawn inside its box (centre, size along its own axes, `rot` about the centre, "
+                              "as written); world min / max are its world bounds.\n\n"
+                              "| shape | copy | kind | centre | size | rot (yaw pitch roll) | world min | world max |\n"
+                              "|---|---|---|---|---|---|---|---|\n");
         bool turned = false;    // a line with turned boxes gets a rotation column (min / max: world bounds)
-        for (int i = sl->first; i < sl->first + sl->count && !model; i++) turned |= ObjTurn(B->selOrder[i]) != NULL;
+        for (int i = sl->first; i < sl->first + sl->count && !model && !shape; i++) turned |= ObjTurn(B->selOrder[i]) != NULL;
         if (turned) fprintf(f, "Turned %s%s: min, max, centre and size are their world bounds; `rot` turns the %s as written "
                                "about its centre.\n\n| %s | copy | min | max | centre | size | rot (yaw pitch roll) |\n"
                                "|---|---|---|---|---|---|---|\n", kind, first.kind == MS_OBJ_BOX ? "es" : "s", kind, kind);
-        else if (!model) fprintf(f, "| %s | copy | min | max | centre | size |\n|---|---|---|---|---|---|\n", kind);
+        else if (!model && !shape) fprintf(f, "| %s | copy | min | max | centre | size |\n|---|---|---|---|---|---|\n", kind);
         for (int i = sl->first; i < sl->first + sl->count; i++) {
             MS_ObjRef o = B->selOrder[i];
             BoundingBox b = ObjBounds(o);
@@ -1763,6 +1922,18 @@ static void WriteRequestMdBody(FILE *f, const Bundle *B)
                 fprintf(f, " | `%s` | ", scene->modelFiles[m->file].path); MdVec(f, m->position);
                 fprintf(f, " | "); MdVec(f, m->rotationDeg);
                 fprintf(f, " | "); MdVec(f, m->scale);
+                fprintf(f, " | "); MdVec(f, b.min);
+                fprintf(f, " | "); MdVec(f, b.max);
+                fprintf(f, " |\n");
+                continue;
+            }
+            if (o.kind == MS_OBJ_SHAPE) {
+                const MS_TurnedBox *t = &scene->shapes[o.index].shape;
+                fprintf(f, "| #%d | ", o.index);
+                MdCopy(f, o);
+                fprintf(f, " | `%s` | ", ObjShapeKind(o)); MdVec(f, t->center);
+                fprintf(f, " | "); MdVec(f, t->size);
+                fprintf(f, " | "); MdVec(f, t->rotationDeg);
                 fprintf(f, " | "); MdVec(f, b.min);
                 fprintf(f, " | "); MdVec(f, b.max);
                 fprintf(f, " |\n");
@@ -1783,6 +1954,7 @@ static void WriteRequestMdBody(FILE *f, const Bundle *B)
     }
 
     WriteRegionsMd(f, B);
+    WriteSketchesMd(f, B);
     WriteVolumesMd(f, B);
 
     fprintf(f, "## Nearby\n\nGroups with an object (box or model) within %.0f m of the %s ", NEARBY_RADIUS, B->hit ? "hit point" : "eye");
@@ -1902,6 +2074,18 @@ static void JsonMaterial(FILE *f, MS_ObjRef o)
     else fputs("null", f);
 }
 
+// A shape (docs/editor-tools.md 2.6): { kind, center, size, rotationDeg }: the centre of its box, its size
+// along its own axes and its rotation as written (0 0 0 without `rot`)
+static void JsonShape(FILE *f, int index)
+{
+    const MS_Shape *s = &scene->shapes[index];
+    fprintf(f, "{ \"kind\": \"%s\", \"center\": ", ObjShapeKind((MS_ObjRef){ MS_OBJ_SHAPE, index }));
+    JsonVec(f, s->shape.center);
+    fprintf(f, ", \"size\": "); JsonVec(f, s->shape.size);
+    fprintf(f, ", \"rotationDeg\": "); JsonVec(f, s->shape.rotationDeg);
+    fprintf(f, " }");
+}
+
 // A model instance (.claude/skills/map-request/bundle-reference.md): file, transform as written, the resulting
 // translation, origin, collision, shadow, material overrides
 static void JsonModel(FILE *f, int index)
@@ -1928,7 +2112,8 @@ static void WriteVolumesJson(FILE *f, const DesignRequest *r)
     for (int i = 0; i < r->volumeCount; i++) {
         const DesignVolumeInfo *v = &r->volumes[i];
         Vector3 size = Vector3Subtract(v->box.max, v->box.min);
-        fprintf(f, "%s\n    {\n      \"index\": %d,\n      \"label\": \"V%d\",\n      \"min\": ", i ? "," : "", i + 1, i + 1);
+        fprintf(f, "%s\n    {\n      \"index\": %d,\n      \"label\": \"V%d\",\n      \"snip\": %s,\n      \"min\": ", i ? "," : "",
+                i + 1, i + 1, v->snip ? "true" : "false");
         JsonVec(f, v->box.min);
         fprintf(f, ",\n      \"max\": "); JsonVec(f, v->box.max);
         fprintf(f, ",\n      \"center\": "); JsonVec(f, Vector3Scale(Vector3Add(v->box.min, v->box.max), 0.5f));
@@ -1937,6 +2122,22 @@ static void WriteVolumesJson(FILE *f, const DesignRequest *r)
         fprintf(f, ",\n      \"snap\": "); JsonNum(f, v->snap);
         fprintf(f, ",\n      \"empty\": "); JsonNum(f, v->empty);
         fprintf(f, ",\n      \"emptyGrid\": [%d, %d, %d]", v->grid[0], v->grid[1], v->grid[2]);
+        if (v->snip) {
+            // (each image: its file, which side and the camera it was rendered with)
+            fprintf(f, ",\n      \"images\": [");
+            for (int k = 0, n = 0; k < SNIP_VIEW_COUNT; k++) {
+                const DesignSnipView *sv = &v->views[k];
+                if (!v->images[k].data) continue;
+                fprintf(f, "%s\n        { \"file\": \"snip-%d-%s.png\", \"side\": \"%s\", \"camera\": { \"position\": ", n++ ? "," : "",
+                        i + 1, sv->side, sv->side);
+                JsonVec(f, sv->camera.position);
+                fprintf(f, ", \"target\": "); JsonVec(f, sv->camera.target);
+                fprintf(f, ", \"up\": "); JsonVec(f, sv->camera.up);
+                fprintf(f, ", \"fovyDeg\": "); JsonNum(f, sv->camera.fovy);
+                fprintf(f, ", \"width\": %d, \"height\": %d } }", sv->width, sv->height);
+            }
+            fprintf(f, "\n      ]");
+        }
         fprintf(f, ",\n      \"emptyMethod\": \"per cell of emptyGrid, the overlap of every object's bounds (models: world AABB) with the cell, summed and capped at the cell\"");
         fprintf(f, ",\n      \"floor\": ");
         if (ObjValid(v->floor.obj)) {
@@ -1963,6 +2164,7 @@ static void WriteVolumesJson(FILE *f, const DesignRequest *r)
             JsonLine(f, ObjKey(o));
             fprintf(f, ", \"group\": "); JsonStr(f, GroupName(ObjGroup(o)));
             if (o.kind == MS_OBJ_MODEL) { fprintf(f, ", \"file\": "); JsonStr(f, scene->modelFiles[scene->models[o.index].file].path); }
+            if (o.kind == MS_OBJ_SHAPE) { fprintf(f, ", \"shape\": "); JsonShape(f, o.index); }
             fprintf(f, ", \"material\": "); JsonMaterial(f, o);
             fprintf(f, ", \"shareOfVolume\": "); JsonNum(f, vo->shareOfVolume);
             fprintf(f, ", \"shareOfObject\": "); JsonNum(f, vo->shareOfObject);
@@ -2004,12 +2206,167 @@ static void WriteVolumesJson(FILE *f, const DesignRequest *r)
     fprintf(f, "%s]", r->volumeCount ? "\n  " : "");
 }
 
+// The analysis keys of a region (or of a closed sketch's inside), from "center" on, each on its own
+// line at indent `ind` (the list entries two spaces deeper)
+static void JsonRegionAnalysis(FILE *f, const DesignRegionInfo *g, const char *ind)
+{
+    fprintf(f, ",\n%s\"center\": ", ind);
+    if (ObjValid(g->centerObj)) {
+        fprintf(f, "{ \"point\": "); JsonVec(f, g->centerPoint);
+        fprintf(f, ", \"normal\": "); JsonVec(f, g->centerNormal);
+        fprintf(f, ", \"kind\": \"%s\", \"index\": %d, \"distance\": ", ObjKindName(g->centerObj), g->centerObj.index);
+        JsonNum(f, g->centerDist);
+        fprintf(f, ", ");
+        JsonLine(f, ObjKey(g->centerObj));
+        fprintf(f, ", \"group\": "); JsonStr(f, GroupName(ObjGroup(g->centerObj)));
+        fprintf(f, " }");
+    } else fprintf(f, "null");
+    fprintf(f, ",\n%s\"depth\": ", ind);
+    if (g->hasDepth) {
+        fprintf(f, "{ \"min\": "); JsonNum(f, g->depthMin); fprintf(f, ", \"max\": "); JsonNum(f, g->depthMax); fprintf(f, " }");
+    } else fprintf(f, "null");
+    fprintf(f, ",\n%s\"samples\": %d,\n%s\"grid\": [%d, %d],\n%s\"objects\": [", ind, g->samples, ind, g->gridW, g->gridH, ind);
+    int listed = 0;
+    for (int k = 0; k < g->objectCount; k++) {
+        MS_ObjRef o = g->objects[k].obj;
+        if (!ObjValid(o)) continue;
+        BoundingBox b = ObjBounds(o);
+        fprintf(f, "%s\n%s  { \"kind\": \"%s\", \"index\": %d, ", listed++ ? "," : "", ind, ObjKindName(o), o.index);
+        JsonLine(f, ObjKey(o));
+        fprintf(f, ", \"group\": ");
+        JsonStr(f, GroupName(ObjGroup(o)));
+        if (o.kind == MS_OBJ_MODEL) { fprintf(f, ", \"file\": "); JsonStr(f, scene->modelFiles[scene->models[o.index].file].path); }
+        if (o.kind == MS_OBJ_SHAPE) { fprintf(f, ", \"shape\": "); JsonShape(f, o.index); }
+        fprintf(f, ", \"material\": "); JsonMaterial(f, o);
+        fprintf(f, ", \"share\": "); JsonNum(f, g->objects[k].share);
+        fprintf(f, ", \"min\": "); JsonVec(f, b.min);
+        fprintf(f, ", \"max\": "); JsonVec(f, b.max);
+        fprintf(f, " }");
+    }
+    fprintf(f, "%s%s],\n%s\"sky\": ", listed ? "\n" : "", listed ? ind : "", ind); JsonNum(f, g->sky);
+    int lineCount = 0;
+    LineShare *ls = RegionLines(g, &lineCount);
+    fprintf(f, ",\n%s\"lines\": [", ind);
+    for (int k = 0; k < lineCount; k++) {
+        fprintf(f, "%s\n%s  { ", k ? "," : "", ind);
+        JsonLine(f, ls[k].line);
+        fprintf(f, ", \"group\": ");
+        JsonStr(f, GroupName(ObjGroup(ls[k].first)));
+        fprintf(f, ", \"objects\": %d, \"share\": ", ls[k].objects);
+        JsonNum(f, ls[k].share);
+        fprintf(f, " }");
+    }
+    fprintf(f, "%s%s]", lineCount ? "\n" : "", lineCount ? ind : "");
+    free(ls);
+    fprintf(f, ",\n%s\"edge\": { \"offsetPx\": ", ind); JsonNum(f, g->edgeOffset);
+    fprintf(f, ", \"samples\": %d, \"sky\": ", g->edgeSamples); JsonNum(f, g->edgeSky);
+    fprintf(f, ", \"objects\": [");
+    for (int k = 0; k < g->edgeCount; k++) {
+        const DesignRegionEdge *e = &g->edges[k];
+        fprintf(f, "%s\n%s  { \"kind\": \"%s\", \"index\": %d, ", k ? "," : "", ind, ObjKindName(e->obj), e->obj.index);
+        JsonLine(f, ObjValid(e->obj) ? ObjKey(e->obj) : 0);
+        fprintf(f, ", \"group\": ");
+        JsonStr(f, ObjValid(e->obj) ? GroupName(ObjGroup(e->obj)) : "");
+        if (e->obj.kind == MS_OBJ_MODEL && ObjValid(e->obj)) {
+            fprintf(f, ", \"file\": "); JsonStr(f, scene->modelFiles[scene->models[e->obj.index].file].path);
+        }
+        if (e->obj.kind == MS_OBJ_SHAPE && ObjValid(e->obj)) { fprintf(f, ", \"shape\": "); JsonShape(f, e->obj.index); }
+        fprintf(f, ", \"distance\": "); JsonNum(f, e->dist);
+        fprintf(f, ", \"point\": "); JsonVec(f, e->point);
+        fprintf(f, ", \"samples\": %d, \"sides\": [", e->samples);
+        static const char *const SIDES[] = { "left", "right", "top", "bottom" };
+        for (int s = 0, m = 0; s < 4; s++) if (e->sides & (1u << s)) fprintf(f, "%s\"%s\"", m++ ? ", " : "", SIDES[s]);
+        fprintf(f, "] }");
+    }
+    fprintf(f, "%s%s] }", g->edgeCount ? "\n" : "", g->edgeCount ? ind : "");
+}
+
+// A hit of a sketch's first or last point: { kind, index, point, normal, distance, line, group,
+// material }, or null for the sky
+static void JsonSketchHit(FILE *f, DesignerHit h)
+{
+    if (!ObjValid(h.obj)) { fputs("null", f); return; }
+    fprintf(f, "{ \"kind\": \"%s\", \"index\": %d, \"point\": ", ObjKindName(h.obj), h.obj.index);
+    JsonVec(f, h.point);
+    fprintf(f, ", \"normal\": "); JsonVec(f, h.normal);
+    fprintf(f, ", \"distance\": "); JsonNum(f, h.dist);
+    fprintf(f, ", ");
+    JsonLine(f, ObjKey(h.obj));
+    fprintf(f, ", \"group\": "); JsonStr(f, GroupName(ObjGroup(h.obj)));
+    fprintf(f, ", \"material\": "); JsonMaterial(f, h.obj);
+    fprintf(f, " }");
+}
+
+// request.json "sketches": every stroke with its points, what its ends hit, its world samples, the
+// objects along it and, closed, the region analysis of its inside (docs/editor-tools.md 6)
+static void WriteSketchesJson(FILE *f, const DesignRequest *r)
+{
+    fprintf(f, ",\n  \"sketches\": [");
+    for (int i = 0; i < r->sketchCount; i++) {
+        const DesignSketch *s = &r->sketches[i];
+        const DesignSketchInfo *si = &r->sketchInfos[i];
+        Color c = DesignerSketchColor(s->color);
+        fprintf(f, "%s\n    {\n      \"index\": %d,\n      \"label\": \"S%d\",\n      \"color\": \"%s\",\n      \"rgb\": [%d, %d, %d]"
+                   ",\n      \"kind\": \"%s\",\n      \"closed\": %s,\n      \"points\": [", i ? "," : "", i + 1, i + 1,
+                DesignerSketchColorName(s->color), c.r, c.g, c.b, DesignerSketchKindName(s->kind), s->closed ? "true" : "false");
+        for (int k = 0; k < s->pointCount; k++) {
+            fprintf(f, "%s[", k ? ", " : "");
+            JsonNum(f, s->points[k].x); fputs(", ", f); JsonNum(f, s->points[k].y);
+            fputc(']', f);
+        }
+        fprintf(f, "],\n      \"start\": "); JsonSketchHit(f, si->start);
+        fprintf(f, ",\n      \"end\": "); JsonSketchHit(f, si->end);
+        fprintf(f, ",\n      \"samples\": [");
+        for (int k = 0; k < si->sampleCount; k++) {
+            fputs(k ? ", " : "", f);
+            if (si->worldHit[k]) JsonVec(f, si->worldPoints[k]);
+            else fputs("null", f);
+        }
+        fprintf(f, "],\n      \"objects\": [");
+        int listed = 0;
+        for (int k = 0; k < si->objectCount; k++) {
+            MS_ObjRef o = si->objects[k].obj;
+            if (!ObjValid(o)) continue;
+            fprintf(f, "%s\n        { \"kind\": \"%s\", \"index\": %d, ", listed++ ? "," : "", ObjKindName(o), o.index);
+            JsonLine(f, ObjKey(o));
+            fprintf(f, ", \"group\": "); JsonStr(f, GroupName(ObjGroup(o)));
+            if (o.kind == MS_OBJ_MODEL) { fprintf(f, ", \"file\": "); JsonStr(f, scene->modelFiles[scene->models[o.index].file].path); }
+            if (o.kind == MS_OBJ_SHAPE) { fprintf(f, ", \"shape\": "); JsonShape(f, o.index); }
+            fprintf(f, ", \"material\": "); JsonMaterial(f, o);
+            fprintf(f, ", \"samples\": %d, \"share\": ", si->objects[k].samples); JsonNum(f, si->objects[k].share);
+            fprintf(f, " }");
+        }
+        fprintf(f, "%s]", listed ? "\n      " : "");
+        int lineCount = 0;
+        LineShare *ls = ObjectLines(si->objects, si->objectCount, &lineCount);
+        fprintf(f, ",\n      \"lines\": [");
+        for (int k = 0; k < lineCount; k++) {
+            fprintf(f, "%s\n        { ", k ? "," : "");
+            JsonLine(f, ls[k].line);
+            fprintf(f, ", \"group\": "); JsonStr(f, GroupName(ObjGroup(ls[k].first)));
+            fprintf(f, ", \"objects\": %d, \"share\": ", ls[k].objects);
+            JsonNum(f, ls[k].share);
+            fprintf(f, " }");
+        }
+        fprintf(f, "%s]", lineCount ? "\n      " : "");
+        free(ls);
+        if (si->hasRegion) {
+            const DesignRegionInfo *g = &si->region;
+            fprintf(f, ",\n      \"region\": {\n        \"rect\": [%.0f, %.0f, %.0f, %.0f]", g->rect.x, g->rect.y, g->rect.width, g->rect.height);
+            JsonRegionAnalysis(f, g, "        ");
+            fprintf(f, "\n      }");
+        }
+        fprintf(f, "\n    }");
+    }
+    fprintf(f, "%s]", r->sketchCount ? "\n  " : "");
+}
+
 // request.json without its "model" object: the keys before it into head, the rest into f
 // (WriteBundleFiles puts the model between them once it is known)
 static void WriteRequestJsonParts(FILE *head, FILE *f, const Bundle *B)
 {
     const DesignRequest *r = B->req;
-    fprintf(head, "{\n  \"format\": 8,\n  \"id\": "); JsonStr(head, B->id);
+    fprintf(head, "{\n  \"format\": 9,\n  \"id\": "); JsonStr(head, B->id);
     fprintf(head, ",\n  \"slug\": "); JsonStr(head, B->slug);
     fprintf(head, ",\n  \"created\": "); JsonStr(head, B->created);
     fprintf(head, ",\n  \"instructions\": ");
@@ -2031,7 +2388,7 @@ static void WriteRequestJsonParts(FILE *head, FILE *f, const Bundle *B)
     fprintf(f, ",\n    \"width\": %d,\n    \"height\": %d\n  }", r->width, r->height);
     fprintf(f, ",\n  \"images\": { \"view\": \"view.png\", \"marked\": \"view-marked.png\", \"regions\": [");
     for (int i = 0; i < r->regionCount; i++) fprintf(f, "%s\"region-%d.png\"", i ? ", " : "", i + 1);
-    fprintf(f, "] }");
+    fprintf(f, "], \"sketch\": %s }", r->sketchCount ? "\"sketch.png\"" : "null");
 
     fprintf(f, ",\n  \"hit\": ");
     if (B->hit) {
@@ -2047,6 +2404,7 @@ static void WriteRequestJsonParts(FILE *head, FILE *f, const Bundle *B)
         fprintf(f, ",\n    \"max\": "); JsonVec(f, b.max);
         if (ObjTurn(o)) { fprintf(f, ",\n    \"rotationDeg\": "); JsonVec(f, ObjTurn(o)->rotationDeg); }
         if (o.kind == MS_OBJ_MODEL) { fprintf(f, ",\n    \"model\": "); JsonModel(f, o.index); }
+        if (o.kind == MS_OBJ_SHAPE) { fprintf(f, ",\n    \"shape\": "); JsonShape(f, o.index); }
         fprintf(f, ",\n    \"group\": "); JsonStr(f, GroupName(ObjGroup(o)));
         fprintf(f, ",\n    "); JsonCopy(f, o);
         fprintf(f, ",\n    ");
@@ -2080,6 +2438,7 @@ static void WriteRequestJsonParts(FILE *head, FILE *f, const Bundle *B)
             fprintf(f, ", \"size\": "); JsonVec(f, Vector3Subtract(b.max, b.min));
             if (ObjTurn(o)) { fprintf(f, ", \"rotationDeg\": "); JsonVec(f, ObjTurn(o)->rotationDeg); }
             if (o.kind == MS_OBJ_MODEL) { fprintf(f, ", \"model\": "); JsonModel(f, o.index); }
+            if (o.kind == MS_OBJ_SHAPE) { fprintf(f, ", \"shape\": "); JsonShape(f, o.index); }
             fprintf(f, " }");
         }
         fprintf(f, "\n      ]\n    }");
@@ -2093,76 +2452,12 @@ static void WriteRequestJsonParts(FILE *head, FILE *f, const Bundle *B)
                 i ? "," : "", i + 1, g->rect.x, g->rect.y, g->rect.width, g->rect.height);
         JsonNum(f, g->rect.x / r->width); fputs(", ", f); JsonNum(f, g->rect.y / r->height); fputs(", ", f);
         JsonNum(f, g->rect.width / r->width); fputs(", ", f); JsonNum(f, g->rect.height / r->height);
-        fprintf(f, "],\n      \"crop\": \"region-%d.png\",\n      \"center\": ", i + 1);
-        if (ObjValid(g->centerObj)) {
-            fprintf(f, "{ \"point\": "); JsonVec(f, g->centerPoint);
-            fprintf(f, ", \"normal\": "); JsonVec(f, g->centerNormal);
-            fprintf(f, ", \"kind\": \"%s\", \"index\": %d, \"distance\": ", ObjKindName(g->centerObj), g->centerObj.index);
-            JsonNum(f, g->centerDist);
-            fprintf(f, ", ");
-            JsonLine(f, ObjKey(g->centerObj));
-            fprintf(f, ", \"group\": "); JsonStr(f, GroupName(ObjGroup(g->centerObj)));
-            fprintf(f, " }");
-        } else fprintf(f, "null");
-        fprintf(f, ",\n      \"depth\": ");
-        if (g->hasDepth) {
-            fprintf(f, "{ \"min\": "); JsonNum(f, g->depthMin); fprintf(f, ", \"max\": "); JsonNum(f, g->depthMax); fprintf(f, " }");
-        } else fprintf(f, "null");
-        fprintf(f, ",\n      \"samples\": %d,\n      \"grid\": [%d, %d],\n      \"objects\": [", g->gridW * g->gridH, g->gridW, g->gridH);
-        int listed = 0;
-        for (int k = 0; k < g->objectCount; k++) {
-            MS_ObjRef o = g->objects[k].obj;
-            if (!ObjValid(o)) continue;
-            BoundingBox b = ObjBounds(o);
-            fprintf(f, "%s\n        { \"kind\": \"%s\", \"index\": %d, ", listed++ ? "," : "", ObjKindName(o), o.index);
-            JsonLine(f, ObjKey(o));
-            fprintf(f, ", \"group\": ");
-            JsonStr(f, GroupName(ObjGroup(o)));
-            if (o.kind == MS_OBJ_MODEL) { fprintf(f, ", \"file\": "); JsonStr(f, scene->modelFiles[scene->models[o.index].file].path); }
-            fprintf(f, ", \"material\": "); JsonMaterial(f, o);
-            fprintf(f, ", \"share\": "); JsonNum(f, g->objects[k].share);
-            fprintf(f, ", \"min\": "); JsonVec(f, b.min);
-            fprintf(f, ", \"max\": "); JsonVec(f, b.max);
-            fprintf(f, " }");
-        }
-        fprintf(f, "%s],\n      \"sky\": ", listed ? "\n      " : ""); JsonNum(f, g->sky);
-        int lineCount = 0;
-        LineShare *ls = RegionLines(g, &lineCount);
-        fprintf(f, ",\n      \"lines\": [");
-        for (int k = 0; k < lineCount; k++) {
-            fprintf(f, "%s\n        { ", k ? "," : "");
-            JsonLine(f, ls[k].line);
-            fprintf(f, ", \"group\": ");
-            JsonStr(f, GroupName(ObjGroup(ls[k].first)));
-            fprintf(f, ", \"objects\": %d, \"share\": ", ls[k].objects);
-            JsonNum(f, ls[k].share);
-            fprintf(f, " }");
-        }
-        fprintf(f, "%s]", lineCount ? "\n      " : "");
-        free(ls);
-        fprintf(f, ",\n      \"edge\": { \"offsetPx\": "); JsonNum(f, g->edgeOffset);
-        fprintf(f, ", \"samples\": %d, \"sky\": ", g->edgeSamples); JsonNum(f, g->edgeSky);
-        fprintf(f, ", \"objects\": [");
-        for (int k = 0; k < g->edgeCount; k++) {
-            const DesignRegionEdge *e = &g->edges[k];
-            fprintf(f, "%s\n        { \"kind\": \"%s\", \"index\": %d, ", k ? "," : "", ObjKindName(e->obj), e->obj.index);
-            JsonLine(f, ObjValid(e->obj) ? ObjKey(e->obj) : 0);
-            fprintf(f, ", \"group\": ");
-            JsonStr(f, ObjValid(e->obj) ? GroupName(ObjGroup(e->obj)) : "");
-            if (e->obj.kind == MS_OBJ_MODEL && ObjValid(e->obj)) {
-                fprintf(f, ", \"file\": "); JsonStr(f, scene->modelFiles[scene->models[e->obj.index].file].path);
-            }
-            fprintf(f, ", \"distance\": "); JsonNum(f, e->dist);
-            fprintf(f, ", \"point\": "); JsonVec(f, e->point);
-            fprintf(f, ", \"samples\": %d, \"sides\": [", e->samples);
-            static const char *const SIDES[] = { "left", "right", "top", "bottom" };
-            for (int s = 0, m = 0; s < 4; s++) if (e->sides & (1u << s)) fprintf(f, "%s\"%s\"", m++ ? ", " : "", SIDES[s]);
-            fprintf(f, "] }");
-        }
-        fprintf(f, "%s] }", g->edgeCount ? "\n      " : "");
+        fprintf(f, "],\n      \"crop\": \"region-%d.png\"", i + 1);
+        JsonRegionAnalysis(f, g, "      ");
         fprintf(f, "\n    }");
     }
     fprintf(f, "%s]", r->regionCount ? "\n  " : "");
+    WriteSketchesJson(f, r);
     WriteVolumesJson(f, r);
 
     fprintf(f, ",\n  \"nearby\": {\n    \"center\": "); JsonVec(f, B->nearbyCenter);
@@ -3950,7 +4245,7 @@ static unsigned char FinishBundle(OpenRequest *q, const BundleText *t, const Mod
 }
 
 // 0: queued / sent / classifying (note); 1: not sent (err, logged where the old message was)
-unsigned char LauncherSubmit(const DesignRequest *req, Image view, Image marked)
+unsigned char LauncherSubmit(const DesignRequest *req, Image view, Image marked, Image sketch)
 {
     if (MS_CompiledSource(scene, NULL) != MS_SOURCE_TEXT) {
         MS_SetError("%s is a compiled map: requests change the map's text (load its .map)", scene->path);
@@ -3976,6 +4271,7 @@ unsigned char LauncherSubmit(const DesignRequest *req, Image view, Image marked)
     // The overrides first: they decide the prompt written to the bundle (an @token is stripped)
     ModelQuery mq = { .prompt = req->prompt, .boxes = scene->boxCount, .models = scene->modelCount, .brief = scene->brief[0] != 0,
                       .selected = req->selectedCount, .regions = req->regionCount, .volumes = req->volumeCount,
+                      .sketches = req->sketchCount, .snips = SnipCount(req),
                       .hit = req->hit.obj.kind != MS_OBJ_NONE };
     ModelChoice model;
     unsigned char decided = LauncherChooseModel(&mq, &model);     // 0: an override decided
@@ -4010,6 +4306,15 @@ unsigned char LauncherSubmit(const DesignRequest *req, Image view, Image marked)
     if (view.data) ok &= PngWrite(view, path);
     snprintf(path, sizeof(path), "%sview-marked.png", dir);
     if (marked.data) ok &= PngWrite(marked, path);
+    snprintf(path, sizeof(path), "%ssketch.png", dir);
+    if (sketch.data && req->sketchCount > 0) ok &= PngWrite(sketch, path);
+    // 3D snips: snip-<n>-<side>.png (rendered by the caller into the volume's images)
+    for (int i = 0; i < req->volumeCount; i++)
+        for (int k = 0; req->volumes[i].snip && k < SNIP_VIEW_COUNT; k++) {
+            if (!req->volumes[i].images[k].data) continue;
+            snprintf(path, sizeof(path), "%ssnip-%d-%s.png", dir, i + 1, req->volumes[i].views[k].side);
+            ok &= PngWrite(req->volumes[i].images[k], path);
+        }
     // One crop per region, from view.png's pixels
     for (int i = 0; i < req->regionCount && view.data; i++) {
         Rectangle r = req->regions[i].rect;

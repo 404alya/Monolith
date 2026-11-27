@@ -1,6 +1,6 @@
-// The model picker (I in edit mode): the package's models with a licence row in ASSETS.md,
-// with thumbnails, triangles, bounds and licence; ENTER places one at the cursor as a live
-// edit (modelpicker.c; docs/live-editing.md 8.3)
+// The model picker (I in edit mode): the six shape kinds, then the package's models with a licence
+// row in ASSETS.md, with thumbnails, triangles, bounds and licence; ENTER places one at the cursor as
+// a live edit (modelpicker.c; docs/live-editing.md 8.3, docs/editor-tools.md 2.8)
 #ifndef MONOLITH_MODELPICKER_H
 #define MONOLITH_MODELPICKER_H
 
@@ -22,9 +22,18 @@ typedef struct {
     RenderTexture2D thumb;          // PICKER_THUMB_SIZE square (id 0 = not rendered yet)
 } PickerModel;
 
+// One of the Shapes rows (the picker's first MS_SHAPE_KIND_COUNT items, one per MS_ShapeKind)
+typedef struct {
+    bool infoReady;                 // rendered once (or failed: no render target)
+    int triangles;                  // of the thumbnail's mesh
+    RenderTexture2D thumb;          // PICKER_THUMB_SIZE square (id 0 = none)
+} PickerShape;
+
 typedef struct {
     bool open;
-    UiList list;
+    UiList list;                    // items: 0..MS_SHAPE_KIND_COUNT-1 the shape kinds, then models[i] as
+                                    // item MS_SHAPE_KIND_COUNT + i
+    PickerShape shapes[MS_SHAPE_KIND_COUNT];
     PickerModel *models;            // heap; the edit mode's model list (EditModeScanModels) + info
     int modelCount, modelCap;
     unsigned int loadVersion;       // scene->loadVersion the thumbnails belong to
@@ -39,7 +48,7 @@ void ModelPickerClose(ModelPicker *p);
 // Open: every key is the picker's (the designer, the edit mode and the camera wait)
 bool ModelPickerCapturesInput(const ModelPicker *p);
 // Input while open: the list keys and the filter; ESC (or I with an empty filter) closes; ENTER
-// adds the selected model where the designer's hit (the cursor) is and closes
+// adds the selected shape or model where the designer's hit (the cursor) is and closes
 EditModeResult ModelPickerUpdate(ModelPicker *p, EditMode *m, Designer *d);
 // ENTER without a key (--model-picker-key enter): the same placement
 EditModeResult ModelPickerEnter(ModelPicker *p, EditMode *m, Designer *d);

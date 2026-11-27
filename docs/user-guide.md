@@ -18,6 +18,7 @@ The HUD at the top shows what is going on (the mode, the effects, the selection,
 | F2 | graphics settings panel |
 | F3 / Shift+F3 / F4 | render inspector (spectator mode): outlines, its panel, buffer views (*Render inspector* below) |
 | F5 | id panel (spectator mode): every line with an `id` (*Id panel* below) |
+| F6 | groups panel (spectator mode): every group, by area (*Groups panel* below) |
 | F9 | export the open map to `export/<map>-<stamp>/` ([export.md](export.md)) |
 | F12 | save a screenshot in `screenshots/` (named by date and time) |
 | Esc | close the prompt box, leave snip or volume mode or close the panel (it does not quit: close the window). With nothing to close it shows a **See keybindings** button: Enter or a click opens the keybindings panel, every key of the editor in one section per mode (←/→ or a click on a tab changes the section, typing searches all of them, Esc closes) |
@@ -36,7 +37,7 @@ All of this happens in spectator mode.
 | Left click / Shift+click | select the object / add or remove it |
 | Ctrl+click / Ctrl+Shift+click | select / add the object's whole group |
 | Right click | clear the selection |
-| C | snip mode: the camera freezes and the cursor is free. Drag a rectangle over the screen (Shift+drag adds another); Enter opens the prompt with the regions; right click, Esc or C leaves |
+| C | snip mode: the camera freezes and the cursor is free. Drag a rectangle over the screen (Shift+drag adds another), or press **D** for the pen and draw over the frame (*Sketches* below); Enter opens the prompt with the regions and strokes; right click, Esc or C leaves |
 | V | volume mode: mark boxes in world space (below) |
 | Shift+V | a volume from the selection's bounds (or the bounds of the object under the crosshair) |
 | M | edit mode: move, turn, remove, duplicate or add objects yourself, without a request (below) |
@@ -47,25 +48,46 @@ All of this happens in spectator mode.
 
 Type what you want ("make this wall twice as tall", "plant three more pines along the path", "hang a neon sign over each of these stalls") and press **Enter** to send it; Shift+Enter starts a new line, Esc cancels. "This" and "here" mean what the crosshair points at, "these" the selection, the rectangles mean "this area" (useful for "fill this gap" or "make this part darker"), and the volumes mean "this space" (V1, V2, ...). Selections are highlighted in orange and survive map reloads.
 
+### Sketches (the pen in snip mode)
+
+Some requests are easier drawn than said: "a fence along here", "a path from here to there", "fill this area". In snip mode (**C**) press **D** to switch from rectangles to the pen (the help bar at the bottom says which is on; **D** again goes back). Then drag with the left button to draw a stroke over the frozen frame.
+
+| With the pen | Action |
+|---|---|
+| drag (left button) | draw a stroke |
+| 1 / 2 / 3 / 4 | colour: red, yellow, blue, white |
+| F / L / A / O | kind: free hand (to start), straight line, arrow (its head where you let go), circle (from its centre out to the rim) |
+| Backspace / Shift+Backspace | remove the last stroke / all strokes |
+| D | back to rectangles (the strokes stay) |
+| Enter | open the prompt box: strokes and rectangles go into the same request |
+
+Strokes are numbered S1, S2, ... in their colour, so the prompt can name them ("S1 is where the fence goes, S2 the gate"). A free-hand stroke that ends near where it started is a closed outline: Claude reads it as an area, like a rectangle. Leaving snip mode drops the strokes (they belong to that frozen view), as it drops the rectangles. The request carries `sketch.png` (only the strokes), the strokes drawn on `view-marked.png`, and for each stroke what it passes over in the world.
+
 ### Volumes
 
 A volume is a box in the world rather than on the screen: "this room", the space behind a wall, the gap between two buildings at a certain height, or an empty spot to fill. Press **V**; the camera keeps flying, so you can move between the clicks.
 
-1. Click a surface for the first corner.
-2. Click a second surface point for the opposite corner of the footprint.
+1. Click a surface for the first corner, or a point in the air (the *work plane*, below).
+2. Click a second point for the opposite corner of the footprint.
 3. Move the mouse up or down (or turn the wheel; Shift ×4) to set the height. The camera holds still meanwhile. Click or press Enter to add it.
 
 Points snap to a grid (**N** cycles 0.1, 0.25, 0.5, 1 and 2 m; 0.5 m to start) along the face you clicked; hold **Ctrl** while clicking to place them exactly. Right click or Esc cancels the volume you are making.
 
+**The work plane: corners in the air.** Where the crosshair points at the sky (or at nothing within reach), a click lands on the *work plane*, a level plane drawn as a small green grid around the point, with a thin line straight down to the ground under it. Hold **Alt** while clicking to use the plane even over a surface: a corner in the middle of a room or above water. Its height: for the first corner, the base of the last volume (or, with none yet, your feet: the camera height minus 1.62 m, on the snap grid); after the first corner, that corner's height, so the footprint stays level. Before the first click, while the next click would use the plane, **PgUp / PgDn** raise or lower it by one snap step (it keeps that height until you leave volume mode); the HUD's volume line says `work plane y 3.50 m`. Points on the plane snap to the grid in x and z (Ctrl: exact). The plane is only drawn on screen, never in the request images.
+
 | In volume mode | Action |
 |---|---|
 | [ / ] | the previous / next volume becomes the active one |
-| arrows, PgUp / PgDn | move the active volume one step (the arrows follow the world axis nearest to where you look; they don't fly to viewpoints in this mode) |
-| Alt + those keys | grow the volume on that side; Alt+Shift shrinks it |
+| arrows, PgUp / PgDn | move the active volume one step (the arrows follow the world axis nearest to where you look; they don't fly to viewpoints in this mode). While the next click would land on the work plane, PgUp / PgDn move the plane instead |
+| Alt + those keys | grow the volume on that side; Alt+Shift shrinks it (Alt+PgUp / PgDn too, even while Alt puts clicks on the plane) |
+| Alt + click | the corner on the work plane even over a surface |
 | Delete / Shift+Delete | remove the active volume / all volumes |
 | H | write the active volume into the map as a barrier (an invisible wall, *Barriers* below); the volume stays |
+| X | mark the active volume as a **3D snip**, or unmark it (below) |
 | Enter | open the prompt box |
 | V, Esc or right click | leave volume mode (the volumes stay) |
+
+**3D snips.** A volume marked with **X** is drawn with dashed edges and labelled `V2 snip`. With the request go four pictures of only what is inside it: from the direction you are looking, from the front (+z), from the side (+x) and from the top, each framed to the box. Everything outside the box is cut away at its faces (what sticks out of the box is cut off, what lies outside still casts its shadows in), the sky is a flat grey and the distance and volumetric fog are off, so the contents read clearly. Use it for "this thing here", when it is hidden behind other things or hard to see from where you stand. The first snip after the map loads takes a moment longer (the cut versions of the map's shaders are compiled).
 
 Volumes are drawn as green boxes, fainter where they are hidden, numbered V1, V2, ... They are sent with every request until you remove them, survive map reloads, and are never saved into the map.
 
@@ -80,7 +102,7 @@ Small changes don't need Claude: select objects as usual (click, Shift+click, Ct
 | right mouse button held | fly the camera (mouse look, WASD / E / Q / Space, wheel speed, Shift ×4, Alt ×0.25) |
 | click, Shift+click, Ctrl+click | select what is under the cursor (add / remove, its group); a short right click clears the selection |
 | G / S | grab or scale the selection with the mouse (see *Grab, rotate, scale* below) |
-| R / Shift+R | turn the selection 90° / −90° about the vertical at once, each object about its own centre (a box stays a box with its corners rewritten) |
+| R / Shift+R | turn the selection 90° / −90° about the vertical at once, each object about its own centre (a box stays a box with its corners rewritten). On **whole groups** (see *Groups as units* below) the groups turn as one about their centre, their lights with them |
 | Alt+R | rotate with the mouse or a typed angle, the keyboard way (axis keys X / Y / Z; see *Grab, rotate, scale* below) |
 | Alt+Shift+R | reset the rotation of the selection (boxes back to axis-aligned, models to no `rot`) |
 | drag a ring of the rotate gizmo | turn the selection about that axis (see *The rotate gizmo* below) |
@@ -89,8 +111,8 @@ Small changes don't need Claude: select objects as usual (click, Shift+click, Ct
 | arrows, PgUp / PgDn | move the selection one step along the world axis nearest to where you look (up / down with PgUp / PgDn). The first selected object lands on the snap grid; the others keep their distance to it. With Ctrl: exactly one step, no grid |
 | N | snap step 0.1, 0.25, 0.5, 1 or 2 m (shared with volume mode) |
 | Delete | remove |
-| Ctrl+D | duplicate: the copies go one footprint to the right and become the selection |
-| I | the **model picker**: add one of the package's models at the point under the cursor (see *Adding a model* below) |
+| Ctrl+D | duplicate: the copies go one footprint to the right and become the selection. On **whole groups** each group is copied as a new group `"<name> 2"` (the next free number) |
+| I | the **model picker**: add a shape (cube, sphere, cylinder, cone, capsule, plane) or one of the package's models at the point under the cursor (see *Adding a model* and *Adding a shape* below) |
 | H | place a **barrier** (an invisible wall) with three clicks, as a volume (see *Barriers* below) |
 | Ctrl+I | give the selection's line an id. With objects of one line selected, a small panel opens: type the number (it starts with the line's id, or the next free one), Enter sets it, Esc cancels, an empty field takes the next free id; the number must be unused in the map. With objects of several lines selected, each line without an id gets the next free one at once. Only the `id n` in front of the line changes (a `repeat` line keeps all its copies: the id names the line, its objects are `n:0`, `n:1`, …) |
 | M or Esc | leave edit mode (V and C leave it too); the arrows fly to viewpoints again. With unsaved edits the first press only reminds you |
@@ -102,6 +124,8 @@ Small changes don't need Claude: select objects as usual (click, Shift+click, Ct
 
 **Adding a model (I).** **I** opens the model picker on the right: every file in the package's `models/` folder that has a row in `ASSETS.md` (a model from elsewhere needs a request, since it needs a licence row first). Each row shows a picture of the model, its file, its triangles, its size in metres and the licence from its `ASSETS.md` row. Type to filter (by file or licence), ↑ / ↓ / PgUp / PgDn / Home / End select, **Enter** places the selected model at the point under the cursor, standing on the surface (it snaps on the surface's axes like a volume corner; hold Ctrl for the exact point) and joins the group of the object it stands on. It is one edit like the others (Ctrl+Z takes it back, Ctrl+S saves it), the picker closes and the new model is selected, so **G** moves it straight away. **Esc** closes the picker, and so does **I** while nothing is typed. While it is open it takes every key. The pictures are made the first time the picker opens after the map is loaded, two per frame (rows without one yet show "..."); the model is shown with its own materials in a neutral grey studio light, so it looks as it will when placed until the map gives it a material.
 
+**Adding a shape (I).** The picker's first six rows are the **shapes**: cube, sphere, cylinder, cone, capsule and plane, built into monolith (no file, no licence row). Typing filters them too ("cyl", or "shape" for all six). **Enter** places the selected shape at the point under the cursor: 1 × 1 × 1 m (a plane 2 × 2 m, flat), plain grey (the `"default"` material), standing on the surface you point at (hanging under a ceiling, against a wall beside it), snapped like a model (Ctrl: exact). Hold **Alt** while pressing Enter, or point at the sky, and it stands on the **work plane** instead (the horizontal plane of volume mode, *Volumes* above: by default at your feet; `PgUp` / `PgDn` in volume mode raise and lower it), so a shape can float in the air. It is one `shape` line (`id N shape cylinder cx y0 cz 1 1 1`) after the line of the object it stands on (in its group; inside `use "default"` when that group uses another material), or at the end of the map on the work plane; one edit like the others (Ctrl+Z takes it back byte for byte, Ctrl+S saves it), and it is selected, so **G**, **R**, **S** and the gizmo move, turn and size it at once (a shape takes every edit a box does). Give it a material by editing its line or with a request.
+
 Editing one copy of a `repeat` row (a single pillar of a row of eight) splits that line: the moved copy gets its own line and the others stay exactly where they were. Lines you edit get an `id n` in front, so later edits and the selection keep track of them ([map format](map-format.md) §2.9); Ctrl+I gives a line one without changing anything else, for objects your own code looks up by id.
 
 **Undo** (Ctrl+Z) puts the old text back, byte for byte; redo (Ctrl+Shift+Z or Ctrl+Y) applies the edit again; both are live like an edit, and saving doesn't end the history (undo past the save point and the count of unsaved edits goes up again). **When the map changes on disk** while you have unsaved edits (a request finishes, you save it in a text editor), the editor loads the new file and applies your unsaved edits again on top of it, each to the same objects (found by their entity ids, so lines that moved don't matter). An edit whose objects are gone, or that no longer fits the line, is listed in red in the HUD ("could not re-apply: …") until you clear the list with **Ctrl+Shift+Delete**; the history before your last save is dropped. Without unsaved edits such a change just clears the history, so an undo never takes back a change you didn't make here. If a request of yours is queued or running on the same map, the first edit after your last save (and a save) only warns you (the request's session may be changing the same lines); press the key again within 3 seconds to go ahead.
@@ -112,13 +136,15 @@ Editing one copy of a `repeat` row (a single pillar of a row of eight) splits th
 
 A barrier is an invisible wall: it stops the player like a box but is never drawn, casts no shadow and changes nothing in the look of the map, in the editor, in exports and in games ([map-format.md](map-format.md) §2.1 *Barriers*). Use one where the player must not go but nothing should be seen: a map edge, a ledge nobody should walk off, a gap between two buildings. In spectator mode the barriers show as **red translucent boxes with red edges**, fainter where something hides them; **O** hides or shows them (the **Barrier overlay** setting, F2 group *Editor*, remembers it; on to start). Walk mode never shows them, so walking shows the map as a player sees it. While they are shown, a barrier in front of what you point at is pointed at instead: click it to select it, and in edit mode G / S / Alt+R / R, the arrows, Delete and Ctrl+D work on it as on a box (a barrier line is edited like a `box` line); when they are hidden clicks go through them.
 
-To **place one by hand**, press **H** in edit mode and click as for a volume: a first corner on a surface, the opposite corner of the footprint, then the height with the mouse or the wheel (the **N** snap grid applies, Ctrl places points exactly, a right click or Esc cancels). The third click or Enter writes one line `id N barrier x0 y0 z0 x1 y1 z1` into the map as one edit (Ctrl+Z takes it back, Ctrl+S or auto save writes it) and selects the new barrier, so G / S / Alt+R / the arrows / Delete / Ctrl+D work on it at once. With something selected the line goes right after the first selected object's line (in its file and group); with nothing selected it goes to the end of the main map file, under a `# barriers` comment in a `group "barriers"` (made the first time). In volume mode **H** turns the active volume into a barrier the same way (the volume stays). To ask Claude instead, say so in a request ("stop the player walking off this ledge"): it writes the same one line.
+To **place one by hand**, press **H** in edit mode and click as for a volume: a first corner on a surface (or on the work plane: in the air, or anywhere with Alt; *Volumes* above), the opposite corner of the footprint, then the height with the mouse or the wheel (the **N** snap grid applies, Ctrl places points exactly, a right click or Esc cancels). The third click or Enter writes one line `id N barrier x0 y0 z0 x1 y1 z1` into the map as one edit (Ctrl+Z takes it back, Ctrl+S or auto save writes it) and selects the new barrier, so G / S / Alt+R / the arrows / Delete / Ctrl+D work on it at once. With something selected the line goes right after the first selected object's line (in its file and group); with nothing selected it goes to the end of the main map file, under a `# barriers` comment in a `group "barriers"` (made the first time). In volume mode **H** turns the active volume into a barrier the same way (the volume stays). To ask Claude instead, say so in a request ("stop the player walking off this ledge"): it writes the same one line.
 
 ### Painting (B)
 
 Marks, signs, decals and pixel art don't need a request either: press **B** in spectator mode and paint straight onto any box or model. The tools, their keys and the colour picker are Aseprite's, and the cursor stays free: the **mouse wheel** moves toward the point under the cursor, **middle-drag** orbits around it, **Space + drag** (or Shift + middle-drag) pans; the arrow keys still fly to the viewpoints. The **draw panel** on the left shows what the cursor last rested on (the object, the face or model part, where its paint goes, or why it can't be painted), the tools and their options, the colour picker and the density; a ring on the surface shows exactly which texels the brush will cover (at size 1, the one texel). Your tool, brush, colours, palette and the panel's switches are kept per map, in `draw.ini` in the map's folder (not part of the map: it isn't exported or reloaded, commit it only if you want to share your palette).
 
-**Where the paint goes.** Paint is a layer over the material: the object keeps its look (its shader, textures, glow) everywhere you haven't painted. Each material that has paint gets an atlas, `textures/paint/<material>.png`, and the first stroke on a box face or a model part gives it a rectangle there: a `paint` line at the end of the map (under `# paint (draw mode)`), the material's `paint` key and an `id` on the object's line, one undoable edit. A stroke that runs over onto another face of the same box gives that face its rectangle too (still one undo). A model part drawn with its own material paints into `textures/paint/<file>_s<N>.png`. A model whose own texture coordinates repeat or overlap (most low-poly kits, scanned rocks) is **unwrapped** for paint on its first stroke (a `models/<file>.paintuv` file beside it; a large scan takes a few seconds, the HUD says so). Each face of a box has its own rectangle; the panel's **Faces** buttons group faces that should share paint (e.g. the four sides), then **Apply**. **Texels / m** sets how big a texel of new paint is (64 by default, clamped to 2048 texels a side: the panel says when), **Resize to density** gives the paint under the cursor a rectangle of that size (its paint resampled), **Pixel look** keeps texels crisp up close (`paint_filter nearest`), **Clear paint** removes the paint of that face or part.
+**Where the paint goes.** Paint is a layer over the material: the object keeps its look (its shader, textures, glow) everywhere you haven't painted. Each material that has paint gets an atlas, `textures/paint/<material>.png`, and the first stroke on a box face, a shape's part or a model part gives it a rectangle there: a `paint` line at the end of the map (under `# paint (draw mode)`), the material's `paint` key and an `id` on the object's line, one undoable edit. A stroke that runs over onto another face of the same box gives that face its rectangle too (still one undo). A model part drawn with its own material paints into `textures/paint/<file>_s<N>.png`. A model whose own texture coordinates repeat or overlap (most low-poly kits, scanned rocks) is **unwrapped** for paint on its first stroke (a `models/<file>.paintuv` file beside it; a large scan takes a few seconds, the HUD says so). Each face of a box has its own rectangle; the panel's **Faces** buttons group faces that should share paint (e.g. the four sides), then **Apply**.
+
+**Painting a shape.** A shape is painted like a box: each of its **parts** has a rectangle of its own (a cube's six faces; a sphere's `surface`; a cylinder's and a capsule's `side`, `top` and `bottom`; a cone's `side` and `bottom`; a plane's `top` and `bottom`), and the panel's target line names the shape and the part ("cylinder side, line 12"). A round side's paint wraps once around it: its rectangle is as wide as the shape is round (texels per metre along the circumference) and as tall as the side, so a texel is about square; a stroke can run across the seam at the back (where the rectangle's left and right edges meet) without lifting the mouse: it continues on the other edge. **Faces** groups a shape's parts as it does a box's faces (one button per part; *All together* puts every part on one rectangle, a cube keeps *Sides together*); a sphere has one part and nothing to group. On a paint grid a part's rectangle has the grid's texel size but no cells: it spans the whole part, like a model part's, and *Fit to grid* resizes it to the grid. **Texels / m** sets how big a texel of new paint is (64 by default, clamped to 2048 texels a side: the panel says when), **Resize to density** gives the paint under the cursor a rectangle of that size (its paint resampled), **Pixel look** keeps texels crisp up close (`paint_filter nearest`), **Clear paint** removes the paint of that face or part.
 
 **The paint grid.** A map with a pixel look declares the grid its pixels lie on: `env paint.grid 24` (24 texels per metre, 4.2 cm pixels) for the whole map, or `paint_grid 20` on one material (`paint_grid 0`: none); its `MAP.md` says which. On such a material the panel's section is called **Grid** ("follows the grid of concrete: 24 texels/m (4.2 cm)") and has no density slider: a paint texel is one pixel of the map's grid, on the same lines as the surface's own pixels, and on every box of that material the texels meet where the boxes meet. Size 1 paints exactly one of those pixels, and the brush outline lies on them. Paint on a grid is pixel art by default: the first stroke into a material's atlas writes `paint_filter nearest` on its line, so a pixel stays one sharp square up close. **Pixel look** then sits under the brush, beside *Pixel perfect* (and the panel's target line says how many cells the face covers when it shares a larger rectangle with other faces). Turn *Pixel look* off before the first stroke to keep new atlases on a grid filtered (for the rest of the session), or on an atlas afterwards to soften its paint. A model part gets a fresh unwrap whose texels have the grid's size on the model you paint (other copies of the same model at another scale get larger or smaller texels; the panel says so). **Fit to grid** (in place of Resize to density) gives paint made before the grid was declared, or on a box that was moved or resized since, the face's cells again: paint that was already on the grid moves texel for texel, other paint is resampled. A face longer than 2048 grid pixels (85 m at 24/m) can't be painted on the grid; the panel says so. Without a grid, everything stays as described above.
 
@@ -212,6 +238,34 @@ In spectator mode (in the edit mode or not) **F5** lists every line of the map t
 
 Removing and giving ids are manual edits like any other: live, undoable with Ctrl+Z, counted as unsaved until Ctrl+S, and the first one warns when a request is open on the map.
 
+## Groups as units
+
+A group is everything under its `group "<name>"` lines: the editor treats every statement with the same name, in any file of the map, as one group ([map-format.md](map-format.md) §2.3). **Ctrl+click** selects one group (its boxes, models and barriers; lights can't be selected). When the selection is **whole groups** (every selected object is in a group, and all of each group is selected):
+
+- **R / Shift+R** turn the groups 90° / −90° about the vertical through their centre as one edit, their lights with them: a house turns as a house, not as 1500 boxes each on its own spot.
+- **Ctrl+D** copies each group as a new group `"<name> 2"` (or the next free number: copying `"plain: house"` when `"plain: house 2"` to `"plain: house 4"` exist gives `"plain: house 5"`), one footprint to the right; the copies are selected, so G moves them at once. One undo step per group.
+- **G, Alt+R, S and the gizmo** work as on any selection, about its centre (lights stay where they are: turn a group with its lights by R).
+
+Every other selection behaves as before. Renaming, deleting, making and filling groups is in the groups panel (F6).
+
+## Groups panel (F6)
+
+In spectator mode (in the edit mode or not) **F6** lists every group of the map by name, sorted by area (the text before `": "`: `"plain: house"` is in area `plain`), with an area row above the groups of an area that has several. Each row: the name (`x9` when nine `group` lines share it), its objects, the file of its first object and the lines they span (or how many files hold it). While it is open it takes every key and the cursor is free.
+
+| Key | Groups panel |
+|---|---|
+| typing, Backspace | filter by the name (and so the area) and the file (case-insensitive; Ctrl+Backspace clears it) |
+| ↑ / ↓, Page Up / Page Down, Home / End | select a row |
+| Enter | select the group (an area row: all its groups) and fly in front of it; the panel closes |
+| Ctrl+R | rename the group: a field with its name above the panel; Enter applies, Esc cancels. Every `group` line with that name changes, nothing else |
+| Delete | delete the group: press again within 3 s (an area row: all its groups, one undo step each). Its objects, its `group` lines, the comments right above them and `use` lines left without objects go; materials, imports and other lines stay |
+| Ctrl+D | duplicate the group (an area row: each of its groups) as Ctrl+D does on whole groups |
+| Ctrl+N | a new group from the selection: type its name, Enter; the selected lines move to a new block at the end of their file (lines of one file at a time) |
+| Ctrl+G | put the selection into the highlighted group: the lines move to the end of the group's last block (also from another file) |
+| Esc / F6 | close (Esc first closes an open field) |
+
+These are manual edits like any other: live, undoable with Ctrl+Z, counted as unsaved until Ctrl+S, and the first one warns when a request is open on the map. Each one checks itself: if the map after it would differ in anything but what the edit means (an object moving, a material changing), it is refused and nothing changes. A group name can't contain `"`.
+
 ## Graphics settings (F2)
 
 The panel has a preset selector, rows for display, shadows, ambient occlusion, fog, post-processing and performance, the editor's **Save edits** row (manual / auto, see *Editing by hand*) and **Barrier overlay** row (on / off, the **O** key; see *Barriers*), neither a graphics setting nor part of a preset, and a live frame time readout. Use the arrow keys or the mouse; values that differ from the preset are pink, with a pink bar beside them. Heavy changes (shadow map size, AO mode, fog cache, preset) take a frame to apply; a new shadow map size reloads the map (about a second, your selection is kept). Esc or F2 closes and saves.
@@ -229,7 +283,7 @@ Every preset renders at full resolution: **Render scale** is a row you lower by 
 
 ## The view-only build
 
-On any system but Linux (the Windows build `build/win/monolith.exe`, also under wine: `./build.sh --win run --map maps/<name>`) monolith only opens a map to benchmark, look at and debug it. Walking and flying, the spectator camera and its viewpoints, 1–6, F1, F2 (its settings are saved; no Editor row), F3 / Shift+F3, F4, F5 (filter and fly to an id; no edits), F12, selecting with the mouse, hot reload of a map edited elsewhere (say over a shared folder) and the keybindings panel work. M, B, Enter, C, V / Shift+V, I, Ctrl+S, Ctrl+Z / Ctrl+Y, F9, K / Shift+K / Ctrl+K / Ctrl+Shift+K, R and Delete / Shift+Delete / Ctrl+I in the id panel only show "view-only build: editing and requests need the Linux editor". The keybindings panel lists only the keys that work; the refused flags: [command-line.md](command-line.md#view-only-build).
+On any system but Linux (the Windows build `build/win/monolith.exe`, also under wine: `./build.sh --win run --map maps/<name>`) monolith only opens a map to benchmark, look at and debug it. Walking and flying, the spectator camera and its viewpoints, 1–6, F1, F2 (its settings are saved; no Editor row), F3 / Shift+F3, F4, F5 (filter and fly to an id; no edits), F6 (filter and fly to a group; no edits), F12, selecting with the mouse, hot reload of a map edited elsewhere (say over a shared folder) and the keybindings panel work. M, B, Enter, C, V / Shift+V, I, Ctrl+S, Ctrl+Z / Ctrl+Y, F9, K / Shift+K / Ctrl+K / Ctrl+Shift+K, R, Delete / Shift+Delete / Ctrl+I in the id panel and Ctrl+R / Delete / Ctrl+D / Ctrl+N / Ctrl+G in the groups panel only show "view-only build: editing and requests need the Linux editor". The keybindings panel lists only the keys that work; the refused flags: [command-line.md](command-line.md#view-only-build).
 
 ## Making maps
 

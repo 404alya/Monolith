@@ -128,8 +128,9 @@ typedef struct {
     bool fitOk;             // Fit to grid can act on it (an entry on a grid, also one too small for
                             // its face's cells: Resolve's code 10)
     DrawTextKey textKey;
-    bool facesOk;           // a box: the Faces section shows its groups
-    int faceKey;            // the box and material the groups belong to (-1: none)
+    bool facesOk;           // a box or a shape with 2 or more parts: the Faces section shows its groups
+    int faceKey;            // the box / shape and material the groups belong to (-1: none)
+    int faceCount;          // its faces: 6 for a box, a shape's parts (groups[] past them: 255)
     unsigned char groups[6];// per face +x .. -z: its group (faces in one entry share a number; a face
                             // without paint has a number of its own)
 } DrawTarget;

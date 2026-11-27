@@ -104,6 +104,10 @@ A **paint entry** (one `paint` statement, §4.2) gives one object's surface a re
   own; the panel's Faces section groups them (§13.2).
 - **A model slot of one instance**: the slot's triangles in their **paint UV domain**, 0..1 (§4.5),
   mapped onto the rectangle.
+- **A shape's part, or a group of parts of one shape** ([editor-tools.md](editor-tools.md) §2.2, §2.5a):
+  painted exactly as a box's faces (face bits = part bits, one entry per group, the draw mode's *Faces*
+  groups them), each part's 0..1 part UV over the whole rectangle (a round side wraps once around, its
+  seam at −z). The entity is the shape's `id N:i`.
 
 An entry exists only for what was painted: the first stroke on a face (or a group, or a slot)
 allocates its rectangle, nothing else of the object.
@@ -178,6 +182,7 @@ paint own 41:0 slot 0 0 0 256 256 paint_filter nearest
   `+x -x +y -y +z -z` (the box's own axes for a turned box), at least one; `x y w h` the rectangle
   in texels of the material's atlas. On a material with a paint grid, `w h` are at least the cells its
   faces cover, and each face maps onto the rectangle from its own first grid cell (§17.2, §17.3).
+- `paint "<material>" <entity> <parts> <x> <y> <w> <h>` for a shape (`shape` lines, [editor-tools.md](editor-tools.md) §2.5a): `<parts>` a comma-separated list of the kind's parts in place of a box's faces (`side`, `top`, `bottom`, `surface`; a cube's are `+x` … `-z`); a part the kind doesn't have is an error. The parts are keyed and mapped like a model's slots (no paint-grid cells).
 - `paint "<material>" <entity> slot <N> <x> <y> <w> <h>` for a model instance: slot N of the model file
   drawn with `<material>` (its override). `paint own <entity> slot <N> …` when the slot is drawn with
   the model's own material, optionally followed by `paint_filter nearest`.
@@ -268,6 +273,7 @@ read them in its vertex stage, without new draws:
 | **merged box meshes** (axis-aligned and turned) | per vertex: `boneIndices[0..3]` as a 32-bit little-endian key | per vertex: `boneWeights` as two unorm16 (u, v) = the face corner's 0 / 1 |
 | **instanced boxes** (`instanced on`, a shader that needs it) | per instance: `INSTANCE_CUSTOM.x` = the first of 6 consecutive keys (faces +x −x +y −y +z −z; an unpainted face's key holds a zero rectangle), `INSTANCE_CUSTOM.y` = 1 | from the unit cube's model-space position and normal (the same mapping as R3D's cube UVs) |
 | **model instances** | per instance: `INSTANCE_CUSTOM.x` = the first of the file's `materialCount` consecutive keys (one per slot), `.y` = 2; per vertex: `boneIndices[0]` = the slot | per vertex: `boneWeights` as two unorm16 = the paint UV (§4.5) |
+| **shapes** (instanced per piece and material) | as a model instance: `INSTANCE_CUSTOM.x` = the first of the kind's part-count keys, `.y` = 2 (every instance of a painted material's group; 0 keys for unpainted shapes); per vertex: `boneIndices[0]` = the part | per vertex: `boneWeights` as two unorm16 = the part UV (the runtime's generated meshes always carry both) |
 
 - The vertex stage tells the kinds apart by `INSTANCE_CUSTOM.y` (0: a merged mesh, drawn with the
   runtime's one-instance buffer, which has no custom attribute: R3D sets it to 0).
@@ -370,6 +376,13 @@ The **density** `ρ` (texels per metre, the panel's *Density*, default 64):
   the square another entry of the file's slot has, else `ceil(ρ · sqrt(A / a))`, `A` the slot's world
   area in this instance, `a` its share of the paint domain), at most 2048 (a larger unwrap is made
   again at a lower density). Before the round: `clamp(pow2ceil(ρ · sqrt(A)), 16, 2048)`.
+- **A shape's part group**: `w = ceil(ρ · a)`, `h = ceil(ρ · b)` with `a` / `b` the group's longest
+  part along its part UV's u / v (a round side: its circumference by Ramanujan's ellipse perimeter, and
+  its height (a cone: its slant); a sphere: the circumference and half a meridian; a capsule's cap: the
+  circumference and a quarter meridian; a disc or a plane: its sides; a cube's part: as a box face),
+  4..2048. On a paint grid ρ is the grid's and there are no cells (§17.2 doesn't apply: a part spans its
+  whole rectangle, like a model slot, §17.4), so the texels have the grid's size along both axes; a part
+  needing more than 2048 texels on the grid is refused. `drawmode.c` `ShapePartDims` / `ShapeRectSize`.
 - The panel's *Resize to density* (§5.3) gives an entry a new rectangle.
 
 ### 5.3 Changing an entry
@@ -709,9 +722,11 @@ As in the first round (its implementation notes give the layout), except:
    target's paint has (or will have; "the rectangle is clamped to 2048" when it is), *Resize to density* (§5.3), *Pixel look* (the atlas's
    `paint_filter`: `EDIT_MATERIAL_SET` on the material, or every `paint own` entry of an own atlas; on a
    grid target it sits in the Tools section beside *Pixel perfect*, §17.7), and *Clear paint* (§5.3).
-5. **Faces** (boxes): the six faces, each with a group number button (0..5); faces with the same
-   number share one rectangle. *Apply* rewrites the target box's entries (§5.3); *All separate* and
-   *Sides together* set the buttons.
+5. **Faces** (boxes and shapes): the six faces (a shape: one button per part, named), each with a group
+   number button; faces with the same number share one rectangle. *Apply* rewrites the target's entries
+   (§5.3); *All separate* and *Sides together* (a round shape: *All together*) set the buttons. A sphere
+   (one part) shows no buttons. The target line of a shape names it and its part: "cylinder side,
+   line 12"; the texel line its size along the part's u and v.
 
 ### 13.3 The brush cursor
 
@@ -724,8 +739,9 @@ As in the first round (`--paint-script`, `--draw-mode`, `--draw-panel`, `--input
 
 - `shared` is gone; `faces <a b c d e f>` sets group numbers and applies them (§5.3); `clear`;
   `resize`; `pixel on|off` (these on the surface of the last stroke's LMB down);
-  `stroke uv` / `dab uv` take **paint** coordinates (a box face 0..5 and its face uv, or a model slot
-  and its paint uv); `print` lists the atlases (size, rectangles, unsaved state, pixel hashes) and the
+  `stroke uv` / `dab uv` take **paint** coordinates (a box face 0..5 and its face uv, a shape's part
+  number (the kind's part order, [editor-tools.md](editor-tools.md) §2.2) and its part uv, or a model slot
+  and its paint uv); `faces` takes one number per part on a shape; `print` lists the atlases (size, rectangles, unsaved state, pixel hashes) and the
   entries.
 - Every flag stays windowless with `--shot` / `--dump-*` / `--apply-edits` and refused otherwise;
   scripted input never reaches the prompt box (`drawShotLocked`, the launcher guard).

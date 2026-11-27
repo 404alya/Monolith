@@ -16,6 +16,7 @@ These pages are not part of an export: the exported `monolith_scene.c` / `.h`, `
 | [drawmode.md](drawmode.md) | `src/drawmode.c`: the draw mode: paint atlases, allocation and undo, unwrapping, strokes, saving |
 | [modelpicker.md](modelpicker.md) | `src/modelpicker.c`: the model picker's list and thumbnails |
 | [idpanel.md](idpanel.md) | `src/idpanel.c`: the id panel (F5) |
+| [groupspanel.md](groupspanel.md) | `src/groupspanel.c`: the groups panel (F6) |
 | [classifier.md](classifier.md) | `src/classifier.c`: the AI classifier that picks a request's model |
 | [input.md](input.md) | `src/input.c`: the keyboard / mouse shim and input scripts |
 | [ui.md](ui.md) | `src/ui.c`: fonts, the atlas, shapes and text layout of the editor UI |

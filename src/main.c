@@ -27,6 +27,7 @@
 #include "settingspanel.h"
 #include "inspector.h"
 #include "idpanel.h"
+#include "groupspanel.h"
 #include "keyspanel.h"
 #include "modelpicker.h"
 #include "drawpanel.h"
@@ -294,9 +295,12 @@ static void PrintSurfaceHit(Vector3 origin, Vector3 dir)
     MS_SurfaceHit h;
     if (!MS_RaycastSurface(scene, origin, dir, 0.0f, &h)) return;
     static const char *const FACE[] = { "+x", "-x", "+y", "-y", "+z", "-z" };
+    // (a shape: its part's name, docs/editor-tools.md 2.2)
+    const char *part = h.hit.obj.kind == MS_OBJ_SHAPE && h.hit.obj.index < scene->shapeCount
+                     ? MS_ShapePartName(scene->shapes[h.hit.obj.index].kind, h.face) : NULL;
     printf("pick: surface material %d \"%s\"  face %s  slot %d  mesh %d  triangle %d  faceUv %.4f %.4f  uv %.4f %.4f"
            "  bary %.3f %.3f %.3f  paint grid %g texel %.3f %.3f cells %dx%d\n", h.material, h.material >= 0 &&
-           h.material < scene->materialCount ? scene->materials[h.material].name : "(own)", h.face >= 0 && h.face < 6 ? FACE[h.face]
+           h.material < scene->materialCount ? scene->materials[h.material].name : "(own)", part ? part : h.face >= 0 && h.face < 6 ? FACE[h.face]
            : "-", h.slot, h.mesh, h.triangle, h.faceUv.x, h.faceUv.y, h.uv.x, h.uv.y, h.bary.x, h.bary.y, h.bary.z, h.paintGrid,
            h.paintTexel.x, h.paintTexel.y, h.paintCellsW, h.paintCellsH);
 }
@@ -402,6 +406,57 @@ static bool ScreenRead(void *user, int x, int y, Color *out)
     return ReadScenePixel(c->target.id, c->target.texture.width, c->target.texture.height, x, y, out);
 }
 
+// The images of a request's 3D snips (docs/editor-tools.md 5): per snip volume its four cameras
+// (DesignerSnipViews) rendered with only what is inside it (MS_SetClipBox), the sky a flat neutral grey,
+// distance and volumetric fog off, at the views' size (R3D's resolution set to it, then put back). The
+// environment is restored byte for byte afterwards, as the model picker does.
+static void RenderSnips(DesignRequest *req)
+{
+    int snips = 0;
+    for (int i = 0; i < req->volumeCount; i++) snips += req->volumes[i].snip;
+    if (snips == 0) return;
+    double t0 = GetTime();
+    int w = req->volumes[0].views[0].width, h = req->volumes[0].views[0].height;
+    for (int i = 0; i < req->volumeCount; i++)
+        if (req->volumes[i].snip) { w = req->volumes[i].views[0].width; h = req->volumes[i].views[0].height; break; }
+    RenderTexture rt = LoadRenderTexture(w, h);
+    if (!rt.id) { TraceLog(LOG_WARNING, "monolith: 3D snip: no render target; no snip images"); return; }
+    int rw = 0, rh = 0;
+    R3D_GetResolution(&rw, &rh);
+    R3D_SetResolution(w, h);
+    R3D_Environment *env = R3D_GetEnvironment();
+    R3D_Environment saved;
+    memcpy(&saved, env, sizeof(saved));
+    int uncut = 0, images = 0;
+    for (int i = 0; i < req->volumeCount; i++) {
+        DesignVolumeInfo *v = &req->volumes[i];
+        if (!v->snip) continue;
+        int u = MS_SetClipBox(scene, v->box);
+        uncut = u > uncut ? u : uncut;
+        for (int k = 0; k < SNIP_VIEW_COUNT; k++) {
+            Camera3D cam = v->views[k].camera;
+            R3D_BeginPro((R3D_View){ .camera = R3D_CameraFromRL(cam), .target = rt });
+                MS_PushLights(scene, cam, (float)w / h);
+                // (after MS_PushLights: a map's fog zones set the distance fog there)
+                env->background.sky = (R3D_Cubemap){ 0 };
+                env->background.color = (Color){ 128, 128, 128, 255 };
+                env->fog.mode = R3D_FOG_DISABLED;
+                env->volumetricFog.enabled = false;
+                MS_DrawGeometry(scene);
+            R3D_SetOutputDepth(false);
+            R3D_End();
+            memcpy(env, &saved, sizeof(saved));
+            v->images[k] = ReadTarget(rt);
+            images += v->images[k].data != NULL;
+        }
+        MS_ClearClipBox(scene);
+    }
+    R3D_SetResolution(rw, rh);
+    UnloadRenderTexture(rt);
+    TraceLog(LOG_INFO, "monolith: 3D snip: %d image%s of %d volume%s in %.0f ms%s", images, images == 1 ? "" : "s", snips,
+             snips == 1 ? "" : "s", (GetTime() - t0) * 1000.0, uncut > 0 ? " (some materials can't be cut: see the log)" : "");
+}
+
 // A request: view.png is the frame exactly as --shot renders it (offscreen, no HUD),
 // view-marked.png the same pixels plus the selection, hit point and crosshair. One R3D
 // render into `rt`, read back before and after drawing the overlay on top (R3D_End leaves
@@ -425,16 +480,30 @@ static unsigned char Submit(Designer *d, Camera3D cam, float yaw, float pitch, R
         DesignerDrawCrosshair(rt.texture.width, rt.texture.height);
         DesignerDrawRegions(d, rt.texture.width, rt.texture.height, true);
         DesignerDrawVolumes(d, cam, rt.texture.width, rt.texture.height, true);
+        DesignerDrawSketches(d, rt.texture.width, rt.texture.height, true);
     EndTextureMode();
     Image marked = ReadTarget(rt);
+    // sketch.png: only the strokes (and their labels) on a transparent frame of the same size
+    Image sketch = { 0 };
+    if (d->sketchCount > 0) {
+        BeginTextureMode(rt);
+            ClearBackground(BLANK);
+            DesignerDrawSketchesAlone(d, rt.texture.width, rt.texture.height);
+        EndTextureMode();
+        sketch = LoadImageFromTexture(rt.texture);
+        ImageFlipVertical(&sketch);
+    }
 
-    unsigned char r = LauncherSubmit(&req, view, marked);
+    RenderSnips(&req);      // (3D snips: their images into req.volumes[].images)
+
+    unsigned char r = LauncherSubmit(&req, view, marked, sketch);
     const char *text = r == 0 ? LauncherNote() : MS_LastError();   // 0: queued / sent
     TraceLog(r == 0 ? LOG_INFO : LOG_WARNING, "monolith: submit: %s", text);
     DesignerSubmitDone(d, r == 0, text);    // (copies it)
     DesignerFreeRequest(&req);
     UnloadImage(view);
     UnloadImage(marked);
+    if (sketch.data) UnloadImage(sketch);
     if (own) UnloadRenderTexture(rt);
     return r;
 }
@@ -454,6 +523,9 @@ static char *Unescape(const char *in)
     return out;
 }
 
+// One --sketch: its kind, colour (0-based) and points (sketchPoints[first .. first + count))
+typedef struct { SketchKind kind; int color, first, count; } SketchArg;
+
 // Heap memory of main() that lives until it returns (freed by main for every return path):
 // the repeatable command-line arguments (sized by argc) and the --bench tables
 static struct {
@@ -463,7 +535,10 @@ static struct {
     int *selectLines;           // --select [<file>:]<line>: the line
     const char **selectFiles;   //   and the argument when it names a file (NULL: the main file)
     Rectangle *regions;         // --region x y w h
-    BoundingBox *volumes;       // --volume x0 y0 z0 x1 y1 z1
+    BoundingBox *volumes;       // --volume x0 y0 z0 x1 y1 z1 [snip]
+    bool *volumeSnips;          //   and whether it is a 3D snip
+    SketchArg *sketches;        // --sketch <kind> <colour> x0 y0 x1 y1 ...
+    Vector2 *sketchPoints;      //   their points, one after another
     Vector2 *pickAt;            // --pick-at x y
     double *benchTimes;         // [view * benchFrames + frame]
     int *benchShadowUpdates;    // per view
@@ -478,6 +553,9 @@ static void FreeMainHeap(void)
     free(mainHeap.selectFiles);
     free(mainHeap.regions);
     free(mainHeap.volumes);
+    free(mainHeap.volumeSnips);
+    free(mainHeap.sketches);
+    free(mainHeap.sketchPoints);
     free(mainHeap.pickAt);
     free(mainHeap.benchTimes);
     free(mainHeap.benchShadowUpdates);
@@ -669,6 +747,8 @@ static int Run(int argc, char **argv)
     bool noSettings = false;            // --no-settings
     bool settingsPanelFlag = false;     // --settings-panel
     bool idPanelFlag = false;           // --id-panel [filter]
+    bool groupsPanelFlag = false;       // --groups-panel [filter]
+    const char *groupsPanelFilter = NULL;
     bool keysPanelFlag = false;         // --keys-panel [section]
     const char *keysPanelSection = NULL;
     const char *idPanelFilter = NULL;
@@ -719,10 +799,14 @@ static int Run(int argc, char **argv)
     mainHeap.selectFiles = malloc(sizeof(const char *) * argc);
     mainHeap.regions = malloc(sizeof(Rectangle) * argc);
     mainHeap.volumes = malloc(sizeof(BoundingBox) * argc);
+    mainHeap.volumeSnips = malloc(sizeof(bool) * argc);
+    mainHeap.sketches = malloc(sizeof(SketchArg) * argc);
+    mainHeap.sketchPoints = malloc(sizeof(Vector2) * argc);
     mainHeap.pickAt = malloc(sizeof(Vector2) * argc);
     mainHeap.settingsSet = malloc(sizeof(const char *) * argc);
     mainHeap.settingsChange = malloc(sizeof(const char *) * argc);
-    if (!mainHeap.fx || !mainHeap.selectLines || !mainHeap.selectFiles || !mainHeap.regions || !mainHeap.volumes || !mainHeap.pickAt || !mainHeap.settingsSet ||
+    if (!mainHeap.fx || !mainHeap.selectLines || !mainHeap.selectFiles || !mainHeap.regions || !mainHeap.volumes || !mainHeap.volumeSnips || !mainHeap.sketches ||
+        !mainHeap.sketchPoints || !mainHeap.pickAt || !mainHeap.settingsSet ||
         !mainHeap.settingsChange) {
         fprintf(stderr, "monolith: out of memory\n");
         return 1;
@@ -736,6 +820,11 @@ static int Run(int argc, char **argv)
     Vector2 *pickAtArgs = mainHeap.pickAt;
     int pickAtCount = 0;
     int regionArgCount = 0, volumeArgCount = 0;
+    SketchArg *sketchArgs = mainHeap.sketches;
+    Vector2 *sketchPoints = mainHeap.sketchPoints;
+    int sketchArgCount = 0, sketchPointCount = 0;
+    float workPlaneArg = 0.0f;          // --work-plane <y>
+    bool workPlaneArgSet = false;
     const char **settingsSets = mainHeap.settingsSet, **settingsChanges = mainHeap.settingsChange;
     int settingsSetCount = 0, settingsChangeCount = 0;
     // Every flag is checked here, before anything else happens: an unknown flag, a missing
@@ -797,6 +886,10 @@ static int Run(int argc, char **argv)
         else if (strcmp(a, "--id-panel") == 0) {
             idPanelFlag = true;
             if (i + 1 < argc && strncmp(argv[i + 1], "--", 2) != 0) idPanelFilter = argv[++i];
+        }
+        else if (strcmp(a, "--groups-panel") == 0) {
+            groupsPanelFlag = true;
+            if (i + 1 < argc && strncmp(argv[i + 1], "--", 2) != 0) groupsPanelFilter = argv[++i];
         }
         else if (strcmp(a, "--inspect-hide") == 0 || strcmp(a, "--inspect-isolate") == 0) {
             NEED(1);
@@ -978,8 +1071,48 @@ static int Run(int argc, char **argv)
             NUM(4, -ARG_COORD_LIMIT, ARG_COORD_LIMIT, v.max.x);
             NUM(5, -ARG_COORD_LIMIT, ARG_COORD_LIMIT, v.max.y);
             NUM(6, -ARG_COORD_LIMIT, ARG_COORD_LIMIT, v.max.z);
+            // (a following `snip`: a 3D snip, docs/editor-tools.md 5)
+            bool snip = i + 7 < argc && strcmp(argv[i + 7], "snip") == 0;
+            mainHeap.volumeSnips[volumeArgCount] = snip;
             volumeArgs[volumeArgCount++] = v;
-            i += 6;
+            i += 6 + (snip ? 1 : 0);
+        }
+        else if (strcmp(a, "--work-plane") == 0) {
+            // The work plane's height for the run (docs/editor-tools.md 1.2)
+            NEED(1);
+            NUM(1, -ARG_COORD_LIMIT, ARG_COORD_LIMIT, workPlaneArg);
+            workPlaneArgSet = true;
+            i++;
+        }
+        else if (strcmp(a, "--sketch") == 0) {
+            // <free|line|arrow|circle> <colour 1-4> then x y pairs up to the next flag (at least two points;
+            // a circle: its centre, then a point on its rim)
+            NEED(4);
+            static const char *const KINDS[] = { "free", "line", "arrow", "circle" };
+            int kind = -1;
+            for (int k = 0; k < 4; k++) if (strcmp(argv[i + 1], KINDS[k]) == 0) kind = k;
+            if (kind < 0) { fprintf(stderr, "monolith: --sketch: free, line, arrow or circle, not '%s'\n", argv[i + 1]); return 1; }
+            long color;
+            if (!ArgInt(a, argv[i + 2], &color)) return 1;
+            if (color < 1 || color > SKETCH_COLOR_COUNT) {
+                fprintf(stderr, "monolith: --sketch: colour 1-%d, not %ld\n", SKETCH_COLOR_COUNT, color);
+                return 1;
+            }
+            int n = 0;
+            while (i + 3 + n < argc && strncmp(argv[i + 3 + n], "--", 2) != 0) n++;
+            if (n < 4 || n % 2 != 0) {
+                fprintf(stderr, "monolith: --sketch %s: x y pairs, at least two points (%d number%s given)\n", argv[i + 1], n,
+                        n == 1 ? "" : "s");
+                return 1;
+            }
+            SketchArg *sa = &sketchArgs[sketchArgCount++];
+            *sa = (SketchArg){ (SketchKind)kind, (int)color - 1, sketchPointCount, n / 2 };
+            for (int k = 0; k < n; k += 2) {
+                Vector2 *pt = &sketchPoints[sketchPointCount++];
+                NUM(3 + k, -ARG_COORD_LIMIT, ARG_COORD_LIMIT, pt->x);
+                NUM(4 + k, -ARG_COORD_LIMIT, ARG_COORD_LIMIT, pt->y);
+            }
+            i += 2 + n;
         }
         else if (strcmp(a, "--shadow") == 0) {
             // Clamped: a zero range or size would divide by zero in the shadow tile layout
@@ -1035,7 +1168,7 @@ static int Run(int argc, char **argv)
             "--apply-edits", "--edit-script", "--paint-script", "--new-map", "--submit", "--submit-wait",
             "--close-submitted", "--type", "--classify", "--edit-mode", "--edit-id", "--edit-modal",
             "--edit-save", "--model-picker", "--model-picker-key", "--draw-mode", "--draw-panel", "--draw-state", "--cursor", "--region",
-            "--volume", "--bake-surface", "--bake-face", "--bake-size", "--bake-texels", "--bake-levels", "--export",
+            "--volume", "--sketch", "--work-plane", "--bake-surface", "--bake-face", "--bake-size", "--bake-texels", "--bake-levels", "--export",
             "--compile",
         };
         for (int i = 1; i < argc; i++)
@@ -1269,7 +1402,7 @@ static int Run(int argc, char **argv)
             char *package = MonoStrf("%s", GetFileName(GetDirectoryPath(peek->path)));
             ModelQuery q = { .prompt = text, .package = package, .boxes = peek->boxCount, .models = peek->modelCount,
                              .brief = peek->brief[0] != 0, .selected = selected, .regions = regionArgCount, .volumes = volumeArgCount,
-                             .hit = true };
+                             .sketches = sketchArgCount, .hit = true };
             ModelChoice c;
             LauncherClassify(&q, &c);       // (the AI classifier runs to its end here: no window to keep alive)
             printf("tier: %s\nmodel: %s%s\nclassifier: %s\nclassifier model: %s\nreason: %s\n", ModelTierName(c.tier), c.name,
@@ -1493,8 +1626,19 @@ static int Run(int argc, char **argv)
         if (!DesignerAddRegion(&designer, regionArgs[i], GetScreenWidth(), GetScreenHeight()))
             TraceLog(LOG_WARNING, "monolith: --region %.0f %.0f %.0f %.0f is empty after clamping to %dx%d; ignored",
                      regionArgs[i].x, regionArgs[i].y, regionArgs[i].width, regionArgs[i].height, GetScreenWidth(), GetScreenHeight());
+    // --sketch: as if drawn with the pen in snip mode (pixels of the shot)
+    if (sketchArgCount > 0 && !designer.snipping) DesignerSnipBegin(&designer);
+    for (int i = 0; i < sketchArgCount; i++)
+        if (!DesignerAddSketch(&designer, sketchArgs[i].kind, sketchArgs[i].color, &sketchPoints[sketchArgs[i].first], sketchArgs[i].count))
+            TraceLog(LOG_WARNING, "monolith: --sketch %d: %s; ignored", i + 1, MS_LastError());
     // --volume: as if made in volume mode (world space)
-    for (int i = 0; i < volumeArgCount; i++) DesignerAddVolume(&designer, volumeArgs[i]);
+    for (int i = 0; i < volumeArgCount; i++)
+        if (DesignerAddVolume(&designer, volumeArgs[i])) designer.volumes[designer.volumeCount - 1].snip = mainHeap.volumeSnips[i];
+    // --work-plane: the plane's height for the whole run (PGUP / PGDN still move it)
+    if (workPlaneArgSet) {
+        designer.workPlaneY = workPlaneArg;
+        designer.workPlaneSet = designer.workPlaneFixed = true;
+    }
     // Edit mode (M): manual edits of the selection (editmode.c); --edit-mode opens it for --shot-hud
     static EditMode edit;
     edit.ed.autoSave = gfx.editSave == 1;
@@ -1504,6 +1648,10 @@ static int Run(int argc, char **argv)
     static IdPanel idPanel;
     idPanel.interactive = !hidden || scripted;
     if (idPanelFlag && shotPath) IdPanelOpen(&idPanel, idPanelFilter);
+    // The groups panel (F6, groupspanel.c); --groups-panel opens it for a --shot-hud image
+    static GroupsPanel groupsPanel;
+    groupsPanel.interactive = !hidden || scripted;
+    if (groupsPanelFlag && shotPath) GroupsPanelOpen(&groupsPanel, groupsPanelFilter);
     // The keybindings panel (ESC menu, keyspanel.c); --keys-panel opens it for a --shot-hud image
     static KeysPanel keys;
     keys.interactive = !hidden || scripted;
@@ -1658,7 +1806,8 @@ static int Run(int argc, char **argv)
         // While the prompt box is open (and a couple of frames after it closed) every
         // editor key and the camera are frozen: the keys are text now
         bool typing = DesignerCapturesInput(&designer) || EditModeCapturesInput(&edit) || EditModeModalRunning(&edit) ||
-                      InspectorCapturesInput(&inspector) || IdPanelCapturesInput(&idPanel) || ModelPickerCapturesInput(&picker) ||
+                      InspectorCapturesInput(&inspector) || IdPanelCapturesInput(&idPanel) || GroupsPanelCapturesInput(&groupsPanel) ||
+                      ModelPickerCapturesInput(&picker) ||
                       (drawMode.active && drawPanel.typing);     // (the draw panel: a field has the keys)
         // ESC with nothing else to close: the menu with the keybindings button (keyspanel.c);
         // while it or the panel is open every editor key and the camera are frozen
@@ -1729,6 +1878,7 @@ static int Run(int argc, char **argv)
                     designer.version = (unsigned int)-1;   // remap the selection by its keys
                     inspector.scene = NULL;                 // a new scene: the inspector's filter again
                     idPanel.scene = NULL;                   // (and the id panel's rows)
+                    groupsPanel.scene = NULL;               // (and the groups panel's)
                     ModelPickerDropThumbs(&picker);         // (rendered again while it is open)
                     reuse.keyValid = reuse.cacheValid = false;
                     DrawModeBeforeSync(&drawMode);          // (the paint atlases, for the working copy)
@@ -1774,6 +1924,17 @@ static int Run(int argc, char **argv)
             mapMessageError = false;
         }
         typing = typing || IdPanelCapturesInput(&idPanel);
+        // The groups panel (groupspanel.c): F6 in spectator mode; takes every key while open, its edits
+        // go through the edit mode (live, undoable). A scripted shot (--input-script) drives it too, so
+        // its keys are tested end to end
+        bool groupsKeys = !shotPath || scripted;
+        if (spec.active && groupsKeys && !bench && !typing && IsKeyPressed(KEY_F6)) GroupsPanelOpen(&groupsPanel, NULL);
+        else if (groupsKeys && !bench && GroupsPanelCapturesInput(&groupsPanel) &&
+                 GroupsPanelUpdate(&groupsPanel, &edit, &designer, &spec, dt) == EDITMODE_RELOADED) {
+            ApplyEnvironment(&effects);
+            mapMessageError = false;
+        }
+        typing = typing || GroupsPanelCapturesInput(&groupsPanel);
 
         // Closing requests (launcher.c): K = the last finished request, SHIFT+K = all finished
         // ones, CTRL+K then 1-9 / 0 (= 10) = request [n] of the HUD list, also a running one
@@ -2019,6 +2180,7 @@ static int Run(int argc, char **argv)
                 if (editKeys && !typing && GetTime() - rmbDownTime < 0.25 && rmbMoved < 4.0f) DesignerClearSelection(&designer);
             }
             if (drawKeys && !PanelCapturesInput(&panel) && !InspectorCapturesInput(&inspector) && !IdPanelCapturesInput(&idPanel) &&
+                !GroupsPanelCapturesInput(&groupsPanel) &&
                 !KeysCapturesInput(&keys)) {
                 // The draw panel first: while the cursor is over it, LMB is its and nothing is painted
                 DrawPanelAction act = DRAWPANEL_ACT_NONE;
@@ -2039,6 +2201,7 @@ static int Run(int argc, char **argv)
                 if (spec.active && !typing && !KeysCapturesInput(&keys) && !PanelCapturesInput(&panel) && IsKeyPressed(KEY_B))
                     DrawModeOpen(&drawMode, &edit, &designer);
             } else if (spec.active && !PanelCapturesInput(&panel) && !InspectorCapturesInput(&inspector) && !IdPanelCapturesInput(&idPanel) &&
+                !GroupsPanelCapturesInput(&groupsPanel) &&
                 !KeysCapturesInput(&keys) && ModelPickerCapturesInput(&picker)) {
                 // The model picker takes every key while open (ENTER places a model: a live edit)
                 if (ModelPickerUpdate(&picker, &edit, &designer) == EDITMODE_RELOADED) {
@@ -2047,6 +2210,7 @@ static int Run(int argc, char **argv)
                 }
                 typing = true;
             } else if (spec.active && !PanelCapturesInput(&panel) && !InspectorCapturesInput(&inspector) && !IdPanelCapturesInput(&idPanel) &&
+                !GroupsPanelCapturesInput(&groupsPanel) &&
                        !KeysCapturesInput(&keys)) {
                 // The edit mode's id panel and the transform modal take every key while they run
                 bool idPanel = EditModeCapturesInput(&edit), modal = EditModeModalRunning(&edit);
@@ -2090,7 +2254,7 @@ static int Run(int argc, char **argv)
             // (always: the mouse navigates there), unless the prompt box, snip mode or the settings
             // panel own it (they show and hide it themselves)
             if (!hidden || scripted) {
-                int want = !(spec.active && (edit.active || drawMode.active)) || designer.promptOpen || designer.snipping || panel.open || idPanel.open ||
+                int want = !(spec.active && (edit.active || drawMode.active)) || designer.promptOpen || designer.snipping || panel.open || idPanel.open || groupsPanel.open ||
                            keys.open || keys.menu ? 0
                          : EditModeModalRunning(&edit) || (edit.active && IsMouseButtonDown(MOUSE_BUTTON_RIGHT)) ? 2 : 1;
                 if (want != editCursor) {
@@ -2101,7 +2265,7 @@ static int Run(int argc, char **argv)
                         editCursorAt = GetMousePosition();
                         DisableCursor();
                     } else if (want == 0 && editCursor != 0 && !IsCursorHidden() && !designer.promptOpen && !designer.snipping && !panel.open &&
-                               !idPanel.open)
+                               !idPanel.open && !groupsPanel.open)
                         DisableCursor();
                     editCursor = want;
                 }
@@ -2181,7 +2345,7 @@ static int Run(int argc, char **argv)
             // Inspector outlines: with the HUD, and in every --inspect shot (labels: --shot-hud)
             // Another panel open (settings, id panel, model picker, keybindings): the inspector steps
             // aside (its panel closes, its outlines, labels and HUD line wait until that panel closes)
-            bool otherPanel = panel.open || idPanel.open || picker.open || keys.open || keys.menu;
+            bool otherPanel = panel.open || idPanel.open || groupsPanel.open || picker.open || keys.open || keys.menu;
             if (otherPanel) inspector.panelOpen = false;
             bool inspectUi = inspector.mode != INSPECT_OFF && designerUi && (shotPath || (drawUi && hud)) && !otherPanel;
 
@@ -2250,6 +2414,7 @@ static int Run(int argc, char **argv)
             }
             // Snip mode (screen regions) shows even with the HUD off, like the prompt box
             if (drawUi && designerUi) DesignerDrawRegions(&designer, GetScreenWidth(), GetScreenHeight(), false);
+            if (drawUi && designerUi) DesignerDrawSketches(&designer, GetScreenWidth(), GetScreenHeight(), false);
             int hudBottom = 10 + UI_HUD_LINE + 8;   // below the HUD lines (the draw panel's top)
             if (drawUi && hud) {
                 // The status line: fps | mode | effect toggles (on / off by colour) | preset
@@ -2309,6 +2474,7 @@ static int Run(int argc, char **argv)
             if (drawUi) PanelDraw(&panel, &gfx, GetScreenWidth(), GetScreenHeight(), reused);
             if (drawUi && designerUi) InspectorDrawPanel(&inspector, GetScreenWidth(), GetScreenHeight());
             if (drawUi && designerUi) IdPanelDraw(&idPanel, GetScreenWidth(), GetScreenHeight());
+            if (drawUi && designerUi) GroupsPanelDraw(&groupsPanel, &designer, GetScreenWidth(), GetScreenHeight());
             if (drawUi && designerUi) ModelPickerDraw(&picker, GetScreenWidth(), GetScreenHeight());
             if (drawUi) KeysDraw(&keys, GetScreenWidth(), GetScreenHeight());     // (on top of everything)
             if (uiToTarget) EndTextureMode();
@@ -2446,6 +2612,7 @@ static int Run(int argc, char **argv)
     InputScriptFree();
     InspectorFree(&inspector);
     IdPanelFree(&idPanel);
+    GroupsPanelFree(&groupsPanel);
     KeysFree(&keys);
     if (emulateWindow) WindowEmuUnload(&windowEmu);
     else if (hidden) UnloadRenderTexture(shotTarget);

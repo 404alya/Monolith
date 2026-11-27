@@ -1,6 +1,15 @@
 # `src/drawmode.c`: the draw mode
 
-B in spectator mode: painting on boxes and models into the paint layer. The design is in [painting.md](../painting.md).
+B in spectator mode: painting on boxes, shapes and models into the paint layer. The design is in [painting.md](../painting.md).
+
+## Shapes
+
+A shape's part ([editor-tools.md](../editor-tools.md) §2.2, §2.5a) is painted as a box face: `HitIsShape` (an `MS_SurfaceHit` of kind `MS_OBJ_SHAPE`, `face` = the part) and `HitIsFaced` (a box or a shape) pick the box paths everywhere an entry is found, allocated or edited (face bits = part bits; `EntryFor`, `AddRect`, `ActFaces`, `ActResize`, `ActClear`), the region is the whole rectangle and the paint coordinate the part UV (`paintUv`). What differs:
+
+- **Size.** `ShapeRectSize`: per axis the group's longest part along its part UV (`ShapePartDims`: a round side's circumference and height, a sphere's half meridian, a capsule cap's quarter meridian, a disc's or plane's sides, a cube part as a box face) times the grid (else the density); no grid cells (a part spans its rectangle like a model slot), refused above 2048 on a grid (Resolve's code 9).
+- **Geometry.** `ShapePartPoint` maps a part UV to the world analytically (the runtime's conventions: u around from −z, counter-clockwise from above; v up, from a sphere's bottom pole, from a cap's rim to its pole; discs and planes as a box's ±y face), so the brush cursor, the selection outline and the fill outline (`SurfPieces`: a line on a curved part in up to 24 pieces) and `ShapeTexel`'s tangent plane work on shapes; `UvHit` makes a script's `stroke uv <id> <part> u v` hit from it.
+- **Texts.** The target line "cylinder side, line 12"; the texel line along the part's u and v; the HUD "cylinder side"; `print` "cylinder side,top". *Faces* shows one button per part (`DrawTarget.faceCount`; a sphere none), *All together* for a round kind.
+- A stroke across a round side's seam (u 1 → 0) is cut into two runs on the rectangle's opposite edges by the segment subdivision (no join across the jump).
 
 ## Paint atlases
 

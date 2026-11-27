@@ -74,6 +74,11 @@ bool EditModeCapturesInput(const EditMode *m);
 // field's keys while it is open (EditModeCapturesInput), in any spectator mode
 EditModeResult EditModeApplyTo(EditMode *m, Designer *d, int key, const MS_ObjRef *sel, int selCount, const EditOp *op);
 EditModeResult EditModeIdKey(EditMode *m, Designer *d);
+// CTRL+D on whole groups (docs/editor-tools.md 3.3), and the groups panel's CTRL+D: each named group
+// copied as a new group "<name> 2" (the next free number; EDIT_GROUP_DUPLICATE, one step each),
+// shifted one footprint of all of them (whole snap steps) to the view's right; the copies become the
+// selection. `key`: the request warning's key to press again
+EditModeResult EditModeDuplicateGroups(EditMode *m, Designer *d, int key, const char *const *names, int count);
 EditModeResult EditModeIdFieldUpdate(EditMode *m, Designer *d);
 // Opens the id panel for the selection with this text typed (--edit-id, for HUD shots)
 void EditModeOpenIdPanel(EditMode *m, Designer *d, const char *text);
@@ -105,5 +110,11 @@ void EditModeScanModels(EditMode *m);
 // hit face's axes (N step), CTRL held: exact; after the hit object's line, in its group. One
 // live edit (undoable); the selection becomes the new model
 EditModeResult EditModeAddModel(EditMode *m, Designer *d, const char *modelPath);
+// Adds a shape of kind `kind` (an MS_ShapeKind), 1 x 1 x 1 m (a plane 2 x 0 x 2), with the "default"
+// material, at DesignerPickWorldPoint (the cursor's surface point; ALT held or nothing under the cursor:
+// the work plane): standing on an upward face or the plane, hanging under a downward one, against a wall
+// beside it. After the hit object's line (its group), else at the end of the main map file. One live
+// edit (undoable, EDIT_SHAPE_ADD); the selection becomes the new shape (docs/editor-tools.md 2.8)
+EditModeResult EditModeAddShape(EditMode *m, Designer *d, int kind);
 
 #endif

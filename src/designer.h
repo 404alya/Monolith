@@ -54,7 +54,9 @@ typedef struct {
 // A volume (V in spectator mode, --volume): an axis-aligned box in world space (map
 // coordinates). World-space, so a map reload leaves it alone; an editor overlay, never
 // written to the map.
-typedef struct { BoundingBox box; } DesignVolume;
+// snip: a 3D snip (X in volume mode, `--volume ... snip`): the request also gets images of only what
+// is inside it (docs/editor-tools.md 5)
+typedef struct { BoundingBox box; bool snip; } DesignVolume;
 
 // An object whose world bounds overlap a volume (models count by their world AABB)
 typedef struct {
@@ -63,6 +65,14 @@ typedef struct {
     float shareOfObject;    // the same overlap / the object's bounds (flat axes count as 1)
     bool fullyInside;       // the object's bounds lie inside the volume
 } DesignVolumeObject;
+
+// One image of a 3D snip: which side, the camera it is rendered with, its size
+typedef struct {
+    const char *side;       // "view", "front", "side", "top" (a literal)
+    Camera3D camera;
+    int width, height;
+} DesignSnipView;
+#define SNIP_VIEW_COUNT 4
 
 // What a volume holds, computed at submit time by DesignerAnalyzeVolume
 typedef struct {
@@ -74,12 +84,27 @@ typedef struct {
     int grid[3];            // that grid (x, y, z cells; product <= VOLUME_SAMPLES)
     DesignerHit floor;      // first surface straight down from the volume's centre (none: obj.kind NONE)
     double ms;              // time the analysis took
+    bool snip;              // a 3D snip: the launcher writes its images (DesignSnipView, docs/editor-tools.md 5)
+    DesignSnipView views[SNIP_VIEW_COUNT];  // snip: the cameras of its images (DesignerSnipViews)
+    Image images[SNIP_VIEW_COUNT];          // snip: rendered at submit (main.c; data NULL: not rendered),
+                                            //   unloaded by DesignerFreeVolume
 } DesignVolumeInfo;
+
+// --- World points (docs/editor-tools.md 1): volume corners, barrier clicks, shape placement
+typedef enum {
+    WORLD_POINT_SURFACE = 0,    // a surface hit as before (snapped on the hit face's axes; Ctrl: exact),
+                                // the work plane when nothing is hit
+    WORLD_POINT_PLANE,          // the work plane even over a surface (Alt held while clicking)
+} WorldPointMode;
+typedef enum { WORLD_POINT_NONE = 0, WORLD_POINT_ON_SURFACE, WORLD_POINT_ON_PLANE } WorldPointKind;
+#define WORK_PLANE_MAX_DIST 2000.0f     // metres along the ray: farther crossings are no point
+
 
 // What a region shows, computed at submit time by DesignerAnalyzeRegion (ray sampling)
 typedef struct {
     Rectangle rect;         // clamped to the frame, whole pixels
     int gridW, gridH;       // sample grid (gridW * gridH <= REGION_SAMPLES)
+    int samples;            // rays the shares count: gridW * gridH, or those inside a sketch's polygon
     MS_ObjRef centerObj;    // under the rect's centre; kind MS_OBJ_NONE = sky
     Vector3 centerPoint, centerNormal;
     float centerDist;       // from the eye, metres
@@ -98,6 +123,31 @@ typedef struct {
     double ms;              // time the analysis took
 } DesignRegionInfo;
 
+// --- Sketches (docs/editor-tools.md 4): strokes over the frozen frame of snip mode
+typedef enum { SKETCH_FREE = 0, SKETCH_LINE, SKETCH_ARROW, SKETCH_CIRCLE } SketchKind;
+#define SKETCH_COLOR_COUNT 4    // red, yellow, blue, white (scene-side constants in designer.c, not UI tokens)
+#define SKETCH_SAMPLES 256      // world samples along a stroke at most (DesignerAnalyzeSketch)
+
+typedef struct {
+    SketchKind kind;
+    int color;              // 0..SKETCH_COLOR_COUNT-1
+    Vector2 *points;        // pixels of the frame, top-left origin (heap; a circle: 64 points on its rim)
+    int pointCount, pointCap;
+    bool closed;            // circles always; free strokes that end near their start
+} DesignSketch;
+
+// What a stroke touches, computed at submit time by DesignerAnalyzeSketch
+typedef struct {
+    DesignerHit start, end;         // what the first and last points hit
+    Vector3 *worldPoints;           // the hit point of each sample along the stroke (heap)
+    bool *worldHit;                 // per sample: something was hit (heap)
+    int sampleCount;                // at most SKETCH_SAMPLES, evenly spaced along the stroke
+    DesignRegionObject *objects;    // objects hit along the stroke, by samples descending (heap)
+    int objectCount;
+    bool hasRegion;                 // closed: the inside analysed like a region
+    DesignRegionInfo region;        // over the rays inside the polygon (rect = the polygon's bounds)
+} DesignSketchInfo;
+
 // One request as it is submitted: a snapshot of everything the launcher writes into the
 // bundle. Object indices refer to the scene at submit time (scene->version tells which load).
 // Its arrays are heap copies: DesignerFreeRequest releases them.
@@ -114,6 +164,9 @@ typedef struct {
     int regionCount;
     DesignVolumeInfo *volumes;
     int volumeCount;
+    DesignSketch *sketches;         // copies of the strokes (heap)
+    DesignSketchInfo *sketchInfos;  // parallel to sketches[]
+    int sketchCount;
     unsigned int mapVersion;
 } DesignRequest;
 
@@ -137,11 +190,11 @@ typedef struct {
 
     DesignerHit hit;        // under the crosshair (refreshed by DesignerPick / DesignerUpdate)
 
-    MS_ObjRef *selected;    // boxes, models and barriers, no duplicates (heap)
+    MS_ObjRef *selected;    // boxes, models, barriers and shapes, no duplicates (heap)
     DesignerSelKey *keys;   // parallel to selected[]
     int selectedCount, selectedCap, keyCap;
-    int *selPos[MS_OBJ_BARRIER + 1];    // per kind (MS_OBJ_BOX, MS_OBJ_MODEL, MS_OBJ_BARRIER): object index ->
-    int selPosCap[MS_OBJ_BARRIER + 1];  // position in selected[] + 1, 0 = not selected (O(1) membership)
+    int *selPos[MS_OBJ_SHAPE + 1];      // per kind (MS_OBJ_BOX, MS_OBJ_MODEL, MS_OBJ_BARRIER, MS_OBJ_SHAPE): object
+    int selPosCap[MS_OBJ_SHAPE + 1];    // index -> position in selected[] + 1, 0 = not selected (O(1) membership)
     unsigned int version;   // scene->version the indices refer to
 
     // Snip mode (C): screen regions dragged out over a frozen camera. Regions are
@@ -152,6 +205,12 @@ typedef struct {
     bool dragging;
     bool dragAdd;           // Shift was down at the drag start: add instead of replace
     Vector2 dragStart, dragEnd;
+    // Sketches (snip mode, D: the pen; docs/editor-tools.md 4)
+    bool pen;               // the pen is on (LMB draws strokes instead of rectangles)
+    int penColor;           // 0..SKETCH_COLOR_COUNT-1 (keys 1-4)
+    SketchKind penKind;     // F / L / A / O
+    DesignSketch *sketches; // heap; dropped with the regions when snip mode ends
+    int sketchCount, sketchCap;
 
     // Volume mode (V): world-space boxes made from crosshair clicks. The camera keeps
     // flying (except while the height is set); the arrows edit the active volume.
@@ -165,10 +224,14 @@ typedef struct {
     int activeVolume;       // index into volumes[] (edited by the arrows), -1 = none
     float volumeSnap;       // metres; 0 = VOLUME_SNAP_DEFAULT
     float angleSnap;        // degrees, the edit mode's rotate snap (SHIFT+N); 0 = ANGLE_SNAP_DEFAULT
+    float workPlaneY;       // the work plane's height (docs/editor-tools.md 1.2), valid with workPlaneSet
+    bool workPlaneSet;      // PGUP / PGDN or --work-plane set it; else it follows the rule of 1.2
+    bool workPlaneFixed;    // --work-plane: workPlaneSet outlives volume mode (else leaving the mode unsets it)
     Vector3 eye, viewFwd;   // the camera of the last DesignerPickCamera (arrow directions)
     bool pickValid;         // hit is the pick of pickPos/pickTarget at pickVersion (the crosshair's,
     unsigned int pickVersion;   // or with pickCursor the cursor's at pickPx)
     Vector3 pickPos, pickTarget;
+    Vector3 pickDir;        // the ray of that pick (from pickPos): the work plane's crossing
     bool pickCursor;
     Vector2 pickPx;
     bool editMode;          // edit mode (set by the caller every frame): the hit follows the cursor and
@@ -281,6 +344,36 @@ float DesignerCycleSnap(Designer *d);
 float DesignerAngleSnap(const Designer *d);
 float DesignerCycleAngleSnap(Designer *d);
 void DesignerSetAngleSnap(Designer *d, float deg);
+// The world point under `cursor` (pixels of a frame rendered with `cam`): a surface hit snapped as
+// the volume corners always were, else (or with WORLD_POINT_PLANE) the work plane's crossing,
+// snapped to the N grid in x and z (Ctrl: exact). *normal: the face normal, (0 1 0) on the plane.
+// WORLD_POINT_NONE when neither is reached (docs/editor-tools.md 1.1)
+WorldPointKind DesignerWorldPoint(const Designer *d, Camera3D cam, Vector2 cursor, WorldPointMode mode,
+                                  Vector3 *out, Vector3 *normal);
+// DesignerWorldPoint along the last pick's ray (DesignerPickCamera / DesignerPickCursor: the crosshair,
+// or the edit mode's cursor) with its hit: no new ray cast (placing a shape at the cursor)
+WorldPointKind DesignerPickWorldPoint(const Designer *d, WorldPointMode mode, Vector3 *out, Vector3 *normal);
+
+// Sketches: add a stroke (--sketch; points are copied, a circle's are centre then a rim point and
+// become its 64 rim points); what a stroke touches; freeing; drawing (marked: as view-marked.png
+// wants them, strokes and labels; else the live look). DesignerDrawSketchesAlone: only the strokes,
+// for sketch.png on a transparent target
+bool DesignerAddSketch(Designer *d, SketchKind kind, int color, const Vector2 *pts, int n);
+void DesignerAnalyzeSketch(Camera3D cam, int w, int h, const DesignSketch *s, DesignSketchInfo *out);
+void DesignerFreeSketch(DesignSketch *s);
+void DesignerFreeSketchInfo(DesignSketchInfo *i);
+void DesignerDrawSketches(const Designer *d, int w, int h, bool marked);
+void DesignerDrawSketchesAlone(const Designer *d, int w, int h);
+// A stroke colour (0..SKETCH_COLOR_COUNT-1): its scene-side RGB, its name ("red", ...); a kind's name
+// ("free", "line", "arrow", "circle"): request.json and the help bar
+Color DesignerSketchColor(int color);
+const char *DesignerSketchColorName(int color);
+const char *DesignerSketchKindName(SketchKind kind);
+
+// The cameras of a 3D snip's images (DesignSnipView[SNIP_VIEW_COUNT]): view (the developer's
+// direction), front, side, top, each framed to the box
+void DesignerSnipViews(BoundingBox box, Camera3D viewCam, DesignSnipView *out);
+
 // Leaves volume mode (cancels a volume being made)
 void DesignerVolumeModeEnd(Designer *d);
 // Volume mode on (V; the draw mode's V: docs/painting.md 13.1)

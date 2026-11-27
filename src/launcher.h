@@ -19,6 +19,8 @@ typedef struct {
     int selected;           // selected objects
     int regions;            // screen regions
     int volumes;            // volumes (world-space boxes)
+    int sketches;           // pen strokes over the frame (snip mode)
+    int snips;              // volumes marked as 3D snips
     bool hit;               // the crosshair hit something
 } ModelQuery;
 
@@ -60,7 +62,8 @@ void LauncherClassify(const ModelQuery *q, ModelChoice *out);
 // not a failure (failures are in MS_LastError()). "" before any. Valid until the next of those calls; freed by LauncherShutdown.
 const char *LauncherNote(void);
 
-// Writes requests/<stamp>_<slug>/ (view.png, view-marked.png, region-<n>.png) and computes the
+// Writes requests/<stamp>_<slug>/ (view.png, view-marked.png, region-<n>.png, sketch.png when `sketch` has
+// data: the strokes on a transparent frame) and computes the
 // rest of the bundle. With an override (LauncherChooseModel) it then writes request.md and
 // request.json and queues the bundle for the coordinator, starting one if none runs
 // (MONOLITH_LAUNCH=per-request: launches Claude Code on it in a new terminal). Without one it
@@ -71,7 +74,7 @@ const char *LauncherNote(void);
 //      (...) ...", "request classifying [n] ...")
 //   1: not sent; why in MS_LastError() (it names the bundle path if one was written, so the
 //      developer can run it by hand)
-unsigned char LauncherSubmit(const DesignRequest *req, Image view, Image marked);
+unsigned char LauncherSubmit(const DesignRequest *req, Image view, Image marked, Image sketch);
 
 // The HUD text of a classified request that LauncherUpdate has just queued or sent (or failed to:
 // *warning true), once: NULL until the next one. Valid until the next launcher call.
@@ -144,9 +147,9 @@ static inline void LauncherClassify(const ModelQuery *q, ModelChoice *out)
 }
 static inline void ModelChoiceFree(ModelChoice *c) { MsgFree(&c->reason); }
 static inline const char *LauncherNote(void) { return MSG_VIEW_ONLY; }
-static inline unsigned char LauncherSubmit(const DesignRequest *req, Image view, Image marked)
+static inline unsigned char LauncherSubmit(const DesignRequest *req, Image view, Image marked, Image sketch)
 {
-    (void)req; (void)view; (void)marked;
+    (void)req; (void)view; (void)marked; (void)sketch;
     MS_SetError(MSG_VIEW_ONLY);
     return 1;
 }

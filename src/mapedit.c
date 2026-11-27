@@ -4,7 +4,8 @@
 // deletes a line, splits a `repeat` line or adds lines, and leaves every other byte as it was.
 // Every edit is a list of hunks (file, offset, old bytes, new bytes), so edit + undo gives back
 // every file byte for byte; a map split into parts (imports) is edited in the file that holds the
-// line. Also the edit script language of --apply-edits / --edit-script (with move-to-file).
+// line. Also the edit script language of --apply-edits / --edit-script (with move-to-file and the
+// group ops: a group is its name, every `group` statement with it in any file).
 // Reference: docs/code/mapedit.md
 #include "mapedit.h"
 #include <ctype.h>
@@ -218,6 +219,9 @@ static bool Tokenize(Stmt *st)
 // Reads the statement's prefixes, keyword and positional numbers. False with a reason.
 // A line of two opposite corners: `box`, or `barrier` (an invisible wall written like a box)
 static bool CornerPrim(const char *prim) { return strcmp(prim, "box") == 0 || strcmp(prim, "barrier") == 0; }
+// A line of a block's numbers (centre x z, floor, sizes): `block`, or `shape <kind>` (Stmt.kw is then
+// the kind word, so kw + 1.. are the numbers as after `block`)
+static bool BlockPrim(const char *prim) { return strcmp(prim, "block") == 0 || strcmp(prim, "shape") == 0; }
 
 static bool Analyze(Stmt *st, const char *text, int len, const char **why)
 {
@@ -274,7 +278,9 @@ static bool Analyze(Stmt *st, const char *text, int len, const char **why)
         }
     } else {
         unsigned char axes[8];
-        int argc = MS_PrimitiveArgs(st->prim, axes);
+        bool shape = TokIs(st, t, "shape");     // (a block's numbers after the kind word)
+        if (shape) st->kw = ++t;
+        int argc = MS_PrimitiveArgs(shape ? "block" : st->prim, axes);
         if (argc < 0) { *why = "not an object line"; return false; }
         st->kind = ST_BOX;
         for (int a = 0; a < argc; a++)
@@ -896,7 +902,7 @@ static void BoxShape(const Stmt *st, const double *vals, double e[3], double c[3
 // is a plain box again: true, with the world extents ne[i] = e[src[i]] (the written ones
 // permuted). Else false and ne[] = e[] (the extents stay along its own axes).
 static bool BoxTurn(const EditOp *op, const double ypr[3], const double e[3], const double P[3], double c[3],
-                    double nv[3], double ne[3], int src[3])
+                    double nv[3], double ne[3], int src[3], bool keepRot)
 {
     Mat3 M = op->kind == EDIT_ROTATE ? OpRotation(op) : MatYpr(0, 0, 0);
     if (op->kind == EDIT_ROTATE && !op->local) {     // (without a pivot P is the centre: it stays)
@@ -908,6 +914,10 @@ static bool BoxTurn(const EditOp *op, const double ypr[3], const double e[3], co
     Mat3 R = MatYpr(nv[0], nv[1], nv[2]);
     for (int i = 0; i < 3; i++) src[i] = i;
     bool plain = SignedPermutation(&R, src);
+    // (a shape keeps its `rot` unless the turn takes it back to none: its mesh is not a box's, a
+    // quarter turn is not a permutation of its sizes)
+    if (plain && keepRot)
+        for (int i = 0; i < 3; i++) plain = plain && src[i] == i && R.m[i][i] == 1.0;
     if (!plain)
         for (int i = 0; i < 3; i++) src[i] = i;
     for (int i = 0; i < 3; i++) ne[i] = e[src[i]];
@@ -927,7 +937,7 @@ static void RwBoxTurn(Ctx *C, const Stmt *st, double *vals, const double P[3], b
     int src[3];
     BoxShape(st, vals, e, c);
     ModelRot(st, ypr);
-    bool plain = BoxTurn(op, ypr, e, P, c, nv, ne, src);
+    bool plain = BoxTurn(op, ypr, e, P, c, nv, ne, src, strcmp(st->prim, "shape") == 0);
     if (box)    // two opposite corners, the smaller first
         for (int a = 0; a < 3; a++) {
             vals[a] = c[a] - ne[a] * 0.5;
@@ -956,12 +966,16 @@ static bool RwTransform(Ctx *C, const Stmt *st, double *vals, bool whole)
 {
     const EditOp *op = C->op;
     Rewrite *w = &C->rw;
-    bool box = st->kind == ST_BOX && CornerPrim(st->prim), block = st->kind == ST_BOX && strcmp(st->prim, "block") == 0;
+    bool box = st->kind == ST_BOX && CornerPrim(st->prim), block = st->kind == ST_BOX && BlockPrim(st->prim);
     bool turn = op->kind == EDIT_ROTATE || op->kind == EDIT_SET_ROTATION;
     const char *what = turn ? "turn" : op->kind == EDIT_SCALE ? "scale" : "resize";
     if (st->kind == ST_LIGHT) { Refuse(C, "lights can't %s (only their position moves)", what); return false; }
     if (st->kind == ST_BOX && !box && !block) {
-        Refuse(C, "%s lines can't %s (only box and block lines)", st->prim, what);
+        Refuse(C, "%s lines can't %s (only box, block and shape lines)", st->prim, what);
+        return false;
+    }
+    if (op->kind == EDIT_SIZE && strcmp(st->prim, "shape") == 0 && TokIs(st, st->kw, "plane") && op->size[1] != 0.0) {
+        Refuse(C, "a plane has no height (size <sx> 0 <sz> keeps it flat)");
         return false;
     }
     if (op->kind == EDIT_SIZE && st->kind == ST_MODEL) { Refuse(C, "size is for boxes (models: scale)"); return false; }
@@ -1089,7 +1103,7 @@ bool MapEditPreviewTransform(const EditOp *op, int cls, const MS_Transform *in, 
         // as RwBoxTurn writes it: the centre, the new rotation, or an axis-aligned box again
         double e[3] = { in->scale.x, in->scale.y, in->scale.z }, ne[3];
         int src[3];
-        bool plain = BoxTurn(op, ypr, e, P, p, nv, ne, src);
+        bool plain = BoxTurn(op, ypr, e, P, p, nv, ne, src, cls == EDIT_CLASS_SHAPE);
         out->position = (Vector3){ (float)p[0], (float)p[1], (float)p[2] };
         out->scale = (Vector3){ (float)ne[0], (float)ne[1], (float)ne[2] };
         out->rotationDeg = plain ? (Vector3){ 0 } : (Vector3){ (float)nv[0], (float)nv[1], (float)nv[2] };
@@ -1121,6 +1135,56 @@ bool MapEditPreviewTransform(const EditOp *op, int cls, const MS_Transform *in, 
     return false;
 }
 
+// EDIT_ROTATE of a light line about a pivot, global (a whole group turned about its centre,
+// docs/editor-tools.md 3.3): its position orbits the pivot, a spot's or directional light's
+// direction turns, its `clip` box turns with it (90 degree steps only: an axis-aligned box stays
+// one), a whole line's `repeat` steps turn. vals[] are its positional numbers (position, clip
+// corners); the direction is spliced into C->rw. Any other transform of a light is refused (only
+// its position moves). False with the refusal in MS_LastError().
+static bool LightTurn(Ctx *C, const Stmt *st, double *vals, bool whole)
+{
+    const EditOp *op = C->op;
+    if (op->kind != EDIT_ROTATE || !op->hasPivot || op->local) {
+        const char *what = op->kind == EDIT_SCALE ? "scale" : op->kind == EDIT_SIZE ? "resize" : "turn";
+        return Refuse(C, "lights can't %s (only their position moves; turned about a pivot they orbit it)", what);
+    }
+    Mat3 M = OpRotation(op);
+    const double *P = op->pivot;
+    bool dir = TokIs(st, st->kw + 1, "dir"), point = TokIs(st, st->kw + 1, "point");
+    int nPos = dir ? 0 : 3, clip = st->posCount == nPos + 6 ? nPos : -1;     // (clip: its first corner in vals[])
+    int perm[3];
+    if (clip >= 0 && !SignedPermutation(&M, perm))
+        return Refuse(C, "a light's clip box turns only in 90 degree steps about the vertical or an axis");
+    if (nPos == 3) {
+        double d[3] = { vals[0] - P[0], vals[1] - P[1], vals[2] - P[2] };
+        MatVec(&M, d, d);
+        for (int a = 0; a < 3; a++) vals[a] = d[a] + P[a];
+    }
+    if (clip >= 0) {
+        double c0[3], c1[3];
+        for (int a = 0; a < 3; a++) {
+            c0[a] = vals[clip + a] - P[a];
+            c1[a] = vals[clip + 3 + a] - P[a];
+        }
+        MatVec(&M, c0, c0);
+        MatVec(&M, c1, c1);
+        for (int a = 0; a < 3; a++) {
+            vals[clip + a] = fmin(c0[a], c1[a]) + P[a];
+            vals[clip + 3 + a] = fmax(c0[a], c1[a]) + P[a];
+        }
+    }
+    if (!point) {       // (spot: x y z dx dy dz; dir: dx dy dz)
+        int first = st->kw + 2 + nPos;
+        double d[3];
+        for (int a = 0; a < 3; a++)
+            if (!TokNum(st, first + a, &d[a], NULL)) return Refuse(C, "the light's direction can't be read");
+        MatVec(&M, d, d);
+        RwVec3(&C->rw, st, first, d);
+    }
+    if (whole) RwSteps(&C->rw, st, &M);
+    return true;
+}
+
 // Copy c of the line as a plain line of its own (world numbers, no repeat, new id),
 // moved / turned / scaled / resized / shifted by the op (EDIT_REMOVE never gets here)
 static bool CopyLine(Ctx *C, const Stmt *st, int c, StrBuf *out)
@@ -1138,7 +1202,8 @@ static bool CopyLine(Ctx *C, const Stmt *st, int c, StrBuf *out)
         decs[k] = ValueDecimals(st, k);
         if (C->op->kind == EDIT_MOVE || C->op->kind == EDIT_DUPLICATE) vals[k] += C->op->delta[st->posAxis[k]];
     }
-    if (IsTransform(C->op) && !RwTransform(C, st, vals, false)) return false;
+    if (IsTransform(C->op) && !(st->kind == ST_LIGHT ? LightTurn(C, st, vals, false) : RwTransform(C, st, vals, false)))
+        return false;
     for (int k = 0; k < st->posCount; k++) RwNumber(w, st, st->posTok[k], vals[k], decs[k]);
     RwId(w, st, C->nextId++);
     RwBuild(w, st, out);
@@ -1160,7 +1225,7 @@ static bool WholeLine(Ctx *C, const Stmt *st, int *idOut, StrBuf *out)
     if (IsTransform(C->op)) {
         double was[POS_MAX];
         memcpy(was, vals, sizeof(double) * (size_t)st->posCount);
-        if (!RwTransform(C, st, vals, true)) return false;
+        if (!(st->kind == ST_LIGHT ? LightTurn(C, st, vals, true) : RwTransform(C, st, vals, true))) return false;
         for (int k = 0; k < st->posCount; k++)
             if (!SameNumber(vals[k], was[k], decs[k])) RwNumber(w, st, st->posTok[k], vals[k], decs[k]);
     } else {
@@ -1816,21 +1881,47 @@ typedef struct {
     char material[256];     // the material's name ("" for own)
     unsigned int id;
     int index;
-    bool box;
-    unsigned char faces;    // boxes
+    bool box;               // faces (a box's, or a shape's parts), not a slot
+    int shapeKind;          // the entity is a shape of this MS_ShapeKind (its part names), -1: a box
+    unsigned char faces;    // boxes: face bits; shapes: part bits
     int slot;               // models
     int rect[4];
     signed char filter;     // `paint_filter`: -1 not written, 0 trilinear, 1 nearest
     int facesTok, rectTok, filterTok;   // token indices (filterTok -1: none)
 } PaintLine;
 
-// "+x,-z" for face bits
-static void PaintFacesText(unsigned char faces, char *out, int size)
+// The name of face / part bit f: a box's face, or part f of a shape of kind shapeKind (>= 0;
+// docs/editor-tools.md 2.5a); NULL when it has none
+static const char *PaintPartName(int shapeKind, int f)
+{
+    if (shapeKind >= 0) return MS_ShapePartName((MS_ShapeKind)shapeKind, f);
+    return f >= 0 && f < 6 ? PAINT_FACE_NAMES[f] : NULL;
+}
+
+// "+x,-z" for face bits (a shape's: "side,top")
+static void PaintFacesText(int shapeKind, unsigned char faces, char *out, int size)
 {
     int n = 0;
     out[0] = '\0';
     for (int f = 0; f < 6 && n < size; f++)
-        if (faces & (1u << f)) n += snprintf(out + n, (size_t)(size - n), "%s%s", n ? "," : "", PAINT_FACE_NAMES[f]);
+        if ((faces & (1u << f)) && PaintPartName(shapeKind, f))
+            n += snprintf(out + n, (size_t)(size - n), "%s%s", n ? "," : "", PaintPartName(shapeKind, f));
+}
+
+// The shape kind of a paint entry's entity id:index in the loaded map (its part names), -1: not a
+// shape (or not in the map)
+static int PaintShapeKind(unsigned int id, int index)
+{
+    int e = MS_FindEntity(scene, (MS_EntityId){ id, index });
+    if (e < 0) return -1;
+    MS_ObjRef o = scene->entityObjects[e];
+    return o.kind == MS_OBJ_SHAPE && o.index >= 0 && o.index < scene->shapeCount ? (int)scene->shapes[o.index].kind : -1;
+}
+
+// The shape kind of an object (its part names), -1: not a shape
+static int ObjShapeKind(MS_ObjRef o)
+{
+    return o.kind == MS_OBJ_SHAPE && o.index >= 0 && o.index < scene->shapeCount ? (int)scene->shapes[o.index].kind : -1;
 }
 
 // Line l (0-based) of F as a paint statement, tokenized into st (false: it is none, or not one this
@@ -1850,6 +1941,7 @@ static bool ReadPaintLine(const PFile *F, int l, Stmt *st, PaintLine *pl)
     pl->filterTok = -1;
     pl->filter = -1;
     pl->slot = -1;
+    pl->shapeKind = -1;
     if (st->tok[1].quoted) {
         int n = st->tok[1].e - st->tok[1].s - 2;
         if (n >= (int)sizeof(pl->material)) return false;
@@ -1877,10 +1969,14 @@ static bool ReadPaintLine(const PFile *F, int l, Stmt *st, PaintLine *pl)
         if (!TokCopy(st, 3, faces, sizeof(faces))) return false;
         pl->box = true;
         pl->facesTok = 3;
+        pl->shapeKind = PaintShapeKind(pl->id, pl->index);
         for (char *f = faces; ; ) {
             size_t fl = strcspn(f, ",");
             int face = -1;
-            for (int k = 0; k < 6; k++) if (fl == 2 && strncmp(f, PAINT_FACE_NAMES[k], 2) == 0) face = k;
+            for (int k = 0; k < 6; k++) {
+                const char *name = PaintPartName(pl->shapeKind, k);
+                if (name && fl == strlen(name) && strncmp(f, name, fl) == 0) face = k;
+            }
             if (face < 0) return false;
             pl->faces |= (unsigned char)(1u << face);
             if (!f[fl]) break;
@@ -2004,8 +2100,8 @@ static bool PaintScan(const Patch *P, PaintEdit *pe, Stmt *st)
 static bool PaintObject(Ctx *C, Patch *P, MS_ObjRef obj, Stmt *st, int *file, int *line, int *id, int *index)
 {
     int e = MS_ObjectEntity(scene, obj);
-    if (e < 0 || (obj.kind != MS_OBJ_BOX && obj.kind != MS_OBJ_MODEL)) {
-        Refuse(C, "paint: select a box or a model (one object)");
+    if (e < 0 || (obj.kind != MS_OBJ_BOX && obj.kind != MS_OBJ_MODEL && obj.kind != MS_OBJ_SHAPE)) {
+        Refuse(C, "paint: select a box, a shape or a model (one object)");
         return false;
     }
     const MS_Source *src = &scene->entitySources[e];
@@ -2037,8 +2133,8 @@ static bool PaintRewriteFaces(Ctx *C, Patch *P, PaintOut *o, const PaintLine *pl
     PaintLine cur;
     PFile *F = PatchFile(P, pl->file);
     if (!F || !ReadPaintLine(F, pl->line - 1, st, &cur)) return false;
-    char text[32];
-    PaintFacesText(faces, text, sizeof(text));
+    char text[64];
+    PaintFacesText(cur.shapeKind, faces, text, sizeof(text));
     RwReset(&C->rw);
     RwStr(&C->rw, st->tok[cur.facesTok].s, st->tok[cur.facesTok].e, text);
     o->body.len = 0;
@@ -2093,9 +2189,16 @@ static bool PaintAdd(Ctx *C, Patch *P, PaintEdit *pe, MS_ObjRef obj, Stmt *st)
     bool model = obj.kind == MS_OBJ_MODEL;
     if (mat && (!mat[0] || strchr(mat, '"'))) { Refuse(C, "paint: bad material name"); return false; }
     if (!model && (!mat || (op->paint.faces & EDIT_PAINT_ALL_FACES) == 0 || (op->paint.faces & ~EDIT_PAINT_ALL_FACES))) {
-        Refuse(C, "paint-add on a box takes a material and faces");
+        Refuse(C, "paint-add on a box or shape takes a material and faces");
         return false;
     }
+    int shapeKind = ObjShapeKind(obj);
+    for (int f = 0; shapeKind >= 0 && f < 6; f++)
+        if ((op->paint.faces & (1u << f)) && !PaintPartName(shapeKind, f)) {
+            Refuse(C, "paint-add: a %s has %d part%s", MS_ShapeKindName((MS_ShapeKind)shapeKind), MS_ShapePartCount((MS_ShapeKind)shapeKind),
+                   MS_ShapePartCount((MS_ShapeKind)shapeKind) == 1 ? "" : "s");
+            return false;
+        }
     if (model && op->paint.slot < 0) { Refuse(C, "paint-add on a model takes a slot"); return false; }
     if (!PaintRectOk(C, op->paint.rect)) return false;
     int file, line, id, index;
@@ -2162,13 +2265,13 @@ static bool PaintAdd(Ctx *C, Patch *P, PaintEdit *pe, MS_ObjRef obj, Stmt *st)
 
     // The statement, sorted into the block (appended at the end of the file with the block when the
     // file has none)
-    PaintLine me = { .own = !mat, .id = (unsigned int)id, .index = index, .box = !model, .faces = op->paint.faces,
-                     .slot = model ? op->paint.slot : -1 };
+    PaintLine me = { .own = !mat, .id = (unsigned int)id, .index = index, .box = !model, .shapeKind = shapeKind,
+                     .faces = op->paint.faces, .slot = model ? op->paint.slot : -1 };
     if (mat) snprintf(me.material, sizeof(me.material), "%s", mat);
     StrBuf stmt = { 0 };
     char where[64];
     if (model) snprintf(where, sizeof(where), "slot %d", op->paint.slot);
-    else PaintFacesText(op->paint.faces, where, sizeof(where));
+    else PaintFacesText(shapeKind, op->paint.faces, where, sizeof(where));
     const int *r = op->paint.rect;
     if (mat) SbFmt(&stmt, "paint \"%s\" %d:%d %s %d %d %d %d", mat, id, index, where, r[0], r[1], r[2], r[3]);
     else SbFmt(&stmt, "paint own %d:%d %s %d %d %d %d%s", id, index, where, r[0], r[1], r[2], r[3], op->paint.nearest ? " paint_filter nearest" : "");
@@ -2247,8 +2350,9 @@ static bool PaintSet(Ctx *C, Patch *P, PaintEdit *pe, const MS_ObjRef *sel, int 
         }
         if (k == pe->lineCount) {
             char where[32];
+            const char *part = PaintPartName(ObjShapeKind(sel[i]), first);
             if (model) snprintf(where, sizeof(where), "slot %d", op->paint.slot);
-            else snprintf(where, sizeof(where), "%s", PAINT_FACE_NAMES[first]);
+            else snprintf(where, sizeof(where), "%s", part ? part : "?");
             Refuse(C, "paint-set: line %s%s%d has no entry of %s for %s", LINE_AT(file, line),
                      op->paint.material ? op->paint.material : "its own material", where);
             return false;
@@ -2261,8 +2365,8 @@ static bool PaintSet(Ctx *C, Patch *P, PaintEdit *pe, const MS_ObjRef *sel, int 
         ReadPaintLine(PatchFile(P, pl->file), pl->line - 1, st, &cur);
         RwReset(&C->rw);
         if (!model && op->paint.faces != pl->faces) {
-            char faces[32];
-            PaintFacesText(op->paint.faces, faces, sizeof(faces));
+            char faces[64];
+            PaintFacesText(ObjShapeKind(sel[i]), op->paint.faces, faces, sizeof(faces));
             RwStr(&C->rw, st->tok[pl->facesTok].s, st->tok[pl->facesTok].e, faces);
         }
         for (int c = 0; rect && c < 4; c++)
@@ -2285,9 +2389,9 @@ static bool PaintSet(Ctx *C, Patch *P, PaintEdit *pe, const MS_ObjRef *sel, int 
         }
         SelAdd(P, (unsigned int)id, index);
         if (i == 0) {
-            char where[48];
+            char where[64];
             if (model) snprintf(where, sizeof(where), "slot %d", op->paint.slot);
-            else PaintFacesText(op->paint.faces, where, sizeof(where));
+            else PaintFacesText(ObjShapeKind(sel[i]), op->paint.faces, where, sizeof(where));
             PatchWhat(P, "paint %.120s %d:%d %s", op->paint.material ? op->paint.material : "own", id, index, where);
             if (rect && P->what)
                 PatchWhat(P, "%s %d %d %d %d", P->what, op->paint.rect[0], op->paint.rect[1], op->paint.rect[2], op->paint.rect[3]);
@@ -2360,7 +2464,8 @@ static bool GroupSelection(const MS_ObjRef *sel, int selCount, StmtSel **out, in
         if (e < 0) continue;
         const MS_Source *src = &scene->entitySources[e];
         *turnedBoxes += (sel[i].kind == MS_OBJ_BOX && scene->boxTurned && scene->boxTurned[sel[i].index] >= 0) ||
-                        (sel[i].kind == MS_OBJ_BARRIER && scene->barriers[sel[i].index].turned);
+                        (sel[i].kind == MS_OBJ_BARRIER && scene->barriers[sel[i].index].turned) ||
+                        (sel[i].kind == MS_OBJ_SHAPE && scene->shapes[sel[i].index].turned);
         *models += sel[i].kind == MS_OBJ_MODEL;
         *lights += sel[i].kind == MS_OBJ_LIGHT;
         StmtSel *S = NULL;
@@ -2704,6 +2809,593 @@ static bool BarrierAdd(Ctx *C, Patch *P)
     return true;
 }
 
+// --- shape-add (EDIT_SHAPE_ADD) ---------------------------------------------------------------
+
+// A new `id N shape <kind> cx y0 cz sx sy sz` line: after the anchor's line (its file, its group), or
+// with no anchor at the end of the main file. Where a `use` other than "default" is active, the line
+// goes between `use "default"` and `use "<active>"`, as EDIT_ADD writes a model: a new shape is plain
+// grey until it gets a material.
+static double Written4(double v) { return round(v * 1e4) / 1e4; }     // (a number as FormatNum(v, 4) writes it)
+
+static bool ShapeAdd(Ctx *C, Patch *P)
+{
+    const EditOp *op = C->op;
+    const char *kind = MS_ShapeKindName((MS_ShapeKind)op->shapeKind);
+    if (!kind) return Refuse(C, "unknown shape kind");
+    char v[6][NUMBER_MAX];
+    for (int i = 0; i < 6; i++) {
+        double x = i < 3 ? op->pos[i] : op->size[i - 3];
+        if (!isfinite(x) || fabs(x) > 1e6) return Refuse(C, "shape position or size out of range");
+        FormatNum(x, 4, v[i], sizeof(v[i]));
+    }
+    bool plane = op->shapeKind == MS_SHAPE_PLANE;
+    if (Written4(op->size[0]) <= 0.0 || Written4(op->size[2]) <= 0.0) return Refuse(C, "a shape needs sizes sx and sz > 0");
+    if (plane ? op->size[1] != 0.0 : Written4(op->size[1]) <= 0.0)
+        return Refuse(C, plane ? "a plane has no height: sy 0" : "a shape needs a height sy > 0 (only a plane has none)");
+    int id = C->nextId++;
+
+    const MS_Ref *r = op->anchor.kind != MS_OBJ_NONE ? MS_ObjectRef(scene, op->anchor) : NULL;
+    if (op->anchor.kind != MS_OBJ_NONE && !r) return Refuse(C, "the object to put it after is gone");
+    int file = r ? r->file : 0;
+    PFile *F = PatchFile(P, file);
+    if (!F || F->lineCount < 1) return Refuse(C, "the map file is empty");
+    int after;          // 1-based line the new one follows
+    if (r) {
+        if (r->line < 1 || r->line > F->lineCount) return Refuse(C, "line %s%s%d is not in the file", LINE_AT(r->file, r->line));
+        after = r->line;
+    } else {
+        after = F->lineCount;
+        while (after > 1 && F->lines[after - 1].contentEnd == F->lines[after - 1].start) after--;   // (trailing empty lines)
+    }
+    char use[256];
+    ActiveUse(F, after, use, sizeof(use));
+    const LineSpan *ls = &F->lines[after - 1];
+    LineOut *o = OutFor(F, after);
+    if (!o) return Refuse(C, "out of memory");
+    SbAdd(&o->text, F->text + ls->start, ls->contentEnd - ls->start);
+    if (use[0]) SbStr(&o->text, "\nuse \"default\"");
+    SbFmt(&o->text, "\nid %d shape %s %s %s %s %s %s %s", id, kind, v[0], v[1], v[2], v[3], v[4], v[5]);
+    if (use[0]) SbFmt(&o->text, "\nuse \"%s\"", use);
+    if (o->text.oom) return Refuse(C, "out of memory");
+    SelAdd(P, (unsigned int)id, 0);
+    PatchWhat(P, "added a %s after line %s%s%d%s", kind, LINE_AT(file, after), use[0] ? " (in use \"default\")" : "");
+    return true;
+}
+
+// --- Groups as units (docs/editor-tools.md 3; docs/code/mapedit.md "Groups") ---------------------
+//
+// A group is its name: every `group "<name>"` statement with that name, in any file, is one group.
+// The ops by name (rename, delete, duplicate) ignore the selection; group-new and group-move take the
+// selection's whole lines (split out first like move-to-file: MoveStep).
+
+// The op works on a group by name (EDIT_GROUP_*)
+static bool IsGroupOp(const EditOp *op)
+{
+    return op->kind == EDIT_GROUP_RENAME || op->kind == EDIT_GROUP_DELETE || op->kind == EDIT_GROUP_NEW ||
+           op->kind == EDIT_GROUP_MOVE || op->kind == EDIT_GROUP_DUPLICATE;
+}
+
+// A name a `group` line can hold: not empty, no '"', no control character
+static bool GroupNameOk(const char *s)
+{
+    if (!s || !s[0]) return false;
+    for (; *s; s++)
+        if (*s == '"' || (unsigned char)*s < 0x20 || *s == 0x7f) return false;
+    return true;
+}
+
+// The loaded map has a group with this name
+static bool SceneHasGroup(const char *name)
+{
+    for (int g = 0; g < scene->groupCount; g++)
+        if (strcmp(scene->groups[g], name) == 0) return true;
+    return false;
+}
+
+// Per scene group index: its name is `name` (heap, at least one entry; NULL: out of memory)
+static bool *GroupMask(const char *name)
+{
+    bool *mask = calloc((size_t)(scene->groupCount > 0 ? scene->groupCount : 1), sizeof(bool));
+    for (int g = 0; mask && g < scene->groupCount; g++) mask[g] = strcmp(scene->groups[g], name) == 0;
+    return mask;
+}
+
+// Entity e belongs to a group of the mask
+static bool EntityInMask(int e, const bool *mask)
+{
+    const MS_Ref *r = MS_ObjectRef(scene, scene->entityObjects[e]);
+    return r && r->group >= 0 && r->group < scene->groupCount && mask[r->group];
+}
+
+static bool SpanIs(Span a, const char *s)
+{
+    size_t n = strlen(s);
+    return a.n >= 0 && (size_t)a.n == n && memcmp(a.s, s, n) == 0;
+}
+
+// Line l (0-based) of F: only blanks (or nothing)
+static bool BlankLine(const PFile *F, int l)
+{
+    for (int i = F->lines[l].start; i < F->lines[l].contentEnd; i++)
+        if (F->text[i] != ' ' && F->text[i] != '\t') return false;
+    return true;
+}
+
+// Line l (0-based) of F is a comment line (its first non-blank character is '#')
+static bool CommentLine(const PFile *F, int l)
+{
+    int i = F->lines[l].start;
+    while (i < F->lines[l].contentEnd && (F->text[i] == ' ' || F->text[i] == '\t')) i++;
+    return i < F->lines[l].contentEnd && F->text[i] == '#';
+}
+
+// The `group` and `use` in effect at each line of F (0-based; a scope line's own name from itself on;
+// use: n < 0 for none / "default"): heap arrays of F->lineCount + 1 entries. False: out of memory
+static bool FileScopes(const PFile *F, Stmt *st, Span **groupAt, Span **useAt)
+{
+    *groupAt = malloc(sizeof(Span) * (size_t)(F->lineCount + 1));
+    *useAt = malloc(sizeof(Span) * (size_t)(F->lineCount + 1));
+    if (!*groupAt || !*useAt) return false;
+    Span g = { NULL, -1 }, u = { NULL, -1 }, name;
+    for (int l = 0; l < F->lineCount; l++) {
+        int kind = ScopeLine(F, l, st, &name);
+        if (kind == 1) g = name;
+        else if (kind == 2) u = name;
+        (*groupAt)[l] = g;
+        (*useAt)[l] = u;
+    }
+    return true;
+}
+
+// The `group` / `use` lines of scene file `file` (F) whose scope (to the next line of its kind) holds
+// objects of the lines marked in mark[] (0-based) and no other object: gone[l] = true (heap arrays
+// of F->lineCount + 1, the caller's). False: out of memory
+static bool ScopeLinesGone(const PFile *F, int file, const bool *mark, bool *gone, Stmt *st)
+{
+    int *markedIn = calloc((size_t)F->lineCount + 1, sizeof(int)), *otherIn = calloc((size_t)F->lineCount + 1, sizeof(int));
+    bool *objLine = calloc((size_t)F->lineCount + 1, sizeof(bool));
+    if (!markedIn || !otherIn || !objLine) { free(markedIn); free(otherIn); free(objLine); return false; }
+    for (int e = 0; e < scene->entityCount; e++) {
+        const MS_Source *s = &scene->entitySources[e];
+        if (s->file == file && s->line >= 1 && s->line <= F->lineCount) objLine[s->line - 1] = true;
+    }
+    int curGroup = -1, curUse = -1;
+    Span name;
+    for (int l = 0; l < F->lineCount; l++) {
+        int kind = ScopeLine(F, l, st, &name);
+        if (kind == 1) curGroup = l;
+        else if (kind == 2) curUse = l;
+        if (!objLine[l]) continue;
+        int *counter = mark[l] ? markedIn : otherIn;
+        if (curGroup >= 0) counter[curGroup]++;
+        if (curUse >= 0) counter[curUse]++;
+    }
+    for (int l = 0; l < F->lineCount; l++) gone[l] = markedIn[l] > 0 && otherIn[l] == 0;
+    free(markedIn);
+    free(otherIn);
+    free(objLine);
+    return true;
+}
+
+// `use "<u>"` (u.n < 0: "default") added to b as a line of its own (with the '\n' before it)
+static void SbUseLine(StrBuf *b, Span u)
+{
+    SbStr(b, "\nuse \"");
+    if (u.n < 0) SbStr(b, "default");
+    else SbAdd(b, u.s, u.n);
+    SbStr(b, "\"");
+}
+
+// The last block of group `name` in the map's text with every import pasted in: its file (patch /
+// scene index) and its `group` line (0-based); false when the map has no `group "<name>"` line
+static bool LastGroupBlock(const Patch *P, const char *name, Stmt *st, int *file, int *line)
+{
+    bool found = false;
+    Span sp;
+    for (int f = 0; f < P->fileCount; f++) {
+        const PFile *F = &P->files[f];
+        if (F->create || F->scene != f) continue;
+        for (int l = 0; l < F->lineCount; l++)
+            if (ScopeLine(F, l, st, &sp) == 1 && SpanIs(sp, name) &&
+                (!found || ExpandedCompare(f, l + 1, *file, *line + 1) > 0)) {
+                found = true;
+                *file = f;
+                *line = l;
+            }
+    }
+    return found;
+}
+
+// Where lines go at the end of the block whose `group` line is g (0-based) in F: after its last object
+// line (an object line of the scene file `file` before the next `group` line), else after the group
+// line itself; lines marked in skip[] (being removed; NULL: none) are passed over
+static int BlockInsertLine(const PFile *F, int file, int g, const bool *skip, Stmt *st)
+{
+    int end = g + 1;
+    Span sp;
+    while (end < F->lineCount && ScopeLine(F, end, st, &sp) != 1) end++;
+    int at = g;
+    for (int e = 0; e < scene->entityCount; e++) {
+        const MS_Source *s = &scene->entitySources[e];
+        if (s->file == file && s->line - 1 > at && s->line - 1 < end && !(skip && skip[s->line - 1])) at = s->line - 1;
+    }
+    return at;
+}
+
+// EDIT_GROUP_RENAME: the quoted name of every `group "<old>"` line in every file; nothing else
+static bool GroupRename(Ctx *C, Patch *P, const MS_ObjRef *sel, int selCount, Stmt *st)
+{
+    const char *old = C->op->groupName ? C->op->groupName : "", *nw = C->op->groupNew ? C->op->groupNew : "";
+    if (!GroupNameOk(nw))
+        return Refuse(C, "group-rename: \"%s\" can't be a group name (empty, or with a '\"' or a control character)", nw);
+    if (strcmp(old, nw) == 0) return Refuse(C, "group-rename: the group is called \"%s\" already", nw);
+    if (SceneHasGroup(nw))
+        return Refuse(C, "group-rename: group \"%s\" exists already (group-move puts lines into a group)", nw);
+    int lines = 0, files = 0;
+    Span sp;
+    for (int f = 0; f < P->fileCount; f++) {
+        PFile *F = &P->files[f];
+        int before = lines;
+        for (int l = 0; l < F->lineCount; l++) {
+            if (ScopeLine(F, l, st, &sp) != 1 || !SpanIs(sp, old)) continue;
+            LineOut *o = OutFor(F, l + 1);
+            if (!o) return Refuse(C, "out of memory");
+            const char *s = F->text + F->lines[l].start;
+            SbAdd(&o->text, s, (int)(sp.s - s));
+            SbStr(&o->text, nw);
+            SbAdd(&o->text, sp.s + sp.n, F->lines[l].contentEnd - F->lines[l].start - (int)(sp.s - s) - sp.n);
+            if (o->text.oom) return Refuse(C, "out of memory");
+            lines++;
+        }
+        files += lines > before;
+    }
+    if (lines == 0) return Refuse(C, "group-rename: the map has no group \"%s\"", old);
+    // (the objects' lines don't change: the selection stays)
+    for (int i = 0; i < selCount; i++) {
+        int e = MS_ObjectEntity(scene, sel[i]);
+        MS_EntityId *id = e >= 0 ? MS_PUSH(P->sel, P->selCount, P->selCap) : NULL;
+        if (id) *id = scene->entityIds[e];
+    }
+    PatchWhat(P, "renamed group \"%s\" to \"%s\" (%d group line%s%s)", old, nw, lines, lines == 1 ? "" : "s",
+              files > 1 ? TextFormat(" in %d files", files) : "");
+    return true;
+}
+
+static int CompareInts(const void *a, const void *b)
+{
+    int x = *(const int *)a, y = *(const int *)b;
+    return (x > y) - (x < y);
+}
+
+// Line l (0-based) of F is a `paint` statement of an entity of a line whose id is in ids[] (sorted)
+static bool PaintOfIds(const PFile *F, int l, const int *ids, int n, Stmt *st)
+{
+    const char *s = F->text + F->lines[l].start;
+    int len = F->lines[l].contentEnd - F->lines[l].start, i = 0;
+    while (i < len && (s[i] == ' ' || s[i] == '\t')) i++;
+    if (n == 0 || len - i < 6 || memcmp(s + i, "paint", 5) != 0 || (s[i + 5] != ' ' && s[i + 5] != '\t')) return false;
+    st->text = s;
+    st->len = len;
+    char ent[64];
+    if (!Tokenize(st) || st->n < 3 || !TokIs(st, 0, "paint") || st->tok[2].quoted || !TokCopy(st, 2, ent, sizeof(ent))) return false;
+    char *end;
+    long id = strtol(ent, &end, 10);
+    if (end == ent || *end != ':' || id <= 0 || id > INT_MAX) return false;
+    int key = (int)id;
+    return bsearch(&key, ids, (size_t)n, sizeof(int), CompareInts) != NULL;
+}
+
+// EDIT_GROUP_DELETE: every object line of the group (every block of that name), its `group` lines, the
+// comment lines directly above a deleted line inside a block, `use` lines whose scope holds no other
+// object any more, a block's blank lines when nothing else of it is left, and the `paint` entries of
+// the deleted lines' ids. Everything else (material, import, env, spawn, viewpoint, other paint) stays.
+static bool GroupDelete(Ctx *C, Patch *P, Stmt *st)
+{
+    const char *name = C->op->groupName ? C->op->groupName : "";
+    if (!SceneHasGroup(name)) return Refuse(C, "group-delete: the map has no group \"%s\"", name);
+    bool ok = false, *mask = GroupMask(name);
+    bool **del = calloc((size_t)P->fileCount, sizeof(bool *));
+    bool *inBlock = NULL, *gone = NULL;
+    int *ids = NULL, idCount = 0, idCap = 0, objects = 0, lines = 0, files = 0;
+    if (!mask || !del) { Refuse(C, "out of memory"); goto done; }
+    for (int f = 0; f < P->fileCount; f++)
+        if (!(del[f] = calloc((size_t)P->files[f].lineCount + 1, sizeof(bool)))) { Refuse(C, "out of memory"); goto done; }
+    for (int e = 0; e < scene->entityCount; e++) {
+        if (!EntityInMask(e, mask)) continue;
+        const MS_Source *s = &scene->entitySources[e];
+        PFile *F = PatchFile(P, s->file);
+        if (!F || s->line < 1 || s->line > F->lineCount) { Refuse(C, "group-delete: the map's files don't match the loaded map"); goto done; }
+        del[s->file][s->line - 1] = true;
+        objects++;
+    }
+    for (int f = 0; f < P->fileCount; f++) {
+        PFile *F = &P->files[f];
+        bool *d = del[f];
+        free(inBlock);
+        free(gone);
+        inBlock = calloc((size_t)F->lineCount + 1, sizeof(bool));
+        gone = calloc((size_t)F->lineCount + 1, sizeof(bool));
+        if (!inBlock || !gone) { Refuse(C, "out of memory"); goto done; }
+        // The explicit ids of the deleted object lines (their paint entries go)
+        for (int l = 0; l < F->lineCount; l++) {
+            int id = d[l] ? LineId(F, l, st) : 0;
+            int *slot = id > 0 ? MS_PUSH(ids, idCount, idCap) : NULL;
+            if (slot) *slot = id;
+            else if (id > 0) { Refuse(C, "out of memory"); goto done; }
+        }
+        // `group` / `use` lines left without objects (the group's own lines among them)
+        if (!ScopeLinesGone(F, f, d, gone, st)) { Refuse(C, "out of memory"); goto done; }
+        bool cur = false;
+        Span sp;
+        for (int l = 0; l < F->lineCount; l++) {
+            int kind = ScopeLine(F, l, st, &sp);
+            if (kind == 1) cur = SpanIs(sp, name);
+            inBlock[l] = cur;
+            if ((kind == 1 && cur) || (kind != 0 && gone[l])) d[l] = true;
+        }
+        // Comment lines directly above a deleted line, inside the block (not above its `group` line)
+        for (int l = 0; l < F->lineCount; l++) {
+            if (!d[l] || !inBlock[l] || ScopeLine(F, l, st, &sp) == 1) continue;
+            for (int k = l - 1; k >= 0 && inBlock[k] && !d[k] && CommentLine(F, k); k--) d[k] = true;
+        }
+        // A block left with nothing but blank lines: they go too
+        for (int g = 0; g < F->lineCount; g++) {
+            if (!inBlock[g] || ScopeLine(F, g, st, &sp) != 1) continue;      // (a block of the group starts here)
+            int end = g + 1;
+            while (end < F->lineCount && !(ScopeLine(F, end, st, &sp) == 1)) end++;
+            bool empty = true;
+            for (int l = g; l < end && empty; l++) empty = d[l] || BlankLine(F, l);
+            for (int l = g; empty && l < end; l++) d[l] = true;
+        }
+    }
+    // The paint entries of the deleted lines' ids, in every file
+    if (idCount > 1) qsort(ids, (size_t)idCount, sizeof(int), CompareInts);
+    for (int f = 0; f < P->fileCount; f++)
+        for (int l = 0; l < P->files[f].lineCount; l++)
+            if (!del[f][l] && PaintOfIds(&P->files[f], l, ids, idCount, st)) del[f][l] = true;
+    for (int f = 0; f < P->fileCount; f++) {
+        int before = lines;
+        for (int l = 0; l < P->files[f].lineCount; l++) {
+            if (!del[f][l]) continue;
+            LineOut *o = OutFor(&P->files[f], l + 1);
+            if (!o) { Refuse(C, "out of memory"); goto done; }
+            o->deleted = true;
+            lines++;
+        }
+        files += lines > before;
+    }
+    PatchWhat(P, "deleted group \"%s\" (%d object%s, %d line%s%s)", name, objects, objects == 1 ? "" : "s", lines,
+              lines == 1 ? "" : "s", files > 1 ? TextFormat(" in %d files", files) : "");
+    ok = true;
+done:
+    for (int f = 0; del && f < P->fileCount; f++) free(del[f]);
+    free(del);
+    free(mask);
+    free(inBlock);
+    free(gone);
+    free(ids);
+    return ok;
+}
+
+// EDIT_GROUP_DUPLICATE: a copy of every object line of the group (in map order; each shifted by
+// op.delta, with a new id and without its comment, as `duplicate` writes it), in a new block
+// `group "<groupNew>"` right after the last object line of the group's last block, with the `use`
+// each source line had; the `use` in effect there is written back after the block when it differs.
+// The copies become the selection.
+static bool GroupDuplicate(Ctx *C, Patch *P, Stmt *st)
+{
+    const EditOp *op = C->op;
+    const char *name = op->groupName ? op->groupName : "", *nw = op->groupNew ? op->groupNew : "";
+    if (!SceneHasGroup(name)) return Refuse(C, "group-duplicate: the map has no group \"%s\"", name);
+    if (!GroupNameOk(nw))
+        return Refuse(C, "group-duplicate: \"%s\" can't be a group name (empty, or with a '\"' or a control character)", nw);
+    if (SceneHasGroup(nw)) return Refuse(C, "group-duplicate: group \"%s\" exists already", nw);
+    for (int a = 0; a < 3; a++)
+        if (!isfinite(op->delta[a]) || fabs(op->delta[a]) > 1e6) return Refuse(C, "group-duplicate: shift out of range");
+    int tf = 0, tg = 0;
+    if (!LastGroupBlock(P, name, st, &tf, &tg)) return Refuse(C, "group-duplicate: the map has no group \"%s\"", name);
+    PFile *T = PatchFile(P, tf);
+    if (!T) return Refuse(C, "group-duplicate: the map's files don't match the loaded map");
+    int at = BlockInsertLine(T, tf, tg, NULL, st);
+
+    bool ok = false, *mask = GroupMask(name);
+    Span *gAt = NULL, *uAt = NULL, *tgAt = NULL, *tuAt = NULL;
+    StrBuf body = { 0 };
+    EditOp dup = { .kind = EDIT_DUPLICATE, .delta = { op->delta[0], op->delta[1], op->delta[2] } };
+    int lines = 0, objects = 0, scopeFile = -1;
+    if (!mask || !FileScopes(T, st, &tgAt, &tuAt)) { Refuse(C, "out of memory"); goto done; }
+    Span cur = tuAt[at], back = tuAt[at];
+    SbStr(&body, "\n\ngroup \"");
+    SbStr(&body, nw);
+    SbStr(&body, "\"");
+    // The group's lines in map order (entities are; one statement's entities are contiguous)
+    for (int e = 0; e < scene->entityCount; ) {
+        int prim = scene->entitySources[e].prim, end = e + 1;
+        while (end < scene->entityCount && scene->entitySources[end].prim == prim) end++;
+        bool in = prim >= 0 && EntityInMask(e, mask);
+        const MS_Source *s = &scene->entitySources[e];
+        int count = end - e;
+        e = end;
+        if (!in) continue;
+        PFile *F = PatchFile(P, s->file);
+        if (!F || s->line < 1 || s->line > F->lineCount) { Refuse(C, "group-duplicate: the map's files don't match the loaded map"); goto done; }
+        if (scopeFile != s->file) {
+            free(gAt);
+            free(uAt);
+            gAt = uAt = NULL;
+            if (!FileScopes(F, st, &gAt, &uAt)) { Refuse(C, "out of memory"); goto done; }
+            scopeFile = s->file;
+        }
+        const LineSpan *ls = &F->lines[s->line - 1];
+        const char *bad;
+        if (!Analyze(st, F->text + ls->start, ls->contentEnd - ls->start, &bad)) {
+            Refuse(C, "line %s%s%d: %s", LINE_AT(s->file, s->line), bad);
+            goto done;
+        }
+        Span u = uAt[s->line - 1];
+        if (!SpanEq(u, cur)) {
+            SbUseLine(&body, u);
+            cur = u;
+        }
+        SbStr(&body, "\n");
+        const EditOp *keep = C->op;
+        C->op = &dup;
+        int id = 0;
+        bool w = WholeLine(C, st, &id, &body);
+        C->op = keep;
+        if (!w) { if (!C->refused) Refuse(C, "line %s%s%d: cannot copy it", LINE_AT(s->file, s->line)); goto done; }
+        for (int i = 0; i < count; i++) SelAdd(P, (unsigned int)id, i);
+        lines++;
+        objects += count;
+    }
+    if (lines == 0) { Refuse(C, "group-duplicate: group \"%s\" has no objects", name); goto done; }
+    if (!SpanEq(cur, back)) SbUseLine(&body, back);
+    {
+        LineOut *o = OutFor(T, at + 1);
+        if (!o) { Refuse(C, "out of memory"); goto done; }
+        SbAdd(&o->text, T->text + T->lines[at].start, T->lines[at].contentEnd - T->lines[at].start);
+        SbAdd(&o->text, body.s, body.len);
+        if (o->text.oom || body.oom) { Refuse(C, "out of memory"); goto done; }
+    }
+    {
+        char a[3][NUMBER_MAX];
+        for (int i = 0; i < 3; i++) FormatNum(op->delta[i], 4, a[i], sizeof(a[i]));
+        PatchWhat(P, "duplicated group \"%s\" as \"%s\" (%d line%s, %d object%s) by %s %s %s, after line %s%s%d", name, nw,
+                  lines, lines == 1 ? "" : "s", objects, objects == 1 ? "" : "s", a[0], a[1], a[2], LINE_AT(tf, at + 1));
+    }
+    ok = true;
+done:
+    free(mask);
+    free(gAt);
+    free(uAt);
+    free(tgAt);
+    free(tuAt);
+    free(body.s);
+    return ok;
+}
+
+// EDIT_GROUP_NEW / EDIT_GROUP_MOVE on whole statements of one file (ss: every copy selected; a split
+// copy is a line of its own by now, MoveStep): their lines move, in their order, into a new block
+// `group "<groupNew>"` at the end of their file (new) or to the end of group groupName's last block,
+// after its last object line (move; in any file), each with the `use` it had where the target's
+// differs; the target's `use` is written back after them (move). `group` / `use` lines of the source
+// whose scope held moved objects and holds no other object any more go (move-to-file's rule).
+static bool RegroupLines(Ctx *C, Patch *P, const StmtSel *ss, int ssCount, Stmt *st)
+{
+    const EditOp *op = C->op;
+    bool isNew = op->kind == EDIT_GROUP_NEW;
+    const char *verb = isNew ? "group-new" : "group-move";
+    const char *name = isNew ? (op->groupNew ? op->groupNew : "") : (op->groupName ? op->groupName : "");
+    int src = ss[0].file;
+    const char *mainPath = MS_MapFileAt(scene, 0)->path;
+    for (int k = 1; k < ssCount; k++)
+        if (ss[k].file != src)
+            return Refuse(C, "%s: the selection holds lines of %s and of %s: one file's lines at a time", verb,
+                          src > 0 ? MapEditFilePath(src) : mainPath, ss[k].file > 0 ? MapEditFilePath(ss[k].file) : mainPath);
+    for (int k = 0; k < ssCount; k++)
+        if (ss[k].selCopies < ss[k].copies) return Refuse(C, "%s: a repeat copy was not split out", verb);
+    if (isNew && !GroupNameOk(name))
+        return Refuse(C, "group-new: \"%s\" can't be a group name (empty, or with a '\"' or a control character)", name);
+    if (isNew && SceneHasGroup(name)) return Refuse(C, "group-new: group \"%s\" exists already (group-move puts lines into it)", name);
+    PFile *F = PatchFile(P, src);
+    if (!F) return Refuse(C, "%s: the map's files don't match the loaded map", verb);
+
+    bool ok = false, *moved = calloc((size_t)F->lineCount + 1, sizeof(bool)), *gone = calloc((size_t)F->lineCount + 1, sizeof(bool));
+    Span *gAt = NULL, *uAt = NULL;
+    StrBuf body = { 0 };
+    int movedLines = 0, objects = 0, removedScope = 0;
+    if (!moved || !gone) { Refuse(C, "out of memory"); goto done; }
+    for (int k = 0; k < ssCount; k++) {
+        if (ss[k].line < 1 || ss[k].line > F->lineCount) { Refuse(C, "line %s%s%d is not in the file", LINE_AT(src, ss[k].line)); goto done; }
+        moved[ss[k].line - 1] = true;
+        objects += ss[k].entityCount;
+    }
+    if (!ScopeLinesGone(F, src, moved, gone, st)) { Refuse(C, "out of memory"); goto done; }
+    Span sp;
+    for (int l = 0; l < F->lineCount; l++) {
+        bool scope = ScopeLine(F, l, st, &sp) != 0;
+        gone[l] = gone[l] && scope;
+        removedScope += gone[l];
+        gone[l] = gone[l] || moved[l];      // (from here: every line that goes)
+    }
+
+    // The target: its file, the line the lines follow, and the `use` in effect there
+    int tf = src, at;
+    if (isNew) {
+        at = F->lineCount - 1;
+        while (at > 0 && gone[at]) at--;
+    } else {
+        int tg = 0;
+        if (!LastGroupBlock(P, name, st, &tf, &tg)) { Refuse(C, "group-move: the map has no group \"%s\"", name); goto done; }
+        at = BlockInsertLine(PatchFile(P, tf), tf, tg, tf == src ? gone : NULL, st);
+    }
+    PFile *T = PatchFile(P, tf);
+    if (!T || T->lineCount == 0) { Refuse(C, "%s: the map's files don't match the loaded map", verb); goto done; }
+    // (the `use` at the target line with the lines that go passed over: they are gone by then)
+    Span cur = { NULL, -1 };
+    for (int l = 0; l <= at; l++) {
+        if (tf == src && gone[l]) continue;
+        if (ScopeLine(T, l, st, &sp) == 2) cur = sp;
+    }
+    Span back = cur;
+    if (!FileScopes(F, st, &gAt, &uAt)) { Refuse(C, "out of memory"); goto done; }
+    if (isNew) {
+        SbStr(&body, BlankLine(T, at) ? "\ngroup \"" : "\n\ngroup \"");
+        SbStr(&body, name);
+        SbStr(&body, "\"");
+    }
+    for (int l = 0; l < F->lineCount; l++) {
+        if (!moved[l]) continue;
+        if (!SpanEq(uAt[l], cur)) {
+            SbUseLine(&body, uAt[l]);
+            cur = uAt[l];
+        }
+        SbStr(&body, "\n");
+        SbAdd(&body, F->text + F->lines[l].start, F->lines[l].contentEnd - F->lines[l].start);
+        movedLines++;
+    }
+    if (!isNew && !SpanEq(cur, back)) SbUseLine(&body, back);
+    if (body.oom) { Refuse(C, "out of memory"); goto done; }
+
+    // The source's lines that go, then the lines after the target line
+    for (int l = 0; l < F->lineCount; l++) {
+        if (!gone[l]) continue;
+        LineOut *o = OutFor(F, l + 1);
+        if (!o) { Refuse(C, "out of memory"); goto done; }
+        o->deleted = true;
+    }
+    {
+        LineOut *o = OutFor(T, at + 1);
+        if (!o) { Refuse(C, "out of memory"); goto done; }
+        SbAdd(&o->text, T->text + T->lines[at].start, T->lines[at].contentEnd - T->lines[at].start);
+        SbAdd(&o->text, body.s, body.len);
+        if (o->text.oom) { Refuse(C, "out of memory"); goto done; }
+    }
+
+    // The selection stays the same objects (their lines' text, and so their keys, are unchanged)
+    for (int k = 0; k < ssCount; k++)
+        for (int i = 0; i < ss[k].entityCount; i++) {
+            MS_EntityId *e = MS_PUSH(P->sel, P->selCount, P->selCap);
+            if (e) *e = scene->entityIds[ss[k].firstEntity + i];
+        }
+    const char *removed = removedScope ? TextFormat(", %d group / use line%s left without objects removed", removedScope,
+                                                    removedScope == 1 ? "" : "s") : "";
+    if (isNew)
+        PatchWhat(P, "new group \"%s\": %d line%s (%d object%s) moved to the end of %s%s", name, movedLines, movedLines == 1 ? "" : "s",
+                  objects, objects == 1 ? "" : "s", src > 0 ? MapEditFilePath(src) : mainPath, removed);
+    else
+        PatchWhat(P, "put %d line%s (%d object%s) into group \"%s\" (after line %s%s%d)%s", movedLines, movedLines == 1 ? "" : "s",
+                  objects, objects == 1 ? "" : "s", name, LINE_AT(tf, at + 1), removed);
+    ok = true;
+done:
+    free(moved);
+    free(gone);
+    free(gAt);
+    free(uAt);
+    free(body.s);
+    return ok;
+}
+
 static bool BuildPatch(Ctx *C, Patch *P, const MS_ObjRef *sel, int selCount)
 {
     const EditOp *op = C->op;
@@ -2723,6 +3415,16 @@ static bool BuildPatch(Ctx *C, Patch *P, const MS_ObjRef *sel, int selCount)
     }
     if (op->kind == EDIT_BARRIER_ADD) {
         ok = BarrierAdd(C, P);
+        goto done;
+    }
+    if (op->kind == EDIT_SHAPE_ADD) {
+        ok = ShapeAdd(C, P);
+        goto done;
+    }
+    // (groups by name: the selection only rides along)
+    if (op->kind == EDIT_GROUP_RENAME || op->kind == EDIT_GROUP_DELETE || op->kind == EDIT_GROUP_DUPLICATE) {
+        ok = op->kind == EDIT_GROUP_RENAME ? GroupRename(C, P, sel, selCount, &st)
+           : op->kind == EDIT_GROUP_DELETE ? GroupDelete(C, P, &st) : GroupDuplicate(C, P, &st);
         goto done;
     }
     if (op->kind == EDIT_ADD) {
@@ -2760,8 +3462,13 @@ static bool BuildPatch(Ctx *C, Patch *P, const MS_ObjRef *sel, int selCount)
         ok = MoveToFile(C, P, ss, ssCount, &st);
         goto doneSel;
     }
-    if ((op->kind == EDIT_ROTATE || op->kind == EDIT_SET_ROTATION) && lights > 0) {
-        Refuse(C, "lights can't be turned (edit a spot light's direction on its line)");
+    if (op->kind == EDIT_GROUP_NEW || op->kind == EDIT_GROUP_MOVE) {
+        ok = RegroupLines(C, P, ss, ssCount, &st);
+        goto doneSel;
+    }
+    // (a turn about a pivot takes lights along: they orbit it, LightTurn; a whole group turned as one)
+    if ((op->kind == EDIT_SET_ROTATION || (op->kind == EDIT_ROTATE && (!op->hasPivot || op->local))) && lights > 0) {
+        Refuse(C, "lights can't be turned (edit a spot light's direction on its line; turned about a pivot they orbit it)");
         goto doneSel;
     }
     bool plain = IsPlainTurn(op);
@@ -2801,8 +3508,8 @@ static bool BuildPatch(Ctx *C, Patch *P, const MS_ObjRef *sel, int selCount)
         const char *bad;
         if (!Analyze(&st, F->text + ls->start, ls->contentEnd - ls->start, &bad)) { Refuse(C, "%s", bad); goto doneSel; }
         if (CopyCount(&st) != S->copies) { Refuse(C, "line %s%s%d: the copies don't match the loaded map", LINE_AT(S->file, S->line)); goto doneSel; }
-        if (IsTransform(op) && st.kind == ST_BOX && !CornerPrim(st.prim) && strcmp(st.prim, "block") != 0) {
-            Refuse(C, "line %s%s%d: %s can't %s (only box, block and barrier lines)", LINE_AT(S->file, S->line), st.prim,
+        if (IsTransform(op) && st.kind == ST_BOX && !CornerPrim(st.prim) && !BlockPrim(st.prim)) {
+            Refuse(C, "line %s%s%d: %s can't %s (only box, block, shape and barrier lines)", LINE_AT(S->file, S->line), st.prim,
                      op->kind == EDIT_ROTATE || op->kind == EDIT_SET_ROTATION ? "turn" : op->kind == EDIT_SCALE ? "be scaled" : "be resized");
             goto doneSel;
         }
@@ -3235,12 +3942,14 @@ static bool PatchFromSet(Patch *P, const FSet *s)
 // #region Self-check of move-to-file: the map before and after, object by object
 // ======================================================================================
 
-// One entity as the self-check compares it: its id, kind, what and where it is (geom), and its
-// material and group by name (look)
+// One entity as the self-check compares it: its id, kind, what and where it is (geom), its
+// material(s) by name (look) and its group by name (group). dropped: the edit is expected to remove
+// it (group-delete; SnapExpect)
 typedef struct {
     MS_EntityId id;
     int kind;
-    unsigned long long geom, look;
+    unsigned long long geom, look, group;
+    bool dropped;
 } SnapEntity;
 
 typedef struct {
@@ -3248,6 +3957,8 @@ typedef struct {
     int n;
     unsigned long long paint;   // every paint entry (material, entity, faces / slot, rectangle, filter, what it hit)
     int paintCount;
+    unsigned long long newGroup;    // entities only the map after has are expected in this group (group-duplicate;
+    bool allowNew;                  // SnapExpect)
 } Snapshot;
 
 static unsigned long long HashBytes(unsigned long long h, const void *p, size_t n)
@@ -3271,7 +3982,9 @@ static int CompareSnap(const void *a, const void *b)
 
 static const char *MaterialName(int m) { return m >= 0 && m < scene->materialCount ? scene->materials[m].name : NULL; }
 
-static bool TakeSnapshot(Snapshot *S)
+// dropGroup: entities of the group with this name, and their paint entries, are left out of the paint
+// hash (the map before a group-delete); NULL: none
+static bool TakeSnapshot(Snapshot *S, const char *dropGroup)
 {
     S->n = scene->entityCount;
     S->v = malloc(sizeof(SnapEntity) * (S->n > 0 ? (size_t)S->n : 1));
@@ -3317,16 +4030,29 @@ static bool TakeSnapshot(Snapshot *S)
             g = HashBytes(g, &b->box, sizeof(BoundingBox));
             g = HashBytes(g, &b->turned, sizeof(b->turned));
             if (b->turned) g = HashBytes(g, &b->shape, sizeof(MS_TurnedBox));
+        } else if (o.kind == MS_OBJ_SHAPE) {
+            const MS_Shape *sh = &scene->shapes[o.index];
+            g = HashBytes(g, &sh->kind, sizeof(sh->kind));
+            g = HashBytes(g, &sh->box, sizeof(BoundingBox));
+            g = HashBytes(g, &sh->turned, sizeof(sh->turned));
+            g = HashBytes(g, &sh->shape, sizeof(MS_TurnedBox));
         }
         l = HashName(l, r ? MaterialName(r->material) : NULL);
-        l = HashName(l, r && r->group >= 0 && r->group < scene->groupCount ? scene->groups[r->group] : NULL);
-        S->v[e] = (SnapEntity){ scene->entityIds[e], (int)o.kind, g, l };
+        const char *group = r && r->group >= 0 && r->group < scene->groupCount ? scene->groups[r->group] : NULL;
+        S->v[e] = (SnapEntity){ scene->entityIds[e], (int)o.kind, g, l, HashName(FNV_OFFSET, group),
+                                dropGroup && group && strcmp(group, dropGroup) == 0 };
     }
     if (S->n > 1) qsort(S->v, (size_t)S->n, sizeof(SnapEntity), CompareSnap);
     unsigned long long p = FNV_OFFSET;
-    S->paintCount = MS_PaintEntryCount(scene);
-    for (int i = 0; i < S->paintCount; i++) {
+    S->paintCount = 0;
+    for (int i = 0; i < MS_PaintEntryCount(scene); i++) {
         const MS_PaintEntry *pe = MS_PaintEntryAt(scene, i);
+        if (dropGroup) {
+            int pent = MS_FindEntity(scene, pe->entity);
+            const MS_Ref *pr = pent >= 0 ? MS_ObjectRef(scene, scene->entityObjects[pent]) : NULL;
+            if (pr && pr->group >= 0 && pr->group < scene->groupCount && strcmp(scene->groups[pr->group], dropGroup) == 0) continue;
+        }
+        S->paintCount++;
         p = HashName(p, MaterialName(pe->material));
         p = HashBytes(p, &pe->entity, sizeof(pe->entity));
         int v[6] = { pe->faces, pe->slot, pe->x, pe->y, pe->w, pe->h };
@@ -3350,19 +4076,53 @@ static const char *IdText(MS_EntityId id)
 // TextFormat string)
 static const char *SnapshotDiff(const Snapshot *a, const Snapshot *b)
 {
-    static const char *const KIND[] = { "object", "box", "model", "light", "barrier" };
+    static const char *const KIND[] = { "object", "box", "model", "light", "barrier", "shape" };
     for (int i = 0, j = 0; i < a->n || j < b->n; ) {
+        if (i < a->n && a->v[i].dropped) {
+            // (expected gone: an entity of the same id after it is no match)
+            if (j < b->n && CompareSnap(&a->v[i], &b->v[j]) == 0)
+                return TextFormat("entity %s (%s) would still be there", IdText(a->v[i].id), KIND[a->v[i].kind % 6]);
+            i++;
+            continue;
+        }
         int c = i >= a->n ? 1 : j >= b->n ? -1 : CompareSnap(&a->v[i], &b->v[j]);
-        if (c < 0) return TextFormat("entity %s (%s) would be gone", IdText(a->v[i].id), KIND[a->v[i].kind % 5]);
-        if (c > 0) return TextFormat("entity %s (%s) would be new", IdText(b->v[j].id), KIND[b->v[j].kind % 5]);
+        if (c > 0 && a->allowNew && b->v[j].group == a->newGroup) { j++; continue; }     // (a copy, as expected)
+        if (c < 0) return TextFormat("entity %s (%s) would be gone", IdText(a->v[i].id), KIND[a->v[i].kind % 6]);
+        if (c > 0) return TextFormat("entity %s (%s) would be new", IdText(b->v[j].id), KIND[b->v[j].kind % 6]);
         if (a->v[i].kind != b->v[j].kind) return TextFormat("entity %s would be another kind of object", IdText(a->v[i].id));
-        if (a->v[i].geom != b->v[j].geom) return TextFormat("entity %s (%s) would change its shape or place", IdText(a->v[i].id), KIND[a->v[i].kind % 5]);
-        if (a->v[i].look != b->v[j].look) return TextFormat("entity %s (%s) would get another material or group", IdText(a->v[i].id), KIND[a->v[i].kind % 5]);
+        if (a->v[i].geom != b->v[j].geom) return TextFormat("entity %s (%s) would change its shape or place", IdText(a->v[i].id), KIND[a->v[i].kind % 6]);
+        if (a->v[i].look != b->v[j].look || a->v[i].group != b->v[j].group)
+            return TextFormat("entity %s (%s) would get another material or group", IdText(a->v[i].id), KIND[a->v[i].kind % 6]);
         i++;
         j++;
     }
     if (a->paintCount != b->paintCount || a->paint != b->paint) return "the paint entries would change";
     return NULL;
+}
+
+// The map before a group op (a) becomes what the map after it must be (docs/editor-tools.md 3.2): rename:
+// the group's entities in the new group; new / move: the moved entities (moved[], sorted like a's) in
+// the target group; delete: the group's entities dropped (TakeSnapshot left their paint out);
+// duplicate: new entities allowed in the new group. Other ops: a stays as it is.
+static void SnapExpect(Snapshot *a, const EditOp *op, MS_EntityId *moved, int movedCount)
+{
+    if (!IsGroupOp(op)) return;
+    unsigned long long from = HashName(FNV_OFFSET, op->groupName), to = HashName(FNV_OFFSET, op->groupNew);
+    if (op->kind == EDIT_GROUP_RENAME)
+        for (int i = 0; i < a->n; i++) { if (a->v[i].group == from) a->v[i].group = to; }
+    else if (op->kind == EDIT_GROUP_NEW || op->kind == EDIT_GROUP_MOVE) {
+        unsigned long long into = op->kind == EDIT_GROUP_NEW ? to : from;
+        SnapEntity *m = malloc(sizeof(SnapEntity) * (size_t)(movedCount > 0 ? movedCount : 1));
+        if (!m) return;     // (out of memory: the check then names the first moved entity)
+        for (int i = 0; i < movedCount; i++) m[i] = (SnapEntity){ .id = moved[i] };
+        if (movedCount > 1) qsort(m, (size_t)movedCount, sizeof(SnapEntity), CompareSnap);
+        for (int i = 0; i < a->n; i++)
+            if (bsearch(&a->v[i], m, (size_t)movedCount, sizeof(SnapEntity), CompareSnap)) a->v[i].group = into;
+        free(m);
+    } else if (op->kind == EDIT_GROUP_DUPLICATE) {
+        a->allowNew = true;
+        a->newGroup = to;
+    }
 }
 
 // #endregion
@@ -3384,6 +4144,8 @@ static void FreeStep(MapEditor *E, EditStep *s)
     free(s->matKeys);
     free(s->paintMaterial);
     free(s->paintAtlas);
+    free(s->groupName);
+    free(s->groupNew);
     free(s->what);
     for (int i = 0; i < s->moreCount; i++) {
         free(s->more[i].material);
@@ -3487,6 +4249,14 @@ static bool KeepOp(EditStep *step, const EditOp *op)
     step->op.modelPath = step->op.filePath = NULL;
     step->op.matName = step->op.matKeys = NULL;
     step->op.paint.material = step->op.paint.atlas = NULL;
+    step->op.groupName = step->op.groupNew = NULL;
+    if (IsGroupOp(op)) {
+        step->groupName = op->groupName ? MS_StrDup(op->groupName) : NULL;
+        step->groupNew = op->groupNew ? MS_StrDup(op->groupNew) : NULL;
+        if ((op->groupName && !step->groupName) || (op->groupNew && !step->groupNew)) return false;
+        step->op.groupName = step->groupName;
+        step->op.groupNew = step->groupNew;
+    }
     if (op->kind == EDIT_PAINT_ADD || op->kind == EDIT_PAINT_SET || op->kind == EDIT_PAINT_REMOVE) {
         step->paintMaterial = op->paint.material ? MS_StrDup(op->paint.material) : NULL;
         step->paintAtlas = op->paint.atlas ? MS_StrDup(op->paint.atlas) : NULL;
@@ -3507,7 +4277,7 @@ static bool KeepOp(EditStep *step, const EditOp *op)
         int e = MS_ObjectEntity(scene, op->anchor);
         if (e >= 0) step->anchorId = scene->entityIds[e];
     }
-    if (op->kind == EDIT_BARRIER_ADD) {
+    if (op->kind == EDIT_BARRIER_ADD || op->kind == EDIT_SHAPE_ADD) {
         int e = op->anchor.kind != MS_OBJ_NONE ? MS_ObjectEntity(scene, op->anchor) : -1;
         if (e >= 0) step->anchorId = scene->entityIds[e];
         else step->op.anchor = (MS_ObjRef){ MS_OBJ_NONE, -1 };
@@ -3555,7 +4325,7 @@ static unsigned char ApplyStep(MapEditor *E, const MS_ObjRef *sel, int selCount,
         MS_SetError("the map was reloaded from disk: wait until the edits are re-applied");
         return 1;
     }
-    if (op->kind == EDIT_MOVE_TO_FILE) return MoveStep(E, sel, selCount, op, outSel, outSelCount);
+    if (op->kind == EDIT_MOVE_TO_FILE || IsGroupOp(op)) return MoveStep(E, sel, selCount, op, outSel, outSelCount);
     FSet set0 = { 0 }, set1 = { 0 };
     Ctx C = { .op = op };
     Patch P = { 0 };
@@ -3616,14 +4386,22 @@ done:
     return res;
 }
 
-// EDIT_MOVE_TO_FILE (ApplyStep's values): a selected `repeat` copy is split out first (as a move by
-// 0 0 0 does), then the lines move; the map before the move (after the split) and after it are
-// compared object by object (SnapshotDiff), and any difference refuses the edit with the scene as it
-// was. The step's hunks go from the texts before the split to the texts after the move (one undo).
+// EDIT_MOVE_TO_FILE and the group ops (ApplyStep's values): for the ops on the selection's lines
+// (move-to-file, group-new, group-move) a selected `repeat` copy is split out first (as a move by 0 0 0
+// does), then the lines move; the map before the edit (after the split) and after it are compared
+// object by object (SnapshotDiff; a group op's expected changes applied first, SnapExpect), and any
+// difference refuses the edit with the scene as it was. The step's hunks go from the texts before the
+// split to the texts after the edit (one undo).
 static unsigned char MoveStep(MapEditor *E, const MS_ObjRef *sel, int selCount, const EditOp *op,
                               MS_EntityId **outSel, int *outSelCount)
 {
     bool live = MapEditHasWork(E);
+    const char *opName = op->kind == EDIT_GROUP_RENAME ? "group-rename" : op->kind == EDIT_GROUP_DELETE ? "group-delete"
+                       : op->kind == EDIT_GROUP_NEW ? "group-new" : op->kind == EDIT_GROUP_MOVE ? "group-move"
+                       : op->kind == EDIT_GROUP_DUPLICATE ? "group-duplicate" : "move-to-file";
+    // (the ops by name take no lines of the selection: it only rides along as the step's selection)
+    bool byLines = op->kind == EDIT_MOVE_TO_FILE || op->kind == EDIT_GROUP_NEW || op->kind == EDIT_GROUP_MOVE;
+    MS_ObjRef *own = NULL;      // group-move: the selection without the objects in the target group already
     unsigned long long before = scene->hash;
     FSet set0 = { 0 }, set1 = { 0 }, set2 = { 0 };
     Patch P1 = { 0 }, P2 = { 0 };
@@ -3640,17 +4418,36 @@ static unsigned char MoveStep(MapEditor *E, const MS_ObjRef *sel, int selCount, 
     step.selBefore = SelectionIds(sel, selCount, &step.selBeforeCount);
     keep = malloc(sizeof(MS_EntityId) * (selCount > 0 ? (size_t)selCount : 1));
     splitSel = malloc(sizeof(MS_ObjRef) * (selCount > 0 ? (size_t)selCount : 1));
-    if (!step.selBefore || !keep || !splitSel || !GroupSelection(sel, selCount, &ss, &ssCount, &models, &lights, &turned)) {
-        MS_SetError("out of memory");
-        goto done;
+    if (!step.selBefore || !keep || !splitSel) { MS_SetError("out of memory"); goto done; }
+    if (op->kind == EDIT_GROUP_MOVE) {
+        // (objects in that group already stay where they are)
+        int n = 0;
+        bool *mask = GroupMask(op->groupName ? op->groupName : "");
+        own = malloc(sizeof(MS_ObjRef) * (selCount > 0 ? (size_t)selCount : 1));
+        if (!mask || !own) { free(mask); MS_SetError("out of memory"); goto done; }
+        if (!SceneHasGroup(op->groupName ? op->groupName : "")) {
+            free(mask);
+            MS_SetError("group-move: the map has no group \"%s\"", op->groupName ? op->groupName : "");
+            goto done;
+        }
+        for (int i = 0; i < selCount; i++) {
+            int e = MS_ObjectEntity(scene, sel[i]);
+            if (e >= 0 && !EntityInMask(e, mask)) own[n++] = sel[i];
+        }
+        free(mask);
+        if (n == 0 && selCount > 0) { MS_SetError("group-move: the selection is in group \"%s\" already", op->groupName); goto done; }
+        sel = own;
+        selCount = n;
     }
-    if (ssCount == 0) { MS_SetError("nothing selected"); goto done; }
+    if (byLines && !GroupSelection(sel, selCount, &ss, &ssCount, &models, &lights, &turned)) { MS_SetError("out of memory"); goto done; }
+    if (byLines && ssCount == 0) { MS_SetError("nothing selected"); goto done; }
 
     // 1. The copies of `repeat` lines selected without their whole line: split out (a move by 0 0 0)
     int splitCount = 0;
     for (int i = 0; i < selCount; i++) {
         int e = MS_ObjectEntity(scene, sel[i]);
         if (e < 0) continue;
+        if (!byLines) { keep[keepCount++] = scene->entityIds[e]; continue; }
         const StmtSel *S = NULL;
         for (int k = 0; k < ssCount && !S; k++) if (ss[k].prim == scene->entitySources[e].prim) S = &ss[k];
         if (S->selCopies < S->copies) splitSel[splitCount++] = sel[i];
@@ -3663,7 +4460,7 @@ static unsigned char MoveStep(MapEditor *E, const MS_ObjRef *sel, int selCount, 
         if (!MakeHunks(&P1, &split)) { MS_SetError("out of memory"); goto done; }
         if (!FSetApply(&set0, &split, false, true, &set1)) goto done;
         if (FSetLive(&set1, &E->lastStats) != MS_RELOADED) {
-            MS_SetError("move-to-file: splitting the repeat copies out would break the map: %s", MS_LastError());
+            MS_SetError("%s: splitting the repeat copies out would break the map: %s", opName, MS_LastError());
             goto done;
         }
         changed = true;
@@ -3681,21 +4478,22 @@ static unsigned char MoveStep(MapEditor *E, const MS_ObjRef *sel, int selCount, 
         int e = MS_FindEntity(scene, keep[i]);
         if (e >= 0) objs[objCount++] = scene->entityObjects[e];
     }
-    if (!TakeSnapshot(&S1)) goto revert;
+    if (!TakeSnapshot(&S1, op->kind == EDIT_GROUP_DELETE ? op->groupName : NULL)) goto revert;
+    SnapExpect(&S1, op, keep, keepCount);
 
     // 2. The move, live, then the self-check
     if (!PatchFromSet(&P2, &set1) || !BuildPatch(&C2, &P2, objs, objCount)) goto revert;
     if (!MakeHunks(&P2, &move)) { MS_SetError("out of memory"); goto revert; }
     if (!FSetApply(&set1, &move, false, true, &set2)) goto revert;
     if (FSetLive(&set2, &E->lastStats) != MS_RELOADED) {
-        MS_SetError("move-to-file refused: the map would not load: %s", MS_LastError());
+        MS_SetError("%s refused: the map would not load: %s", opName, MS_LastError());
         goto revert;
     }
     changed = true;
-    if (!TakeSnapshot(&S2)) goto revert;
+    if (!TakeSnapshot(&S2, NULL)) goto revert;
     const char *diff = SnapshotDiff(&S1, &S2);
     if (diff) {
-        MS_SetError("move-to-file refused (self-check: the map would not be the same): %s", diff);
+        MS_SetError("%s refused (self-check: the map would not be the same): %s", opName, diff);
         goto revert;
     }
 
@@ -3737,6 +4535,7 @@ done:
     FreeStmtSels(ss, ssCount);
     free(keep);
     free(splitSel);
+    free(own);
     free(objs);
     free(S1.v);
     free(S2.v);
@@ -4083,10 +4882,13 @@ unsigned char MapEditRebase(MapEditor *E, MS_EntityId **outSel, int *outSelCount
         int n = 0;
         bool bad = false;
         char *why = NULL;       // why the step can't be applied again (heap; NULL with bad: out of memory)
+        // (a group op by name doesn't need its selection: objects of it that are gone are left out)
+        bool byName = st->op.kind == EDIT_GROUP_RENAME || st->op.kind == EDIT_GROUP_DELETE || st->op.kind == EDIT_GROUP_DUPLICATE;
         for (int k = 0; k < st->selBeforeCount && !bad; k++) {
             MS_EntityId orig = st->selBefore[k], id = MapId(map, mapCount, orig);
             int e = id.stmt ? MS_FindEntity(scene, id) : -1;
             const char *fmt = MS_ENTITY_EXPLICIT(orig) ? "entity %u:%d %s" : "entity %08x:%d %s";
+            if (e < 0 && byName) continue;
             if (e < 0) {
                 bad = true;
                 why = MonoStrf(fmt, orig.stmt, orig.index, id.stmt ? "is gone" : "came from an edit that could not be re-applied");
@@ -4098,6 +4900,8 @@ unsigned char MapEditRebase(MapEditor *E, MS_EntityId **outSel, int *outSelCount
         op.matKeys = st->matKeys;
         op.paint.material = st->paintMaterial;
         op.paint.atlas = st->paintAtlas;
+        op.groupName = st->groupName;
+        op.groupNew = st->groupNew;
         if (!bad && op.kind == EDIT_ADD) {
             MS_EntityId id = MapId(map, mapCount, st->anchorId);
             int e = id.stmt ? MS_FindEntity(scene, id) : -1;
@@ -4106,8 +4910,9 @@ unsigned char MapEditRebase(MapEditor *E, MS_EntityId **outSel, int *outSelCount
                 why = MonoStrf("what it stood on (entity %08x:%d) is gone", st->anchorId.stmt, st->anchorId.index);
             } else op.anchor = scene->entityObjects[e];
         }
-        if (!bad && op.kind == EDIT_BARRIER_ADD && st->anchorId.stmt) {
-            // (after the object it was put after; without one: the main file's `# barriers` block)
+        if (!bad && (op.kind == EDIT_BARRIER_ADD || op.kind == EDIT_SHAPE_ADD) && st->anchorId.stmt) {
+            // (after the object it was put after; without one: the main file's `# barriers` block, or
+            // for a shape the main file's end)
             MS_EntityId id = MapId(map, mapCount, st->anchorId);
             int e = id.stmt ? MS_FindEntity(scene, id) : -1;
             if (e < 0) {
@@ -4221,6 +5026,7 @@ void MapEditAnchor(MS_ObjRef o, double out[3])
     else if (o.kind == MS_OBJ_MODEL && o.index >= 0 && o.index < scene->modelCount) p = scene->models[o.index].position;
     else if (o.kind == MS_OBJ_LIGHT && o.index >= 0 && o.index < scene->lightCount) p = scene->lights[o.index].light.position;
     else if (o.kind == MS_OBJ_BARRIER && o.index >= 0 && o.index < scene->barrierCount) p = scene->barriers[o.index].box.min;
+    else if (o.kind == MS_OBJ_SHAPE && o.index >= 0 && o.index < scene->shapeCount) p = scene->shapes[o.index].box.min;
     out[0] = Round4(p.x);
     out[1] = Round4(p.y);
     out[2] = Round4(p.z);
@@ -4293,7 +5099,8 @@ void MapEditClassify(const MS_ObjRef *objs, int count, unsigned char *classes)
             if (indexed[f] > 0 && line >= 1 && line <= F->lineCount &&
                 Analyze(&st, F->text + F->lines[line - 1].start, F->lines[line - 1].contentEnd - F->lines[line - 1].start, &bad))
                 c = strcmp(st.prim, "box") == 0 ? EDIT_CLASS_BOX : strcmp(st.prim, "block") == 0 ? EDIT_CLASS_BLOCK
-                  : strcmp(st.prim, "barrier") == 0 ? EDIT_CLASS_BARRIER : EDIT_CLASS_OTHER_BOX;
+                  : strcmp(st.prim, "barrier") == 0 ? EDIT_CLASS_BARRIER : strcmp(st.prim, "shape") == 0 ? EDIT_CLASS_SHAPE
+                  : EDIT_CLASS_OTHER_BOX;
             lastPrim = scene->entitySources[e].prim;
             lastClass = c;
         }
@@ -4331,7 +5138,8 @@ static void SelectIds(ObjList *l, const MS_EntityId *ids, int n)
 
 static const char *KindName(MS_ObjKind k)
 {
-    return k == MS_OBJ_BOX ? "box" : k == MS_OBJ_MODEL ? "model" : k == MS_OBJ_LIGHT ? "light" : k == MS_OBJ_BARRIER ? "barrier" : "none";
+    return k == MS_OBJ_BOX ? "box" : k == MS_OBJ_MODEL ? "model" : k == MS_OBJ_LIGHT ? "light" : k == MS_OBJ_BARRIER ? "barrier"
+         : k == MS_OBJ_SHAPE ? "shape" : "none";
 }
 
 // Script words: whitespace-separated, "..." one word, '#' ends the line (in place)
@@ -4546,6 +5354,17 @@ static int RunScript(MapEditor *E, const char *scriptPath, bool live)
             for (int i = 0; isEdit && op.hasRot && i < 3; i++) isEdit = ScriptNum(w[8 + i], &op.ypr[i]);
             op.anchor = sel.n > 0 ? sel.v[0] : (MS_ObjRef){ MS_OBJ_NONE, -1 };
             if (!isEdit) MsgSetStatic(&msg, "barrier-add <x0> <y0> <z0> <x1> <y1> <z1> [rot <yaw> <pitch> <roll>]");
+        } else if (strcmp(w[0], "shape-add") == 0) {
+            // shape-add <kind> <cx> <y0> <cz> <sx> <sy> <sz>: after the first selected object's line, else
+            // at the end of the main file (docs/editor-tools.md 2.7)
+            op.kind = EDIT_SHAPE_ADD;
+            op.shapeKind = -1;
+            for (int k = 0; n == 8 && k < MS_SHAPE_KIND_COUNT; k++)
+                if (strcmp(w[1], MS_ShapeKindName((MS_ShapeKind)k)) == 0) op.shapeKind = k;
+            isEdit = n == 8 && op.shapeKind >= 0;
+            for (int i = 0; isEdit && i < 3; i++) isEdit = ScriptNum(w[2 + i], &op.pos[i]) && ScriptNum(w[5 + i], &op.size[i]);
+            op.anchor = sel.n > 0 ? sel.v[0] : (MS_ObjRef){ MS_OBJ_NONE, -1 };
+            if (!isEdit) MsgSetStatic(&msg, "shape-add cube|sphere|cylinder|cone|capsule|plane <cx> <y0> <cz> <sx> <sy> <sz>");
         } else if (strcmp(w[0], "material-set") == 0) {
             // material-set "<name>" <keys...> (docs/painting.md 10.3)
             op.kind = EDIT_MATERIAL_SET;
@@ -4628,6 +5447,31 @@ static int RunScript(MapEditor *E, const char *scriptPath, bool live)
             op.filePath = n == 2 ? w[1] : "";
             isEdit = n == 2 && w[1][0];
             if (!isEdit) MsgSetStatic(&msg, "move-to-file \"<path>.map\" (a part of the map, or a new one; relative to the package)");
+        } else if (strncmp(w[0], "group-", 6) == 0) {
+            // Groups as units (docs/editor-tools.md 3.2): group-rename "<old>" "<new>", group-delete "<name>",
+            // group-new "<name>", group-move "<name>", group-duplicate "<name>" "<new>" <dx> <dy> <dz>
+            const char *g = w[0] + 6;
+            if (strcmp(g, "rename") == 0) {
+                op.kind = EDIT_GROUP_RENAME;
+                isEdit = n == 3;
+                if (isEdit) { op.groupName = w[1]; op.groupNew = w[2]; }
+                else MsgSetStatic(&msg, "group-rename \"<old>\" \"<new>\"");
+            } else if (strcmp(g, "delete") == 0 || strcmp(g, "move") == 0) {
+                op.kind = g[0] == 'd' ? EDIT_GROUP_DELETE : EDIT_GROUP_MOVE;
+                isEdit = n == 2;
+                if (isEdit) op.groupName = w[1];
+                else MsgSetStatic(&msg, g[0] == 'd' ? "group-delete \"<name>\"" : "group-move \"<name>\" (the selection's lines into that group)");
+            } else if (strcmp(g, "new") == 0) {
+                op.kind = EDIT_GROUP_NEW;
+                isEdit = n == 2;
+                if (isEdit) op.groupNew = w[1];
+                else MsgSetStatic(&msg, "group-new \"<name>\" (the selection's lines into a new group at the end of their file)");
+            } else if (strcmp(g, "duplicate") == 0) {
+                op.kind = EDIT_GROUP_DUPLICATE;
+                isEdit = n == 6 && ScriptNum(w[3], &op.delta[0]) && ScriptNum(w[4], &op.delta[1]) && ScriptNum(w[5], &op.delta[2]);
+                if (isEdit) { op.groupName = w[1]; op.groupNew = w[2]; }
+                else MsgSetStatic(&msg, "group-duplicate \"<name>\" \"<new>\" <dx> <dy> <dz>");
+            } else MsgSetf(&msg, "unknown command '%s' (group-rename group-delete group-new group-move group-duplicate)", w[0]);
         } else if (strcmp(w[0], "id") == 0 && n == 2 && strcmp(w[1], "remove") == 0) {
             op.kind = EDIT_ID_REMOVE;
             isEdit = true;
@@ -4703,7 +5547,7 @@ static int RunScript(MapEditor *E, const char *scriptPath, bool live)
                  ScriptPreview(&sel, delta, NULL, &previewing, &previewFrom);
             MsgSetf(&msg, ok ? "preview: %d object%s shifted" : "preview move <dx> <dy> <dz> (needs a selection; refused?)",
                     sel.n, sel.n == 1 ? "" : "s");
-        } else MsgSetf(&msg, "unknown command '%s' (select also move turn rotation scale size remove duplicate add barrier-add id material-set paint-add paint-set paint-remove move-to-file undo redo print%s)", w[0],
+        } else MsgSetf(&msg, "unknown command '%s' (select also move turn rotation scale size remove duplicate add barrier-add shape-add id material-set paint-add paint-set paint-remove move-to-file group-rename group-delete group-new group-move group-duplicate undo redo print%s)", w[0],
                        live ? " save disk preview" : "");
 
         if (isEdit && previewOp) {

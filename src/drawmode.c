@@ -228,11 +228,48 @@ static bool HitIsModel(const MS_SurfaceHit *h)
     return h->hit.obj.kind == MS_OBJ_MODEL && h->hit.obj.index >= 0 && h->hit.obj.index < scene->modelCount && h->slot >= 0;
 }
 
-// The same surface: object, and its face (boxes) or slot (models)
+// A shape's part (face = the part; docs/editor-tools.md 2.5a): painted as a box face is, its part UV
+// 0..1 over the whole rectangle (no grid cells: on a paint grid a part's rectangle is sized like a
+// model slot's, ShapeRectSize)
+static bool HitIsShape(const MS_SurfaceHit *h)
+{
+    return h->hit.obj.kind == MS_OBJ_SHAPE && h->hit.obj.index >= 0 && h->hit.obj.index < scene->shapeCount && h->face >= 0 &&
+           h->face < MS_ShapePartCount(scene->shapes[h->hit.obj.index].kind);
+}
+
+// Paint by faces: a box's faces or a shape's parts (entries hold face bits, a region is the whole
+// rectangle, the paint coordinate is the face's / part's 0..1)
+static bool HitIsFaced(const MS_SurfaceHit *h) { return HitIsBox(h) || HitIsShape(h); }
+
+// The faces of an object (a box's 6, a shape's parts), and the name of face f ("+x", "side")
+static int FaceCount(MS_ObjRef o)
+{
+    if (o.kind == MS_OBJ_SHAPE && o.index >= 0 && o.index < scene->shapeCount) return MS_ShapePartCount(scene->shapes[o.index].kind);
+    return 6;
+}
+static const char *FaceName(MS_ObjRef o, int f)
+{
+    if (o.kind == MS_OBJ_SHAPE && o.index >= 0 && o.index < scene->shapeCount) {
+        const char *n = MS_ShapePartName(scene->shapes[o.index].kind, f);
+        return n ? n : "?";
+    }
+    return f >= 0 && f < 6 ? FACE_NAMES[f] : "?";
+}
+
+// FacesText with an object's face names (a shape's parts: "side,top")
+static void FacesTextOf(MS_ObjRef o, unsigned char faces, char *out, int size)
+{
+    int n = 0;
+    out[0] = '\0';
+    for (int f = 0; f < FaceCount(o) && n < size; f++)
+        if (faces & (1u << f)) n += snprintf(out + n, (size_t)(size - n), "%s%s", n ? "," : "", FaceName(o, f));
+}
+
+// The same surface: object, and its face (boxes, shapes) or slot (models)
 static bool SameSurface(const MS_SurfaceHit *a, const MS_SurfaceHit *b)
 {
     if (a->hit.obj.kind != b->hit.obj.kind || a->hit.obj.index != b->hit.obj.index) return false;
-    if (a->hit.obj.kind == MS_OBJ_BOX) return a->face == b->face;
+    if (a->hit.obj.kind == MS_OBJ_BOX || a->hit.obj.kind == MS_OBJ_SHAPE) return a->face == b->face;
     if (a->hit.obj.kind == MS_OBJ_MODEL) return a->slot == b->slot;
     return true;
 }
@@ -256,8 +293,8 @@ static const char *EntryAtlasRel(const MS_PaintEntry *e)
     return AtlasRelOf(e->material, file, e->slot, NULL, NULL, NULL);
 }
 
-// The entry of object obj's face `face` (boxes) or slot `slot` (models) in material m: the active
-// one's MS_PaintEntryAt index, -1 when none; *inactive: an inactive one holds it (its index)
+// The entry of object obj's face `face` (boxes; shapes: the part) or slot `slot` (models) in material m:
+// the active one's MS_PaintEntryAt index, -1 when none; *inactive: an inactive one holds it (its index)
 static int EntryFor(MS_ObjRef obj, int m, int face, int slot, int *inactive)
 {
     if (inactive) *inactive = -1;
@@ -265,7 +302,8 @@ static int EntryFor(MS_ObjRef obj, int m, int face, int slot, int *inactive)
     for (int i = 0; i < n; i++) {
         const MS_PaintEntry *e = MS_PaintEntryAt(scene, i);
         if (e->obj.kind != obj.kind || e->obj.index != obj.index || e->material != m) continue;
-        if (obj.kind == MS_OBJ_BOX ? !(face >= 0 && (e->faces & (1u << face))) : e->slot != slot) continue;
+        bool faced = obj.kind == MS_OBJ_BOX || obj.kind == MS_OBJ_SHAPE;
+        if (faced ? !(face >= 0 && (e->faces & (1u << face))) : e->slot != slot) continue;
         if (e->active) return i;
         if (inactive) *inactive = i;
     }
@@ -343,6 +381,148 @@ static bool BoxGroupCells(int b, unsigned char faces, float rho, int *w, int *h,
         if (most > DRAW_RECT_MAX && most > *cells) { *big = f; *cells = most; }
     }
     return *big < 0;
+}
+
+// --- Shapes (docs/editor-tools.md 2.2): where a part UV lies on the shape, how long a part is along its
+// u and v (its rectangle at a density), all from the kind's analytic surface (the runtime's meshes are
+// its 32-segment approximation: points lie on the true surface, within 0.5 % of the size off a facet)
+
+#define SHAPE_SEG_PI 3.14159265358979323846
+
+// Ramanujan's perimeter of an ellipse with semi-axes a and b
+static float EllipsePerimeter(float a, float b)
+{
+    return (float)(SHAPE_SEG_PI * (3.0 * (a + b) - sqrt((3.0 * a + b) * (a + 3.0 * b))));
+}
+
+// A capsule's cap height (min(sx, sz) / 2, at most sy / 2), as the runtime builds it
+static float CapsuleCap(Vector3 size) { return fminf(fminf(size.x, size.z) * 0.5f, size.y * 0.5f); }
+
+// Part `part` of shape s at part UV uv: the point in the shape's own frame, in metres from its centre
+// along its own axes
+static Vector3 ShapeLocal(const MS_Shape *S, int part, Vector2 uv)
+{
+    Vector3 size = S->shape.size, l = { 0 };
+    // (around a round kind: u from -z, counter-clockwise seen from above, as the runtime's Around)
+    double a = 2.0 * SHAPE_SEG_PI * uv.x;
+    Vector3 dir = { (float)-sin(a), 0.0f, (float)-cos(a) };
+    float u = uv.x, v = uv.y;
+    switch (S->kind) {
+    case MS_SHAPE_CUBE:
+        switch (part) {
+        case 0:  l = (Vector3){ 0.5f, v - 0.5f, 0.5f - u }; break;
+        case 1:  l = (Vector3){ -0.5f, v - 0.5f, u - 0.5f }; break;
+        case 2:  l = (Vector3){ u - 0.5f, 0.5f, 0.5f - v }; break;
+        case 3:  l = (Vector3){ u - 0.5f, -0.5f, v - 0.5f }; break;
+        case 4:  l = (Vector3){ u - 0.5f, v - 0.5f, 0.5f }; break;
+        default: l = (Vector3){ 0.5f - u, v - 0.5f, -0.5f }; break;
+        }
+        break;
+    case MS_SHAPE_SPHERE: {
+        double b = SHAPE_SEG_PI * v;        // (v from the bottom pole)
+        float r = 0.5f * (float)sin(b);
+        l = (Vector3){ dir.x * r, -0.5f * (float)cos(b), dir.z * r };
+        break;
+    }
+    case MS_SHAPE_CYLINDER:
+        if (part == 0) l = (Vector3){ dir.x * 0.5f, v - 0.5f, dir.z * 0.5f };
+        else if (part == 1) l = (Vector3){ u - 0.5f, 0.5f, 0.5f - v };
+        else l = (Vector3){ u - 0.5f, -0.5f, v - 0.5f };
+        break;
+    case MS_SHAPE_CONE:
+        if (part == 0) l = (Vector3){ dir.x * 0.5f * (1.0f - v), v - 0.5f, dir.z * 0.5f * (1.0f - v) };
+        else l = (Vector3){ u - 0.5f, -0.5f, v - 0.5f };
+        break;
+    case MS_SHAPE_CAPSULE: {
+        // (the side between the caps; a cap's v from its rim to its pole; heights in metres)
+        float c = CapsuleCap(size), side = size.y - 2.0f * c, y;
+        float r = 0.5f;
+        if (part == 0) y = (v - 0.5f) * fmaxf(side, 0.0f);
+        else {
+            double t = 0.5 * SHAPE_SEG_PI * v;
+            r = 0.5f * (float)cos(t);
+            y = (size.y * 0.5f - c) + c * (float)sin(t);
+            if (part == 2) y = -y;
+        }
+        l = (Vector3){ dir.x * r, size.y > 0.0f ? y / size.y : 0.0f, dir.z * r };
+        break;
+    }
+    default:    // a plane: its top seen from above, its bottom from below
+        l = part == 0 ? (Vector3){ u - 0.5f, 0.0f, 0.5f - v } : (Vector3){ u - 0.5f, 0.0f, v - 0.5f };
+        break;
+    }
+    return (Vector3){ l.x * size.x, l.y * size.y, l.z * size.z };
+}
+
+// Part `part` of shape s at part UV uv, in the world (turned with the shape)
+static Vector3 ShapePartPoint(int s, int part, Vector2 uv)
+{
+    const MS_TurnedBox *T = &scene->shapes[s].shape;
+    Vector3 l = ShapeLocal(&scene->shapes[s], part, uv);
+    Vector3 p = Vector3Add(T->center, Vector3Scale(T->axis[0], l.x));
+    p = Vector3Add(p, Vector3Scale(T->axis[1], l.y));
+    return Vector3Add(p, Vector3Scale(T->axis[2], l.z));
+}
+
+// Whether a part is curved (a line on it is drawn in pieces): the round sides, a sphere, a capsule's caps
+static bool PartCurved(MS_ObjRef o, int part)
+{
+    if (o.kind != MS_OBJ_SHAPE || o.index < 0 || o.index >= scene->shapeCount) return false;
+    MS_ShapeKind k = scene->shapes[o.index].kind;
+    return k == MS_SHAPE_SPHERE || k == MS_SHAPE_CAPSULE || ((k == MS_SHAPE_CYLINDER || k == MS_SHAPE_CONE) && part == 0);
+}
+
+// The length of shape s's part `part` along its part UV's u and v, in metres (*su around a round side,
+// *sv up it or from a rim to a pole); a flat part: its rectangle's sides
+static void ShapePartDims(int s, int part, float *su, float *sv)
+{
+    const MS_Shape *S = &scene->shapes[s];
+    Vector3 z = S->shape.size;
+    float around = EllipsePerimeter(z.x * 0.5f, z.z * 0.5f), r = (z.x + z.z) * 0.25f;
+    switch (S->kind) {
+    case MS_SHAPE_CUBE: {
+        int axis = part / 2;
+        *su = axis == 0 ? z.z : z.x;
+        *sv = axis == 1 ? z.z : z.y;
+        return;
+    }
+    case MS_SHAPE_SPHERE: *su = around; *sv = 0.5f * EllipsePerimeter(r, z.y * 0.5f); return;
+    case MS_SHAPE_CYLINDER:
+        if (part == 0) { *su = around; *sv = z.y; } else { *su = z.x; *sv = z.z; }
+        return;
+    case MS_SHAPE_CONE:
+        if (part == 0) { *su = around; *sv = sqrtf(z.y * z.y + r * r); } else { *su = z.x; *sv = z.z; }
+        return;
+    case MS_SHAPE_CAPSULE: {
+        float c = CapsuleCap(z);
+        *su = around;
+        *sv = part == 0 ? fmaxf(z.y - 2.0f * c, 0.0f) : 0.25f * EllipsePerimeter(r, c);
+        return;
+    }
+    default: *su = z.x; *sv = z.z; return;
+    }
+}
+
+// A shape part group's rectangle at rho texels per metre: per axis the largest of its parts' lengths
+// (ShapePartDims) times rho; without a grid each side DRAW_RECT_MIN .. DRAW_RECT_MAX, on a grid at least
+// 1 (the caller refuses one above DRAW_RECT_MAX: a part maps onto its rectangle like a model slot)
+static void ShapeRectSize(float rho, bool grid, int s, unsigned char parts, int *w, int *h)
+{
+    float su = 0.0f, sv = 0.0f;
+    for (int f = 0; f < MS_ShapePartCount(scene->shapes[s].kind); f++) {
+        if (!(parts & (1u << f))) continue;
+        float a, b;
+        ShapePartDims(s, f, &a, &b);
+        su = fmaxf(su, a);
+        sv = fmaxf(sv, b);
+    }
+    double W = ceil((double)rho * su - 1e-4), H = ceil((double)rho * sv - 1e-4);
+    *w = (int)fmin(fmax(W, 1.0), 1e9);
+    *h = (int)fmin(fmax(H, 1.0), 1e9);
+    if (!grid) {
+        *w = ClampI(*w, DRAW_RECT_MIN, DRAW_RECT_MAX);
+        *h = ClampI(*h, DRAW_RECT_MIN, DRAW_RECT_MAX);
+    }
 }
 
 // The largest of a model instance's three scales (docs/painting.md 17.5: the unwrap's texels per unit)
@@ -1546,7 +1726,7 @@ static int HitTriangle(const MS_SurfaceHit *h)
 // went live, after the hit was cast); false when it has none
 static bool HitPaintUv(const MS_SurfaceHit *h, Vector2 *uv)
 {
-    if (HitIsBox(h)) { *uv = h->paintUv; return true; }
+    if (HitIsFaced(h)) { *uv = h->paintUv; return true; }
     int k = HitTriangle(h);
     Vector2 puv[3];
     Vector3 pos[3];
@@ -1598,7 +1778,7 @@ static unsigned char Resolve(DrawMode *dm, const MS_SurfaceHit *h, DrawGeom *g)
     MS_ObjKind kind = h->hit.obj.kind;
     if (kind == MS_OBJ_NONE) return 1;
     if (kind == MS_OBJ_LIGHT) return 2;
-    if (!HitIsBox(h) && !HitIsModel(h)) return 3;
+    if (!HitIsFaced(h) && !HitIsModel(h)) return 3;
     int m = h->material;
     if (m >= scene->materialCount) return 4;
     g->grid = MS_PaintGridOf(scene, m);
@@ -1635,6 +1815,11 @@ static unsigned char Resolve(DrawMode *dm, const MS_SurfaceHit *h, DrawGeom *g)
                 int big, cells;
                 if (!BoxGroupCells(h->hit.obj.index, g->faces, g->grid, &g->w, &g->h, &big, &cells)) return 9;
             } else BoxRectSize(dm->density, h->hit.obj.index, g->faces, &g->w, &g->h);
+        } else if (HitIsShape(h)) {
+            // (a shape's part: its lengths at the grid or the density, no cells: it maps like a slot)
+            g->faces = (unsigned char)(1u << h->face);
+            ShapeRectSize(RhoOf(dm, m), g->grid > 0.0f, h->hit.obj.index, g->faces, &g->w, &g->h);
+            if (g->grid > 0.0f && (g->w > DRAW_RECT_MAX || g->h > DRAW_RECT_MAX)) return 9;
         } else {
             SlotNewSize(dm, h->hit.obj.index, h->slot, m, RhoOf(dm, m), &g->w, &g->h, &g->estimate);
             if (g->grid > 0.0f && !g->estimate && (g->w > DRAW_RECT_MAX || g->h > DRAW_RECT_MAX)) return 9;
@@ -1687,6 +1872,13 @@ static int RefusalPrint(char *out, size_t size, unsigned char code, const MS_Sur
             BoxGroupCells(h->hit.obj.index, (unsigned char)(1u << h->face), rho, &w, &hh, &big, &cells);
             return snprintf(out, size, "face %s covers %d texels of the grid (%g/m); the most is %d", FACE_NAMES[big >= 0 ? big : h->face],
                             cells, (double)rho, DRAW_RECT_MAX);
+        }
+        if (HitIsShape(h)) {
+            int w, hh;
+            ShapeRectSize(rho, true, h->hit.obj.index, (unsigned char)(1u << h->face), &w, &hh);
+            return snprintf(out, size, "the %s's %s needs %dx%d texels of the grid (%g/m); the most is %d",
+                            MS_ShapeKindName(scene->shapes[h->hit.obj.index].kind), FaceName(h->hit.obj, h->face), w, hh, (double)rho,
+                            DRAW_RECT_MAX);
         }
         return snprintf(out, size, "%s slot %d needs more than %d texels a side on the grid (%g/m)", name, h->slot, DRAW_RECT_MAX,
                         (double)rho);
@@ -1946,7 +2138,7 @@ static bool StrokeSample(DrawMode *dm, const MS_SurfaceHit *h, Sample *s)
     if (!dm->stroking || !dm->stroke) return false;
     if (h->hit.obj.kind != dm->strokeObj.kind || h->hit.obj.index != dm->strokeObj.index || h->material != dm->strokeMaterial) return false;
     bool model = HitIsModel(h);
-    if (model ? h->slot != dm->strokeSlot : !HitIsBox(h)) return false;
+    if (model ? h->slot != dm->strokeSlot : !HitIsFaced(h)) return false;
     PaintStep *p = dm->stroke;
     int e = EntryFor(h->hit.obj, h->material, h->face, h->slot, NULL);
     if (e < 0) {
@@ -1981,7 +2173,8 @@ static bool StrokeSample(DrawMode *dm, const MS_SurfaceHit *h, Sample *s)
 
 // The region and texel (atlas pixels, sub-texel) of hit h on its entry e: a box face on a grid its
 // cells (the texels it shows: the rectangle's lower-left part, 17.3) and the hit's texel from its
-// first cell (17.6), else the face's 0..1 over the whole rectangle; a model the hit triangle's island.
+// first cell (17.6), else the face's (a shape's part's) 0..1 over the whole rectangle; a model the hit
+// triangle's island.
 // False: no paint coordinate or island there
 static bool HitRegion(DrawMode *dm, const MS_SurfaceHit *h, int e, PaintRegion *out, float *tx, float *ty)
 {
@@ -1992,7 +2185,7 @@ static bool HitRegion(DrawMode *dm, const MS_SurfaceHit *h, int e, PaintRegion *
     if (!HitPaintUv(h, &uv)) return false;
     PaintRegion r = { E->x, E->y, E->w, E->h, -1, -1, -1 };
     FaceCells fc;
-    bool grid = !model && rho > 0.0f && FaceGridCells(h->hit.obj.index, h->face, rho, &fc);
+    bool grid = HitIsBox(h) && rho > 0.0f && FaceGridCells(h->hit.obj.index, h->face, rho, &fc);
     if (grid) {
         r.w = fc.w < E->w ? fc.w : E->w;
         r.h = fc.h < E->h ? fc.h : E->h;
@@ -2232,7 +2425,7 @@ static void SprayTick(DrawMode *dm, const Probe *pr)
 // work on pixels). False: no paint there
 static bool SurfaceRegion(DrawMode *dm, const MS_SurfaceHit *h, PaintRegion *r, float *tx, float *ty, int *atlas)
 {
-    if (!HitIsBox(h) && !HitIsModel(h)) return false;
+    if (!HitIsFaced(h) && !HitIsModel(h)) return false;
     int e = EntryFor(h->hit.obj, h->material, h->face, h->slot, NULL);
     if (e < 0 || !HitRegion(dm, h, e, r, tx, ty)) return false;
     const char *rel = EntryAtlasRel(MS_PaintEntryAt(scene, e));
@@ -2262,7 +2455,7 @@ static bool ShapeTexel(DrawMode *dm, Ray ray, DtPoint *out)
     MS_RaycastSurface(scene, ray.position, ray.direction, 0.0f, &h);
     PaintRegion r;
     float tx, ty;
-    int e = HitIsBox(&h) || HitIsModel(&h) ? EntryFor(h.hit.obj, h.material, h.face, h.slot, NULL) : -1;
+    int e = HitIsFaced(&h) || HitIsModel(&h) ? EntryFor(h.hit.obj, h.material, h.face, h.slot, NULL) : -1;
     if (e >= 0 && h.hit.obj.kind == S->hit.hit.obj.kind && h.hit.obj.index == S->hit.hit.obj.index && h.material == S->hit.material &&
         HitRegion(dm, &h, e, &r, &tx, &ty) && memcmp(&r, &want, sizeof(r)) == 0) {
         S->lastOn = h;
@@ -2279,6 +2472,17 @@ static bool ShapeTexel(DrawMode *dm, Ray ray, DtPoint *out)
         O = FacePoint(L->hit.obj.index, L->face, (Vector2){ 0, 0 });
         U = Vector3Subtract(FacePoint(L->hit.obj.index, L->face, (Vector2){ 1, 0 }), O);
         V = Vector3Subtract(FacePoint(L->hit.obj.index, L->face, (Vector2){ 0, 1 }), O);
+    } else if (HitIsShape(L)) {
+        // (a shape's part: its tangent plane at the last hit, from the part UV's derivatives there)
+        const float e2 = 1e-3f;
+        Vector2 at = { Clamp01(L->paintUv.x), Clamp01(L->paintUv.y) };
+        Vector2 du = { at.x + (at.x > 0.5f ? -e2 : e2), at.y }, dv = { at.x, at.y + (at.y > 0.5f ? -e2 : e2) };
+        O = ShapePartPoint(L->hit.obj.index, L->face, at);
+        U = Vector3Scale(Vector3Subtract(ShapePartPoint(L->hit.obj.index, L->face, du), O), 1.0f / (du.x - at.x));
+        V = Vector3Scale(Vector3Subtract(ShapePartPoint(L->hit.obj.index, L->face, dv), O), 1.0f / (dv.y - at.y));
+        o2 = at;
+        u2 = (Vector2){ at.x + 1.0f, at.y };
+        v2 = (Vector2){ at.x, at.y + 1.0f };
     } else {
         int k = HitTriangle(L);
         Vector2 puv[3];
@@ -3051,15 +3255,18 @@ static DrawModeResult EditStepEnd(DrawMode *dm, PaintStep *p, bool pushed, const
 // also an inactive one whose rectangle is smaller than its face's cells of the grid, Resolve's 10)
 static bool ActionEntry(DrawMode *dm, const MS_SurfaceHit *h, const char *what, int *entry, bool small)
 {
-    if (!HitIsBox(h) && !HitIsModel(h)) {
-        Sayf(dm, true, "%s: point at a painted box or model first (the panel acts on the surface the cursor rests on)", what);
+    if (!HitIsFaced(h) && !HitIsModel(h)) {
+        Sayf(dm, true, "%s: point at a painted box, shape or model first (the panel acts on the surface the cursor rests on)", what);
         return false;
     }
     if (!MapEditHasWork(&dm->em->ed) && !MapEditBegin(&dm->em->ed)) { SayStatic(dm, true, "this map can't be painted (a compiled map?)"); return false; }
     int inactive;
     *entry = EntryFor(h->hit.obj, h->material, h->face, h->slot, &inactive);
     if (*entry < 0 && small) *entry = GridTooSmall(h, inactive);
-    if (*entry < 0) { Sayf(dm, true, "%s: %s has no paint yet: paint it first", what, HitIsBox(h) ? "this face" : "this slot"); return false; }
+    if (*entry < 0) {
+        Sayf(dm, true, "%s: %s has no paint yet: paint it first", what, HitIsBox(h) ? "this face" : HitIsShape(h) ? "this part" : "this slot");
+        return false;
+    }
     return true;
 }
 
@@ -3113,18 +3320,20 @@ static unsigned char MoveEntry(DrawMode *dm, PaintStep *p, bool *pushed, MS_ObjR
     return 0;
 }
 
-// The face groups of box hit h in its material (DrawTarget.groups): faces in one entry share a
-// number, a face without paint has one of its own; numbered in face order from 0
+// The face groups of box hit h (a shape's: its parts) in its material (DrawTarget.groups): faces in one
+// entry share a number, a face without paint has one of its own; numbered in face order from 0; faces
+// past a shape's parts 255
 static void BoxGroups(const MS_SurfaceHit *h, unsigned char groups[6], int entries[6])
 {
-    int n = MS_PaintEntryCount(scene), next = 0;
+    int n = MS_PaintEntryCount(scene), next = 0, count = FaceCount(h->hit.obj);
     for (int f = 0; f < 6; f++) { groups[f] = 255; if (entries) entries[f] = -1; }
-    for (int f = 0; f < 6; f++) {
+    for (int f = 0; f < count; f++) {
         if (groups[f] != 255) continue;
         int e = -1;
         for (int i = 0; i < n && e < 0; i++) {
             const MS_PaintEntry *E = MS_PaintEntryAt(scene, i);
-            if (E->obj.kind == MS_OBJ_BOX && E->obj.index == h->hit.obj.index && E->material == h->material && (E->faces & (1u << f))) e = i;
+            if (E->obj.kind == h->hit.obj.kind && E->obj.index == h->hit.obj.index && E->material == h->material && (E->faces & (1u << f)))
+                e = i;
         }
         if (e < 0) { groups[f] = (unsigned char)next++; continue; }
         const MS_PaintEntry *E = MS_PaintEntryAt(scene, e);
@@ -3144,7 +3353,14 @@ static void BoxGroups(const MS_SurfaceHit *h, unsigned char groups[6], int entri
 // any more is cleared. One undo step
 static DrawModeResult ActFaces(DrawMode *dm, const MS_SurfaceHit *h, const unsigned char want[6])
 {
-    if (!HitIsBox(h)) { SayStatic(dm, true, "faces: point at a box (its faces are grouped here)"); return DRAWMODE_NONE; }
+    if (!HitIsFaced(h)) { SayStatic(dm, true, "faces: point at a box or a shape (its faces / parts are grouped here)"); return DRAWMODE_NONE; }
+    bool shape = HitIsShape(h);
+    int count = FaceCount(h->hit.obj);
+    for (int f = 0; f < count; f++)
+        if (want[f] >= count) {
+            Sayf(dm, true, "faces: %d numbers 0..%d (one per %s)", count, count - 1, shape ? "part" : "face");
+            return DRAWMODE_NONE;
+        }
     if (!MapEditHasWork(&dm->em->ed) && !MapEditBegin(&dm->em->ed)) { SayStatic(dm, true, "this map can't be painted (a compiled map?)"); return DRAWMODE_NONE; }
     // The entries before (a snapshot: the ops change the scene's list)
     typedef struct { int x, y, w, h; unsigned char faces; bool kept; } Snap;
@@ -3159,14 +3375,19 @@ static DrawModeResult ActFaces(DrawMode *dm, const MS_SurfaceHit *h, const unsig
         for (int s = 0; s < snapCount && !seen; s++) seen = snaps[s].faces == E->faces;
         if (!seen) snaps[snapCount++] = (Snap){ E->x, E->y, E->w, E->h, E->faces, false };
     }
-    if (snapCount == 0) { SayStatic(dm, true, "faces: this box has no paint yet: paint it first, then group its faces"); return DRAWMODE_NONE; }
-    for (int f = 0; f < 6; f++) g[f] = want[f] < 6 ? want[f] : 0;
+    if (snapCount == 0) {
+        SayStatic(dm, true, shape ? "faces: this shape has no paint yet: paint it first, then group its parts"
+                                  : "faces: this box has no paint yet: paint it first, then group its faces");
+        return DRAWMODE_NONE;
+    }
+    for (int f = 0; f < 6; f++) g[f] = f < count ? want[f] : 255;     // (a shape's: past its parts, no group)
     PaintStep *p = EditStepOn(dm, h->material, -1, -1, "faces");
     if (!p) return DRAWMODE_NONE;
     Atlas *a = &dm->atlases[p->atlas];
     bool pushed = false, ok = true;
     char *why = NULL;       // (a failed op's reason, kept from the last error: heap, NULL when out of memory)
-    float rho = MS_PaintGridOf(scene, h->material);
+    // (a shape's parts have no grid cells: a group keeps its rectangle, a split copies its source's size)
+    float rho = shape ? 0.0f : MS_PaintGridOf(scene, h->material);
     for (int n = 0; n < 6 && ok; n++) {
         unsigned char G = 0;
         for (int f = 0; f < 6; f++) if (g[f] == n) G |= (unsigned char)(1u << f);
@@ -3248,8 +3469,8 @@ static DrawModeResult ActFaces(DrawMode *dm, const MS_SurfaceHit *h, const unsig
     if (!ok) Sayf(dm, true, "%s", why ? why : "out of memory");
     else if (!pushed) SayStatic(dm, false, "faces: nothing changes (a face without paint gets a rectangle with its first stroke)");
     free(why);
-    char gt[32];
-    snprintf(gt, sizeof(gt), "%d %d %d %d %d %d", g[0], g[1], g[2], g[3], g[4], g[5]);
+    char gt[32] = "";
+    for (int f = 0, at = 0; f < count; f++) at += snprintf(gt + at, sizeof(gt) - (size_t)at, "%s%d", f ? " " : "", g[f]);
     return EditStepEnd(dm, p, pushed, ok ? TextFormat("faces: groups %s", gt) : NULL);
 }
 
@@ -3284,6 +3505,14 @@ static DrawModeResult ActResize(DrawMode *dm, const MS_SurfaceHit *h)
         if (rho > 0.0f) mode = MOVE_NEAREST;
         if (rho > 0.0f && (w > DRAW_RECT_MAX || hh > DRAW_RECT_MAX)) {
             Sayf(dm, true, "%s: slot %d needs %dx%d texels of the grid (%g/m); the most is %d", what, h->slot, w, hh, (double)rho, DRAW_RECT_MAX);
+            return DRAWMODE_NONE;
+        }
+    } else if (HitIsShape(h)) {
+        // (a shape's part group: its lengths at the grid or the density; on a grid resampled nearest, as a slot)
+        ShapeRectSize(RhoOf(dm, h->material), rho > 0.0f, h->hit.obj.index, E.faces, &w, &hh);
+        if (rho > 0.0f) mode = MOVE_NEAREST;
+        if (rho > 0.0f && (w > DRAW_RECT_MAX || hh > DRAW_RECT_MAX)) {
+            Sayf(dm, true, "%s: the parts need %dx%d texels of the grid (%g/m); the most is %d", what, w, hh, (double)rho, DRAW_RECT_MAX);
             return DRAWMODE_NONE;
         }
     } else if (rho > 0.0f) {
@@ -3340,8 +3569,8 @@ static DrawModeResult ActClear(DrawMode *dm, const MS_SurfaceHit *h)
         return pushed ? EditStepEnd(dm, p, true, NULL) : DRAWMODE_NONE;
     }
     ClearRect(&dm->atlases[p->atlas], p, E.x, E.y, E.w, E.h);
-    char faces[32] = "";
-    if (!model) FacesText(E.faces, faces, sizeof(faces));
+    char faces[64] = "";
+    if (!model) FacesTextOf(h->hit.obj, E.faces, faces, sizeof(faces));
     return EditStepEnd(dm, p, pushed, TextFormat("cleared the paint of %s (%dx%d at %d %d)", model ? TextFormat("slot %d", h->slot) : faces,
                                                  E.w, E.h, E.x, E.y));
 }
@@ -3352,7 +3581,7 @@ static DrawModeResult ActClear(DrawMode *dm, const MS_SurfaceHit *h)
 // its first stroke): both
 static DrawModeResult ActPixelLook(DrawMode *dm, const MS_SurfaceHit *h, bool on)
 {
-    bool model = HitIsModel(h), surface = HitIsBox(h) || model;
+    bool model = HitIsModel(h), surface = HitIsFaced(h) || model;
     float grid = surface ? MS_PaintGridOf(scene, h->material) : 0.0f;
     if (!surface || grid <= 0.0f) dm->pixelLook = on;
     if (!surface || grid > 0.0f) dm->gridFiltered = !on;
@@ -3485,7 +3714,7 @@ static bool AlbedoAt(Camera3D cam, int w, int h, Vector2 px, Color *out)
 static bool Eyedropper(DrawMode *dm, const MS_SurfaceHit *h, Camera3D cam, int w, int hh, Vector2 px, Color *out, bool *fromPaint)
 {
     *fromPaint = false;
-    if (!HitIsBox(h) && !HitIsModel(h)) return false;
+    if (!HitIsFaced(h) && !HitIsModel(h)) return false;
     int file = HitIsModel(h) ? scene->models[h->hit.obj.index].file : -1;
     int e = EntryFor(h->hit.obj, h->material, h->face, h->slot, NULL);
     Vector2 uv;
@@ -3610,9 +3839,12 @@ static void TargetText(DrawMode *dm)
     const MS_SurfaceHit *h = &T->hit;
     T->facesOk = false;
     T->faceKey = -1;
-    if (HitIsBox(h) && T->ok) {
+    T->faceCount = FaceCount(h->hit.obj);
+    // (a shape with one part, a sphere, has nothing to group)
+    if (HitIsFaced(h) && T->ok && T->faceCount > 1) {
         T->facesOk = true;
-        T->faceKey = h->hit.obj.index * 1024 + (h->material & 1023);
+        // (a key per object and material: a shape's above every box's)
+        T->faceKey = ((HitIsShape(h) ? scene->boxCount : 0) + h->hit.obj.index) * 1024 + (h->material & 1023);
         BoxGroups(h, T->groups, NULL);
     }
     T->grid = T->geom.grid;
@@ -3633,6 +3865,14 @@ static void TargetText(DrawMode *dm)
         bool turned = scene->boxTurned && scene->boxTurned[h->hit.obj.index] >= 0;
         MsgSetf(&T->what, "%s line %s%s%d #%d, face %s", turned ? "turned box" : "box", MAPEDIT_LINE_AT(r ? r->file : 0, r ? r->line : 0),
                 e >= 0 ? e - first : 0, FACE_NAMES[h->face]);
+    } else if (HitIsShape(h)) {
+        // ("cylinder side, line 12"; a repeat line's copy: #n)
+        const MS_Ref *r = MS_ObjectRef(scene, h->hit.obj);
+        int e = MS_ObjectEntity(scene, h->hit.obj), first = e;
+        while (first > 0 && e >= 0 && scene->entitySources[first - 1].prim == scene->entitySources[e].prim) first--;
+        const MS_Shape *S = &scene->shapes[h->hit.obj.index];
+        MsgSetf(&T->what, "%s%s %s, line %s%s%d%s", S->turned ? "turned " : "", MS_ShapeKindName(S->kind), FaceName(h->hit.obj, h->face),
+                MAPEDIT_LINE_AT(r ? r->file : 0, r ? r->line : 0), e > first ? TextFormat(" #%d", e - first) : "");
     } else if (HitIsModel(h)) {
         const MS_Ref *r = MS_ObjectRef(scene, h->hit.obj);
         int file = scene->models[h->hit.obj.index].file;
@@ -3642,7 +3882,7 @@ static void TargetText(DrawMode *dm)
         MsgSetStatic(&T->what, "a light: nothing to paint");
         return;
     } else {
-        MsgSetStatic(&T->what, "point at a box or a model");
+        MsgSetStatic(&T->what, "point at a box, a shape or a model");
         return;
     }
     // The grid the paint follows (docs/painting.md 17.7), or the density it gets without one
@@ -3683,7 +3923,15 @@ static void TargetText(DrawMode *dm)
         MsgAppendf(&T->into, "; %s is unwrapped for paint first", GetFileName(scene->modelFiles[scene->models[h->hit.obj.index].file].path));
     // The size of a texel here (mm along the face's two edges; a model: about)
     const char *will = g->fresh ? "will be" : "is";
-    if (HitIsBox(h)) {
+    if (HitIsShape(h) && g->w > 0 && g->h > 0) {
+        // (along the part's u and v: around a round side and up it)
+        float su, sv;
+        ShapePartDims(h->hit.obj.index, h->face, &su, &sv);
+        MsgSetf(&T->texel, "%s: a texel %s %.1f × %.1f mm%s", FaceName(h->hit.obj, h->face), will, su * 1000.0f / g->w, sv * 1000.0f / g->h,
+                g->grid <= 0.0f && (g->w >= DRAW_RECT_MAX || g->h >= DRAW_RECT_MAX) ? " (the rectangle is clamped to 2048)"
+                : g->grid > 0.0f ? " (sized to the grid, no cells)" : "");
+        T->texelSet = true;
+    } else if (HitIsBox(h)) {
         float su, sv;
         FaceDims(h->hit.obj.index, h->face, &su, &sv);
         if (g->grid > 0.0f) {
@@ -3695,7 +3943,7 @@ static void TargetText(DrawMode *dm)
                     sv * 1000.0f / g->h, g->w >= DRAW_RECT_MAX || g->h >= DRAW_RECT_MAX ? " (the rectangle is clamped to 2048)" : "");
             T->texelSet = true;
         }
-    } else if (g->w > 0) {
+    } else if (HitIsModel(h) && g->w > 0) {
         // (the slot's world area over the texels its paint UVs cover; before its unwrap: the grid's or
         // the density's texel, which the unwrap is made at)
         double A, a;
@@ -4244,10 +4492,12 @@ int DrawModeDrawHud(const DrawMode *dm, const EditMode *em, int x, int y)
     char target[300] = "";
     const MS_SurfaceHit *h = &dm->hover;
     const DrawGeom *g = &dm->hoverGeom;
-    if (dm->hoverOk && (HitIsBox(h) || HitIsModel(h))) {
+    if (dm->hoverOk && (HitIsFaced(h) || HitIsModel(h))) {
         char what[160], atlas[200];
         if (HitIsModel(h))
             snprintf(what, sizeof(what), "%s slot %d", GetFileName(scene->modelFiles[scene->models[h->hit.obj.index].file].path), h->slot);
+        else if (HitIsShape(h))
+            snprintf(what, sizeof(what), "%s %s", MS_ShapeKindName(scene->shapes[h->hit.obj.index].kind), FaceName(h->hit.obj, h->face));
         else snprintf(what, sizeof(what), "face %s", FACE_NAMES[h->face]);
         AtlasName(h, atlas, (int)sizeof(atlas));
         char grid[40] = "";     // (the paint grid, docs/painting.md 17.7)
@@ -4315,6 +4565,25 @@ static Vector3 FacePoint(int b, int f, Vector2 fu)
     BoundingBox B = scene->boxes[b];
     Vector3 c = Vector3Scale(Vector3Add(B.min, B.max), 0.5f), s = Vector3Subtract(B.max, B.min);
     return (Vector3){ c.x + l.x * s.x, c.y + l.y * s.y, c.z + l.z * s.z };
+}
+
+// A point of a faced surface at face coordinates fu: box b's face (FacePoint) or a shape's part
+static Vector3 SurfPoint(MS_ObjRef o, int f, Vector2 fu)
+{
+    if (o.kind == MS_OBJ_SHAPE) return ShapePartPoint(o.index, f, fu);
+    return FacePoint(o.index, f, fu);
+}
+
+#define SURF_PIECES 24      // a line on a curved part: at most this many straight pieces
+
+// Line a-b (face coordinates) on object o's face / part f as points out[0..n] (n pieces): one piece on a
+// flat face, on a curved part one per 1/32 of the part along u or v (at most SURF_PIECES)
+static int SurfPieces(MS_ObjRef o, int f, Vector2 a, Vector2 b, Vector3 out[SURF_PIECES + 1])
+{
+    int n = 1;
+    if (PartCurved(o, f)) n = ClampI((int)ceilf(fmaxf(fabsf(b.x - a.x), fabsf(b.y - a.y)) * 32.0f), 1, SURF_PIECES);
+    for (int i = 0; i <= n; i++) out[i] = SurfPoint(o, f, Vector2Lerp(a, b, (float)i / n));
+    return n;
 }
 
 // A model slot's triangles (paint UVs, model-space positions) and islands, kept for the brush cursor
@@ -4506,13 +4775,13 @@ static void LinesPush(DrawLines *L, Vector3 a, Vector3 b)
     L->p[L->n++] = b;
 }
 
-// One border segment a-b (atlas texel corners) of a mask on hit h's surface into L: a box face through
-// its entry's mapping (on a grid its cells), cut at the face's edges; a model slot through every slot
+// One border segment a-b (atlas texel corners) of a mask on hit h's surface into L: a box face (a shape's
+// part) through its entry's mapping (on a grid its cells), cut at the face's edges; a model slot through every slot
 // triangle it crosses (each triangle's affine map), cut at the triangle's edges
 static void OutlineSegment(DrawMode *dm, const MS_SurfaceHit *h, const MS_PaintEntry *E, const FaceCells *fc, Vector2 a, Vector2 b,
                            DrawLines *L)
 {
-    if (HitIsBox(h)) {
+    if (HitIsFaced(h)) {
         static const Vector2 face[4] = { { 0, 0 }, { 1, 0 }, { 1, 1 }, { 0, 1 } };
         Vector2 ua, ub;
         if (fc) {
@@ -4522,8 +4791,9 @@ static void OutlineSegment(DrawMode *dm, const MS_SurfaceHit *h, const MS_PaintE
             ua = (Vector2){ (a.x - E->x) / E->w, (a.y - E->y) / E->h };
             ub = (Vector2){ (b.x - E->x) / E->w, (b.y - E->y) / E->h };
         }
-        if (ClipSegment(&ua, &ub, face, 4))
-            LinesPush(L, FacePoint(h->hit.obj.index, h->face, ua), FacePoint(h->hit.obj.index, h->face, ub));
+        Vector3 q[SURF_PIECES + 1];
+        int n = ClipSegment(&ua, &ub, face, 4) ? SurfPieces(h->hit.obj, h->face, ua, ub, q) : 0;
+        for (int i = 0; i < n; i++) LinesPush(L, q[i], q[i + 1]);
         return;
     }
     const MS_ModelInstance *M = &scene->models[h->hit.obj.index];
@@ -4549,7 +4819,7 @@ static void OutlineSegment(DrawMode *dm, const MS_SurfaceHit *h, const MS_PaintE
 static void OutlineBuild(DrawMode *dm, const DtMask *m, const MS_SurfaceHit *h, DrawLines *out)
 {
     out->n = 0;
-    if (!m->a || (!HitIsBox(h) && !HitIsModel(h))) return;
+    if (!m->a || (!HitIsFaced(h) && !HitIsModel(h))) return;
     int e = EntryFor(h->hit.obj, h->material, h->face, h->slot, NULL);
     if (e < 0) return;
     const MS_PaintEntry *E = MS_PaintEntryAt(scene, e);
@@ -4582,19 +4852,22 @@ static void OutlineBuild(DrawMode *dm, const DtMask *m, const MS_SurfaceHit *h, 
 }
 
 // A closed or open polyline of n rectangle-texel points drawn on the hovered surface: on a box face
-// (exact: the face is linear in its coordinates), cut at the face's edges; on a model, through each
+// (exact: the face is linear in its coordinates; a shape's curved part in pieces), cut at the face's
+// edges; on a model, through each
 // triangle of the hit triangle's island that it crosses (each triangle's affine map), cut at the
 // triangle's edges. dashed: every other pair of segments
 static void CursorPolyline(const DrawMode *dm, const Vector2 *pts, int n, float tx, float ty, Color col, bool dashed)
 {
     const MS_SurfaceHit *h = &dm->hover;
     const DrawGeom *g = &dm->hoverGeom;
-    if (h->hit.obj.kind == MS_OBJ_BOX) {
+    if (HitIsFaced(h)) {
         static const Vector2 face[4] = { { 0, 0 }, { 1, 0 }, { 1, 1 }, { 0, 1 } };
         for (int i = 0; i + 1 < n; i++) {
             if (dashed && ((i / 2) & 1)) continue;
             Vector2 a = TexelToSurface(g, pts[i], tx, ty), b = TexelToSurface(g, pts[i + 1], tx, ty);
-            if (ClipSegment(&a, &b, face, 4)) CursorLine(FacePoint(h->hit.obj.index, h->face, a), FacePoint(h->hit.obj.index, h->face, b), col);
+            Vector3 q[SURF_PIECES + 1];
+            int m = ClipSegment(&a, &b, face, 4) ? SurfPieces(h->hit.obj, h->face, a, b, q) : 0;
+            for (int k = 0; k < m; k++) CursorLine(q[k], q[k + 1], col);
         }
         return;
     }
@@ -4645,17 +4918,18 @@ static void CursorQuad(const DrawMode *dm, float x0, float y0, float s, float tx
 }
 
 // The fill pen: the outline of what one click fills (a box: the faces of the hit face's entry; a
-// model: the hit triangle's UV island)
+// shape: its parts' UV squares; a model: the hit triangle's UV island)
 static void CursorFill(const DrawMode *dm, Color col)
 {
     const MS_SurfaceHit *h = &dm->hover;
     const DrawGeom *g = &dm->hoverGeom;
-    if (h->hit.obj.kind == MS_OBJ_BOX) {
+    if (HitIsFaced(h)) {
         static const Vector2 q[4] = { { 0, 0 }, { 1, 0 }, { 1, 1 }, { 0, 1 } };
+        bool box = HitIsBox(h);
         for (int f = 0; f < 6; f++) {
             if (!(g->faces & (1u << f))) continue;
             FaceCells c;
-            if (g->grid > 0.0f && FaceGridCells(h->hit.obj.index, f, g->grid, &c) && c.u1 > c.u0 && c.v1 > c.v0) {
+            if (box && g->grid > 0.0f && FaceGridCells(h->hit.obj.index, f, g->grid, &c) && c.u1 > c.u0 && c.v1 > c.v0) {
                 // (on a grid the fill covers the hit face's cells: on each face of the entry the part of
                 // them it shows, through that face's own cells)
                 Vector2 r[4];
@@ -4667,8 +4941,11 @@ static void CursorFill(const DrawMode *dm, Color col)
                 }
                 continue;
             }
-            for (int i = 0; i < 4; i++)
-                CursorLine(FacePoint(h->hit.obj.index, f, q[i]), FacePoint(h->hit.obj.index, f, q[(i + 1) % 4]), col);
+            for (int i = 0; i < 4; i++) {
+                Vector3 p[SURF_PIECES + 1];
+                int m = SurfPieces(h->hit.obj, f, q[i], q[(i + 1) % 4], p);
+                for (int k = 0; k < m; k++) CursorLine(p[k], p[k + 1], col);
+            }
         }
         return;
     }
@@ -4696,7 +4973,7 @@ void DrawModeDrawCursor(const DrawMode *dm, Camera3D cam)
     const DrawGeom *g = &dm->hoverGeom;
     bool selLines = dm->active && dm->sel.active && dm->sel.outlineSet && dm->sel.outlineVersion == scene->version && dm->sel.outline.n > 0;
     bool shapeLines = dm->active && dm->shapeDrag.on && dm->shapeDrag.outline.n > 0;
-    bool cursor = dm->active && dm->hoverOk && !dm->onPanel && g->ok && dm->hoverVersion == scene->version && (HitIsBox(h) || HitIsModel(h)) &&
+    bool cursor = dm->active && dm->hoverOk && !dm->onPanel && g->ok && dm->hoverVersion == scene->version && (HitIsFaced(h) || HitIsModel(h)) &&
                   g->uv.x >= 0.0f && g->w > 0 && g->h > 0;     // (a model before its unwrap: no paint coordinates yet)
     if (!selLines && !shapeLines && !cursor) return;
     DesignerBeginOverlay3D(cam);
@@ -4898,13 +5175,37 @@ void DrawModeScreenPicked(DrawMode *dm, bool ok, Color c)
 }
 
 // A surface hit made from paint coordinates (a script's `uv`): box face f at face coordinates (u, v),
-// or model slot s at paint UV (u, v) (the first slot triangle that holds it)
+// a shape's part p at part UV (u, v), or model slot s at paint UV (u, v) (the first slot triangle that
+// holds it)
 static bool UvHit(MS_ObjRef obj, int faceOrSlot, float u, float v, MS_SurfaceHit *h)
 {
     memset(h, 0, sizeof(*h));
     h->hit.obj = obj;
     h->material = h->face = h->slot = h->mesh = h->triangle = h->paintEntry = -1;
     h->faceUv = h->paintUv = (Vector2){ u, v };
+    if (obj.kind == MS_OBJ_SHAPE) {
+        if (obj.index < 0 || obj.index >= scene->shapeCount || faceOrSlot < 0 || faceOrSlot >= FaceCount(obj)) return false;
+        h->face = faceOrSlot;
+        h->material = scene->shapes[obj.index].ref.material;
+        Vector2 at = { Clamp01(u), Clamp01(v) };
+        h->hit.point = ShapePartPoint(obj.index, h->face, at);
+        // (the normal: across the part's u and v there, turned away from the shape's centre; a plane's
+        // its own up or down)
+        const MS_TurnedBox *T = &scene->shapes[obj.index].shape;
+        Vector2 du = { at.x + (at.x > 0.5f ? -1e-3f : 1e-3f), at.y }, dv = { at.x, at.y + (at.y > 0.5f ? -1e-3f : 1e-3f) };
+        Vector3 n = Vector3CrossProduct(Vector3Subtract(ShapePartPoint(obj.index, h->face, du), h->hit.point),
+                                        Vector3Subtract(ShapePartPoint(obj.index, h->face, dv), h->hit.point));
+        if (scene->shapes[obj.index].kind == MS_SHAPE_PLANE) n = Vector3Scale(T->axis[1], h->face == 0 ? 1.0f : -1.0f);
+        else if (Vector3DotProduct(n, Vector3Subtract(h->hit.point, T->center)) < 0.0f) n = Vector3Negate(n);
+        h->hit.normal = Vector3Normalize(n);
+        h->paintGrid = MS_PaintGridOf(scene, h->material);
+        h->paintEntry = EntryFor(obj, h->material, h->face, -1, NULL);
+        if (h->paintEntry >= 0) {
+            const MS_PaintEntry *E = MS_PaintEntryAt(scene, h->paintEntry);
+            h->paintTexel = (Vector2){ at.x * (float)E->w, at.y * (float)E->h };
+        }
+        return true;
+    }
     if (obj.kind == MS_OBJ_BOX) {
         if (obj.index < 0 || obj.index >= scene->boxCount || faceOrSlot < 0 || faceOrSlot > 5) return false;
         h->face = faceOrSlot;
@@ -5009,9 +5310,12 @@ static void PrintState(DrawMode *dm, EditMode *em)
     int n = MS_PaintEntryCount(scene);
     for (int i = 0; i < n; i++) {
         const MS_PaintEntry *e = MS_PaintEntryAt(scene, i);
-        char where[48], cells[48] = "";
+        char where[64], cells[48] = "";
         if (e->obj.kind == MS_OBJ_BOX) FacesText(e->faces, where, (int)sizeof(where));
-        else snprintf(where, sizeof(where), "slot %d", e->slot);
+        else if (e->obj.kind == MS_OBJ_SHAPE && e->obj.index >= 0 && e->obj.index < scene->shapeCount) {
+            int at = snprintf(where, sizeof(where), "%s ", MS_ShapeKindName(scene->shapes[e->obj.index].kind));
+            FacesTextOf(e->obj, e->faces, where + at, (int)sizeof(where) - at);
+        } else snprintf(where, sizeof(where), "slot %d", e->slot);
         // (a box on a grid: the cells its faces cover, 17.3)
         float grid = MS_PaintGridOf(scene, e->material);
         int cw, ch, big, many;
@@ -5360,16 +5664,18 @@ int DrawModeRunScript(DrawMode *dm, EditMode *em, Designer *d, Camera3D cam, int
             DrawModeResult r = ActPixelLook(dm, dm->lastHitSet ? &dm->lastHit : &(MS_SurfaceHit){ 0 }, on);
             ok = r == DRAWMODE_RELOADED || !dm->messageError;
             MsgSetf(&msg, "pixel look %s: %s", wd[1], MsgText(&dm->message));
-        } else if (strcmp(wd[0], "faces") == 0 && n == 7) {
-            unsigned char cells[6];
-            ok = dm->lastHitSet || hoverNewer;
-            for (int k = 0; k < 6 && ok; k++) {
+        } else if (strcmp(wd[0], "faces") == 0 && n >= 2 && n <= 7) {
+            // (a box's six numbers, a shape's one per part)
+            const MS_SurfaceHit *on = hoverNewer ? &hoverHit : &dm->lastHit;
+            unsigned char cells[6] = { 255, 255, 255, 255, 255, 255 };
+            ok = (dm->lastHitSet || hoverNewer) && n - 1 == FaceCount(on->hit.obj);
+            for (int k = 0; k < n - 1 && ok; k++) {
                 ok = ScriptNum(wd[1 + k], &f[0]) && f[0] >= 0 && f[0] <= 5;
                 cells[k] = (unsigned char)(ok ? f[0] : 0);
             }
-            if (ok) ok = ActFaces(dm, hoverNewer ? &hoverHit : &dm->lastHit, cells) == DRAWMODE_RELOADED;
+            if (ok) ok = ActFaces(dm, on, cells) == DRAWMODE_RELOADED;
             if (dm->messageSaid) MsgSetf(&msg, "%s", MsgText(&dm->message));
-            else MsgSetStatic(&msg, "faces <a b c d e f> (0-5), after a stroke on a box");
+            else MsgSetStatic(&msg, "faces <a b c d e f> (0-5; a shape: one number per part), after a stroke on a box or a shape");
         } else if ((strcmp(wd[0], "resize") == 0 || strcmp(wd[0], "clear") == 0) && n == 1) {
             bool resize = wd[0][0] == 'r';
             const MS_SurfaceHit *on = hoverNewer ? &hoverHit : &dm->lastHit;
@@ -5398,7 +5704,7 @@ int DrawModeRunScript(DrawMode *dm, EditMode *em, Designer *d, Camera3D cam, int
             // (faces, resize and clear act on it now, as the panel acts on its target: also on an entry no
             // stroke can reach, one too small for its grid cells; pixel stays on the last stroke's surface,
             // so `pixel on` before a first stroke still sets the switch for new atlases)
-            if (HitIsBox(&dm->target.hit) || HitIsModel(&dm->target.hit)) {
+            if (HitIsFaced(&dm->target.hit) || HitIsModel(&dm->target.hit)) {
                 hoverHit = dm->target.hit;
                 hoverNewer = true;
             }

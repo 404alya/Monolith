@@ -44,6 +44,7 @@ static const struct { const char *name; int key; } KEY_NAMES[] = {
     { "CTRL", KEY_LEFT_CONTROL }, { "RCTRL", KEY_RIGHT_CONTROL }, { "ALT", KEY_LEFT_ALT }, { "RALT", KEY_RIGHT_ALT },
     { "UP", KEY_UP }, { "DOWN", KEY_DOWN }, { "LEFT", KEY_LEFT }, { "RIGHT", KEY_RIGHT },
     { "LBRACKET", KEY_LEFT_BRACKET }, { "RBRACKET", KEY_RIGHT_BRACKET },
+    { "PAGE_UP", KEY_PAGE_UP }, { "PAGE_DOWN", KEY_PAGE_DOWN }, { "HOME", KEY_HOME }, { "END", KEY_END },
     { "F1", KEY_F1 }, { "F2", KEY_F2 }, { "F3", KEY_F3 }, { "F4", KEY_F4 }, { "F5", KEY_F5 }, { "F6", KEY_F6 },
     { "F7", KEY_F7 }, { "F8", KEY_F8 }, { "F9", KEY_F9 }, { "F10", KEY_F10 }, { "F11", KEY_F11 }, { "F12", KEY_F12 },
 };

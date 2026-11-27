@@ -7,7 +7,8 @@
 //   compiled_test <package folder>       (a copy of a package with its <name>.mapb in it)
 // A package with turned boxes (box turns, section 17) gets the box-turn cases; one without them
 // the cases that need tests/models' uniforms, lights and model paths; one with two or more barriers
-// (section 21, tests/barrier) the barrier cases.
+// (section 21, tests/barrier) the barrier cases; one with two or more shapes (section 22, tests/shapes)
+// the shape cases, their paint entries among them.
 #include "monolith_scene.h"
 #include <stdint.h>
 #include <stdlib.h>
@@ -19,7 +20,7 @@ static char dir[1024], fuzzPath[1100];
 // The header and section table fields this test changes (docs/compiled-map.md, section 2)
 enum { H_VERSION = 8, H_SIZE = 12, H_ORDER = 16, H_FORMAT = 20, H_COUNT = 24, H_TABLE = 28, H_FILESIZE = 32 };
 enum { S_STRINGS = 1, S_BOXES = 2, S_MATERIALS = 4, S_LIGHTS = 7, S_MODEL_FILES = 9, S_STATEMENTS = 13, S_ENV = 14,
-       S_BOX_TURNS = 17, S_PAINT = 18, S_SOURCES = 19, S_FOG_ZONES = 20, S_BARRIERS = 21, S_SECTIONS = 21 };
+       S_BOX_TURNS = 17, S_PAINT = 18, S_SOURCES = 19, S_FOG_ZONES = 20, S_BARRIERS = 21, S_SHAPES = 22, S_SECTIONS = 22 };
 // A material record and its line files, face layout, filter and padding bytes, its paint atlas path,
 // paint filter and padding, noPrepass, drawDistance, paintGrid, the paint key's line and file, noShadow
 enum { MAT_SIZE = 216, MAT_FILE = 48, MAT_SHADER_FILE = 52, MAT_MAP_FILE = 56, MAT_UV_SCALE = 104, MAT_CULL = 124,
@@ -36,6 +37,12 @@ enum { BOX_SIZE = 52, BOX_FILE = 28, BOX_STATEMENT = 32, BOX_GROUP = 36, BOX_MAT
 // group, material, copy, part)
 enum { BAR_SIZE = 64, BAR_MIN = 0, BAR_MAX = 12, BAR_ROT = 24, BAR_FILE = 40, BAR_STATEMENT = 44, BAR_GROUP = 48,
        BAR_MATERIAL = 52 };
+// A shape record: kind, the box as written, rotation, then the source reference (line, file, statement,
+// group, material, copy, part); a paint record: material, kind, object, faces or slot, rectangle, filter,
+// line, file
+enum { SHAPE_SIZE = 68, SHAPE_KIND = 0, SHAPE_MIN = 4, SHAPE_MAX = 16, SHAPE_ROT = 28, SHAPE_FILE = 44, SHAPE_STATEMENT = 48,
+       SHAPE_GROUP = 52, SHAPE_MATERIAL = 56 };
+enum { PAINT_SIZE = 44, PAINT_KIND = 4, PAINT_OBJECT = 8, PAINT_FACES = 12 };
 // A source record: path, the import line's file and line, padding, size, hash
 enum { SRC_PATH = 0, SRC_IMPORT_FILE = 4, SRC_IMPORT_LINE = 8, SRC_PAD = 12, SRC_SIZE = 16, SRC_HASH = 24 };
 
@@ -437,7 +444,79 @@ int main(int argc, char **argv)
             MS_Unload(bs);
         }
     }
-    if (srcCount > 1) {
+    uint32_t shapeE, shapes = Section(orig, S_SHAPES, &shapeE), shapeCount = Rd32(orig, shapeE + 8);
+    if (shapeCount >= 2) {
+        // Shapes: a known kind, the box as written (ordered, finite; sx, sz > 0, sy > 0 but a plane's 0), a
+        // finite rotation, a valid reference with a material, map order
+        uint32_t stmtE, last = shapes + SHAPE_SIZE * (shapeCount - 1), plane = 0;
+        Section(orig, S_STATEMENTS, &stmtE);
+        for (uint32_t i = shapeCount; i-- > 0; )
+            if (Rd32(orig, shapes + SHAPE_SIZE * i + SHAPE_KIND) == 5) plane = shapes + SHAPE_SIZE * i;
+        CASE("shape kind 6", Wr32(c, shapes + SHAPE_KIND, 6));
+        CASE("shape kind 0xFFFFFFFF", Wr32(c, last + SHAPE_KIND, 0xFFFFFFFFu));
+        CASE("shape corners unordered", Wr32(c, shapes + SHAPE_MIN, 0x7F000000u));
+        CASE("shape min NaN", Wr32(c, shapes + SHAPE_MIN + 4, 0x7FC00000u));
+        CASE("shape max infinite", Wr32(c, last + SHAPE_MAX + 8, 0x7F800000u));
+        CASE("shape width 0", Wr32(c, shapes + SHAPE_MAX, Rd32(c, shapes + SHAPE_MIN)));
+        CASE("shape depth 0", Wr32(c, shapes + SHAPE_MAX + 8, Rd32(c, shapes + SHAPE_MIN + 8)));
+        CASE("shape height 0 (not a plane)", Wr32(c, shapes + SHAPE_MAX + 4, Rd32(c, shapes + SHAPE_MIN + 4)));
+        if (plane) CASE("plane with a height", Wr32(c, plane + SHAPE_MAX + 4, 0x42C80000u));    // (100)
+        else { printf("FAIL the shape package needs a plane\n"); fails++; }
+        CASE("shape rotation NaN", Wr32(c, shapes + SHAPE_ROT + 4, 0x7FC00000u));
+        CASE("shape centre out of range", { Wr32(c, shapes + SHAPE_MIN, 0x7F61B1E6u); Wr32(c, shapes + SHAPE_MAX, 0x7F61B1E7u); });
+        CASE("shape file = the source count", Wr32(c, shapes + SHAPE_FILE, srcCount));
+        CASE("shape statement = the statement count", Wr32(c, shapes + SHAPE_STATEMENT, Rd32(orig, stmtE + 8)));
+        CASE("shape group -2", Wr32(c, shapes + SHAPE_GROUP, 0xFFFFFFFEu));
+        CASE("shape material -1", Wr32(c, shapes + SHAPE_MATERIAL, 0xFFFFFFFFu));
+        CASE("shapes out of map order", Wr32(c, shapes + SHAPE_SIZE + SHAPE_STATEMENT, Rd32(orig, shapes + SHAPE_STATEMENT) - 1));
+        CASE("more shapes than MS_MAX_OBJECTS", Wr32(c, shapeE + 8, 1000001u));
+        // Paint on shapes (kind 2): its parts' bits only, an object in range
+        uint32_t paintE, paints = Section(orig, S_PAINT, &paintE), paintCount = Rd32(orig, paintE + 8), onShape = 0, onSphere = 0;
+        for (uint32_t i = paintCount; i-- > 0; ) {
+            uint32_t p = paints + PAINT_SIZE * i;
+            if (Rd32(orig, p + PAINT_KIND) != 2) continue;
+            onShape = p;
+            uint32_t o = Rd32(orig, p + PAINT_OBJECT);
+            if (o < shapeCount && Rd32(orig, shapes + SHAPE_SIZE * o + SHAPE_KIND) == 1) onSphere = p;
+        }
+        if (onShape && onSphere) {
+            CASE("paint kind 3", Wr32(c, onShape + PAINT_KIND, 3));
+            CASE("paint on shape = the shape count", Wr32(c, onShape + PAINT_OBJECT, shapeCount));
+            CASE("paint on a shape: part bit 6", Wr32(c, onShape + PAINT_FACES, 0x40u));
+            CASE("paint on a shape: no part", Wr32(c, onShape + PAINT_FACES, 0));
+            CASE("paint on a sphere: part 1", Wr32(c, onSphere + PAINT_FACES, 2));
+        } else { printf("FAIL the shape package needs paint on a sphere\n"); fails++; }
+        // Loaded as valid: the first shape turned (yaw 45)
+        unsigned char *ok = Copy(orig, size);
+        Wr32(ok, shapes + SHAPE_ROT, 0x42340000u);
+        if (!Load(ok, size)) { printf("FAIL shape yaw 45: %s\n", MS_LastError()); fails++; }
+        else printf("ok   shape yaw 45 loads\n");
+        free(ok);
+        printf("ok   %u shapes in the file\n", shapeCount);
+        // The game's runtime on the compiled shapes: a body inside the first one collides with its collider,
+        // a ray down onto it hits the shape (its top part), the shapes are entities
+        FILE *sf = fopen(fuzzPath, "wb");
+        bool written = sf && fwrite(orig, 1, size, sf) == size;
+        if (sf) fclose(sf);
+        MS_Scene *ss = written ? MS_Load(fuzzPath, &(MS_LoadOptions){ .noGpu = true }) : NULL;
+        if (!ss) { printf("FAIL the shape package does not load: %s\n", MS_LastError()); fails++; }
+        else {
+            const MS_Shape *s0 = &ss->shapes[0];
+            Vector3 c0 = s0->shape.center;
+            BoundingBox body = { { c0.x - 0.05f, c0.y - 0.05f, c0.z - 0.05f }, { c0.x + 0.05f, c0.y + 0.05f, c0.z + 0.05f } };
+            int hit = MS_FirstCollision(ss, body);
+            MS_Hit r = MS_Raycast(ss, (Vector3){ c0.x, c0.y + 10.0f, c0.z }, (Vector3){ 0, -1, 0 }, 0.0f);
+            int e = MS_ObjectEntity(ss, (MS_ObjRef){ MS_OBJ_SHAPE, 0 });
+            bool good = (int)shapeCount == ss->shapeCount && hit == ss->shapeColliderFirst && r.obj.kind == MS_OBJ_SHAPE &&
+                        r.obj.index == 0 && fabsf(r.point.y - s0->box.max.y) < 1e-3f && e >= 0 &&
+                        ss->entityObjects[e].kind == MS_OBJ_SHAPE && MS_ShapeTriangles(ss, 0) > 0;
+            if (!good) { printf("FAIL compiled shapes: collision %d (want %d), raycast %d:%d at y %g (want %g), entity %d\n", hit,
+                                ss->shapeColliderFirst, (int)r.obj.kind, r.obj.index, r.point.y, s0->box.max.y, e); fails++; }
+            else printf("ok   compiled shapes collide (collider %d), MS_Raycast hits shape 0 at its top, entity %d\n", hit, e);
+            MS_Unload(ss);
+        }
+    }
+    if (srcCount > 1 || shapeCount > 0) {
         // (the package-specific cases below are tests/models' and tests/rotated's)
         printf("%s: %d loads, %d valid scenes, %d failures\n", fails ? "FAILED" : "PASSED", loads, accepted, fails);
         free(orig);

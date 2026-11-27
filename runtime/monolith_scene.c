@@ -54,6 +54,11 @@
 #define AO_VOLUME_BUDGET    (32.0 * 1024.0 * 1024.0)
 #define AO_DIST_MIN         (-1.0f)
 #define AO_DIST_MAX         4.0f
+// The meshes shapes are drawn with ("pieces", region "Shapes"): one per kind, except a capsule, which
+// is drawn as three (its side and its two half-ellipsoid caps, whose heights follow its size)
+enum { SHAPE_PIECE_CUBE, SHAPE_PIECE_SPHERE, SHAPE_PIECE_CYLINDER, SHAPE_PIECE_CONE, SHAPE_PIECE_CAPSULE_SIDE,
+       SHAPE_PIECE_CAPSULE_TOP, SHAPE_PIECE_CAPSULE_BOTTOM, SHAPE_PIECE_PLANE, SHAPE_PIECE_COUNT };
+#define SHAPE_PIECES_MAX    3       // pieces of one shape (a capsule)
 
 // ======================================================================================
 // #region Types
@@ -115,9 +120,9 @@ enum { TEX_TRILINEAR, TEX_NEAREST };
 // grid cells don't fit the rectangle and how many it covers
 typedef struct {
     int material;
-    int kind;                           // PAINT_BOX or PAINT_MODEL
-    int object;                         // boxes[] or models[] index
-    unsigned char faces;                // boxes: bit f for face f (+x -x +y -y +z -z)
+    int kind;                           // PAINT_BOX, PAINT_MODEL or PAINT_SHAPE
+    int object;                         // boxes[], models[] or shapes[] index
+    unsigned char faces;                // boxes: bit f for face f (+x -x +y -y +z -z); shapes: bit p for part p
     int slot;                           // models: the file's material slot; boxes: -1
     int x, y, w, h;                     // texels of the atlas
     bool nearest;                       // `paint own ... paint_filter nearest`
@@ -128,9 +133,10 @@ typedef struct {
     signed char why;
     signed char gridFace;
     int gridW, gridH;
+    unsigned short names;               // while parsing: the face / part names written (bits of PAINT_NAMES)
 } PaintDef;
 
-enum { PAINT_BOX = 0, PAINT_MODEL = 1 };
+enum { PAINT_BOX = 0, PAINT_MODEL = 1, PAINT_SHAPE = 2 };
 enum { PAINT_OK = 0, PAINT_NOT_DRAWN, PAINT_OUTSIDE, PAINT_NO_ATLAS, PAINT_SKINNED, PAINT_NEEDS_UNWRAP, PAINT_NO_SHADER,
        PAINT_GRID_CELLS };
 
@@ -267,6 +273,15 @@ typedef struct { int group, first, count; BoundingBox bounds; R3D_Mesh mesh; flo
 // then index (keeps map order within a cluster)
 typedef struct { int group, big, turned, cx, cz, index; BoundingBox bounds; } CellItem;
 
+// One instanced draw of shapes: the pieces (SHAPE_PIECE_*: a capsule is three) of one kind drawn with
+// one material, in the scene's shape mesh of that piece; painted: its buffer carries the paint keys
+typedef struct {
+    int piece, material;
+    R3D_InstanceBuffer inst;
+    bool instLoaded, painted;
+    int count;
+} ShapeGroup;
+
 // One instanced draw: the model instances of one file with the same material set and shadow flag
 typedef struct {
     int file;
@@ -339,6 +354,12 @@ typedef struct {
     int barrierCount, barrierCap;
     BoundingBox *barrierWritten;        // parallel to barriers[]: each as written (corners ordered), for
     int barrierWrittenCap;              // compiled maps, which rebuild the record from it bit for bit
+    MS_Shape *shapes;                   // `shape` lines (primitives drawn with a generated mesh; MS_Shape)
+    int shapeCount, shapeCap;
+    BoundingBox *shapeWritten;          // parallel to shapes[]: each as written (the block's box), for
+    int shapeWrittenCap;                //   compiled maps, which rebuild the record from it bit for bit
+    MS_TurnedBox *shapeHull;            // parallel to shapes[]: the shape of its collider (its turned box;
+    int shapeHullCap;                   //   a plane's: 0.01 m thick below it)
     bool hasSpawn;
     Vector3 spawnFeet;
     float spawnYawDeg, spawnPitchDeg;
@@ -375,8 +396,9 @@ typedef struct {
     int paintTableRows;
     Texture2D paintTableTex;
     bool anyPaint;
-    BoundingBox *colliders;             // boxes, then model colliders, then barriers (only with models or
-                                        // barriers: OwnColliders)
+    int *shapePaintKey;                 // per shape: the first of its parts' paint keys (0 = none)
+    BoundingBox *colliders;             // boxes, then model colliders, then shapes, then barriers (only
+                                        // with models, shapes or barriers: OwnColliders)
     int colliderCount;
     BvhNode *colliderNodes;             // BVH over the published colliders (MS_Raycast, MS_FirstCollision)
     int *colliderOrder;                 // collider indices in leaf order
@@ -397,7 +419,7 @@ typedef struct {
     MS_Source *entitySources;
     int *entityModels;
     int entityCount;
-    int *objEntities;                   // boxes, then models, then lights, then barriers
+    int *objEntities;                   // boxes, then models, then lights, then barriers, then shapes
     int *entityHash;
     int entityHashCap;
 
@@ -431,7 +453,13 @@ typedef struct {
     int modelGroupCount;
     DrawRange *modelRanges;
     int modelRangeCount, modelRangeCap;
+    ShapeGroup *shapeGroups;            // the shapes' draws (BuildShapeGroups): per (piece, material)
+    int shapeGroupCount;
+    DrawRange *shapeRanges;             // one cluster each (group = shapeGroups[] index)
+    int shapeRangeCount, shapeRangeCap;
 #ifdef MONOLITH_EDITOR
+    int *shapeRangeOf, *shapeSlotOf;    // per shape piece (SHAPE_PIECES_MAX per shape): its range, its slot
+                                        //   in its group's buffer (-1: the shape has no such piece)
     const char *shaderDefines, *shaderDefinesFile;  // MS_LoadOptions (not owned)
     // Live edits (MS_EditSetText): what the next edit compares with and keeps
     unsigned long long lookHash;        // the statements that are no objects (materials, env, format)
@@ -508,6 +536,8 @@ struct EditPreview {
     int *colliderAt;
     MS_LightDef *lightOrig;             // lights
     MS_Barrier *barrierOrig;            // barriers
+    MS_Shape *shapeOrig;                // shapes
+    BoundingBox *shapeRangeOrig;        // shape range bounds at Begin (grown while shapes move)
     MS_Transform *entityOrig;
     BoundingBox *reach;                 // per object: everything it covered since Begin
     unsigned char *boxSel;              // per box: selected
@@ -588,11 +618,17 @@ struct MS_Private {
     bool filterOn;
     unsigned char *filterObj, *filterObjNew;
     int filterObjCount, filterObjCap, filterObjNewCap;
+
+    // 3D snips (region "3D snip clip"): the clip variants (NULL: not built), drawn while clipOn
+    struct SnipClip *clip;
+    bool clipOn;
 #endif
 
     // GPU state that lives as long as the scene (not per load)
     bool gpu;
     R3D_Mesh cube;
+    R3D_Mesh shapeMesh[SHAPE_PIECE_COUNT];      // the shapes' unit meshes (ShapeMeshesLoad: on the first map
+    bool shapeMeshLoaded;                       //   with shapes; kept until MS_Unload)
     bool sunShadowLoaded;
     R3D_ShadowMap sunShadow[SUN_TILE_COUNT];    // one per cached tile ([0] for the camera-fitted map)
     SunShadowTiles tiles;
@@ -1506,10 +1542,10 @@ static void TurnedBoxMake(BoundingBox written, Vector3 rotationDeg, MS_TurnedBox
     }
 }
 
-// The objects a map has made so far (what MS_MAX_OBJECTS caps): boxes, models, lights, barriers
+// The objects a map has made so far (what MS_MAX_OBJECTS caps): boxes, models, lights, barriers, shapes
 static inline int ObjectCount(const SceneData *d)
 {
-    return d->boxCount + d->modelCount + d->lightCount + d->barrierCount;
+    return d->boxCount + d->modelCount + d->lightCount + d->barrierCount + d->shapeCount;
 }
 
 // A barrier from its box as written (corners ordered) and its rotation, with the box's float math: a
@@ -1636,6 +1672,11 @@ static Vector2 CubeFaceUv(int f, Vector3 l)
 #define PAINT_RASTER        1024        // the own-UV test's raster (texels per side)
 #define PAINT_SHADER_MAX    16384       // R3D_MAX_SHADER_CODE_LENGTH (R3D's CMakeLists.txt): a surface shader's source
 static const char *const PAINT_FACES[6] = { "+x", "-x", "+y", "-y", "+z", "-z" };
+#ifdef MONOLITH_EDITOR
+// The names a `paint` line's face list may hold: a box's faces (= a cube shape's parts), then the
+// other shapes' parts (MS_ShapePartName); PaintDef.names has bit i for PAINT_NAMES[i]
+static const char *const PAINT_NAMES[10] = { "+x", "-x", "+y", "-y", "+z", "-z", "surface", "side", "top", "bottom" };
+#endif
 
 // The size of a PNG from its header (IHDR), without decoding it; else of any image raylib reads.
 // False when the file can't be read.
@@ -1978,14 +2019,50 @@ static int CountSamplers(const char *s)
     return n;
 }
 
+// A last stage over a surface shader's source (StageSource): what goes first, the names the source's
+// vertex() and fragment() get, the stage's uniforms and its vertex() / fragment() (each format has
+// one %s: the call of the renamed entry point, or nothing), the samplers the source may declare
+typedef struct {
+    const char *preamble, *userVertex, *userFragment;
+    const char *head, *vert, *frag;
+    int maxSamplers;
+    bool hoistPragmas;      // `#pragma` lines go first, outside the stage #ifdefs (R3D drops the line
+                            // break before a #pragma, which would join it to an #ifdef line)
+} StageSpec;
+
+static const StageSpec PAINT_STAGE = {
+    "#define MS_INTERP(q) q\n", "ms_userVertex", "ms_userFragment", PAINT_STAGE_HEAD, PAINT_STAGE_VERT, PAINT_STAGE_FRAG, 2,
+};
+
+static char *StageSource(const char *src, const StageSpec *spec);
+
 // The paint version of a surface shader's source (src NULL: of an empty shader), heap; NULL when out
 // of memory or when the source declares more than 2 samplers (the stage needs 2 of R3D's 4).
-static char *PaintShaderSource(const char *src)
+static char *PaintShaderSource(const char *src) { return StageSource(src, &PAINT_STAGE); }
+
+// A surface shader's source with a stage after it (src NULL: an empty shader): comments stripped,
+// `varying`s declared in place per stage, vertex() and fragment() renamed (spec) and kept to their
+// stage, then the spec's stage. Heap; NULL when out of memory or with more samplers than the spec allows.
+static char *StageSource(const char *src, const StageSpec *spec)
 {
     Text in = { 0 }, out = { 0 };
     if (src && !StripComments(src, &in)) { free(in.s); return NULL; }
     const char *s = in.s ? in.s : "";
-    if (CountSamplers(s) > 2) { free(in.s); return NULL; }
+    if (CountSamplers(s) > spec->maxSamplers) { free(in.s); return NULL; }
+    Text body = { 0 };
+    if (spec->hoistPragmas) {
+        // (lines start without blanks after StripComments)
+        for (int i = 0; s[i]; ) {
+            int e = i;
+            while (s[e] && s[e] != '\n') e++;
+            bool pragma = strncmp(s + i, "#pragma", 7) == 0;
+            TextPut(pragma ? &out : &body, s + i, e - i);
+            TextPut(pragma ? &out : &body, "\n", s[e] ? 1 : 0);
+            i = e + (s[e] ? 1 : 0);
+        }
+        if (body.oom) { free(in.s); free(body.s); free(out.s); return NULL; }
+        s = body.s ? body.s : "";
+    }
 
     // Which entry points the source has: without vertex() its code belongs to the fragment stage
     // only, without fragment() to the vertex stage (R3D gives a stage without its entry no user code)
@@ -1997,7 +2074,7 @@ static char *PaintShaderSource(const char *src)
             hasV = hasV || WordAt(s, k, "vertex", false);
             hasF = hasF || WordAt(s, k, "fragment", false);
         }
-    TextStr(&out, "#define MS_INTERP(q) q\n");
+    TextStr(&out, spec->preamble);
     if (src && (hasV != hasF)) TextStr(&out, hasV ? "#ifdef STAGE_VERT\n" : "#ifdef STAGE_FRAG\n");
 
     for (int i = 0; s[i]; ) {
@@ -2013,7 +2090,9 @@ static char *PaintShaderSource(const char *src)
                     if (*e == '{') depth++;
                     else if (*e == '}' && --depth == 0) { e++; break; }
                 }
-                TextStr(&out, v ? "\n#ifdef STAGE_VERT\nvoid ms_userVertex() " : "\n#ifdef STAGE_FRAG\nvoid ms_userFragment() ");
+                TextStr(&out, v ? "\n#ifdef STAGE_VERT\nvoid " : "\n#ifdef STAGE_FRAG\nvoid ");
+                TextStr(&out, v ? spec->userVertex : spec->userFragment);
+                TextStr(&out, "() ");
                 TextPut(&out, open, (int)(e - open));
                 TextStr(&out, "\n#endif\n");
                 i = (int)(e - s);
@@ -2043,16 +2122,17 @@ static char *PaintShaderSource(const char *src)
         TextPut(&out, &s[i++], 1);
     }
     if (src && (hasV != hasF)) TextStr(&out, "\n#endif\n");
+    free(body.s);
 
     // The stage (its entry points call the source's, renamed)
     TextStr(&out, "\n");
-    TextStr(&out, PAINT_STAGE_HEAD);
+    TextStr(&out, spec->head);
     char head[64];
     for (int st = 0; st < 2; st++) {
-        const char *fmt = st == 0 ? PAINT_STAGE_VERT : PAINT_STAGE_FRAG;
+        const char *fmt = st == 0 ? spec->vert : spec->frag;
         const char *at = strstr(fmt, "%s");
-        const char *call = st == 0 ? "ms_userVertex();\n" : "ms_userFragment();\n";
-        snprintf(head, sizeof(head), "%s", (st == 0 ? hasV : hasF) ? call : "");
+        if ((st == 0 ? hasV : hasF)) snprintf(head, sizeof(head), "%s();\n", st == 0 ? spec->userVertex : spec->userFragment);
+        else head[0] = '\0';
         TextPut(&out, fmt, (int)(at - fmt));
         TextStr(&out, head);
         TextStr(&out, at + 2);
@@ -2289,13 +2369,13 @@ static int PaintConflict(const SceneData *d, int *ea, int *eb)
     // Faces and slots: by (material, kind, object); neighbours in a run share no face or slot
     for (int i = 0; i < n && !result; i++) {
         const PaintDef *e = &d->paints[i];
-        it[i] = (PaintSortItem){ ((long long)(e->material + 1) << 1) | e->kind, e->object, i };
+        it[i] = (PaintSortItem){ ((long long)(e->material + 1) << 2) | e->kind, e->object, i };
     }
     if (!result) qsort(it, (size_t)n, sizeof(PaintSortItem), ComparePaintItems);
     for (int i = 0; i < n && !result; i++)
         for (int j = i + 1; j < n && it[j].a == it[i].a && it[j].b == it[i].b && !result; j++) {
             const PaintDef *e = &d->paints[it[i].idx], *f = &d->paints[it[j].idx];
-            if (e->kind == PAINT_BOX ? (e->faces & f->faces) != 0 : e->slot == f->slot) {
+            if (e->kind != PAINT_MODEL ? (e->faces & f->faces) != 0 : e->slot == f->slot) {
                 result = 2;
                 *ea = it[i].idx < it[j].idx ? it[i].idx : it[j].idx;
                 *eb = it[i].idx < it[j].idx ? it[j].idx : it[i].idx;
@@ -2388,6 +2468,481 @@ static GridSpan BoxFaceSpan(const SceneData *d, int b, int f, bool v, double rho
     GridSpan s = { first, fmax(g0 - first, 0.0), fmin(g1, last) - first, cells < 1e9 ? (int)cells : 1000000000 };
     if (s.end < s.frac) s.end = s.frac;
     return s;
+}
+
+// #endregion
+
+// ======================================================================================
+// #region Shapes: kinds, parts, records, the generated meshes, ray hits (monolith's docs/map-format.md 2.1, Shapes)
+// ======================================================================================
+// A `shape` line is drawn inside the box a `block` with the same numbers makes, turned with it. Each
+// kind is one unit mesh ("piece"), scaled by the size, turned and placed per shape (a capsule: three
+// pieces, its caps as high as min(sx, sz) / 2, at most sy / 2). The pieces are generated here with
+// fixed segment counts, so the triangles are the same everywhere: in a unit frame centred on the
+// origin (x and z -0.5..0.5; y -0.5..0.5, a capsule cap 0..1 or -1..0, a plane at 0). Per vertex the
+// part (a paint region, numbered like a box's faces) is in boneIndices[0] and the part UV in the bone
+// weights (two unorm16), as a painted model's mesh carries them; its texcoord is the part UV too.
+// The vertex data is a constant of the code, not of a map: built once (ShapeMeshData), never freed.
+
+#define SHAPE_PI            3.14159265358979323846
+#define SHAPE_SEGS          32      // around a round kind
+#define SHAPE_RINGS         16      // a sphere's rings, pole to pole
+#define SHAPE_CAP_RINGS     8       // a capsule cap's rings, rim to pole
+#define SHAPE_V_TOTAL       (24 + 17 * 33 + 132 + 98 + 66 + 9 * 33 + 9 * 33 + 8)
+#define SHAPE_T_TOTAL       (12 + 960 + 128 + 64 + 64 + 480 + 480 + 4)
+
+static const char *const SHAPE_KINDS[MS_SHAPE_KIND_COUNT] = { "cube", "sphere", "cylinder", "cone", "capsule", "plane" };
+static const char *const SHAPE_PARTS[MS_SHAPE_KIND_COUNT][6] = {
+    { "+x", "-x", "+y", "-y", "+z", "-z" }, { "surface" }, { "side", "top", "bottom" }, { "side", "bottom" },
+    { "side", "top", "bottom" }, { "top", "bottom" },
+};
+static const int SHAPE_PART_COUNT[MS_SHAPE_KIND_COUNT] = { 6, 1, 3, 2, 3, 2 };
+#ifdef MONOLITH_EDITOR
+static const char *const SHAPE_PART_LIST[MS_SHAPE_KIND_COUNT] = {      // (the parser's messages)
+    "+x -x +y -y +z -z", "surface", "side top bottom", "side bottom", "side top bottom", "top bottom",
+};
+#endif
+// Each piece's vertices and triangles (the sums are SHAPE_V_TOTAL and SHAPE_T_TOTAL)
+static const int SHAPE_PIECE_V[SHAPE_PIECE_COUNT] = { 24, 17 * 33, 132, 98, 66, 9 * 33, 9 * 33, 8 };
+static const int SHAPE_PIECE_T[SHAPE_PIECE_COUNT] = { 12, 960, 128, 64, 64, 480, 480, 4 };
+
+const char *MS_ShapeKindName(MS_ShapeKind kind)
+{
+    return (int)kind >= 0 && kind < MS_SHAPE_KIND_COUNT ? SHAPE_KINDS[kind] : NULL;
+}
+
+int MS_ShapePartCount(MS_ShapeKind kind)
+{
+    return (int)kind >= 0 && kind < MS_SHAPE_KIND_COUNT ? SHAPE_PART_COUNT[kind] : 0;
+}
+
+const char *MS_ShapePartName(MS_ShapeKind kind, int part)
+{
+    return part >= 0 && part < MS_ShapePartCount(kind) ? SHAPE_PARTS[kind][part] : NULL;
+}
+
+#ifdef MONOLITH_EDITOR
+// The kind named `name`, -1 for none
+static int ShapeKindOf(const char *name)
+{
+    for (int k = 0; k < MS_SHAPE_KIND_COUNT; k++)
+        if (strcmp(name, SHAPE_KINDS[k]) == 0) return k;
+    return -1;
+}
+#endif
+
+// The statement of object i of a list sorted by statement (kind PAINT_BOX: boxes by boxRefs, PAINT_MODEL:
+// models by ref, PAINT_SHAPE: shapes by ref)
+static inline int StatementOf(const SceneData *d, int kind, int i)
+{
+    return kind == PAINT_MODEL ? d->models[i].ref.prim : kind == PAINT_SHAPE ? d->shapes[i].ref.prim : d->boxRefs[i].prim;
+}
+
+// The AABB of a turned box's eight corners
+static BoundingBox TurnedAabb(const MS_TurnedBox *t)
+{
+    Vector3 h = Vector3Scale(t->size, 0.5f);
+    BoundingBox b = { { INFINITY, INFINITY, INFINITY }, { -INFINITY, -INFINITY, -INFINITY } };
+    for (int c = 0; c < 8; c++) {
+        Vector3 q = TurnedPoint(t, c & 1 ? h.x : -h.x, c & 2 ? h.y : -h.y, c & 4 ? h.z : -h.z);
+        b.min = Vector3Min(b.min, q);
+        b.max = Vector3Max(b.max, q);
+    }
+    return b;
+}
+
+// A shape from its box as written (the block's box, corners ordered) and its rotation, with the box's
+// float math as BarrierMake: its record (box, turned, shape) and the shape of its collider (*hull: its
+// turned box; a plane's is 0.01 m thick below it, along its own up axis), box = the collider's AABB.
+// False when a coordinate or size is not finite.
+static bool ShapeMake(int kind, BoundingBox written, Vector3 rotationDeg, MS_Shape *s, MS_TurnedBox *hull)
+{
+    s->kind = (MS_ShapeKind)kind;
+    s->turned = rotationDeg.x != 0.0f || rotationDeg.y != 0.0f || rotationDeg.z != 0.0f;
+    BoundingBox a;
+    TurnedBoxMake(written, s->turned ? rotationDeg : (Vector3){ 0 }, &s->shape, &a);
+    *hull = s->shape;
+    s->box = s->turned ? a : written;
+    if (kind == MS_SHAPE_PLANE) {
+        hull->size.y = 0.01f;
+        hull->center = Vector3Subtract(s->shape.center, Vector3Scale(s->shape.axis[1], 0.005f));
+        if (s->turned) s->box = TurnedAabb(hull);
+        else s->box.min.y = written.min.y - 0.01f;
+    }
+    const float f[] = { s->box.min.x, s->box.min.y, s->box.min.z, s->box.max.x, s->box.max.y, s->box.max.z,
+                        s->box.max.x - s->box.min.x, s->box.max.y - s->box.min.y, s->box.max.z - s->box.min.z,
+                        s->shape.center.x, s->shape.center.y, s->shape.center.z,
+                        s->shape.size.x, s->shape.size.y, s->shape.size.z, hull->center.y };
+    for (int i = 0; i < (int)(sizeof(f) / sizeof(f[0])); i++)
+        if (!isfinite(f[i])) return false;
+    return true;
+}
+
+// The pieces a shape is drawn with: which mesh, where its unit frame's origin lies and its scale (the
+// rotation is the shape's for all of them). A capsule's side is left out when its caps meet.
+typedef struct { int piece; Vector3 pos, scale; } ShapePiece;
+
+static int ShapePieces(const MS_Shape *s, ShapePiece out[SHAPE_PIECES_MAX])
+{
+    const MS_TurnedBox *t = &s->shape;
+    Vector3 size = t->size;
+    switch (s->kind) {
+    case MS_SHAPE_CUBE:     out[0] = (ShapePiece){ SHAPE_PIECE_CUBE, t->center, size }; return 1;
+    case MS_SHAPE_SPHERE:   out[0] = (ShapePiece){ SHAPE_PIECE_SPHERE, t->center, size }; return 1;
+    case MS_SHAPE_CYLINDER: out[0] = (ShapePiece){ SHAPE_PIECE_CYLINDER, t->center, size }; return 1;
+    case MS_SHAPE_CONE:     out[0] = (ShapePiece){ SHAPE_PIECE_CONE, t->center, size }; return 1;
+    case MS_SHAPE_PLANE:    out[0] = (ShapePiece){ SHAPE_PIECE_PLANE, t->center, { size.x, 1.0f, size.z } }; return 1;
+    default: break;
+    }
+    // A capsule: the caps' height c, the side between them
+    float c = fminf(fminf(size.x, size.z) * 0.5f, size.y * 0.5f), side = size.y - 2.0f * c;
+    Vector3 up = Vector3Scale(t->axis[1], size.y * 0.5f - c);
+    int n = 0;
+    if (side > 0.0f) out[n++] = (ShapePiece){ SHAPE_PIECE_CAPSULE_SIDE, t->center, { size.x, side, size.z } };
+    out[n++] = (ShapePiece){ SHAPE_PIECE_CAPSULE_TOP, Vector3Add(t->center, up), { size.x, c, size.z } };
+    out[n++] = (ShapePiece){ SHAPE_PIECE_CAPSULE_BOTTOM, Vector3Subtract(t->center, up), { size.x, c, size.z } };
+    return n;
+}
+
+// The rotation a shape's pieces are drawn with (identity when it isn't turned)
+static Quaternion ShapeRotation(const MS_Shape *s)
+{
+    return s->turned ? RotationYpr(s->shape.rotationDeg) : (Quaternion){ 0.0f, 0.0f, 0.0f, 1.0f };
+}
+
+// --- The pieces' vertex data (built once per process)
+
+// A model's own UV or a shape's part UV as its paint mesh stores it (unorm16, PaintBones), so picking and drawing agree
+static Vector2 Unorm16Uv(Vector2 t)
+{
+    float u = fminf(fmaxf(t.x, 0.0f), 1.0f), v = fminf(fmaxf(t.y, 0.0f), 1.0f);
+    return (Vector2){ floorf(u * 65535.0f + 0.5f) / 65535.0f, floorf(v * 65535.0f + 0.5f) / 65535.0f };
+}
+
+
+static R3D_Vertex g_shapeVert[SHAPE_V_TOTAL];
+static Vector3 g_shapeNormal[SHAPE_V_TOTAL];        // (the float normals: triangle winding)
+static Vector2 g_shapeUv[SHAPE_V_TOTAL];            // the part UV as a float (ray hits)
+static uint32_t g_shapeIndex[3 * SHAPE_T_TOTAL];    // per piece from its first vertex
+static int g_shapeV0[SHAPE_PIECE_COUNT + 1], g_shapeI0[SHAPE_PIECE_COUNT + 1];
+static pthread_once_t g_shapeOnce = PTHREAD_ONCE_INIT;
+static bool g_shapeOk;
+
+typedef struct { int v, i, v0; } ShapeGen;      // vertices and indices so far, the piece's first vertex
+
+// A vertex: its normal, its tangent along dpdu (made orthogonal to the normal; the sign says whether
+// normal x tangent runs along dpdv, as the part UV's v does), the part and part UV in the bones
+static void ShapeVertex(ShapeGen *g, Vector3 p, Vector3 n, Vector2 uv, Vector3 dpdu, Vector3 dpdv, int part)
+{
+    if (g->v >= SHAPE_V_TOTAL) return;
+    n = Vector3Normalize(n);
+    Vector3 t = Vector3Normalize(Vector3Subtract(dpdu, Vector3Scale(n, Vector3DotProduct(n, dpdu))));
+    float w = Vector3DotProduct(Vector3CrossProduct(n, t), dpdv) < 0.0f ? -1.0f : 1.0f;
+    R3D_Vertex v = R3D_MakeVertex(p, uv, n, (Vector4){ t.x, t.y, t.z, w }, WHITE);
+    PaintBones(&v, (unsigned int)part, uv);
+    g_shapeVert[g->v] = v;
+    g_shapeNormal[g->v] = n;
+    g_shapeUv[g->v++] = uv;
+}
+
+// A triangle of the piece's vertices a, b, c, wound so it faces where its vertices' normals point
+// (counter-clockwise seen from outside)
+static void ShapeTri(ShapeGen *g, int a, int b, int c)
+{
+    if (g->i + 3 > 3 * SHAPE_T_TOTAL) return;
+    Vector3 pa = g_shapeVert[g->v0 + a].position, pb = g_shapeVert[g->v0 + b].position, pc = g_shapeVert[g->v0 + c].position;
+    Vector3 fn = Vector3CrossProduct(Vector3Subtract(pb, pa), Vector3Subtract(pc, pa));
+    Vector3 vn = Vector3Add(Vector3Add(g_shapeNormal[g->v0 + a], g_shapeNormal[g->v0 + b]), g_shapeNormal[g->v0 + c]);
+    if (Vector3DotProduct(fn, vn) < 0.0f) { int k = b; b = c; c = k; }
+    g_shapeIndex[g->i++] = (uint32_t)a;
+    g_shapeIndex[g->i++] = (uint32_t)b;
+    g_shapeIndex[g->i++] = (uint32_t)c;
+}
+
+// The direction around a round kind at segment k (+ frac of a segment): u from -z, counter-clockwise
+// seen from above (-z, -x, +z, +x), and its tangent along u. k = SHAPE_SEGS is k = 0 again, so the
+// seam's vertices lie exactly on the first ones.
+static Vector3 Around(int k, float frac)
+{
+    double a = 2.0 * SHAPE_PI * ((k % SHAPE_SEGS) + frac) / SHAPE_SEGS;
+    return (Vector3){ (float)-sin(a), 0.0f, (float)-cos(a) };
+}
+
+static Vector3 AroundTangent(int k, float frac)
+{
+    double a = 2.0 * SHAPE_PI * ((k % SHAPE_SEGS) + frac) / SHAPE_SEGS;
+    return (Vector3){ (float)-cos(a), 0.0f, (float)sin(a) };
+}
+
+// A ring of a surface of revolution (SHAPE_SEGS + 1 vertices, the last on the first): radius rho at
+// height y, v its part UV's v, normal dir * nr + up * ny, dpdv dir * dr + up * dy. pole: each vertex
+// sits in the middle of its segment (u + half a segment)
+static void ShapeRing(ShapeGen *g, float rho, float y, float v, float nr, float ny, float dr, float dy, int part, bool pole)
+{
+    for (int k = 0; k <= SHAPE_SEGS; k++) {
+        float frac = pole ? 0.5f : 0.0f;
+        Vector3 dir = Around(k, frac);
+        Vector3 p = { dir.x * rho, y, dir.z * rho };
+        Vector3 n = { dir.x * nr, ny, dir.z * nr }, dpdv = { dir.x * dr, dy, dir.z * dr };
+        ShapeVertex(g, p, n, (Vector2){ ((float)k + frac) / SHAPE_SEGS, v }, AroundTangent(k, frac), dpdv, part);
+    }
+}
+
+// The quads between ring r0 and r0 + 1 (rings of SHAPE_SEGS + 1 vertices from piece vertex `base`); a
+// pole ring gives one triangle per segment
+static void ShapeBand(ShapeGen *g, int base, int r0, bool lowPole, bool highPole)
+{
+    int n = SHAPE_SEGS + 1;
+    for (int k = 0; k < SHAPE_SEGS; k++) {
+        int a = base + r0 * n + k, b = a + 1, c = a + n + 1, d = a + n;
+        if (lowPole) ShapeTri(g, a, c, d);
+        else if (highPole) ShapeTri(g, a, b, d);
+        else { ShapeTri(g, a, b, c); ShapeTri(g, a, c, d); }
+    }
+}
+
+// A flat disc of SHAPE_SEGS segments at height y (radius 0.5) facing up (top) or down: its part UV the
+// disc's x z on 0..1, as a box's +y / -y face (top: +x right, -z up; bottom: seen from below)
+static void ShapeDisc(ShapeGen *g, float y, bool top, int part)
+{
+    Vector3 n = { 0.0f, top ? 1.0f : -1.0f, 0.0f }, dpdv = { 0.0f, 0.0f, top ? -1.0f : 1.0f }, dpdu = { 1.0f, 0.0f, 0.0f };
+    int centre = g->v - g->v0;
+    ShapeVertex(g, (Vector3){ 0.0f, y, 0.0f }, n, (Vector2){ 0.5f, 0.5f }, dpdu, dpdv, part);
+    for (int k = 0; k < SHAPE_SEGS; k++) {
+        Vector3 d = Around(k, 0.0f);
+        Vector3 p = { d.x * 0.5f, y, d.z * 0.5f };
+        ShapeVertex(g, p, n, (Vector2){ p.x + 0.5f, top ? 0.5f - p.z : p.z + 0.5f }, dpdu, dpdv, part);
+    }
+    for (int k = 0; k < SHAPE_SEGS; k++) ShapeTri(g, centre, centre + 1 + k, centre + 1 + (k + 1) % SHAPE_SEGS);
+}
+
+// A cylinder's side (y -0.5..0.5, radius 0.5): two rings
+static void ShapeSide(ShapeGen *g, int part)
+{
+    int base = g->v - g->v0;
+    ShapeRing(g, 0.5f, -0.5f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, part, false);
+    ShapeRing(g, 0.5f, 0.5f, 1.0f, 1.0f, 0.0f, 0.0f, 1.0f, part, false);
+    ShapeBand(g, base, 0, false, false);
+}
+
+// A capsule cap: a half-ellipsoid of radius 0.5 and height 1 above y 0 (up) or below it, its part UV's
+// v from the rim (0) to the pole (1)
+static void ShapeCap(ShapeGen *g, bool up, int part)
+{
+    int base = g->v - g->v0;
+    float s = up ? 1.0f : -1.0f;
+    for (int r = 0; r <= SHAPE_CAP_RINGS; r++) {
+        double a = 0.5 * SHAPE_PI * r / SHAPE_CAP_RINGS;
+        float c = (float)cos(a), sn = (float)sin(a);
+        // (the ellipsoid x^2/0.25 + y^2 + z^2/0.25 = 1 has the normal (4x, y, 4z))
+        ShapeRing(g, 0.5f * c, s * sn, (float)r / SHAPE_CAP_RINGS, 2.0f * c, s * sn, -0.5f * sn, s * c, part,
+                  r == SHAPE_CAP_RINGS);
+    }
+    for (int r = 0; r < SHAPE_CAP_RINGS; r++) ShapeBand(g, base, r, false, r == SHAPE_CAP_RINGS - 1);
+}
+
+// Every piece, in SHAPE_PIECE_* order (through pthread_once: the first caller builds them)
+static void ShapeBuild(void)
+{
+    ShapeGen g = { 0 };
+    for (int piece = 0; piece < SHAPE_PIECE_COUNT; piece++) {
+        g_shapeV0[piece] = g.v;
+        g_shapeI0[piece] = g.i;
+        g.v0 = g.v;
+        switch (piece) {
+        case SHAPE_PIECE_CUBE: {
+            // R3D's unit cube: its faces, UVs and winding; the part is the face, the part UV its corner's
+            R3D_MeshData c = R3D_GenMeshDataCube(1.0f, 1.0f, 1.0f);
+            if (c.vertexCount != 24 || c.indexCount != 36) {
+                R3D_UnloadMeshData(c);
+                TraceLog(LOG_ERROR, "monolith_scene: R3D's unit cube is not 24 vertices: no shapes");
+                return;
+            }
+            for (int k = 0; k < 24; k++) {
+                R3D_Vertex v = c.vertices[k];
+                int f = FaceOfNormal(R3D_UnpackNormal(v.normal));
+                Vector2 uv = CubeFaceUv(f, v.position);
+                PaintBones(&v, (unsigned int)f, uv);
+                g_shapeVert[g.v] = v;
+                g_shapeNormal[g.v] = R3D_UnpackNormal(v.normal);
+                g_shapeUv[g.v++] = uv;
+            }
+            for (int k = 0; k < 36; k++) g_shapeIndex[g.i++] = c.indices[k];
+            R3D_UnloadMeshData(c);
+            break;
+        }
+        case SHAPE_PIECE_SPHERE: {
+            int base = g.v - g.v0;
+            for (int r = 0; r <= SHAPE_RINGS; r++) {
+                double a = SHAPE_PI * r / SHAPE_RINGS;      // (from the bottom pole)
+                float c = (float)cos(a), sn = (float)sin(a);
+                ShapeRing(&g, 0.5f * sn, -0.5f * c, (float)r / SHAPE_RINGS, sn, -c, c, sn, 0, r == 0 || r == SHAPE_RINGS);
+            }
+            for (int r = 0; r < SHAPE_RINGS; r++) ShapeBand(&g, base, r, r == 0, r == SHAPE_RINGS - 1);
+            break;
+        }
+        case SHAPE_PIECE_CYLINDER:
+            ShapeSide(&g, 0);
+            ShapeDisc(&g, 0.5f, true, 1);
+            ShapeDisc(&g, -0.5f, false, 2);
+            break;
+        case SHAPE_PIECE_CONE: {
+            // The side: the base ring and one apex vertex per segment (its normal the segment's middle's)
+            int base = g.v - g.v0;
+            ShapeRing(&g, 0.5f, -0.5f, 0.0f, 1.0f, 0.5f, 0.5f, 1.0f, 0, false);
+            for (int k = 0; k < SHAPE_SEGS; k++) {
+                Vector3 d = Around(k, 0.5f);
+                ShapeVertex(&g, (Vector3){ 0.0f, 0.5f, 0.0f }, (Vector3){ d.x, 0.5f, d.z }, (Vector2){ (k + 0.5f) / SHAPE_SEGS, 1.0f },
+                            AroundTangent(k, 0.5f), (Vector3){ -0.5f * d.x, 1.0f, -0.5f * d.z }, 0);
+            }
+            for (int k = 0; k < SHAPE_SEGS; k++) ShapeTri(&g, base + k, base + k + 1, base + SHAPE_SEGS + 1 + k);
+            ShapeDisc(&g, -0.5f, false, 1);
+            break;
+        }
+        case SHAPE_PIECE_CAPSULE_SIDE:   ShapeSide(&g, 0); break;
+        case SHAPE_PIECE_CAPSULE_TOP:    ShapeCap(&g, true, 1); break;
+        case SHAPE_PIECE_CAPSULE_BOTTOM: ShapeCap(&g, false, 2); break;
+        default:
+            // A plane: a quad facing up (part 0) and one facing down (part 1) at y 0
+            for (int side = 0; side < 2; side++) {
+                Vector3 n = { 0.0f, side ? -1.0f : 1.0f, 0.0f }, dpdv = { 0.0f, 0.0f, side ? 1.0f : -1.0f };
+                int base = g.v - g.v0;
+                for (int k = 0; k < 4; k++) {
+                    Vector3 p = { (k == 1 || k == 2) ? 0.5f : -0.5f, 0.0f, k >= 2 ? 0.5f : -0.5f };
+                    ShapeVertex(&g, p, n, (Vector2){ p.x + 0.5f, side ? p.z + 0.5f : 0.5f - p.z }, (Vector3){ 1.0f, 0.0f, 0.0f },
+                                dpdv, side);
+                }
+                ShapeTri(&g, base, base + 1, base + 2);
+                ShapeTri(&g, base, base + 2, base + 3);
+            }
+            break;
+        }
+        if (g.v - g_shapeV0[piece] != SHAPE_PIECE_V[piece] || g.i - g_shapeI0[piece] != 3 * SHAPE_PIECE_T[piece]) {
+            TraceLog(LOG_ERROR, "monolith_scene: shape piece %d: %d vertices, %d triangles (expected %d, %d): no shapes", piece,
+                     g.v - g_shapeV0[piece], (g.i - g_shapeI0[piece]) / 3, SHAPE_PIECE_V[piece], SHAPE_PIECE_T[piece]);
+            return;
+        }
+    }
+    g_shapeV0[SHAPE_PIECE_COUNT] = g.v;
+    g_shapeI0[SHAPE_PIECE_COUNT] = g.i;
+    g_shapeOk = true;
+}
+
+// The pieces' vertex data, built on first use; false when it couldn't be (logged)
+static bool ShapeMeshData(void)
+{
+    pthread_once(&g_shapeOnce, ShapeBuild);
+    return g_shapeOk;
+}
+
+// Piece `piece` as mesh data (pointing into the built arrays: never freed)
+static R3D_MeshData ShapePieceData(int piece)
+{
+    int vn = g_shapeV0[piece + 1] - g_shapeV0[piece], in = g_shapeI0[piece + 1] - g_shapeI0[piece];
+    return (R3D_MeshData){ .vertices = &g_shapeVert[g_shapeV0[piece]], .indices = &g_shapeIndex[g_shapeI0[piece]],
+                           .vertexCapacity = vn, .indexCapacity = in, .vertexCount = vn, .indexCount = in };
+}
+
+// Piece `piece`'s extent in its unit frame
+static BoundingBox ShapePieceBounds(int piece)
+{
+    float lo = piece == SHAPE_PIECE_CAPSULE_TOP || piece == SHAPE_PIECE_PLANE ? 0.0f
+             : piece == SHAPE_PIECE_CAPSULE_BOTTOM ? -1.0f : -0.5f;
+    float hi = piece == SHAPE_PIECE_CAPSULE_TOP ? 1.0f
+             : piece == SHAPE_PIECE_CAPSULE_BOTTOM || piece == SHAPE_PIECE_PLANE ? 0.0f : 0.5f;
+    return (BoundingBox){ { -0.5f, lo, -0.5f }, { 0.5f, hi, 0.5f } };
+}
+
+// The triangles a shape is drawn with
+static int ShapeTriangles(const MS_Shape *s)
+{
+    ShapePiece pc[SHAPE_PIECES_MAX];
+    int n = ShapePieces(s, pc), t = 0;
+    for (int k = 0; k < n; k++) t += SHAPE_PIECE_T[pc[k].piece];
+    return t;
+}
+
+// Slab test of a ray against box b; false on a miss (tNear < 0: the origin is inside)
+static bool RayAabb(Vector3 o, Vector3 d, BoundingBox b, float *tNear, float *tFar)
+{
+    const float *O = (const float *)&o, *D = (const float *)&d, *mn = (const float *)&b.min, *mx = (const float *)&b.max;
+    float t0 = -INFINITY, t1 = INFINITY;
+    for (int a = 0; a < 3; a++) {
+        if (fabsf(D[a]) < 1e-12f) {
+            if (O[a] < mn[a] || O[a] > mx[a]) return false;
+            continue;
+        }
+        float u = (mn[a] - O[a]) / D[a], v = (mx[a] - O[a]) / D[a];
+        if (u > v) { float k = u; u = v; v = k; }
+        if (u > t0) t0 = u;
+        if (v < t1) t1 = v;
+        if (t0 > t1) return false;
+    }
+    *tNear = t0;
+    *tFar = t1;
+    return true;
+}
+
+// Where a ray first meets a shape from outside: the nearest triangle facing the ray nearer than limit
+// (t >= 0), its world normal, part, part UV (float), paint UV (as the vertices store it) and the hit's
+// barycentric coordinates
+typedef struct { float t; Vector3 normal; int part; Vector2 uv, paintUv; Vector3 bary; } ShapeHit;
+
+static bool ShapeRaycast(const MS_Shape *s, Vector3 origin, Vector3 dir, float limit, ShapeHit *out)
+{
+    if (!ShapeMeshData()) return false;
+    ShapePiece pc[SHAPE_PIECES_MAX];
+    int n = ShapePieces(s, pc);
+    const MS_TurnedBox *T = &s->shape;
+    bool found = false;
+    for (int k = 0; k < n; k++) {
+        // The ray in the piece's unit frame: along the shape's axes, from the piece's origin, over its
+        // scale (t stays the world's: the map is affine)
+        const ShapePiece *P = &pc[k];
+        const float *sc = (const float *)&P->scale;
+        Vector3 rel = Vector3Subtract(origin, P->pos);
+        Vector3 O = { Vector3DotProduct(rel, T->axis[0]) / sc[0], Vector3DotProduct(rel, T->axis[1]) / sc[1],
+                      Vector3DotProduct(rel, T->axis[2]) / sc[2] };
+        Vector3 D = { Vector3DotProduct(dir, T->axis[0]) / sc[0], Vector3DotProduct(dir, T->axis[1]) / sc[1],
+                      Vector3DotProduct(dir, T->axis[2]) / sc[2] };
+        // (its bounds first: a ray that reaches the collider's AABB often misses a round piece)
+        float bn, bf;
+        if (!RayAabb(O, D, ShapePieceBounds(P->piece), &bn, &bf) || bf < 0.0f || bn > limit) continue;
+        const R3D_Vertex *V = &g_shapeVert[g_shapeV0[P->piece]];
+        const Vector2 *U = &g_shapeUv[g_shapeV0[P->piece]];
+        const uint32_t *I = &g_shapeIndex[g_shapeI0[P->piece]];
+        for (int t = 0; t < SHAPE_PIECE_T[P->piece]; t++) {
+            // Moeller-Trumbore; det > 0: the triangle faces the ray (counter-clockwise from outside)
+            const uint32_t *ix = &I[3 * t];
+            Vector3 a = V[ix[0]].position, e1 = Vector3Subtract(V[ix[1]].position, a), e2 = Vector3Subtract(V[ix[2]].position, a);
+            Vector3 pv = Vector3CrossProduct(D, e2);
+            float det = Vector3DotProduct(e1, pv);
+            if (!(det > 1e-12f)) continue;
+            float inv = 1.0f / det;
+            Vector3 tv = Vector3Subtract(O, a);
+            float bu = Vector3DotProduct(tv, pv) * inv;
+            if (bu < 0.0f || bu > 1.0f) continue;
+            Vector3 qv = Vector3CrossProduct(tv, e1);
+            float bv = Vector3DotProduct(D, qv) * inv;
+            if (bv < 0.0f || bu + bv > 1.0f) continue;
+            float th = Vector3DotProduct(e2, qv) * inv;
+            if (th < 0.0f || th >= limit) continue;
+            limit = th;
+            found = true;
+            float w0 = 1.0f - bu - bv;
+            Vector3 fn = Vector3CrossProduct(e1, e2);
+            // (a normal goes to the world by the inverse transpose: along the axes, over the scale)
+            out->normal = Vector3Normalize(TurnedDir(T, fn.x / sc[0], fn.y / sc[1], fn.z / sc[2]));
+            out->t = th;
+            out->part = V[ix[0]].boneIndices[0];
+            out->bary = (Vector3){ w0, bu, bv };
+            Vector2 u0 = U[ix[0]], u1 = U[ix[1]], u2 = U[ix[2]];
+            out->uv = (Vector2){ w0 * u0.x + bu * u1.x + bv * u2.x, w0 * u0.y + bu * u1.y + bv * u2.y };
+            Vector2 q0 = Unorm16Uv(u0), q1 = Unorm16Uv(u1), q2 = Unorm16Uv(u2);
+            out->paintUv = (Vector2){ w0 * q0.x + bu * q1.x + bv * q2.x, w0 * q0.y + bu * q1.y + bv * q2.y };
+        }
+    }
+    return found;
 }
 
 // #endregion
@@ -2963,6 +3518,65 @@ static bool ParseBarrier(Parser *P, Token *args, int n, const Placement *pl)
     return true;
 }
 
+// shape <kind> cx y0 cz sx sy sz [rot yawDeg pitchDeg rollDeg] (args = the tokens after "shape";
+// monolith's docs/map-format.md 2, Shapes): a primitive drawn inside the box a `block` with the same
+// numbers makes. The centre and floor are shifted by `repeat`, the sizes never; `rot` turns each copy
+// about its own centre (`rot 0 0 0`: the shape without rot). sx, sz > 0; sy > 0, a plane's 0.
+static bool ParseShape(Parser *P, Token *args, int n, const Placement *pl)
+{
+    static const char *USAGE = "shape takes a kind and a block's six numbers: shape cube|sphere|cylinder|cone|capsule|plane "
+                               "cx y0 cz sx sy sz [rot y p r]";
+    SceneData *d = P->d;
+    if (n < 1) return Fail(P, "%s", USAGE);
+    int kind = ShapeKindOf(args[0].s);
+    if (kind < 0) return Fail(P, "unknown shape kind '%s' (cube, sphere, cylinder, cone, capsule or plane)", args[0].s);
+    Vector3 rot = { 0 };
+    int argc = n - 1;
+    if (argc > 6 && strcmp(args[7].s, "rot") == 0) {
+        if (argc != 10) return Fail(P, "rot takes 3 numbers: rot yawDeg pitchDeg rollDeg", NULL);
+        for (int i = 0; i < 3; i++)
+            if (!NumF(P, args[8 + i], &((float *)&rot)[i])) return false;
+        argc = 6;
+    }
+    if (argc != 6) return Fail(P, "%s", USAGE);
+    float v[6];
+    for (int a = 0; a < 6; a++)
+        if (!NumF(P, args[1 + a], &v[a])) return false;
+    if (!(v[3] > 0.0f) || !(v[5] > 0.0f)) return Fail(P, "a shape's sizes sx and sz must be > 0", NULL);
+    if (kind == MS_SHAPE_PLANE && v[4] != 0.0f) return Fail(P, "a plane has no height: write 0", NULL);
+    if (kind != MS_SHAPE_PLANE && !(v[4] > 0.0f)) return Fail(P, "a shape's height sy must be > 0 (only a plane has none: 0)", NULL);
+
+    bool shifted = pl->reps > 0;
+    int cnt[MS_REPEATS_MAX] = { 1, 1, 1 };
+    for (int r = 0; r < pl->reps; r++) cnt[r] = pl->repN[r];
+    for (int i0 = 0; i0 < cnt[0]; i0++)
+    for (int i1 = 0; i1 < cnt[1]; i1++)
+    for (int i2 = 0; i2 < cnt[2]; i2++) {
+        if (ObjectCount(d) >= MS_MAX_OBJECTS)
+            return Fail(P, "too many objects (a map makes at most 1000000 boxes, models and lights)", NULL);
+        int idx[MS_REPEATS_MAX] = { i0, i1, i2 };
+        float off[3], p[6];
+        CopyOffset(pl, idx, off);
+        BeginCopy(P, cnt, i0, i1, i2);
+        // Unshifted lines use the numbers as written (no "+ 0", which would turn -0 into 0), as ParsePrimitive
+        for (int a = 0; a < 6; a++) p[a] = shifted && a < 3 ? off[a] + v[a] : v[a];
+        // the box as written: Block's corners (the same float math)
+        BoundingBox w = { { p[0] - p[3] * 0.5f, p[1], p[2] - p[5] * 0.5f }, { p[0] + p[3] * 0.5f, p[1] + p[4], p[2] + p[5] * 0.5f } };
+        MS_Shape sh = { .ref = P->cur };
+        MS_TurnedBox hull;
+        if (!ShapeMake(kind, w, rot, &sh, &hull)) return Fail(P, "coordinate or size out of range", NULL);
+        if (!MS_RESERVE(d->shapeWritten, d->shapeWrittenCap, d->shapeCount + 1) ||
+            !MS_RESERVE(d->shapeHull, d->shapeHullCap, d->shapeCount + 1))
+            return Fail(P, "out of memory", NULL);
+        MS_Shape *slot = MS_PUSH(d->shapes, d->shapeCount, d->shapeCap);
+        if (!slot) return Fail(P, "out of memory", NULL);
+        *slot = sh;
+        d->shapeWritten[d->shapeCount - 1] = w;
+        d->shapeHull[d->shapeCount - 1] = hull;
+    }
+    return true;
+}
+
 // light point|spot|dir ... (args = the tokens after "light")
 static bool ParseLight(Parser *P, Token *args, int n, const Placement *pl)
 {
@@ -3414,15 +4028,19 @@ static bool ParsePaint(Parser *P, Token *tok, int n)
         t = 5;
     } else {
         if (tok[3].quoted) return Fail(P, "paint: expected faces (+x,-y,...) or slot N, got the string \"%s\"", tok[3].s);
+        // (a box's faces, or a shape's parts: which one the entity is decides ResolvePaintEntities)
         e.kind = PAINT_BOX;
         for (const char *f = tok[3].s; ; ) {
             size_t len = strcspn(f, ",");
-            int face = -1;
-            for (int k = 0; k < 6; k++)
-                if (len == 2 && strncmp(f, PAINT_FACES[k], 2) == 0) face = k;
-            if (face < 0) return Fail(P, "paint: bad face list '%s' (faces +x -x +y -y +z -z, separated by commas)", tok[3].s);
-            if (e.faces & (1u << face)) return Fail(P, "paint: face %s twice", PAINT_FACES[face]);
-            e.faces |= (unsigned char)(1u << face);
+            int name = -1;
+            for (int k = 0; k < COUNT(PAINT_NAMES); k++)
+                if (len == strlen(PAINT_NAMES[k]) && strncmp(f, PAINT_NAMES[k], len) == 0) name = k;
+            if (name < 0)
+                return Fail(P, "paint: bad face list '%s' (faces +x -x +y -y +z -z, or a shape's parts, separated by commas)",
+                            tok[3].s);
+            if (e.names & (1u << name)) return Fail(P, "paint: face %s twice", PAINT_NAMES[name]);
+            e.names |= (unsigned short)(1u << name);
+            if (name < 6) e.faces |= (unsigned char)(1u << name);
             if (f[len] == '\0') break;
             f += len + 1;
         }
@@ -3455,21 +4073,36 @@ static bool ParsePaint(Parser *P, Token *tok, int n)
     return true;
 }
 
-// The first object of statement `prim` in a list sorted by statement (boxes by boxRefs, models by
-// ref): its index and how many the statement made
-static int StatementObjects(const SceneData *d, bool models, int prim, int *count)
+// The first object of statement `prim` in a list sorted by statement (StatementOf): its index and how
+// many the statement made
+static int StatementObjects(const SceneData *d, int kind, int prim, int *count)
 {
-    int n = models ? d->modelCount : d->boxCount, lo = 0, hi = n;
+    int n = kind == PAINT_MODEL ? d->modelCount : kind == PAINT_SHAPE ? d->shapeCount : d->boxCount, lo = 0, hi = n;
     while (lo < hi) {
         int mid = (lo + hi) / 2;
-        int p = models ? d->models[mid].ref.prim : d->boxRefs[mid].prim;
-        if (p < prim) lo = mid + 1;
+        if (StatementOf(d, kind, mid) < prim) lo = mid + 1;
         else hi = mid;
     }
     int k = lo;
-    while (k < n && (models ? d->models[k].ref.prim : d->boxRefs[k].prim) == prim) k++;
+    while (k < n && StatementOf(d, kind, k) == prim) k++;
     *count = k - lo;
     return lo;
+}
+
+// A paint entry on a shape: its part names (PaintDef.names) become the part bits of the shape's kind
+// (faces). False with the name that is not a part of it in *bad.
+static bool PaintShapeParts(PaintDef *e, int kind, const char **bad)
+{
+    e->faces = 0;
+    for (int k = 0; k < COUNT(PAINT_NAMES); k++) {
+        if (!(e->names >> k & 1)) continue;
+        int part = -1;
+        for (int q = 0; q < MS_ShapePartCount((MS_ShapeKind)kind); q++)
+            if (strcmp(MS_ShapePartName((MS_ShapeKind)kind, q), PAINT_NAMES[k]) == 0) part = q;
+        if (part < 0) { *bad = PAINT_NAMES[k]; return false; }
+        e->faces |= (unsigned char)(1u << part);
+    }
+    return true;
 }
 
 // After the last line: each paint entry's entity becomes its object (the line `id N` exists and
@@ -3488,18 +4121,29 @@ static bool ResolvePaintEntities(Parser *P)
                         d->materials[e->material].name);
         int *s = d->stmtSetCap ? StmtSlot(d, e->entity.stmt) : NULL;
         if (!s || !*s) return FailF(P, "paint: no line has id %u", e->entity.stmt);
-        int prim = *s - 1, boxes, models;
-        int firstBox = StatementObjects(d, false, prim, &boxes), firstModel = StatementObjects(d, true, prim, &models);
-        int count = e->kind == PAINT_BOX ? boxes : models;
+        int prim = *s - 1, boxes, models, shapes;
+        int firstBox = StatementObjects(d, PAINT_BOX, prim, &boxes), firstModel = StatementObjects(d, PAINT_MODEL, prim, &models);
+        int firstShape = StatementObjects(d, PAINT_SHAPE, prim, &shapes);
+        if (e->kind == PAINT_BOX && boxes == 0 && shapes > 0) e->kind = PAINT_SHAPE;    // (faces: a shape's parts)
+        int count = e->kind == PAINT_BOX ? boxes : e->kind == PAINT_SHAPE ? shapes : models;
         if (count == 0)
-            return FailF(P, e->kind == PAINT_BOX ? "paint: line %s%s%d (id %u) makes no boxes (a model is painted by slot)"
+            return FailF(P, e->kind == PAINT_BOX ? "paint: line %s%s%d (id %u) makes no boxes or shapes (a model is painted by slot)"
                                                  : "paint: line %s%s%d (id %u) makes no models (a box is painted by faces)",
                          LINE_AT(d, d->stmtFiles[prim], d->stmtLines[prim]), e->entity.stmt);
         if (e->entity.index >= count)
             return FailF(P, "paint: %u:%d: line %s%s%d makes %d %s", e->entity.stmt, e->entity.index,
                          LINE_AT(d, d->stmtFiles[prim], d->stmtLines[prim]), count,
-                         e->kind == PAINT_BOX ? (count == 1 ? "box" : "boxes") : (count == 1 ? "model" : "models"));
-        e->object = (e->kind == PAINT_BOX ? firstBox : firstModel) + e->entity.index;
+                         e->kind == PAINT_BOX ? (count == 1 ? "box" : "boxes") : e->kind == PAINT_SHAPE ? (count == 1 ? "shape" : "shapes")
+                         : (count == 1 ? "model" : "models"));
+        e->object = (e->kind == PAINT_BOX ? firstBox : e->kind == PAINT_SHAPE ? firstShape : firstModel) + e->entity.index;
+        const char *bad = NULL;
+        if (e->kind == PAINT_BOX && e->names >= 1u << 6) {
+            for (int k = 6; k < COUNT(PAINT_NAMES) && !bad; k++) if (e->names >> k & 1) bad = PAINT_NAMES[k];
+            return FailF(P, "paint: %s is not a face of a box (faces +x -x +y -y +z -z)", bad);
+        }
+        if (e->kind == PAINT_SHAPE && !PaintShapeParts(e, d->shapes[e->object].kind, &bad))
+            return FailF(P, "paint: a %s has no part %s (its parts: %s)", MS_ShapeKindName(d->shapes[e->object].kind), bad,
+                         SHAPE_PART_LIST[d->shapes[e->object].kind]);
 
         // An own material's atlas: named after the file, watched like any file the map names
         if (e->material < 0) {
@@ -3523,7 +4167,7 @@ static bool ResolvePaintEntities(Parser *P)
         if (c == 1)
             return FailF(P, "paint: the rectangle %d %d %d %d overlaps line %s%s%d's (%d %d %d %d) in the atlas of %s",
                          f->x, f->y, f->w, f->h, LINE_AT(d, e->file, e->line), e->x, e->y, e->w, e->h, mat);
-        if (f->kind == PAINT_BOX)
+        if (f->kind != PAINT_MODEL)
             return FailF(P, "paint: %u:%d: a face of it is already in line %s%s%d's entry of %s", f->entity.stmt,
                          f->entity.index, LINE_AT(d, e->file, e->line), mat);
         return FailF(P, "paint: %u:%d slot %d is already in line %s%s%d's entry of %s", f->entity.stmt, f->entity.index,
@@ -4390,10 +5034,11 @@ static bool ParseStatement(Parser *P, Token *tok, int n)
     }
     if (!NoStrings(P, tok, 0, n)) return false;
     if (strcmp(prim, "barrier") == 0) return ParseBarrier(P, &tok[t + 1], n - t - 1, &pl);
+    if (strcmp(prim, "shape") == 0) return ParseShape(P, &tok[t + 1], n - t - 1, &pl);
     for (int i = 0; i < COUNT(PRIMS); i++)
         if (strcmp(prim, PRIMS[i].name) == 0) return ParsePrimitive(P, &PRIMS[i], &tok[t + 1], n - t - 1, &pl);
-    return Fail(P, "unknown keyword '%s' (expected group, box, block, stairs, waffle, barrier, model, light, material, "
-                   "use, env, fogzone, paint, import, spawn, viewpoint, id or repeat)", prim);
+    return Fail(P, "unknown keyword '%s' (expected group, box, block, stairs, waffle, barrier, shape, model, light, "
+                   "material, use, env, fogzone, paint, import, spawn, viewpoint, id or repeat)", prim);
 }
 
 // The lines of one map-text file (P->cur.file), each statement parsed in turn
@@ -4434,8 +5079,8 @@ static bool ParseText(Parser *P, const char *text, int size)
     P->open[P->openCount++] = 0;
     if (!ParseLines(P, text, size)) return false;
     P->line = 0;
-    if (P->d->boxCount == 0 && P->d->modelCount == 0)
-        return Fail(P, "map is empty (no boxes and no models)", NULL);
+    if (P->d->boxCount == 0 && P->d->modelCount == 0 && P->d->shapeCount == 0)
+        return Fail(P, "map is empty (no boxes, models or shapes)", NULL);
     return ResolvePaintEntities(P);
 }
 
@@ -4459,7 +5104,7 @@ static bool ParseText(Parser *P, const char *text, int size)
 // (CmRead*) in ReadCompiled's list after the sections its records point into, and the matching
 // section writer (CmPut*). The layout goes into docs/compiled-map.md.
 
-#define CM_VERSION          14         // MS_COMPILED_VERSION: bump on any change to a record or section
+#define CM_VERSION          15         // MS_COMPILED_VERSION: bump on any change to a record or section
 #define CM_BYTE_ORDER       0x01020304u
 #define CM_NONE             0xFFFFFFFFu // a string field without a string
 #define CM_MAX_ENV          4096        // env records (the key tables have ~120 keys)
@@ -4598,6 +5243,17 @@ typedef struct {
     CmRef ref;
 } CmBarrier;
 
+// A `shape` line's copy (section "shapes", map order): its kind (MS_ShapeKind), the box as written (the
+// block's box, after repeat), its rotation as written (0 0 0: not turned) and its source reference
+// (material: the `use` it is drawn with). The reader rebuilds the record (ShapeMake), so the bits
+// match a text load.
+typedef struct {
+    uint32_t kind;
+    float min[3], max[3];
+    float rotationDeg[3];
+    CmRef ref;
+} CmShape;
+
 // A model file the map's `model` lines use: its path and the line that first names it (and its file)
 typedef struct {
     uint32_t path;
@@ -4661,8 +5317,8 @@ typedef struct {
 enum {
     CM_STRINGS = 1, CM_BOXES, CM_GROUPS, CM_MATERIALS, CM_UNIFORMS, CM_SAMPLERS, CM_LIGHTS, CM_VIEWPOINTS,
     CM_MODEL_FILES, CM_MODELS, CM_COLLIDERS, CM_SLOTS, CM_STATEMENTS, CM_ENV, CM_SPAWN, CM_DEPS,
-    CM_BOX_TURNS, CM_PAINT, CM_SOURCES, CM_FOG_ZONES, CM_BARRIERS,
-    CM_SECTIONS = CM_BARRIERS
+    CM_BOX_TURNS, CM_PAINT, CM_SOURCES, CM_FOG_ZONES, CM_BARRIERS, CM_SHAPES,
+    CM_SECTIONS = CM_SHAPES
 };
 
 // What the code knows about one section: its name (for messages), its record size and the most
@@ -4696,6 +5352,7 @@ static const CmSectionInfo CM_SECTION[CM_SECTIONS + 1] = {
     [CM_SOURCES]     = { "sources", sizeof(CmSource), MS_MAX_OBJECTS },
     [CM_FOG_ZONES]   = { "fog zones", sizeof(CmFogZone), MS_MAX_OBJECTS },
     [CM_BARRIERS]    = { "barriers", sizeof(CmBarrier), MS_MAX_OBJECTS },
+    [CM_SHAPES]      = { "shapes", sizeof(CmShape), MS_MAX_OBJECTS },
 };
 
 // --- Reader
@@ -5427,21 +6084,22 @@ static bool CmReadPaint(CmReader *R)
         CmRecord(R, CM_PAINT, i, &c);
         bool own = c.material == CM_NONE;
         bool ok = (own || (c.material < (uint32_t)d->materialCount && d->matDefs[c.material].paint)) &&
-                  c.kind <= PAINT_MODEL &&
+                  c.kind <= PAINT_SHAPE &&
                   (!own || c.kind == PAINT_MODEL) &&
-                  c.object < (uint32_t)(c.kind == PAINT_BOX ? d->boxCount : d->modelCount) &&
-                  (c.kind == PAINT_BOX ? c.facesOrSlot >= 1 && c.facesOrSlot <= 0x3F : c.facesOrSlot <= MS_MAX_OBJECTS) &&
+                  c.object < (uint32_t)(c.kind == PAINT_BOX ? d->boxCount : c.kind == PAINT_SHAPE ? d->shapeCount : d->modelCount) &&
+                  (c.kind == PAINT_MODEL ? c.facesOrSlot <= MS_MAX_OBJECTS
+                   : c.facesOrSlot >= 1 && c.facesOrSlot < 1u << (c.kind == PAINT_SHAPE ? MS_ShapePartCount(d->shapes[c.object].kind) : 6)) &&
                   c.x <= 1000000 && c.y <= 1000000 && c.w >= 1 && c.w <= 1000000 && c.h >= 1 && c.h <= 1000000 &&
                   c.filter <= TEX_NEAREST && (own || c.filter == 0) &&
                   c.line >= 0 && c.file >= 0 && c.file < d->srcCount;
         if (!ok) return CmFail(R, "paint %u: value out of range", i);
-        int prim = c.kind == PAINT_BOX ? d->boxRefs[c.object].prim : d->models[c.object].ref.prim;
+        int prim = StatementOf(d, (int)c.kind, (int)c.object);
         if (d->stmtKeys[prim] & 0x80000000u) return CmFail(R, "paint %u: its line has no id", i);
 
         PaintDef e = {
             .material = own ? -1 : (int)c.material, .kind = (int)c.kind, .object = (int)c.object,
-            .faces = c.kind == PAINT_BOX ? (unsigned char)c.facesOrSlot : 0,
-            .slot = c.kind == PAINT_BOX ? -1 : (int)c.facesOrSlot,
+            .faces = c.kind != PAINT_MODEL ? (unsigned char)c.facesOrSlot : 0,
+            .slot = c.kind != PAINT_MODEL ? -1 : (int)c.facesOrSlot,
             .x = (int)c.x, .y = (int)c.y, .w = (int)c.w, .h = (int)c.h,
             .nearest = c.filter == TEX_NEAREST, .line = c.line, .file = c.file, .ownAtlas = -1,
         };
@@ -5590,7 +6248,7 @@ static bool CmReadBarriers(CmReader *R)
     SceneData *d = R->d;
     uint32_t n = R->sec[CM_BARRIERS].count;
     if (n == 0) return true;
-    if ((int64_t)d->boxCount + d->modelCount + d->lightCount + n > MS_MAX_OBJECTS)
+    if ((int64_t)ObjectCount(d) + n > MS_MAX_OBJECTS)
         return CmFail(R, "compiled map: too many objects (at most %d)", MS_MAX_OBJECTS);
     if (!MS_RESERVE(d->barriers, d->barrierCap, (int)n) || !MS_RESERVE(d->barrierWritten, d->barrierWrittenCap, (int)n))
         return CmFail(R, "out of memory");
@@ -5607,6 +6265,42 @@ static bool CmReadBarriers(CmReader *R)
         d->barriers[i] = b;
         d->barrierWritten[i] = w;
         d->barrierCount = (int)i + 1;
+    }
+    return true;
+}
+
+// The shapes as ParseShape leaves them: a known kind, the box as written with ordered corners, sx and sz
+// > 0, sy > 0 (a plane: 0), finite numbers (ShapeMake's checks on the rebuilt record), a source
+// reference with a material, in map order; and within MS_MAX_OBJECTS with the boxes and models (read
+// after them, before the paint entries that name shapes)
+static bool CmReadShapes(CmReader *R)
+{
+    SceneData *d = R->d;
+    uint32_t n = R->sec[CM_SHAPES].count;
+    if (n == 0) return true;
+    if ((int64_t)ObjectCount(d) + n > MS_MAX_OBJECTS)
+        return CmFail(R, "compiled map: too many objects (at most %d)", MS_MAX_OBJECTS);
+    if (!MS_RESERVE(d->shapes, d->shapeCap, (int)n) || !MS_RESERVE(d->shapeWritten, d->shapeWrittenCap, (int)n) ||
+        !MS_RESERVE(d->shapeHull, d->shapeHullCap, (int)n))
+        return CmFail(R, "out of memory");
+    for (uint32_t i = 0; i < n; i++) {
+        CmShape c;
+        CmRecord(R, CM_SHAPES, i, &c);
+        if (c.kind >= MS_SHAPE_KIND_COUNT) return CmFail(R, "shape %u: unknown kind %u", i, c.kind);
+        BoundingBox w = { V3(c.min), V3(c.max) };
+        MS_Shape sh = { 0 };
+        MS_TurnedBox hull;
+        bool plane = c.kind == MS_SHAPE_PLANE;
+        if (!FiniteOrdered(c.min, c.max) || !FiniteBox(w) || !Finite3(c.rotationDeg) ||
+            !(c.max[0] > c.min[0]) || !(c.max[2] > c.min[2]) || (plane ? c.max[1] != c.min[1] : !(c.max[1] > c.min[1])) ||
+            !ShapeMake((int)c.kind, w, V3(c.rotationDeg), &sh, &hull))
+            return CmFail(R, "shape %u: coordinate, size or rotation out of range", i);
+        if (!CmReadRef(R, &c.ref, false, "shape", i, &sh.ref)) return false;
+        if (i > 0 && sh.ref.prim < d->shapes[i - 1].ref.prim) return CmFail(R, "shape %u: out of map order", i);
+        d->shapes[i] = sh;
+        d->shapeWritten[i] = w;
+        d->shapeHull[i] = hull;
+        d->shapeCount = (int)i + 1;
     }
     return true;
 }
@@ -5748,12 +6442,12 @@ static bool CmReadDeps(CmReader *R)
     return true;
 }
 
-// The parser refuses a map without boxes and models
+// The parser refuses a map without boxes, models and shapes
 static bool CmCheckNotEmpty(CmReader *R)
 {
     const SceneData *d = R->d;
-    if (d->boxCount == 0 && d->modelCount == 0)
-        return CmFail(R, "map is empty (no boxes and no models)");
+    if (d->boxCount == 0 && d->modelCount == 0 && d->shapeCount == 0)
+        return CmFail(R, "map is empty (no boxes, models or shapes)");
     return true;
 }
 
@@ -5786,7 +6480,8 @@ static bool ReadCompiled(SceneData *d, const char *bytes, int size)
            CmReadColliders(&R) &&       // a range of colliders
            CmReadSlots(&R) &&           // and a range of slots
            CmReadModels(&R) &&
-           CmReadPaint(&R) &&           // a paint entry names a material and a box or model
+           CmReadShapes(&R) &&          // (after boxes and models: the object cap)
+           CmReadPaint(&R) &&           // a paint entry names a material and a box, model or shape
            CmReadLights(&R) &&
            CmReadViewpoints(&R) &&
            CmReadFogZones(&R) &&
@@ -6116,7 +6811,7 @@ static void CmPutPaint(CmWriter *W, const SceneData *d)
         CmPaint c = {
             .material = e->material >= 0 ? (uint32_t)e->material : CM_NONE,
             .kind = (uint32_t)e->kind, .object = (uint32_t)e->object,
-            .facesOrSlot = e->kind == PAINT_BOX ? e->faces : (uint32_t)e->slot,
+            .facesOrSlot = e->kind != PAINT_MODEL ? e->faces : (uint32_t)e->slot,
             .x = (uint32_t)e->x, .y = (uint32_t)e->y, .w = (uint32_t)e->w, .h = (uint32_t)e->h,
             .filter = e->nearest ? TEX_NEAREST : TEX_TRILINEAR, .line = e->line, .file = e->file,
         };
@@ -6181,6 +6876,18 @@ static void CmPutBarriers(CmWriter *W, const SceneData *d)
         Vector3 rot = b->turned ? b->shape.rotationDeg : (Vector3){ 0 };
         CmBarrier c = { CM_XYZ(w->min), CM_XYZ(w->max), CM_XYZ(rot), CmRefOf(b->ref) };
         CmPut(W, CM_BARRIERS, &c);
+    }
+}
+
+// The shapes in map order, each with its kind, its box as written (ParseShape's) and its rotation
+static void CmPutShapes(CmWriter *W, const SceneData *d)
+{
+    for (int i = 0; i < d->shapeCount; i++) {
+        const MS_Shape *sh = &d->shapes[i];
+        const BoundingBox *w = &d->shapeWritten[i];
+        Vector3 rot = sh->turned ? sh->shape.rotationDeg : (Vector3){ 0 };
+        CmShape c = { (uint32_t)sh->kind, CM_XYZ(w->min), CM_XYZ(w->max), CM_XYZ(rot), CmRefOf(sh->ref) };
+        CmPut(W, CM_SHAPES, &c);
     }
 }
 
@@ -6290,6 +6997,7 @@ static unsigned char *WriteCompiled(const SceneData *d, int *outSize)
     CmPutViewpoints(&W, d);
     CmPutFogZones(&W, d);
     CmPutBarriers(&W, d);
+    CmPutShapes(&W, d);
     CmPutSpawn(&W, d);
     CmPutEnvironment(&W, &d->env);
     CmPutDeps(&W, d);
@@ -6333,6 +7041,11 @@ static BoundingBox ContentBounds(const SceneData *d)
     for (int i = 0; i < d->modelCount; i++) {
         r.min = Vector3Min(r.min, d->models[i].bounds.min);
         r.max = Vector3Max(r.max, d->models[i].bounds.max);
+    }
+    for (int i = 0; i < d->shapeCount; i++) {
+        if (GroundLike(d->shapes[i].box)) continue;
+        r.min = Vector3Min(r.min, d->shapes[i].box.min);
+        r.max = Vector3Max(r.max, d->shapes[i].box.max);
     }
     if (r.min.x > r.max.x) r = d->bounds;   // only ground: use everything
     return r;
@@ -6898,7 +7611,7 @@ static bool FinishParse(SceneData *d, const MS_LoadOptions *opt)
     return true;
 }
 
-// Scene bounds (boxes, models, point/spot lights) and the collider list; after ResolveModels
+// Scene bounds (boxes, models, shapes, point/spot lights) and the collider list; after ResolveModels
 static void FinishGeometry(SceneData *d)
 {
     BoundingBox b = { { INFINITY, INFINITY, INFINITY }, { -INFINITY, -INFINITY, -INFINITY } };
@@ -6909,6 +7622,10 @@ static void FinishGeometry(SceneData *d)
     for (int i = 0; i < d->modelCount; i++) {
         b.min = Vector3Min(b.min, d->models[i].bounds.min);
         b.max = Vector3Max(b.max, d->models[i].bounds.max);
+    }
+    for (int i = 0; i < d->shapeCount; i++) {
+        b.min = Vector3Min(b.min, d->shapes[i].box.min);
+        b.max = Vector3Max(b.max, d->shapes[i].box.max);
     }
     for (int i = 0; i < d->lightCount; i++)
         if (d->lights[i].light.type != R3D_LIGHT_DIR) {
@@ -6924,8 +7641,8 @@ static unsigned int EntityHash(MS_EntityId id, int cap)
     return (h ^ (h >> 15)) & (unsigned int)(cap - 1);
 }
 
-// The entities (after ResolveModels): every box, model, light and barrier in map order (the four
-// arrays merged by statement), each with its components and its id: the statement's key and
+// The entities (after ResolveModels): every box, model, light, barrier and shape in map order (the
+// five arrays merged by statement), each with its components and its id: the statement's key and
 // the object's index within the statement
 static bool BuildEntities(SceneData *d)
 {
@@ -6943,16 +7660,24 @@ static bool BuildEntities(SceneData *d)
     if (!d->entityIds || !d->entityObjects || !d->entityTransforms || !d->entitySources || !d->entityModels ||
         !d->objEntities || !d->entityHash)
         return false;
-    int ib = 0, im = 0, il = 0, ia = 0, lastPrim = -1, index = 0;
+    int ib = 0, im = 0, il = 0, ia = 0, is = 0, lastPrim = -1, index = 0;
     for (int e = 0; e < n; e++) {
         int pb = ib < d->boxCount ? d->boxRefs[ib].prim : INT_MAX;
         int pm = im < d->modelCount ? d->models[im].ref.prim : INT_MAX;
         int pli = il < d->lightCount ? d->lights[il].ref.prim : INT_MAX;
         int pa = ia < d->barrierCount ? d->barriers[ia].ref.prim : INT_MAX;
+        int ps = is < d->shapeCount ? d->shapes[is].ref.prim : INT_MAX;
         const MS_Ref *r;
         MS_Transform tr = { .scale = { 1, 1, 1 } };
         int model = -1;
-        if (pa < pb && pa < pm && pa < pli) {
+        if (ps < pb && ps < pm && ps < pli && ps < pa) {
+            // a shape: its box's centre, its rotation as written, its size (a plane: height 0)
+            const MS_TurnedBox *t = &d->shapes[is].shape;
+            r = &d->shapes[is].ref;
+            tr = (MS_Transform){ t->center, t->rotationDeg, t->size };
+            d->entityObjects[e] = (MS_ObjRef){ MS_OBJ_SHAPE, is };
+            d->objEntities[d->boxCount + d->modelCount + d->lightCount + d->barrierCount + is++] = e;
+        } else if (pa < pb && pa < pm && pa < pli) {
             // a barrier (a statement makes one kind of object, so the order among equal prims is moot)
             const MS_TurnedBox *t = &d->barriers[ia].shape;
             r = &d->barriers[ia].ref;
@@ -6998,15 +7723,15 @@ static bool BuildEntities(SceneData *d)
     return true;
 }
 
-// Whether the colliders are an array of their own (boxes copied, then model colliders and barriers);
-// without models and barriers they are the box array itself
+// Whether the colliders are an array of their own (boxes copied, then model colliders, shapes and
+// barriers); without models, shapes and barriers they are the box array itself
 static inline bool OwnColliders(const SceneData *d)
 {
-    return d->modelCount > 0 || d->barrierCount > 0;
+    return d->modelCount > 0 || d->barrierCount > 0 || d->shapeCount > 0;
 }
 
-// The colliders MS_Scene publishes: boxes, then model colliders, then barriers (without models and
-// barriers: the box array itself)
+// The colliders MS_Scene publishes: boxes, then model colliders, then shapes, then barriers (without
+// models, shapes and barriers: the box array itself)
 static const BoundingBox *PublishedColliders(const SceneData *d, int *count)
 {
     *count = OwnColliders(d) ? d->colliderCount : d->boxCount;
@@ -7021,13 +7746,21 @@ static inline int BarrierColliderFirst(const SceneData *d)
     return n - d->barrierCount;
 }
 
-// The exact shape of collider c when it is not its AABB (a turned box or barrier), else NULL
+// The first shape's index in the colliders (right before the barriers)
+static inline int ShapeColliderFirst(const SceneData *d)
+{
+    return BarrierColliderFirst(d) - d->shapeCount;
+}
+
+// The exact shape of collider c when it is not its AABB (a turned box, shape or barrier), else NULL
 static inline const MS_TurnedBox *ColliderTurn(const SceneData *d, int c)
 {
     if (c < d->boxCount) return TurnedOf(d, c);
-    if (d->barrierCount == 0) return NULL;      // (a model collider: always its AABB)
+    if (d->barrierCount == 0 && d->shapeCount == 0) return NULL;      // (a model collider: always its AABB)
     int b = c - BarrierColliderFirst(d);
-    return b >= 0 && b < d->barrierCount && d->barriers[b].turned ? &d->barriers[b].shape : NULL;
+    if (b >= 0) return b < d->barrierCount && d->barriers[b].turned ? &d->barriers[b].shape : NULL;
+    int sh = b + d->shapeCount;
+    return sh >= 0 && d->shapes[sh].turned ? &d->shapeHull[sh] : NULL;
 }
 
 // Node `ni` over colliderOrder[first, first + count): leaves of <= 4 colliders, split at the
@@ -7548,8 +8281,8 @@ static bool ResolveModels(SceneData *d)
     RotBoundsCache cache = { 0 };
     int nc = d->boxCount;
     if (OwnColliders(d)) {
-        d->colliders = malloc(sizeof(BoundingBox) *
-                              ((size_t)d->boxCount + (size_t)d->modelColliderCount + (size_t)d->barrierCount));
+        d->colliders = malloc(sizeof(BoundingBox) * ((size_t)d->boxCount + (size_t)d->modelColliderCount +
+                                                     (size_t)d->shapeCount + (size_t)d->barrierCount));
         if (!d->colliders) {
             ErrSet("%s: out of memory", d->path);
             return false;
@@ -7593,6 +8326,7 @@ static bool ResolveModels(SceneData *d)
             for (int k = 0; k < localCount; k++) d->colliders[nc++] = TransformBox(d->localColliders[localFirst + k], m);
         M->colliderCount = nc - M->colliderFirst;
     }
+    for (int i = 0; i < d->shapeCount; i++) d->colliders[nc++] = d->shapes[i].box;
     for (int i = 0; i < d->barrierCount; i++) d->colliders[nc++] = d->barriers[i].box;   // (last: box and model
     d->colliderCount = nc;                                                                  //  indices stay)
     free(cache.e);
@@ -7854,6 +8588,119 @@ static bool BuildModelGroups(SceneData *d)
     return ok;
 }
 
+static void FreeShapeGroups(SceneData *d)
+{
+    for (int g = 0; g < d->shapeGroupCount; g++)
+        if (d->shapeGroups[g].instLoaded) R3D_UnloadInstanceBuffer(d->shapeGroups[g].inst);
+    free(d->shapeGroups);
+    d->shapeGroups = NULL;
+    d->shapeGroupCount = 0;
+    free(d->shapeRanges);
+    d->shapeRanges = NULL;
+    d->shapeRangeCount = d->shapeRangeCap = 0;
+#ifdef MONOLITH_EDITOR
+    free(d->shapeRangeOf);
+    free(d->shapeSlotOf);
+    d->shapeRangeOf = d->shapeSlotOf = NULL;
+#endif
+}
+
+// Piece `item` (shape * SHAPE_PIECES_MAX + piece) into slot k of a group's mapped buffers
+static void ShapeInstance(const SceneData *d, int item, Vector3 *pos, Quaternion *rot, Vector3 *scl, int k)
+{
+    const MS_Shape *S = &d->shapes[item / SHAPE_PIECES_MAX];
+    ShapePiece pc[SHAPE_PIECES_MAX];
+    ShapePieces(S, pc);
+    const ShapePiece *P = &pc[item % SHAPE_PIECES_MAX];
+    pos[k] = P->pos;
+    rot[k] = ShapeRotation(S);
+    scl[k] = P->scale;
+}
+
+// The shapes' draws (monolith's docs/map-format.md 2.1, Shapes): one group per (piece, material) in map order
+// of first use, its instances (every piece of its shapes: position, rotation, scale) sorted into
+// clusters by cell as the boxes', each a draw range. A group of a painted material carries each
+// shape's first paint key and the draw kind 2 (keyed as a model's slots: the part is the vertex's
+// bone index). GPU; after the paint keys. False when out of memory (the last error says so).
+static bool BuildShapeGroups(SceneData *d)
+{
+    if (d->shapeCount == 0) return true;
+    int np = 0;
+    for (int i = 0; i < d->shapeCount; i++) {
+        ShapePiece pc[SHAPE_PIECES_MAX];
+        np += ShapePieces(&d->shapes[i], pc);
+    }
+    int *groupOf = malloc(sizeof(int) * (size_t)SHAPE_PIECE_COUNT * (size_t)d->materialCount);
+    CellItem *items = malloc(sizeof(CellItem) * (size_t)np);
+    d->shapeGroups = calloc((size_t)np, sizeof(ShapeGroup));
+#ifdef MONOLITH_EDITOR
+    // (the preview moves single shapes: where each piece sits; out of memory: no preview)
+    d->shapeRangeOf = malloc(sizeof(int) * SHAPE_PIECES_MAX * (size_t)d->shapeCount);
+    d->shapeSlotOf = malloc(sizeof(int) * SHAPE_PIECES_MAX * (size_t)d->shapeCount);
+    for (int k = 0; d->shapeRangeOf && d->shapeSlotOf && k < SHAPE_PIECES_MAX * d->shapeCount; k++)
+        d->shapeRangeOf[k] = d->shapeSlotOf[k] = -1;
+#endif
+    bool ok = groupOf && items && d->shapeGroups;
+    for (int k = 0; ok && k < SHAPE_PIECE_COUNT * d->materialCount; k++) groupOf[k] = -1;
+
+    // The groups, and each piece as an item (index: shape * SHAPE_PIECES_MAX + piece: map order)
+    int n = 0;
+    for (int i = 0; ok && i < d->shapeCount; i++) {
+        const MS_Shape *S = &d->shapes[i];
+        ShapePiece pc[SHAPE_PIECES_MAX];
+        int count = ShapePieces(S, pc), m = S->ref.material;
+        for (int k = 0; k < count; k++) {
+            int *g = &groupOf[pc[k].piece * d->materialCount + m];
+            if (*g < 0) {
+                *g = d->shapeGroupCount++;
+                d->shapeGroups[*g] = (ShapeGroup){ .piece = pc[k].piece, .material = m, .painted = d->matDefs[m].painted };
+            }
+            d->shapeGroups[*g].count++;
+            items[n++] = MakeCellItem(*g, i * SHAPE_PIECES_MAX + k, S->box, MS_CELL_SIZE);
+        }
+    }
+    if (ok) qsort(items, (size_t)n, sizeof(CellItem), CompareCellItems);
+
+    // Per group its buffer and its ranges
+    for (int g = 0, at = 0; ok && g < d->shapeGroupCount; at += d->shapeGroups[g++].count) {
+        ShapeGroup *G = &d->shapeGroups[g];
+        G->inst = R3D_LoadInstanceBuffer(G->count, R3D_INSTANCE_POSITION | R3D_INSTANCE_ROTATION | R3D_INSTANCE_SCALE |
+                                                   (G->painted ? R3D_INSTANCE_CUSTOM : 0));
+        G->instLoaded = true;
+        if (G->inst.capacity < G->count) { ok = false; break; }
+        Vector3 *pos = R3D_MapInstances(G->inst, R3D_INSTANCE_POSITION, false);
+        Quaternion *rot = R3D_MapInstances(G->inst, R3D_INSTANCE_ROTATION, false);
+        Vector3 *scl = R3D_MapInstances(G->inst, R3D_INSTANCE_SCALE, false);
+        Vector4 *cus = G->painted ? R3D_MapInstances(G->inst, R3D_INSTANCE_CUSTOM, false) : NULL;
+        ok = pos && rot && scl && (cus || !G->painted);
+        for (int k = 0; k < G->count && ok; k++) {
+            ShapeInstance(d, items[at + k].index, pos, rot, scl, k);
+            if (cus) {
+                int i = items[at + k].index / SHAPE_PIECES_MAX;
+                cus[k] = (Vector4){ d->shapePaintKey ? (float)d->shapePaintKey[i] : 0.0f, 2.0f, 0.0f, 0.0f };
+            }
+        }
+        R3D_UnmapInstances(G->inst, (pos ? R3D_INSTANCE_POSITION : 0) | (rot ? R3D_INSTANCE_ROTATION : 0) |
+                                    (scl ? R3D_INSTANCE_SCALE : 0) | (cus ? R3D_INSTANCE_CUSTOM : 0));
+        int rangesBefore = d->shapeRangeCount;
+        if (ok && !AddRanges(&d->shapeRanges, &d->shapeRangeCount, &d->shapeRangeCap, g, items + at, G->count)) ok = false;
+#ifdef MONOLITH_EDITOR
+        for (int r = rangesBefore; ok && d->shapeRangeOf && d->shapeSlotOf && r < d->shapeRangeCount; r++)
+            for (int k = 0; k < d->shapeRanges[r].count; k++) {
+                int item = items[at + d->shapeRanges[r].first + k].index;
+                d->shapeSlotOf[item] = d->shapeRanges[r].first + k;
+                d->shapeRangeOf[item] = r;
+            }
+#else
+        (void)rangesBefore;
+#endif
+    }
+    free(items);
+    free(groupOf);
+    if (!ok) ErrSet("%s: out of memory (shape instances)", d->path);
+    return ok;
+}
+
 // The unit cubes of the materials' face layouts (`uv_faces`): one per distinct layout, in material
 // order; each material with a layout gets its cube (MatDef.faceCube). Materials without one draw
 // R3D's cube as before. False when out of memory.
@@ -7905,6 +8752,7 @@ static void FreeGpu(SceneData *d)
 {
     if (!d->gpu) return;
     FreeModelGroups(d);
+    FreeShapeGroups(d);
     FreeFaceCubes(d);
     FreePaintMeshes(d);
     for (int a = 0; a < d->ownAtlasCount; a++) {
@@ -8769,13 +9617,15 @@ static int FileUvKind(SceneData *d, int file, int slot)
 }
 
 // The faces of an entry as written ("+x,-y") or its slot ("slot 2"), for messages
-static void PaintTargetText(const PaintDef *e, char *out, int size)
+static void PaintTargetText(const SceneData *d, const PaintDef *e, char *out, int size)
 {
     if (e->kind == PAINT_MODEL) { snprintf(out, (size_t)size, "slot %d", e->slot); return; }
     int n = 0;
     out[0] = '\0';
     for (int f = 0; f < 6 && n < size; f++)
-        if (e->faces & (1u << f)) n += snprintf(out + n, (size_t)(size - n), "%s%s", n ? "," : "", PAINT_FACES[f]);
+        if (e->faces & (1u << f))
+            n += snprintf(out + n, (size_t)(size - n), "%s%s", n ? "," : "",
+                          e->kind == PAINT_SHAPE ? SHAPE_PARTS[d->shapes[e->object].kind][f] : PAINT_FACES[f]);
 }
 
 // What is painted, from the entries that are active: the materials, own atlases and model files that
@@ -8800,7 +9650,7 @@ static void PaintFlags(SceneData *d)
 static void PaintLogInactive(const SceneData *d, const PaintDef *e)
 {
     char what[64], why[MS_PATH_MAX + 64];
-    PaintTargetText(e, what, sizeof(what));
+    PaintTargetText(d, e, what, sizeof(what));
     if (e->why == PAINT_GRID_CELLS && e->gridFace >= 0 && e->gridFace < 6) snprintf(what, sizeof(what), "%s", PAINT_FACES[e->gridFace]);
     const char *mat = e->material >= 0 ? d->materials[e->material].name : "its own material";
     const char *atlas = e->material >= 0 ? d->matDefs[e->material].paint : d->ownAtlases[e->ownAtlas].rel;
@@ -8831,13 +9681,16 @@ static void PaintResolve(SceneData *d)
     for (int a = 0; a < d->ownAtlasCount; a++) PaintAtlasSize(d, d->ownAtlases[a].rel, &d->ownAtlases[a].w, &d->ownAtlases[a].h);
     for (int i = 0; i < d->paintCount; i++) {
         PaintDef *e = &d->paints[i];
-        int ent = d->objEntities ? d->objEntities[(e->kind == PAINT_BOX ? 0 : d->boxCount) + e->object] : -1;
+        int ent = d->objEntities ? d->objEntities[(e->kind == PAINT_BOX ? 0 : e->kind == PAINT_MODEL ? d->boxCount
+                                                   : d->boxCount + d->modelCount + d->lightCount + d->barrierCount) + e->object] : -1;
         if (ent >= 0) e->entity = d->entityIds[ent];
         int w = e->material >= 0 ? d->matDefs[e->material].paintW : d->ownAtlases[e->ownAtlas].w;
         int h = e->material >= 0 ? d->matDefs[e->material].paintH : d->ownAtlases[e->ownAtlas].h;
         int why = PAINT_OK;
         if (e->kind == PAINT_BOX) {
             if (d->boxRefs[e->object].material != e->material) why = PAINT_NOT_DRAWN;
+        } else if (e->kind == PAINT_SHAPE) {
+            if (d->shapes[e->object].ref.material != e->material) why = PAINT_NOT_DRAWN;
         } else {
             const MS_ModelInstance *M = &d->models[e->object];
             const MS_ModelFile *F = &d->modelFiles[M->file];
@@ -8880,7 +9733,7 @@ static void PaintPublish(SceneData *d)
         const PaintDef *e = &d->paints[i];
         d->paintPub[i] = (MS_PaintEntry){
             .material = e->material, .line = e->line, .file = e->file, .entity = e->entity,
-            .obj = { e->kind == PAINT_BOX ? MS_OBJ_BOX : MS_OBJ_MODEL, e->object },
+            .obj = { e->kind == PAINT_BOX ? MS_OBJ_BOX : e->kind == PAINT_SHAPE ? MS_OBJ_SHAPE : MS_OBJ_MODEL, e->object },
             .faces = e->faces, .slot = e->slot,
             .x = e->x, .y = e->y, .w = e->w, .h = e->h,
             .nearest = e->nearest, .active = e->active,
@@ -8982,23 +9835,25 @@ static bool BuildOwnAtlases(SceneData *d)
 // to replace another passes it (old, with boxFrom / modelFrom: d's object -> old's) so unchanged
 // objects keep their keys and their meshes and buffers can stay; new keys go after old's. False when
 // out of memory.
-static bool PaintKeys(SceneData *d, const SceneData *old, const int *boxFrom, const int *modelFrom)
+static bool PaintKeys(SceneData *d, const SceneData *old, const int *boxFrom, const int *modelFrom, const int *shapeFrom)
 {
     free(d->boxPaintKey);
     free(d->modelPaintKey);
+    free(d->shapePaintKey);
     free(d->paintTable);
-    d->boxPaintKey = d->modelPaintKey = NULL;
+    d->boxPaintKey = d->modelPaintKey = d->shapePaintKey = NULL;
     d->paintTable = NULL;
     d->paintKeyCount = d->paintTableRows = 0;
     if (!d->anyPaint) return true;
     d->boxPaintKey = calloc(d->boxCount > 0 ? (size_t)d->boxCount : 1, sizeof(int));
     d->modelPaintKey = calloc(d->modelCount > 0 ? (size_t)d->modelCount : 1, sizeof(int));
-    if (!d->boxPaintKey || !d->modelPaintKey) return false;
+    d->shapePaintKey = calloc(d->shapeCount > 0 ? (size_t)d->shapeCount : 1, sizeof(int));
+    if (!d->boxPaintKey || !d->modelPaintKey || !d->shapePaintKey) return false;
 
     // Which objects need keys, then their keys (old's where an object is the same)
     for (int i = 0; i < d->paintCount; i++) {
         const PaintDef *e = &d->paints[i];
-        if (e->active) (e->kind == PAINT_BOX ? d->boxPaintKey : d->modelPaintKey)[e->object] = -1;
+        if (e->active) (e->kind == PAINT_BOX ? d->boxPaintKey : e->kind == PAINT_SHAPE ? d->shapePaintKey : d->modelPaintKey)[e->object] = -1;
     }
     int next = old && old->paintKeyCount > 1 ? old->paintKeyCount : 1;
     for (int b = 0; b < d->boxCount; b++) {
@@ -9013,6 +9868,12 @@ static bool PaintKeys(SceneData *d, const SceneData *old, const int *boxFrom, co
         int slots = d->modelFiles[d->models[i].file].model.materialCount;
         if (o >= 0 && old->modelPaintKey[o] > 0) d->modelPaintKey[i] = old->modelPaintKey[o];
         else { d->modelPaintKey[i] = next; next += slots > 0 ? slots : 1; }
+    }
+    for (int i = 0; i < d->shapeCount; i++) {     // (one key per part, as a model's per slot)
+        if (d->shapePaintKey[i] >= 0) continue;
+        int o = old && shapeFrom && old->shapePaintKey ? shapeFrom[i] : -1;
+        if (o >= 0 && old->shapePaintKey[o] > 0) d->shapePaintKey[i] = old->shapePaintKey[o];
+        else { d->shapePaintKey[i] = next; next += MS_ShapePartCount(d->shapes[i].kind); }
     }
     if (next > 16777215) return false;      // (keys are 3 bytes in a merged mesh's vertices)
 
@@ -9041,6 +9902,9 @@ static bool PaintKeys(SceneData *d, const SceneData *old, const int *boxFrom, co
                 }
                 memcpy(&d->paintTable[4 * (size_t)(d->boxPaintKey[e->object] + f)], r, sizeof(r));
             }
+        } else if (e->kind == PAINT_SHAPE) {
+            for (int q = 0; q < 6; q++)
+                if (e->faces & (1u << q)) memcpy(&d->paintTable[4 * (size_t)(d->shapePaintKey[e->object] + q)], r, sizeof(r));
         } else memcpy(&d->paintTable[4 * (size_t)(d->modelPaintKey[e->object] + e->slot)], r, sizeof(r));
     }
     return true;
@@ -9082,11 +9946,12 @@ static void PaintCheckCube(void);
 // The paint layer's GPU state after the materials (their paint aliases and atlases): the own
 // materials' atlases and aliases, the keys (old's for the same objects, when d replaces old), the table
 // (old's texture when it is the same: *tookTable) bound to every paint alias. On failure the last error says why.
-static bool PaintUpload(SceneData *d, const SceneData *old, const int *boxFrom, const int *modelFrom, bool *tookTable)
+static bool PaintUpload(SceneData *d, const SceneData *old, const int *boxFrom, const int *modelFrom, const int *shapeFrom,
+                        bool *tookTable)
 {
     bool took = false;
     if (!BuildOwnAtlases(d)) return false;
-    if (!PaintKeys(d, old, boxFrom, modelFrom) || !PaintTableUpload(d, old, &took)) {
+    if (!PaintKeys(d, old, boxFrom, modelFrom, shapeFrom) || !PaintTableUpload(d, old, &took)) {
         ErrSet("%s: out of memory (paint keys)", d->path);
         return false;
     }
@@ -9293,7 +10158,7 @@ static bool UploadGpu(SceneData *d)
         }
 
     // The paint layer (only with an active entry): the own materials' paint, the keys and their table
-    if (d->anyPaint && !PaintUpload(d, NULL, NULL, NULL, NULL)) {
+    if (d->anyPaint && !PaintUpload(d, NULL, NULL, NULL, NULL, NULL)) {
         FreeGpu(d);
         return false;
     }
@@ -9351,10 +10216,32 @@ static bool UploadGpu(SceneData *d)
             FreeGpu(d);
             return false;
         }
-    if (!BuildModelGroups(d)) {
+    if (!BuildModelGroups(d) || !BuildShapeGroups(d)) {
         FreeGpu(d);
         return false;
     }
+    return true;
+}
+
+// The shapes' unit meshes on the GPU, once per scene: when the first map with shapes loads (a map
+// without shapes uploads nothing for them), kept until MS_Unload. False when they can't be made (the
+// last error says why).
+static bool ShapeMeshesLoad(MS_Private *p, const SceneData *d)
+{
+    if (p->shapeMeshLoaded || !p->gpu || d->shapeCount == 0) return true;
+    if (!ShapeMeshData()) {
+        ErrSet("%s: the shapes' meshes could not be made", d->path);
+        return false;
+    }
+    for (int k = 0; k < SHAPE_PIECE_COUNT; k++) {
+        BoundingBox b = ShapePieceBounds(k);
+        p->shapeMesh[k] = R3D_LoadMesh(R3D_PRIMITIVE_TRIANGLES, ShapePieceData(k), &b);
+        if (p->shapeMesh[k].vertexCount > 0) continue;
+        for (int j = 0; j < k; j++) R3D_UnloadMesh(p->shapeMesh[j]);
+        ErrSet("%s: out of video memory (the shapes' meshes)", d->path);
+        return false;
+    }
+    p->shapeMeshLoaded = true;
     return true;
 }
 
@@ -9403,6 +10290,10 @@ static void FreeData(SceneData *d)
     free(d->fogZones);
     free(d->barriers);
     free(d->barrierWritten);
+    free(d->shapes);
+    free(d->shapeWritten);
+    free(d->shapeHull);
+    free(d->shapePaintKey);
     free(d->boxes);
     free(d->boxRefs);
     free(d->turned);
@@ -9474,6 +10365,9 @@ static void Publish(MS_Scene *s, SceneData *d)
     s->barriers = d->barriers;
     s->barrierCount = d->barrierCount;
     s->barrierColliderFirst = s->colliderCount - d->barrierCount;
+    s->shapes = d->shapes;
+    s->shapeCount = d->shapeCount;
+    s->shapeColliderFirst = s->barrierColliderFirst - d->shapeCount;
     s->materials = d->materials;
     s->materialCount = d->materialCount;
     s->groups = (const char *const *)d->groups;
@@ -9501,6 +10395,7 @@ static void Publish(MS_Scene *s, SceneData *d)
     s->modelEntities = d->objEntities + d->boxCount;
     s->lightEntities = d->objEntities + d->boxCount + d->modelCount;
     s->barrierEntities = d->objEntities + d->boxCount + d->modelCount + d->lightCount;
+    s->shapeEntities = d->objEntities + d->boxCount + d->modelCount + d->lightCount + d->barrierCount;
 }
 
 #ifdef MONOLITH_EDITOR
@@ -9630,6 +10525,7 @@ static bool LoadBytes(MS_Scene *s, const char *mapPath, char *bytes, int size)
     free(bytes);
 #endif
     if (ok) ok = FinishLoad(d, &p->opt, p->gpu);
+    if (ok) ok = ShapeMeshesLoad(p, d);
     if (ok && p->gpu && !p->warnedShadowSize && R3D_GetHint(R3D_HINT_SHADOW_DIR_SIZE) != d->env.sun.shadowSize) {
         p->warnedShadowSize = true;
         TraceLog(LOG_WARNING, "monolith_scene: shadow.size %d is not the R3D hint %d (it applies at R3D_Init: "
@@ -9724,6 +10620,10 @@ MS_Scene *MS_Load(const char *path, const MS_LoadOptions *opt)
     return s;
 }
 
+#ifdef MONOLITH_EDITOR
+static void ClipFree(MS_Private *p);     // (region "3D snip clip")
+#endif
+
 void MS_Unload(MS_Scene *s)
 {
     if (!s) return;
@@ -9731,6 +10631,7 @@ void MS_Unload(MS_Scene *s)
     if (p) {
 #ifdef MONOLITH_EDITOR
         if (p->pv) MS_EditPreviewEnd(s);
+        ClipFree(p);
         free(p->dirty);
         free(p->aoGrid);
         free(p->rangeObj);
@@ -9759,6 +10660,7 @@ void MS_Unload(MS_Scene *s)
             if (p->sunShadowLoaded)
                 for (int i = 0; i < SUN_TILE_COUNT; i++) R3D_UnloadShadowMap(p->sunShadow[i]);
             R3D_UnloadMesh(p->cube);
+            for (int k = 0; p->shapeMeshLoaded && k < SHAPE_PIECE_COUNT; k++) R3D_UnloadMesh(p->shapeMesh[k]);
         }
 #ifdef MONOLITH_EDITOR
         FreeWatch(p);
@@ -10329,6 +11231,23 @@ static bool LightSame(const SceneData *a, int i, const SceneData *b, int j)
            x->outerCutOff == y->outerCutOff && x->fogEnergy == y->fogEnergy && x->type == y->type &&
            A->shadow == B->shadow && A->depthBias == B->depthBias && A->slopeBias == B->slopeBias &&
            A->clip == B->clip && (!A->clip || memcmp(&A->clipBox, &B->clipBox, sizeof(BoundingBox)) == 0);
+}
+
+// A shape: its kind, its world box and shape, its material (what its draw depends on)
+static unsigned long long ShapeKey(const SceneData *d, int i)
+{
+    const MS_Shape *S = &d->shapes[i];
+    unsigned long long h = Fnv1a64Update(FNV_OFFSET, &S->kind, sizeof(S->kind));
+    h = Fnv1a64Update(h, &S->box, sizeof(BoundingBox));
+    h = Fnv1a64Update(h, &S->shape, sizeof(MS_TurnedBox));
+    return Fnv1a64Update(h, &S->ref.material, sizeof(int));
+}
+
+static bool ShapeSame(const SceneData *a, int i, const SceneData *b, int j)
+{
+    const MS_Shape *A = &a->shapes[i], *B = &b->shapes[j];
+    return A->kind == B->kind && A->turned == B->turned && A->ref.material == B->ref.material &&
+           memcmp(&A->box, &B->box, sizeof(BoundingBox)) == 0 && memcmp(&A->shape, &B->shape, sizeof(MS_TurnedBox)) == 0;
 }
 
 // Matches every new object of one kind to an old one: from[j] = old index or -1; *changed counts
@@ -11017,8 +11936,8 @@ MS_ReloadResult MS_EditSetText(MS_Scene *s, const MS_MapFileText *files, int cou
     char *bytes = malloc((size_t)size + 1);
     SceneData *d = bytes ? calloc(1, sizeof(*d)) : NULL;
     LiveBorrow B = { 0 };
-    int *boxFrom = NULL, *modelFrom = NULL;
-    bool *oldBoxUsed = NULL, *oldModelUsed = NULL, *oldLightUsed = NULL;
+    int *boxFrom = NULL, *modelFrom = NULL, *shapeFrom = NULL;
+    bool *oldBoxUsed = NULL, *oldModelUsed = NULL, *oldLightUsed = NULL, *oldShapeUsed = NULL;
     bool ok = d && InitData(d, old->path);
     if (!ok) ErrSet("%s: out of memory", old->path);
     if (ok) {
@@ -11092,15 +12011,17 @@ MS_ReloadResult MS_EditSetText(MS_Scene *s, const MS_MapFileText *files, int cou
     int dirtyBoxes = 0;
     p->dirtyCount = 0;
     if (ok) {
-        int lightsChanged = 0;
+        int lightsChanged = 0, shapesChanged = 0;
         int *lightFrom = malloc(sizeof(int) * (d->lightCount > 0 ? (size_t)d->lightCount : 1));
         for (int j = 0; lightFrom && j < d->lightCount; j++) lightFrom[j] = -1;
         boxFrom = malloc(sizeof(int) * (d->boxCount > 0 ? (size_t)d->boxCount : 1));
         modelFrom = malloc(sizeof(int) * (d->modelCount > 0 ? (size_t)d->modelCount : 1));
-        ok = lightFrom && boxFrom && modelFrom &&
+        shapeFrom = malloc(sizeof(int) * (d->shapeCount > 0 ? (size_t)d->shapeCount : 1));
+        ok = lightFrom && boxFrom && modelFrom && shapeFrom &&
              LiveMatchAll(old, old->boxCount, d, d->boxCount, BoxKey, BoxSame, boxFrom, &oldBoxUsed, &st.boxesChanged) &&
              LiveMatchAll(old, old->modelCount, d, d->modelCount, ModelKey, ModelSame, modelFrom, &oldModelUsed, &st.modelsChanged) &&
-             LiveMatchAll(old, old->lightCount, d, d->lightCount, LightKey, LightSame, lightFrom, &oldLightUsed, &lightsChanged);
+             LiveMatchAll(old, old->lightCount, d, d->lightCount, LightKey, LightSame, lightFrom, &oldLightUsed, &lightsChanged) &&
+             LiveMatchAll(old, old->shapeCount, d, d->shapeCount, ShapeKey, ShapeSame, shapeFrom, &oldShapeUsed, &shapesChanged);
         st.lightsChanged = lightsChanged;
         B.lightFrom = lightFrom;
         if (!ok) ErrSet("%s: out of memory", d->path);
@@ -11121,6 +12042,10 @@ MS_ReloadResult MS_EditSetText(MS_Scene *s, const MS_MapFileText *files, int cou
             }
             if (uses) DirtyAdd(p, d->models[j].bounds);
         }
+        // Shapes: as boxes, their old and new bounds (in no hidden-face search or occlusion volume)
+        for (int i = 0; ok && i < old->shapeCount; i++) if (!oldShapeUsed[i]) DirtyAdd(p, old->shapes[i].box);
+        for (int j = 0; ok && j < d->shapeCount; j++)
+            if (shapeFrom[j] < 0 || (matRebuild && (matRebuild[d->shapes[j].ref.material] & PLAN_MATERIAL))) DirtyAdd(p, d->shapes[j].box);
         if (DirtyAll(p)) dirtyBoxes = 0;
     }
 
@@ -11218,7 +12143,7 @@ MS_ReloadResult MS_EditSetText(MS_Scene *s, const MS_MapFileText *files, int cou
             }
             // The paint keys (the same objects keep theirs) and table, before the box draws use them
             bool tookTable = false;
-            if (ok) ok = PaintUpload(d, old, boxFrom, modelFrom, &tookTable);
+            if (ok) ok = PaintUpload(d, old, boxFrom, modelFrom, shapeFrom, &tookTable);
             B.paintTable = tookTable;
             if (ok && d->anyPaint && !tookTable) st.paintTables++;
             if (ok) ok = UploadBoxesLive(p, old, d, boxFrom, dirtyBoxes, &B, matRebuild, &st);
@@ -11239,13 +12164,17 @@ MS_ReloadResult MS_EditSetText(MS_Scene *s, const MS_MapFileText *files, int cou
         // Paint meshes of the painted model files: old's when built from the same unwrap
         if (ok) ok = PaintMeshesLive(old, d, &B, &st);
         if (ok) ok = BuildModelGroups(d);
+        if (ok) ok = BuildShapeGroups(d);
     }
+    if (ok) ok = ShapeMeshesLoad(p, d);     // (the first map text with shapes)
     st.uploadMs = (GetTime() - tu) * 1000.0 - st.hiddenMs - st.meshesMs;
     free(boxFrom);
     free(modelFrom);
+    free(shapeFrom);
     free(oldBoxUsed);
     free(oldModelUsed);
     free(oldLightUsed);
+    free(oldShapeUsed);
     free(bytes);
     if (!ok) {
         if (d && B.materials) LiveMaterialsBack(old, d, &B);
@@ -11307,7 +12236,7 @@ static void PreviewFree(struct EditPreview *v)
     for (int r = 0; v->turnMesh && r < v->drawRanges; r++) R3D_UnloadMesh(v->turnMesh[r]);
     R3D_UnloadMeshData(v->cube);
     free(v->objs); free(v->boxOrig); free(v->turnOrig); free(v->modelOrig); free(v->localFirst); free(v->colliderOrig); free(v->colliderAt);
-    free(v->lightOrig); free(v->barrierOrig); free(v->entityOrig); free(v->reach); free(v->boxSel); free(v->hiddenOrig); free(v->ranges);
+    free(v->lightOrig); free(v->barrierOrig); free(v->shapeOrig); free(v->shapeRangeOrig); free(v->entityOrig); free(v->reach); free(v->boxSel); free(v->hiddenOrig); free(v->ranges);
     free(v->meshOrig); free(v->instMat); free(v->instSlot); free(v->instScaleOrig); free(v->modelRangeOrig);
     free(v->bufBox); free(v->turnMesh); free(v->turnBounds); free(v->drawMat); free(v->drawFirst); free(v->drawCount); free(v->drawBounds);
     free(v);
@@ -11387,6 +12316,32 @@ static void PreviewModelInstance(SceneData *d, int i)
     if (scl) scl[k] = M->scale;
     R3D_UnmapInstances(G->inst, (pos ? R3D_INSTANCE_POSITION : 0) | (rot ? R3D_INSTANCE_ROTATION : 0) | (scl ? R3D_INSTANCE_SCALE : 0));
     R->bounds = BoundsUnion(R->bounds, M->bounds);
+}
+
+// Writes shape i's pieces into their groups' instance buffers (a piece it didn't have when the draws
+// were built, a capsule's side, waits for the edit)
+static void PreviewShapeInstances(SceneData *d, int i)
+{
+    if (!d->shapeRangeOf || !d->shapeSlotOf) return;
+    for (int k = 0; k < SHAPE_PIECES_MAX; k++) {
+        int item = i * SHAPE_PIECES_MAX + k, r = d->shapeRangeOf[item];
+        if (r < 0) continue;
+        DrawRange *R = &d->shapeRanges[r];
+        ShapeGroup *G = &d->shapeGroups[R->group];
+        ShapePiece pc[SHAPE_PIECES_MAX];
+        int n = ShapePieces(&d->shapes[i], pc), slot = d->shapeSlotOf[item];
+        // (the piece by its mesh: a capsule's caps keep their slots when its side comes or goes)
+        int at = -1;
+        for (int q = 0; q < n && at < 0; q++) if (pc[q].piece == G->piece) at = q;
+        Vector3 *pos = R3D_MapInstances(G->inst, R3D_INSTANCE_POSITION, false);
+        Quaternion *rot = R3D_MapInstances(G->inst, R3D_INSTANCE_ROTATION, false);
+        Vector3 *scl = R3D_MapInstances(G->inst, R3D_INSTANCE_SCALE, false);
+        if (pos) pos[slot] = at >= 0 ? pc[at].pos : d->shapes[i].shape.center;
+        if (rot) rot[slot] = ShapeRotation(&d->shapes[i]);
+        if (scl) scl[slot] = at >= 0 ? pc[at].scale : Vector3Zero();
+        R3D_UnmapInstances(G->inst, (pos ? R3D_INSTANCE_POSITION : 0) | (rot ? R3D_INSTANCE_ROTATION : 0) | (scl ? R3D_INSTANCE_SCALE : 0));
+        R->bounds = BoundsUnion(R->bounds, d->shapes[i].box);
+    }
 }
 
 // The preview buffer slots of the selected boxes, and the draw ranges' bounds
@@ -11500,8 +12455,10 @@ bool MS_EditPreviewBegin(MS_Scene *s, const MS_ObjRef *objs, int count)
     if (p->pv || !p->gpu || !d || !d->gpu || count <= 0) return false;
     for (int i = 0; i < count; i++) {
         int n = objs[i].kind == MS_OBJ_BOX ? d->boxCount : objs[i].kind == MS_OBJ_MODEL ? d->modelCount
-              : objs[i].kind == MS_OBJ_LIGHT ? d->lightCount : objs[i].kind == MS_OBJ_BARRIER ? d->barrierCount : 0;
+              : objs[i].kind == MS_OBJ_LIGHT ? d->lightCount : objs[i].kind == MS_OBJ_BARRIER ? d->barrierCount
+              : objs[i].kind == MS_OBJ_SHAPE ? d->shapeCount : 0;
         if (objs[i].index < 0 || objs[i].index >= n) return false;
+        if (objs[i].kind == MS_OBJ_SHAPE && (!d->shapeRangeOf || !d->shapeSlotOf)) return false;
         if (objs[i].kind == MS_OBJ_BOX && (!d->boxOrder || !d->boxRangeOf)) return false;
         if (objs[i].kind == MS_OBJ_MODEL && (!d->modelSlotOf || !d->modelRangeOf)) return false;
     }
@@ -11517,6 +12474,8 @@ bool MS_EditPreviewBegin(MS_Scene *s, const MS_ObjRef *objs, int count)
     v->colliderAt = calloc(nc, sizeof(int));
     v->lightOrig = calloc(nc, sizeof(MS_LightDef));
     v->barrierOrig = calloc(nc, sizeof(MS_Barrier));
+    v->shapeOrig = calloc(nc, sizeof(MS_Shape));
+    v->shapeRangeOrig = malloc(sizeof(BoundingBox) * (d->shapeRangeCount > 0 ? (size_t)d->shapeRangeCount : 1));
     v->entityOrig = calloc(nc, sizeof(MS_Transform));
     v->reach = calloc(nc, sizeof(BoundingBox));
     v->boxSel = calloc(d->boxCount > 0 ? (size_t)d->boxCount : 1, 1);
@@ -11534,7 +12493,7 @@ bool MS_EditPreviewBegin(MS_Scene *s, const MS_ObjRef *objs, int count)
     v->trisDrawn = d->boxTrisDrawn;
     v->meshCount = d->boxMeshCount;
     bool ok = v->objs && v->boxOrig && v->turnOrig && v->modelOrig && v->localFirst && v->colliderAt && v->lightOrig && v->barrierOrig &&
-              v->entityOrig && v->reach &&
+              v->shapeOrig && v->shapeRangeOrig && v->entityOrig && v->reach &&
               v->boxSel && v->modelRangeOrig && v->bufBox && v->turnMesh && v->turnBounds && v->drawMat && v->drawFirst && v->drawCount && v->drawBounds &&
               v->instMat && v->instSlot && v->instScaleOrig;
     // What everything was at Begin
@@ -11544,7 +12503,8 @@ bool MS_EditPreviewBegin(MS_Scene *s, const MS_ObjRef *objs, int count)
         v->objs[i] = o;
         int e = d->objEntities[o.kind == MS_OBJ_BOX ? o.index : o.kind == MS_OBJ_MODEL ? d->boxCount + o.index
                                : o.kind == MS_OBJ_LIGHT ? d->boxCount + d->modelCount + o.index
-                               : d->boxCount + d->modelCount + d->lightCount + o.index];
+                               : o.kind == MS_OBJ_BARRIER ? d->boxCount + d->modelCount + d->lightCount + o.index
+                               : d->boxCount + d->modelCount + d->lightCount + d->barrierCount + o.index];
         v->entityOrig[i] = d->entityTransforms[e];
         if (o.kind == MS_OBJ_BOX) {
             v->boxOrig[i] = v->reach[i] = d->boxes[o.index];
@@ -11561,6 +12521,9 @@ bool MS_EditPreviewBegin(MS_Scene *s, const MS_ObjRef *objs, int count)
         } else if (o.kind == MS_OBJ_BARRIER) {
             v->barrierOrig[i] = d->barriers[o.index];
             v->reach[i] = d->barriers[o.index].box;
+        } else if (o.kind == MS_OBJ_SHAPE) {
+            v->shapeOrig[i] = d->shapes[o.index];
+            v->reach[i] = d->shapes[o.index].box;
         } else {
             v->lightOrig[i] = d->lights[o.index];
             v->reach[i] = (BoundingBox){ d->lights[o.index].light.position, d->lights[o.index].light.position };
@@ -11573,6 +12536,7 @@ bool MS_EditPreviewBegin(MS_Scene *s, const MS_ObjRef *objs, int count)
             memcpy(&v->colliderOrig[v->colliderAt[i]], &d->colliders[d->models[objs[i].index].colliderFirst],
                    sizeof(BoundingBox) * d->models[objs[i].index].colliderCount);
     for (int r = 0; ok && r < d->modelRangeCount; r++) v->modelRangeOrig[r] = d->modelRanges[r].bounds;
+    for (int r = 0; ok && r < d->shapeRangeCount; r++) v->shapeRangeOrig[r] = d->shapeRanges[r].bounds;
 
     // The selected boxes leave their draws: merged ranges are built again without them (with the
     // faces they hid shown again), instanced ones get a zero scale in their buffer
@@ -11755,6 +12719,24 @@ bool MS_EditPreviewSet(MS_Scene *s, const MS_Transform *tr)
             v->reach[i] = BoundsUnion(v->reach[i], B->box);
             colliders = true;
             continue;
+        } else if (o.kind == MS_OBJ_SHAPE) {
+            // Its record, collider and instances follow (centre + size + rotation, as a block's)
+            MS_Shape *S = &d->shapes[o.index];
+            e = d->objEntities[d->boxCount + d->modelCount + d->lightCount + d->barrierCount + o.index];
+            before = S->box;
+            Vector3 h = Vector3Scale(tr[i].scale, 0.5f);
+            BoundingBox w = { Vector3Subtract(tr[i].position, h), Vector3Add(tr[i].position, h) };
+            MS_Shape sh = { .ref = S->ref };
+            MS_TurnedBox hull;
+            if (ShapeMake(S->kind, w, tr[i].rotationDeg, &sh, &hull)) {
+                *S = sh;
+                d->shapeHull[o.index] = hull;
+            }
+            PreviewShapeInstances(d, o.index);
+            after = S->box;
+            d->colliders[ShapeColliderFirst(d) + o.index] = S->box;
+            d->entityTransforms[e] = (MS_Transform){ S->shape.center, S->shape.rotationDeg, S->shape.size };
+            colliders = true;
         } else {
             MS_LightDef *L = &d->lights[o.index];
             e = d->objEntities[d->boxCount + d->modelCount + o.index];
@@ -11813,6 +12795,17 @@ void MS_EditPreviewEnd(MS_Scene *s)
             d->entityTransforms[d->objEntities[d->boxCount + d->modelCount + d->lightCount + o.index]] = v->entityOrig[i];
             colliders = true;
             continue;       // (in no static cache)
+        } else if (o.kind == MS_OBJ_SHAPE) {
+            MS_Shape *S = &d->shapes[o.index];
+            *S = v->shapeOrig[i];
+            MS_Shape sh;
+            ShapeMake(S->kind, d->shapeWritten[o.index], S->turned ? S->shape.rotationDeg : (Vector3){ 0 }, &sh,
+                      &d->shapeHull[o.index]);
+            PreviewShapeInstances(d, o.index);
+            d->colliders[ShapeColliderFirst(d) + o.index] = S->box;
+            d->entityTransforms[d->objEntities[d->boxCount + d->modelCount + d->lightCount + d->barrierCount + o.index]] =
+                v->entityOrig[i];
+            colliders = true;
         } else if (o.kind == MS_OBJ_LIGHT) {
             d->lights[o.index] = v->lightOrig[i];
             if (d->lightShadowDrawn) d->lightShadowDrawn[o.index] = false;
@@ -11822,6 +12815,7 @@ void MS_EditPreviewEnd(MS_Scene *s)
         DirtyAdd(p, v->reach[i]);
     }
     for (int r = 0; v->modelRangeOrig && r < d->modelRangeCount; r++) d->modelRanges[r].bounds = v->modelRangeOrig[r];
+    for (int r = 0; v->shapeRangeOrig && r < d->shapeRangeCount; r++) d->shapeRanges[r].bounds = v->shapeRangeOrig[r];
     PreviewUndoDraws(d, v);
     if (colliders) RefitColliderBvh(d);
     FinishGeometry(d);
@@ -12042,13 +13036,6 @@ static int MeshOfTriangle(const ModelPick *mp, int src)
     return lo;
 }
 
-// A model's own UV as its paint mesh stores it (unorm16, PaintBones), so picking and drawing agree
-static Vector2 Unorm16Uv(Vector2 t)
-{
-    float u = fminf(fmaxf(t.x, 0.0f), 1.0f), v = fminf(fmaxf(t.y, 0.0f), 1.0f);
-    return (Vector2){ floorf(u * 65535.0f + 0.5f) / 65535.0f, floorf(v * 65535.0f + 0.5f) / 65535.0f };
-}
-
 // The active paint entry of a box face (face >= 0) or a model slot in `material`'s atlas (-1: the
 // slot's own material), -1 for none (a linear search: entries are few)
 static int PaintEntryOf(const SceneData *d, int kind, int object, int material, int face, int slot)
@@ -12056,7 +13043,7 @@ static int PaintEntryOf(const SceneData *d, int kind, int object, int material, 
     for (int i = 0; i < d->paintCount; i++) {
         const PaintDef *e = &d->paints[i];
         if (e->active && e->kind == kind && e->object == object && e->material == material &&
-            (kind == PAINT_BOX ? face >= 0 && (e->faces >> face & 1) : e->slot == slot)) return i;
+            (kind != PAINT_MODEL ? face >= 0 && (e->faces >> face & 1) : e->slot == slot)) return i;
     }
     return -1;
 }
@@ -12177,6 +13164,29 @@ static void SurfaceOfModel(const MS_Scene *s, Vector3 origin, Vector3 dir, float
     out->uv = R ? (Vector2){ R->uvOffset.x + tc.x * R->uvScale.x, R->uvOffset.y + tc.y * R->uvScale.y } : tc;
 }
 
+// A shape hit: the part as the face, where in the part (its part UV), its paint entry, the material's
+// uv_scale / uv_offset over the part UV (the texture coordinate)
+static void SurfaceOfShape(const SceneData *d, Vector3 origin, Vector3 dir, MS_SurfaceHit *out)
+{
+    const MS_Shape *S = &d->shapes[out->hit.obj.index];
+    ShapeHit h;
+    if (!ShapeRaycast(S, origin, dir, out->hit.dist * 1.0001f + 1e-6f, &h)) return;
+    int m = S->ref.material;
+    out->material = m;
+    out->face = h.part;
+    out->faceUv = h.uv;
+    out->paintUv = h.paintUv;
+    out->bary = h.bary;
+    out->paintEntry = PaintEntryOf(d, PAINT_SHAPE, out->hit.obj.index, m, h.part, -1);
+    out->paintGrid = PaintGridOf(d, m);
+    if (out->paintEntry >= 0) {
+        const PaintDef *e = &d->paints[out->paintEntry];
+        out->paintTexel = (Vector2){ h.paintUv.x * (float)e->w, h.paintUv.y * (float)e->h };
+    }
+    const R3D_Material *M = &d->materials[m].material;
+    out->uv = (Vector2){ M->uvOffset.x + h.uv.x * M->uvScale.x, M->uvOffset.y + h.uv.y * M->uvScale.y };
+}
+
 bool MS_RaycastSurface(const MS_Scene *s, Vector3 origin, Vector3 dir, float maxDist, MS_SurfaceHit *out)
 {
     memset(out, 0, sizeof(*out));
@@ -12187,6 +13197,7 @@ bool MS_RaycastSurface(const MS_Scene *s, Vector3 origin, Vector3 dir, float max
     const SceneData *d = s->priv->d;
     if (out->hit.obj.kind == MS_OBJ_BOX) SurfaceOfBox(d, out);
     else if (out->hit.obj.kind == MS_OBJ_MODEL) SurfaceOfModel(s, origin, dir, maxDist, out);
+    else if (out->hit.obj.kind == MS_OBJ_SHAPE) SurfaceOfShape(d, origin, dir, out);
     return out->hit.obj.kind != MS_OBJ_NONE;
 }
 
@@ -13093,6 +14104,233 @@ bool MS_PushLights(MS_Scene *s, Camera3D camera, float aspect)
 // casts shadows: the sun's tiles and the light shadows are drawn once and must not lose it, and
 // R3D culls it per shadow view as before. So the image changes only where the camera saw it.
 
+#ifdef MONOLITH_EDITOR
+// #region 3D snip clip (editor)
+// ======================================================================================
+// MS_SetClipBox: while a clip box is set, MS_DrawGeometry draws every material with its clip variant,
+// the material's own shader (its paint version when painted, the empty shader when it has none) with a
+// last stage that discards fragments outside the box (StageSource, CLIP_STAGE), except in the shadow
+// variants (DEPTH, DEPTH_CUBE): what lies outside still shades the inside. The variants and their
+// aliases (one per material, painted own-material slot, and one for model slots drawn with the file's
+// own material) are built on the first MS_SetClipBox after a load or edit (scene->version) and freed
+// with the scene; nothing is built or drawn differently while no box is set. A material whose clip
+// variant can't be made (too many samplers, too long, a compile error: logged) draws uncut.
+
+static const char CLIP_STAGE_HEAD[] =
+    "uniform vec3 ms_clipMin;\n"
+    "uniform vec3 ms_clipMax;\n";
+
+static const char CLIP_STAGE_VERT[] =
+    "#ifdef STAGE_VERT\n"
+    "void vertex() {\n"
+    "%s"
+    "}\n"
+    "#endif\n";
+
+// (POSITION: the fragment's world position)
+static const char CLIP_STAGE_FRAG[] =
+    "#ifdef STAGE_FRAG\n"
+    "void fragment() {\n"
+    "#if !defined(DEPTH) && !defined(DEPTH_CUBE)\n"
+    "if (any(lessThan(POSITION, ms_clipMin)) || any(greaterThan(POSITION, ms_clipMax))) discard;\n"
+    "#endif\n"
+    "%s"
+    "}\n"
+    "#endif\n";
+
+// (the paint version, which the clip stage may wrap, defines MS_INTERP already)
+static const StageSpec CLIP_STAGE = {
+    "#ifndef MS_INTERP\n#define MS_INTERP(q) q\n#endif\n", "ms_clipVertex", "ms_clipFragment",
+    CLIP_STAGE_HEAD, CLIP_STAGE_VERT, CLIP_STAGE_FRAG, 4, true,     // (4: R3D's sampler limit per material)
+};
+
+#define CLIP_MARGIN 0.001f      // metres the clip box grows by: faces lying on it stay
+
+// One compiled clip variant: of shader file `rel` (NULL: the empty shader), of its paint version or not
+typedef struct {
+    char *rel;
+    bool painted;
+    R3D_SurfaceShader *shader;          // NULL: it failed (its materials draw uncut)
+} ClipProgram;
+
+typedef struct SnipClip {
+    unsigned int version;               // the scene version it was built for
+    const SceneData *data;
+    ClipProgram *progs;
+    int progCount, progCap;
+    R3D_SurfaceShader **mat;            // per material: its clip alias (NULL: draws uncut)
+    int matCount;
+    R3D_SurfaceShader **own;            // per own atlas: the clip alias of its paint alias (NULL: none)
+    int ownCount;
+    R3D_SurfaceShader *empty;           // model slots with the file's own material and no paint
+    R3D_Material **groupMats;           // per model group: its materials with the clip aliases
+    int groupCount;
+    int uncut;                          // materials (and slots) drawn uncut
+} SnipClip;
+
+// Unloads the aliases, then the variants they alias (R3D's order), and frees everything
+static void ClipFree(MS_Private *p)
+{
+    SnipClip *c = p->clip;
+    if (!c) return;
+    for (int i = 0; p->gpu && i < c->matCount; i++) if (c->mat[i]) R3D_UnloadSurfaceShader(c->mat[i]);
+    for (int i = 0; p->gpu && i < c->ownCount; i++) if (c->own[i]) R3D_UnloadSurfaceShader(c->own[i]);
+    if (p->gpu && c->empty) R3D_UnloadSurfaceShader(c->empty);
+    for (int i = 0; i < c->progCount; i++) {
+        if (p->gpu && c->progs[i].shader) R3D_UnloadSurfaceShader(c->progs[i].shader);
+        free(c->progs[i].rel);
+    }
+    for (int g = 0; g < c->groupCount; g++) free(c->groupMats[g]);
+    free(c->progs);
+    free(c->mat);
+    free(c->own);
+    free(c->groupMats);
+    free(c);
+    p->clip = NULL;
+    p->clipOn = false;
+}
+
+// The clip variant of shader file rel (NULL: the empty shader), painted or not: compiled the first time
+// it is asked for. NULL when it can't be made (logged once) or out of memory.
+static R3D_SurfaceShader *ClipProgramOf(SnipClip *c, const SceneData *d, const char *rel, bool painted)
+{
+    for (int i = 0; i < c->progCount; i++)
+        if (c->progs[i].painted == painted && (rel ? c->progs[i].rel && strcmp(c->progs[i].rel, rel) == 0 : !c->progs[i].rel))
+            return c->progs[i].shader;
+    ClipProgram *slot = MS_PUSH(c->progs, c->progCount, c->progCap);
+    if (!slot) return NULL;
+    *slot = (ClipProgram){ .rel = rel ? MS_StrDup(rel) : NULL, .painted = painted };
+    char *src = rel ? ShaderSourceText(d, rel) : NULL;
+    char *base = painted && (!rel || src) ? PaintShaderSource(src) : NULL;
+    char *code = (!rel || src) && (!painted || base) ? StageSource(painted ? base : src, &CLIP_STAGE) : NULL;
+    if (code && strlen(code) <= PAINT_SHADER_MAX) slot->shader = R3D_LoadSurfaceShaderFromMemory(code);
+    if (!slot->shader)
+        TraceLog(LOG_WARNING, "monolith_scene: %s: no 3D snip clip for the surface shader \"%s\"%s (%s); its materials are not cut",
+                 d->srcPath, rel ? rel : "(none)", painted ? " with paint" : "", !code ? "too many samplers, or unreadable"
+                 : strlen(code) > PAINT_SHADER_MAX ? "longer than R3D's limit with it" : "see the log");
+    free(code);
+    free(base);
+    free(src);
+    return slot->shader;
+}
+
+// An alias of program prog with the sort key `key` (as the material's own alias sorts), NULL on failure
+static R3D_SurfaceShader *ClipAlias(R3D_SurfaceShader *prog, unsigned int key)
+{
+    R3D_SurfaceShader *a = prog ? R3D_LoadSurfaceShaderAlias(prog) : NULL;
+    if (a) ShaderSortKey(a, key);
+    return a;
+}
+
+// Material i's clip alias: the variant of what it draws with (its paint alias, its shader's alias, or
+// none: the empty shader), its uniforms, samplers and paint atlas as BuildMaterialShader /
+// BuildPaintedShader give them
+static R3D_SurfaceShader *ClipMaterialAlias(SnipClip *c, SceneData *d, int i)
+{
+    MS_Material *M = &d->materials[i];
+    MatDef *D = &d->matDefs[i];
+    bool has = M->material.shader != NULL, painted = has && D->painted;
+    const char *rel = has ? M->shader : NULL;
+    R3D_SurfaceShader *a = ClipAlias(ClipProgramOf(c, d, rel, painted), rel ? (unsigned int)i + 1 : 0);
+    if (!a || !has) return a;
+    for (int u = 0; u < D->uniformCount; u++) R3D_SetSurfaceShaderUniform(a, D->uniforms[u].name, D->uniforms[u].v);
+    for (int s = 0; s < D->samplerCount; s++) {
+        Texture2D tex = GetTexture(d, D->samplers[s].path, true, D->samplers[s].data, D->wrap, TEX_TRILINEAR,
+                                   D->samplers[s].file, D->samplers[s].line);
+        if (tex.id) R3D_SetSurfaceShaderSampler(a, D->samplers[s].name, tex);
+    }
+    if (painted) {
+        R3D_SetSurfaceShaderSampler(a, "ms_paint", D->paintTex);
+        if (d->paintTableTex.id) R3D_SetSurfaceShaderSampler(a, "ms_paintTable", d->paintTableTex);
+    }
+    return a;
+}
+
+// The clip set of the scene as loaded now (p->clip): false when out of memory (nothing is cut then)
+static bool ClipBuild(MS_Private *p, unsigned int version)
+{
+    SceneData *d = p->d;
+    SnipClip *c = calloc(1, sizeof(SnipClip));
+    if (!c) return false;
+    p->clip = c;
+    c->version = version;
+    c->data = d;
+    c->mat = calloc(d->materialCount > 0 ? d->materialCount : 1, sizeof(R3D_SurfaceShader *));
+    c->own = calloc(d->ownAtlasCount > 0 ? d->ownAtlasCount : 1, sizeof(R3D_SurfaceShader *));
+    c->groupMats = calloc(d->modelGroupCount > 0 ? d->modelGroupCount : 1, sizeof(R3D_Material *));
+    if (!c->mat || !c->own || !c->groupMats) { ClipFree(p); return false; }
+    c->matCount = d->materialCount;
+    c->ownCount = d->ownAtlasCount;
+    c->groupCount = d->modelGroupCount;
+    for (int i = 0; i < d->materialCount; i++) c->uncut += !(c->mat[i] = ClipMaterialAlias(c, d, i));
+    for (int a = 0; a < d->ownAtlasCount; a++) {
+        OwnAtlas *A = &d->ownAtlases[a];
+        if (!A->shader) continue;
+        if (!(c->own[a] = ClipAlias(ClipProgramOf(c, d, NULL, true), 0))) { c->uncut++; continue; }
+        R3D_SetSurfaceShaderSampler(c->own[a], "ms_paint", A->tex);
+        if (d->paintTableTex.id) R3D_SetSurfaceShaderSampler(c->own[a], "ms_paintTable", d->paintTableTex);
+    }
+    c->empty = ClipAlias(ClipProgramOf(c, d, NULL, false), 0);
+    // Model groups: each slot as the group draws it, with the clip alias in place of its shader
+    for (int g = 0; g < d->modelGroupCount; g++) {
+        const ModelGroup *G = &d->modelGroups[g];
+        int n = G->model.materialCount;
+        R3D_Material *mats = malloc(sizeof(R3D_Material) * (n > 0 ? n : 1));
+        if (!mats) { ClipFree(p); return false; }
+        c->groupMats[g] = mats;
+        for (int s = 0; s < n; s++) {
+            mats[s] = G->model.materials[s];
+            int mi = G->slotMat[s], a = mi < 0 ? OwnAtlasFind(d, G->file, s) : -1;
+            R3D_SurfaceShader *cut = mi >= 0 ? c->mat[mi]
+                                   : a >= 0 && d->ownAtlases[a].shader && mats[s].shader == d->ownAtlases[a].shader ? c->own[a]
+                                   : !mats[s].shader ? c->empty : NULL;
+            if (cut) mats[s].shader = cut;
+            else c->uncut++;
+        }
+    }
+    return true;
+}
+
+int MS_SetClipBox(MS_Scene *s, BoundingBox box)
+{
+    MS_Private *p = s->priv;
+    if (!p->gpu) return -1;
+    if (p->clip && (p->clip->version != s->version || p->clip->data != p->d)) ClipFree(p);
+    if (!p->clip && !ClipBuild(p, s->version)) {
+        TraceLog(LOG_WARNING, "monolith_scene: 3D snip clip: out of memory; nothing is cut");
+        return -1;
+    }
+    SnipClip *c = p->clip;
+    Vector3 mn = Vector3SubtractValue(Vector3Min(box.min, box.max), CLIP_MARGIN);
+    Vector3 mx = Vector3AddValue(Vector3Max(box.min, box.max), CLIP_MARGIN);
+    for (int i = 0; i < c->matCount + c->ownCount + 1; i++) {
+        R3D_SurfaceShader *a = i < c->matCount ? c->mat[i] : i < c->matCount + c->ownCount ? c->own[i - c->matCount] : c->empty;
+        if (!a) continue;
+        R3D_SetSurfaceShaderUniform(a, "ms_clipMin", &mn);
+        R3D_SetSurfaceShaderUniform(a, "ms_clipMax", &mx);
+    }
+    // The depth pre-pass draws depth without the user code, so outside fragments would stay in it
+#ifdef MS_PATCHED_R3D
+    R3D_SetDepthPrepass(false);
+#endif
+    p->clipOn = true;
+    return c->uncut;
+}
+
+void MS_ClearClipBox(MS_Scene *s)
+{
+    MS_Private *p = s->priv;
+    if (!p->clipOn) return;
+    p->clipOn = false;
+#ifdef MS_PATCHED_R3D
+    R3D_SetDepthPrepass(p->rs.depthPrepass);
+#endif
+}
+
+// #endregion
+
+#endif
+
 // Is range R beyond its draw distance from the camera of the last MS_PushLights?
 static bool RangeFar(const MS_Private *p, const SceneData *d, const DrawRange *R, bool box)
 {
@@ -13107,7 +14345,10 @@ static bool RangeFar(const MS_Private *p, const SceneData *d, const DrawRange *R
 // each view's frustum (the camera, the shadow maps) and skips its draw when outside
 static inline void DrawBoxRange(const MS_Private *p, const SceneData *d, const DrawRange *R)
 {
-    const R3D_Material mat = d->materials[R->group].material;
+    R3D_Material mat = d->materials[R->group].material;
+#ifdef MONOLITH_EDITOR
+    if (p->clipOn && p->clip->mat[R->group]) mat.shader = p->clip->mat[R->group];     // (a 3D snip: MS_SetClipBox)
+#endif
     bool far = RangeFar(p, d, R, true);
     bool noShadow = d->materials[R->group].noShadow;
     if (far && noShadow) return;                    // (a shadow-only draw of a material without shadows)
@@ -13136,12 +14377,40 @@ static inline void DrawModelRange(const MS_Private *p, const SceneData *d, const
 {
     const ModelGroup *G = &d->modelGroups[R->group];
     R3D_Model model = G->model;
+#ifdef MONOLITH_EDITOR
+    if (p->clipOn) model.materials = p->clip->groupMats[R->group];     // (a 3D snip: MS_SetClipBox)
+#endif
     if (RangeFar(p, d, R, false)) {
         if (!G->farMeshes) return;              // (no shadow either: nothing to draw)
         model.meshes = G->farMeshes;
     }
     R3D_BeginCluster(R->bounds);
     R3D_DrawModelInstancedEx(model, G->inst, R->first, R->count);
+    R3D_EndCluster();
+}
+
+// Shapes: one cluster per cell and (piece, material), drawn and shadowed as the material's boxes
+// (`shadow off`, the draw distance of a box range of that size or the material's `draw_distance`)
+static inline void DrawShapeRange(const MS_Private *p, const SceneData *d, const DrawRange *R)
+{
+    const ShapeGroup *G = &d->shapeGroups[R->group];
+    const MS_Material *M = &d->materials[G->material];
+    if (!p->shapeMeshLoaded) return;
+    bool far = false;
+    if (p->rs.detailDistance > 0.0f && M->drawDistance >= 0.0f) {
+        float limit = (M->drawDistance > 0.0f ? M->drawDistance : MS_DETAIL_FACTOR * R->size) * p->rs.detailDistance;
+        Vector3 c = Vector3Clamp(p->viewPos, R->bounds.min, R->bounds.max);
+        far = isfinite(limit) && Vector3DistanceSqr(p->viewPos, c) > limit * limit;
+    }
+    if (far && M->noShadow) return;                 // (a shadow-only draw of a material without shadows)
+    R3D_Mesh mesh = p->shapeMesh[G->piece];
+    if (M->noShadow) mesh.shadowCastMode = R3D_SHADOW_CAST_DISABLED;
+    R3D_Material mat = M->material;
+#ifdef MONOLITH_EDITOR
+    if (p->clipOn && p->clip->mat[G->material]) mat.shader = p->clip->mat[G->material];    // (a 3D snip: MS_SetClipBox)
+#endif
+    R3D_BeginCluster(R->bounds);
+    R3D_DrawMeshInstancedEx(far ? ShadowOnlyMesh(mesh) : mesh, mat, G->inst, R->first, R->count);
     R3D_EndCluster();
 }
 
@@ -13155,6 +14424,7 @@ static void DrawFiltered(MS_Private *p, const SceneData *d)
     if (p->pv) PreviewDraw(p);
     for (int r = 0; r < d->modelRangeCount; r++)
         if (d->boxRangeCount + r >= n || !p->drawHidden[d->boxRangeCount + r]) DrawModelRange(p, d, &d->modelRanges[r]);
+    for (int r = 0; r < d->shapeRangeCount; r++) DrawShapeRange(p, d, &d->shapeRanges[r]);    // (not in the inspector)
 }
 #endif
 
@@ -13174,6 +14444,7 @@ void MS_DrawGeometry(MS_Scene *s)
     if (p->pv) PreviewDraw(p);      // the boxes of a transform preview
 #endif
     for (int r = 0; r < d->modelRangeCount; r++) DrawModelRange(p, d, &d->modelRanges[r]);
+    for (int r = 0; r < d->shapeRangeCount; r++) DrawShapeRange(p, d, &d->shapeRanges[r]);
 #ifdef MONOLITH_EDITOR
     }
 #endif
@@ -13240,20 +14511,34 @@ MS_Hit MS_Raycast(const MS_Scene *s, Vector3 origin, Vector3 dir, float maxDist)
     // The boxes, through the colliders' BVH: a node's slab interval (the same arithmetic) holds
     // those of its boxes, so a node is skipped only when none of its boxes can be the hit. The
     // order of the visits doesn't matter: the nearest box wins, on equal distances the lower index.
+    // Shapes through the same BVH, by their triangles once the ray reaches their collider: the nearest
+    // in shapeBest (a box wins a tie with a shape: a node is skipped only when farther than both)
     const SceneData *sd = s->priv->d;
+    MS_Hit shapeBest = { .obj = { MS_OBJ_NONE, -1 }, .dist = INFINITY };
+    int shapeFirst = ShapeColliderFirst(sd);
     int stack[128], sp = 0;
     if (sd->colliderNodeCount > 0) stack[sp++] = 0;
     while (sp > 0) {
         const BvhNode *nd = &sd->colliderNodes[stack[--sp]];
         float nodeNear, nodeFar;
         if (!RayBox(origin, dir, nd->mn, nd->mx, &nodeNear, &nodeFar, NULL) || nodeFar < 0.0f ||
-            nodeNear > best.dist || nodeNear > limit) continue;
+            nodeNear > fminf(best.dist, shapeBest.dist) || nodeNear > limit) continue;
         if (nd->count == 0) {
             if (sp + 2 <= 128) { stack[sp++] = nd->left; stack[sp++] = nd->left + 1; }
             continue;
         }
         for (int k = nd->first; k < nd->first + nd->count; k++) {
             int i = sd->colliderOrder[k];
+            int si = i - shapeFirst;
+            if (si >= 0 && si < sd->shapeCount) {
+                ShapeHit h;
+                if (!ShapeRaycast(&sd->shapes[si], origin, dir, fminf(fminf(shapeBest.dist, best.dist), limit) * 1.0000001f, &h))
+                    continue;
+                if (h.t > shapeBest.dist || h.t > limit || (h.t == shapeBest.dist && si > shapeBest.obj.index)) continue;
+                shapeBest = (MS_Hit){ .obj = { MS_OBJ_SHAPE, si }, .dist = h.t, .normal = h.normal,
+                                      .point = Vector3Add(origin, Vector3Scale(dir, h.t)) };
+                continue;
+            }
             if (i >= s->boxCount) continue;     // a model collider: models are hit by their triangles below
             const BoundingBox *b = &s->boxes[i];
             float mn[3] = { b->min.x, b->min.y, b->min.z };
@@ -13302,7 +14587,8 @@ MS_Hit MS_Raycast(const MS_Scene *s, Vector3 origin, Vector3 dir, float maxDist)
             best.normal = T ? Vector3Scale(T->axis[axis], n[axis]) : (Vector3){ n[0], n[1], n[2] };
         }
     }
-    // Models: only strictly nearer than the best box (a box wins a tie)
+    if (shapeBest.obj.kind != MS_OBJ_NONE && shapeBest.dist < best.dist) best = shapeBest;
+    // Models: only strictly nearer than the best box or shape (they win a tie)
     for (int i = 0; i < s->modelCount; i++) {
         MS_Hit h;
         float lim = best.obj.kind != MS_OBJ_NONE ? best.dist : (maxDist > 0.0f ? maxDist : 0.0f);
@@ -13400,6 +14686,16 @@ static bool RayBox(Vector3 o, Vector3 d, Vector3 mn, Vector3 mx, float *tNear, f
 bool MS_RaycastModel(const MS_Scene *s, int mi, Vector3 origin, Vector3 dir, float maxDist, MS_Hit *hit)
 {
     return RaycastModelTri(s, mi, origin, dir, maxDist, hit, NULL, NULL);
+}
+
+bool MS_RaycastShape(const MS_Scene *s, int shape, Vector3 origin, Vector3 dir, float maxDist, MS_Hit *hit)
+{
+    if (!s || shape < 0 || shape >= s->shapeCount) return false;
+    ShapeHit h;
+    if (!ShapeRaycast(&s->shapes[shape], origin, dir, maxDist > 0.0f ? maxDist : INFINITY, &h)) return false;
+    *hit = (MS_Hit){ .obj = { MS_OBJ_SHAPE, shape }, .dist = h.t, .normal = h.normal,
+                     .point = Vector3Add(origin, Vector3Scale(dir, h.t)) };
+    return true;
 }
 
 // MS_RaycastModel, plus the triangle hit (*tri: its place in the file's ModelPick.tri[], -1 when
@@ -13515,8 +14811,10 @@ int MS_FirstCollision(const MS_Scene *s, BoundingBox a)
         }
         for (int k = nd->first; k < nd->first + nd->count; k++) {
             int i = d->colliderOrder[k];
-            // (a box of a `collide off` material never blocks; a turned box or barrier by its shape)
+            // (a box or shape of a `collide off` material never blocks; a turned box, shape or barrier by its shape)
             if (i < d->boxCount && s->materials[s->boxRefs[i].material].noCollide) continue;
+            int si = i - s->shapeColliderFirst;
+            if (si >= 0 && si < s->shapeCount && s->materials[s->shapes[si].ref.material].noCollide) continue;
             if ((first < 0 || i < first) && Overlaps(a, s->colliders[i].min, s->colliders[i].max) &&
                 (!ColliderTurn(d, i) || OverlapsTurned(a, ColliderTurn(d, i)))) first = i;
         }
@@ -13610,6 +14908,7 @@ const MS_Ref *MS_ObjectRef(const MS_Scene *s, MS_ObjRef obj)
     if (obj.kind == MS_OBJ_MODEL && obj.index >= 0 && obj.index < s->modelCount) return &s->models[obj.index].ref;
     if (obj.kind == MS_OBJ_LIGHT && obj.index >= 0 && obj.index < s->lightCount) return &s->lights[obj.index].ref;
     if (obj.kind == MS_OBJ_BARRIER && obj.index >= 0 && obj.index < s->barrierCount) return &s->barriers[obj.index].ref;
+    if (obj.kind == MS_OBJ_SHAPE && obj.index >= 0 && obj.index < s->shapeCount) return &s->shapes[obj.index].ref;
     return NULL;
 }
 
@@ -13620,6 +14919,7 @@ BoundingBox MS_ObjectBounds(const MS_Scene *s, MS_ObjRef obj)
     if (obj.kind == MS_OBJ_LIGHT && obj.index >= 0 && obj.index < s->lightCount)
         return (BoundingBox){ s->lights[obj.index].light.position, s->lights[obj.index].light.position };
     if (obj.kind == MS_OBJ_BARRIER && obj.index >= 0 && obj.index < s->barrierCount) return s->barriers[obj.index].box;
+    if (obj.kind == MS_OBJ_SHAPE && obj.index >= 0 && obj.index < s->shapeCount) return s->shapes[obj.index].box;
     return (BoundingBox){ 0 };
 }
 
@@ -13629,7 +14929,13 @@ int MS_ObjectEntity(const MS_Scene *s, MS_ObjRef obj)
     if (obj.kind == MS_OBJ_MODEL && obj.index >= 0 && obj.index < s->modelCount) return s->modelEntities[obj.index];
     if (obj.kind == MS_OBJ_LIGHT && obj.index >= 0 && obj.index < s->lightCount) return s->lightEntities[obj.index];
     if (obj.kind == MS_OBJ_BARRIER && obj.index >= 0 && obj.index < s->barrierCount) return s->barrierEntities[obj.index];
+    if (obj.kind == MS_OBJ_SHAPE && obj.index >= 0 && obj.index < s->shapeCount) return s->shapeEntities[obj.index];
     return -1;
+}
+
+int MS_ShapeTriangles(const MS_Scene *s, int shape)
+{
+    return s && shape >= 0 && shape < s->shapeCount ? ShapeTriangles(&s->shapes[shape]) : 0;
 }
 
 int MS_FindEntity(const MS_Scene *s, MS_EntityId id)

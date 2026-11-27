@@ -15,6 +15,7 @@ typedef struct {
     int boxes, models;          // objects in the map
     bool brief;                 // the package has a MAP.md
     int selected, regions, volumes;
+    int sketches, snips;        // pen strokes over the frame; volumes marked as 3D snips
     bool hit;                   // the crosshair is on an object
 } ClassifierQuery;
 

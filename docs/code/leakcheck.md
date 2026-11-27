@@ -48,7 +48,8 @@ Every run uses a hidden window (`--shot`, `--dump-*`, ...) or none: nothing appe
 
 **Editor panels and inspection**
 
-- `--shot-hud` with `--select` / `--region` / `--volume`.
+- `--shot-hud` with `--select` / `--region` / `--volume` / `--sketch` / `--work-plane`.
+- The pen in snip mode through `--input-script` (strokes by drags, Backspace, Shift+Backspace, leaving snip mode) and volume corners on the work plane (ALT, PAGE_UP).
 - The render inspector: outline modes, labels, its panel, buffer views, the draw filter with a live edit, a preview and a reload.
 - The id panel (`--id-panel` unfiltered, filtered, and with live id edits and the number field).
 - The draw panel (`--draw-panel` whole, one section, clicks on its widgets through `--input-script`, a bad section).
@@ -61,11 +62,12 @@ Every run uses a hidden window (`--shot`, `--dump-*`, ...) or none: nothing appe
 - The transform ops (turn with pitch / roll / local / pivot, scale, size): `--apply-edits` with a failing command, `--edit-script` with turn / scale previews.
 - The transform modal (`--edit-modal`: open with the HUD, committed, cancelled; `--input-script`: mouse and keys through the input shim, a no-op turn), the rotate gizmo, the R step and reset.
 - Turned boxes: shots with the caches, a reload, live edits.
+- Shapes (`tests/shapes`): a shot with paint on every kind, a compiled copy and its shot, `--tri-report`, and `--edit-script` on shape lines (a preview move and turn, move, turn, scale, `shape-add`, undo / redo, remove).
 - The model picker (`--model-picker`): thumbnails of the scene's files and of one loaded for the render, a filter, freed and rendered again across a reload and a renderer restart, ENTER and ESC.
 
 **Requests and the AI classifier**
 
-- `--submit` (with `build/tools/stub-terminal` instead of a terminal, `MONOLITH_WORKSPACE=`) on both maps, in coordinator mode (queue + coordinator start, a cancel with no coordinator) and in per-request mode.
+- `--submit` (with `build/tools/stub-terminal` instead of a terminal, `MONOLITH_WORKSPACE=`; the first with `--sketch` strokes and a 3D snip volume: `sketch.png`, the sketch analysis, the snip images and the clip variants) on both maps, in coordinator mode (queue + coordinator start, a cancel with no coordinator) and in per-request mode.
 - The AI classifier: `MONOLITH_CLASSIFIER` is the sanitizer copy of `build/tools/stub-classifier` for every run, never a real `claude -p`; an answer, a quit and a cancel while classifying, a failure.
 - `--classify`: an answer, garbage, a timeout, off, an override.
 

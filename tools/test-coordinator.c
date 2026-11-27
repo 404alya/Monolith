@@ -604,7 +604,7 @@ static void MakeBundle(const char *id, const char *pkg)
     ToolMkdirP(dir);
     FILE *f = fopen(nob_temp_sprintf("%s/request.json", dir), "wb");
     if (f) {
-        fprintf(f, "{\n  \"format\": 8,\n  \"prompt\": \"test %s\",\n  \"package\": \"%s\",\n}\n", id, pkg);
+        fprintf(f, "{\n  \"format\": 9,\n  \"prompt\": \"test %s\",\n  \"package\": \"%s\",\n}\n", id, pkg);
         if (fclose(f) != 0) ToolErr("request.json: %s", strerror(errno));
     }
     f = fopen(nob_temp_sprintf("%s/state", dir), "wb");
@@ -1341,7 +1341,7 @@ int main(int argc, char **argv)
             char *E1 = Submit(A, "test classifier limit submit", waitE, 2);
             const char *json = nob_temp_sprintf("%s/%s/request.json", gR, E1 ? E1 : "");
             const char *md = nob_temp_sprintf("%s/%s/request.md", gR, E1 ? E1 : "");
-            if (FileHas(json, Contains, "\"classifierAccount\": \"fallback-config\"") && FileHas(json, Contains, "\"format\": 8") &&
+            if (FileHas(json, Contains, "\"classifierAccount\": \"fallback-config\"") && FileHas(json, Contains, "\"format\": 9") &&
                 FileHas(md, Contains, " on fallback-config in ") && FileHas(md, Contains, "(fast tier, chosen by the AI classifier")) {
                 Ok("submit: the bundle says the fallback classified it (request.json classifierAccount, request.md Model line)");
             } else {

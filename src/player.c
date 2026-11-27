@@ -29,6 +29,9 @@ static bool IsTurned(int c)
     // (a turned barrier collides like a turned box: colliders[barrierColliderFirst + i])
     int b = c - scene->barrierColliderFirst;
     if (c >= 0 && b >= 0 && b < scene->barrierCount) return scene->barriers[b].turned;
+    // (and a turned shape: colliders[shapeColliderFirst + i], its turned box)
+    int s = c - scene->shapeColliderFirst;
+    if (c >= 0 && s >= 0 && s < scene->shapeCount) return scene->shapes[s].turned;
     return c >= 0 && c < scene->boxCount && scene->boxTurned && scene->boxTurned[c] >= 0;
 }
 

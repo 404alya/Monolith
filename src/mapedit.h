@@ -1,6 +1,6 @@
-// Manual map edits: remove, move, turn, scale, duplicate and add objects as minimal text edits to the
-// map's text (mapedit.c; each edit in the map-text file that holds the line: the main file or a part
-// it imports), with undo / redo; the edit script of --apply-edits
+// Manual map edits: remove, move, turn, scale, duplicate and add objects, and whole groups (rename, delete, new,
+// move, duplicate) as minimal text edits to the map's text (mapedit.c; each edit in the map-text file that holds the
+// line: the main file or a part it imports), with undo / redo; the edit script of --apply-edits
 #ifndef MONOLITH_MAPEDIT_H
 #define MONOLITH_MAPEDIT_H
 
@@ -41,6 +41,19 @@ typedef enum {
                             // hasRot ypr[]): after anchor's line (its file and group), or with anchor kind
                             // MS_OBJ_NONE at the end of the main map file's `# barriers` block (made at its
                             // end, with `group "barriers"`, when it has none); the new barrier is selected
+    // Shapes and groups as units (docs/editor-tools.md 2.7, 3.2)
+    EDIT_SHAPE_ADD,         // a new line `id N shape <shapeKind> pos[0] pos[1] pos[2] size[0..2]` after
+                            // anchor's line (its group; the `use "default"` wrap as EDIT_ADD), or with
+                            // anchor kind MS_OBJ_NONE at the end of the main map file; the new shape is selected
+    EDIT_GROUP_RENAME,      // every `group "<groupName>"` line in every file becomes `group "<groupNew>"`
+    EDIT_GROUP_DELETE,      // every object line of group groupName, its `group` lines, the comments right
+                            // above deleted lines in its blocks, `use` lines left without objects, the
+                            // deleted entities' paint entries
+    EDIT_GROUP_NEW,         // the selection's whole lines into a new block `group "<groupNew>"` at the end of
+                            // the file that holds them (move-to-file's scope rules)
+    EDIT_GROUP_MOVE,        // the selection's whole lines to the end of group groupName's last block
+    EDIT_GROUP_DUPLICATE,   // a copy of every object line of group groupName, shifted by delta[], in a new
+                            // block `group "<groupNew>"` right after its last block
 } EditOpKind;
 
 // Faces of a paint entry (bits of EditOp.paint.faces): +x -x +y -y +z -z
@@ -75,6 +88,9 @@ typedef struct {
                             // (its group); EDIT_BARRIER_ADD with kind MS_OBJ_NONE: the main file's `# barriers`
     double corners[6];      // EDIT_BARRIER_ADD: x0 y0 z0 x1 y1 z1 (world; written with up to 4 decimals)
     bool hasRot;            // EDIT_BARRIER_ADD: `rot ypr[0] ypr[1] ypr[2]` too
+    int shapeKind;          // EDIT_SHAPE_ADD: an MS_ShapeKind (pos[] = cx y0 cz, size[] = sx sy sz)
+    const char *groupName;  // EDIT_GROUP_*: the group (by name, every statement of it)
+    const char *groupNew;   // EDIT_GROUP_RENAME / NEW / DUPLICATE: the new name
     int id;                 // EDIT_ID: the id the selected objects' line gets (1..2147483647, unique in
                             // the file; one line only); 0 = each line without an id gets the next free one
     const char *matName;    // EDIT_MATERIAL_SET: the material
@@ -125,6 +141,7 @@ typedef struct {
     char *what;             // "moved 2 objects +0.5 m x (line 120 split into 3 lines)" (heap, owned by the step)
     char *matName, *matKeys;    // EDIT_MATERIAL_SET: op.matName / matKeys point here
     char *paintMaterial, *paintAtlas;   // EDIT_PAINT_*: op.paint.material / atlas point here
+    char *groupName, *groupNew;         // EDIT_GROUP_*: op.groupName / groupNew point here
     PaintStep *paint;       // NULL for text edits; strokes (no hunks), or a first stroke (hunks + paint)
     // More paint ops amended onto this step (MapEditAmendPaint: a stroke that went on onto a new face,
     // the panel's face groups): its hunks are the text of all of them, a rebase applies op then these
@@ -315,9 +332,14 @@ typedef enum {
     EDIT_CLASS_MODEL, EDIT_CLASS_LIGHT, EDIT_CLASS_DIR_LIGHT,     // a directional light has no position
     EDIT_CLASS_NONE,                                            // not from a line of the map text
     EDIT_CLASS_BARRIER,                                         // `barrier` (edited like a `box` line)
+    EDIT_CLASS_SHAPE,                                           // `shape <kind>` (edited like a `block` line)
 } EditObjClass;
-// A class whose line is two corners or a block (`box`, `block`, `barrier`): moves, turns, scales and resizes
-static inline bool EditClassBoxLike(int c) { return c == EDIT_CLASS_BOX || c == EDIT_CLASS_BLOCK || c == EDIT_CLASS_BARRIER; }
+// A class whose line is two corners or a block (`box`, `block`, `barrier`, `shape`): moves, turns, scales
+// and resizes
+static inline bool EditClassBoxLike(int c)
+{
+    return c == EDIT_CLASS_BOX || c == EDIT_CLASS_BLOCK || c == EDIT_CLASS_BARRIER || c == EDIT_CLASS_SHAPE;
+}
 // classes[i] for objs[i] (each line read once; allocates only while reading the lines)
 void MapEditClassify(const MS_ObjRef *objs, int count, unsigned char *classes);
 // The transform an object of class cls (EditObjClass) gets from op (EDIT_MOVE, EDIT_ROTATE,

@@ -167,7 +167,9 @@ static EditModeResult Done(EditMode *m, Designer *d, unsigned char r, MS_EntityI
 
 static EditModeResult ApplyTo(EditMode *m, Designer *d, int key, const MS_ObjRef *sel, int selCount, const EditOp *op)
 {
-    if (op->kind != EDIT_ADD && op->kind != EDIT_BARRIER_ADD && selCount == 0) {
+    // (the group ops by name need no selection: it only rides along)
+    bool byName = op->kind == EDIT_GROUP_RENAME || op->kind == EDIT_GROUP_DELETE || op->kind == EDIT_GROUP_DUPLICATE;
+    if (op->kind != EDIT_ADD && op->kind != EDIT_BARRIER_ADD && op->kind != EDIT_SHAPE_ADD && !byName && selCount == 0) {
         SayStatic(m, true, "nothing selected (LMB selects, SHIFT+LMB adds, CTRL+LMB a group)");
         return EDITMODE_NONE;
     }
@@ -210,9 +212,202 @@ static EditModeResult MoveStep(EditMode *m, Designer *d, int key, Vector3 dir)
     return Apply(m, d, key, &op);
 }
 
-// R / SHIFT+R: the plain turn (only `degrees`: each object about its own centre / origin)
+// --- Groups as units (docs/editor-tools.md 3.3) ----------------------------------------------------
+
+// The selection is whole groups (docs/editor-tools.md 3.1): every selected object is in a group, and
+// every group statement with a selected object has all its objects selected (lights, which can't be
+// selected, don't count). *groups (heap, the caller frees; per scene group index): the selected
+// statements. *byName: also every statement of each of their names is selected (or has no
+// selectable object): Ctrl+D copies a group by name. False (and *groups NULL): not whole groups.
+static bool WholeGroups(const Designer *d, bool **groups, bool *byName)
+{
+    *groups = NULL;
+    *byName = false;
+    int n = scene->groupCount;
+    if (d->selectedCount == 0 || n == 0) return false;
+    int *selCount = calloc((size_t)n, sizeof(int)), *total = calloc((size_t)n, sizeof(int));
+    bool whole = selCount && total;
+    for (int i = 0; whole && i < d->selectedCount; i++) {
+        const MS_Ref *r = MS_ObjectRef(scene, d->selected[i]);
+        whole = r && r->group >= 0 && r->group < n;
+        if (whole) selCount[r->group]++;
+    }
+    for (int e = 0; whole && e < scene->entityCount; e++) {
+        MS_ObjRef o = scene->entityObjects[e];
+        const MS_Ref *r = o.kind != MS_OBJ_LIGHT ? MS_ObjectRef(scene, o) : NULL;
+        if (r && r->group >= 0 && r->group < n) total[r->group]++;
+    }
+    for (int g = 0; whole && g < n; g++) whole = selCount[g] == 0 || selCount[g] == total[g];
+    if (whole && (*groups = calloc((size_t)n, sizeof(bool)))) {
+        for (int g = 0; g < n; g++) (*groups)[g] = selCount[g] > 0;
+        *byName = true;
+        for (int g = 0; g < n && *byName; g++) {
+            if (!(*groups)[g]) continue;
+            for (int h = 0; h < n && *byName; h++)
+                if (!(*groups)[h] && total[h] > 0 && strcmp(scene->groups[h], scene->groups[g]) == 0) *byName = false;
+        }
+    }
+    free(selCount);
+    free(total);
+    return *groups != NULL;
+}
+
+// The centre of the selection's world bounds, rounded to 0.1 mm (the transform modal's pivot)
+static void SelectionCentre(const Designer *d, double out[3])
+{
+    BoundingBox bb = { { INFINITY, INFINITY, INFINITY }, { -INFINITY, -INFINITY, -INFINITY } };
+    for (int i = 0; i < d->selectedCount; i++) {
+        BoundingBox b = MS_ObjectBounds(scene, d->selected[i]);
+        bb.min = Vector3Min(bb.min, b.min);
+        bb.max = Vector3Max(bb.max, b.max);
+    }
+    const float c[3] = { 0.5f * (bb.min.x + bb.max.x), 0.5f * (bb.min.y + bb.max.y), 0.5f * (bb.min.z + bb.max.z) };
+    for (int a = 0; a < 3; a++) out[a] = round((double)c[a] * 1e4) / 1e4;
+}
+
+// R / SHIFT+R on whole groups: one turn of every object of those group statements (their lights too,
+// which orbit the pivot) about the vertical through the selection's centre
+static EditModeResult GroupTurn(EditMode *m, Designer *d, int key, const bool *groups, double degrees)
+{
+    MS_ObjRef *objs = malloc(sizeof(MS_ObjRef) * (size_t)(scene->entityCount > 0 ? scene->entityCount : 1));
+    if (!objs) { SayStatic(m, true, "out of memory"); return EDITMODE_NONE; }
+    int n = 0;
+    for (int e = 0; e < scene->entityCount; e++) {
+        const MS_Ref *r = MS_ObjectRef(scene, scene->entityObjects[e]);
+        if (r && r->group >= 0 && r->group < scene->groupCount && groups[r->group]) objs[n++] = scene->entityObjects[e];
+    }
+    EditOp op = { .kind = EDIT_ROTATE, .degrees = degrees, .hasPivot = true };
+    SelectionCentre(d, op.pivot);
+    EditModeResult r = ApplyTo(m, d, key, objs, n, &op);
+    free(objs);
+    return r;
+}
+
+// A group name that is free: "<name> 2", or the next free number; a name that ends in " <number>"
+// counts on from its base ("plain: house 2" gives "plain: house 5" when 3 and 4 are taken). Heap;
+// NULL: out of memory
+static char *FreeGroupName(const char *name)
+{
+    size_t len = strlen(name), base = len;
+    while (base > 0 && isdigit((unsigned char)name[base - 1])) base--;
+    if (base == len || base < 2 || name[base - 1] != ' ') base = len;     // (no " <number>" at its end)
+    else base--;
+    for (int k = 2; k < 1000000; k++) {
+        char *c = MonoStrf("%.*s %d", (int)base, name, k);
+        if (!c) return NULL;
+        bool taken = false;
+        for (int g = 0; g < scene->groupCount && !taken; g++) taken = strcmp(scene->groups[g], c) == 0;
+        if (!taken) return c;
+        free(c);
+    }
+    return NULL;
+}
+
+EditModeResult EditModeDuplicateGroups(EditMode *m, Designer *d, int key, const char *const *names, int count)
+{
+    if (count <= 0) { SayStatic(m, true, "no group to duplicate"); return EDITMODE_NONE; }
+    if (!Confirmed(m, key)) return EDITMODE_NONE;
+    EnsureWork(m);
+    // The shift: one footprint of every object of the groups (whole snap steps, at least one) to the
+    // view's right, as CTRL+D shifts a selection
+    Vector3 fwd, right;
+    ViewAxes(d, &fwd, &right);
+    int a = AxisOf(right);
+    float lo = INFINITY, hi = -INFINITY;
+    for (int e = 0; e < scene->entityCount; e++) {
+        MS_ObjRef o = scene->entityObjects[e];
+        const MS_Ref *r = o.kind != MS_OBJ_LIGHT ? MS_ObjectRef(scene, o) : NULL;
+        bool in = false;
+        for (int k = 0; r && r->group >= 0 && r->group < scene->groupCount && k < count && !in; k++)
+            in = strcmp(scene->groups[r->group], names[k]) == 0;
+        if (!in) continue;
+        BoundingBox b = MS_ObjectBounds(scene, o);
+        lo = fminf(lo, ((const float *)&b.min)[a]);
+        hi = fmaxf(hi, ((const float *)&b.max)[a]);
+    }
+    double s = DesignerSnap(d), width = lo <= hi ? ceil(fmax(hi - lo, 0.0) / s - 1e-6) * s : s;
+    EditOp op = { .kind = EDIT_GROUP_DUPLICATE };
+    op.delta[a] = round((width > s ? width : s) * (right.x + right.z) * 1e6) / 1e6;
+
+    // (the names are copied: every edit gives the scene new group names)
+    char **own = calloc((size_t)count, sizeof(char *));
+    MS_EntityId *all = NULL;
+    int allCount = 0, allCap = 0, done = 0;
+    bool failed = !own;
+    for (int k = 0; own && k < count; k++) failed = failed || !(own[k] = MS_StrDup(names[k]));
+    if (failed) SayStatic(m, true, "out of memory");
+    for (int k = 0; !failed && k < count; k++) {
+        char *nw = FreeGroupName(own[k]);
+        if (!nw) { SayStatic(m, true, "out of memory"); break; }
+        op.groupName = own[k];
+        op.groupNew = nw;
+        MS_EntityId *ids;
+        int n;
+        unsigned char r = MapEditApply(&m->ed, d->selected, d->selectedCount, &op, &ids, &n);
+        DesignerSync(d);    // (the edit renumbered the objects: the selection rides along with the next one)
+        free(nw);
+        if (r == 1) { Sayf(m, true, "%s", MS_LastError()); free(ids); break; }
+        for (int i = 0; i < n; i++) {
+            MS_EntityId *slot = MS_PUSH(all, allCount, allCap);
+            if (slot) *slot = ids[i];
+        }
+        free(ids);
+        done++;
+    }
+    for (int k = 0; own && k < count; k++) free(own[k]);
+    free(own);
+    if (done == 0) { free(all); return EDITMODE_NONE; }
+    // (the copies of every group become the selection)
+    DesignerClearSelection(d);
+    DesignerSync(d);
+    for (int i = 0; i < allCount; i++) {
+        int e = MS_FindEntity(scene, all[i]);
+        if (e >= 0) DesignerSelectObject(d, scene->entityObjects[e]);
+    }
+    free(all);
+    if (done < count) TraceLog(LOG_WARNING, "monolith: edit: %d of %d groups duplicated: %s", done, count, MsgText(&m->message));
+    else if (done == 1) Sayf(m, false, "%s", MapEditNote(&m->ed));
+    else Sayf(m, false, "duplicated %d groups (%d undo steps)", done, done);
+    char stats[400];
+    MapEditStatsText(&m->ed.lastStats, stats, sizeof(stats));
+    TraceLog(LOG_INFO, "monolith: edit: %s", MapEditNote(&m->ed));
+    TraceLog(LOG_INFO, "monolith: live edit %s", stats);
+    return EDITMODE_RELOADED;
+}
+
+// CTRL+D on whole groups (by name): each group duplicated as a new group (EditModeDuplicateGroups);
+// EDITMODE_NONE with *handled false: not whole groups (the plain duplicate then)
+static EditModeResult GroupDuplicateKey(EditMode *m, Designer *d, int key, bool *handled)
+{
+    bool *groups, byName;
+    *handled = false;
+    if (!WholeGroups(d, &groups, &byName) || !byName) { free(groups); return EDITMODE_NONE; }
+    *handled = true;
+    const char **names = malloc(sizeof(char *) * (size_t)scene->groupCount);
+    int n = 0;
+    for (int g = 0; names && g < scene->groupCount; g++) {
+        if (!groups[g]) continue;
+        bool seen = false;
+        for (int k = 0; k < n && !seen; k++) seen = strcmp(names[k], scene->groups[g]) == 0;
+        if (!seen) names[n++] = scene->groups[g];
+    }
+    free(groups);
+    EditModeResult r = names ? EditModeDuplicateGroups(m, d, key, names, n) : EDITMODE_NONE;
+    if (!names) SayStatic(m, true, "out of memory");
+    free(names);
+    return r;
+}
+
+// R / SHIFT+R: the plain turn (only `degrees`: each object about its own centre / origin); on whole
+// groups one turn of the groups about the selection's centre (GroupTurn)
 static EditModeResult StepTurn(EditMode *m, Designer *d, int key, double degrees)
 {
+    bool *groups, byName;
+    if (WholeGroups(d, &groups, &byName)) {
+        EditModeResult r = GroupTurn(m, d, key, groups, degrees);
+        free(groups);
+        return r;
+    }
     return Apply(m, d, key, &(EditOp){ .kind = EDIT_ROTATE, .degrees = degrees });
 }
 
@@ -224,10 +419,14 @@ static EditModeResult SetRotation(EditMode *m, Designer *d, int key, double yaw,
     return Apply(m, d, key, &op);
 }
 
-// The copies go one footprint of the selection (whole snap steps, at least one) to the right
+// The copies go one footprint of the selection (whole snap steps, at least one) to the right; whole
+// groups are copied as new groups (GroupDuplicateKey)
 static EditModeResult Duplicate(EditMode *m, Designer *d, int key)
 {
     if (d->selectedCount == 0) return Apply(m, d, key, &(EditOp){ .kind = EDIT_DUPLICATE });
+    bool handled;
+    EditModeResult gr = GroupDuplicateKey(m, d, key, &handled);
+    if (handled) return gr;
     Vector3 fwd, right;
     ViewAxes(d, &fwd, &right);
     int a = AxisOf(right);
@@ -264,6 +463,39 @@ EditModeResult EditModeAddModel(EditMode *m, Designer *d, const char *modelPath)
     }
     EditOp op = { .kind = EDIT_ADD, .modelPath = modelPath, .anchor = d->hit.obj,
                   .pos = { round(p.x * 1e4) / 1e4, round(p.y * 1e4) / 1e4, round(p.z * 1e4) / 1e4 } };
+    return Apply(m, d, KEY_ENTER, &op);
+}
+
+EditModeResult EditModeAddShape(EditMode *m, Designer *d, int kind)
+{
+    if (kind < 0 || kind >= MS_SHAPE_KIND_COUNT) return EDITMODE_NONE;
+    Vector3 p, n;
+    WorldPointKind at = DesignerPickWorldPoint(d, Alt() ? WORLD_POINT_PLANE : WORLD_POINT_SURFACE, &p, &n);
+    if (at == WORLD_POINT_NONE) {
+        SayStatic(m, true, "neither a surface nor the work plane under the cursor (raise the plane in volume mode: PGUP)");
+        return EDITMODE_NONE;
+    }
+    bool plane = kind == MS_SHAPE_PLANE;
+    Vector3 size = plane ? (Vector3){ 2.0f, 0.0f, 2.0f } : (Vector3){ 1.0f, 1.0f, 1.0f };
+    // Its box against the face: on top of an upward face (or the work plane), under a downward one,
+    // beside a wall (pushed out by half its footprint along the normal, centred on the point's height)
+    Vector3 c = p;
+    float y0 = p.y;
+    if (at == WORLD_POINT_ON_SURFACE && n.y < -0.5f) y0 = p.y - size.y;
+    else if (at == WORLD_POINT_ON_SURFACE && n.y < 0.5f) {
+        float h = sqrtf(n.x * n.x + n.z * n.z);
+        if (h > 0.0f) {
+            c.x += n.x / h * 0.5f * size.x;
+            c.z += n.z / h * 0.5f * size.z;
+        }
+        y0 = p.y - 0.5f * size.y;
+    }
+    // (only a box, model or shape anchors the line: a barrier's line is in the `barriers` group)
+    MS_ObjKind hk = d->hit.obj.kind;
+    bool anchored = at == WORLD_POINT_ON_SURFACE && (hk == MS_OBJ_BOX || hk == MS_OBJ_MODEL || hk == MS_OBJ_SHAPE);
+    EditOp op = { .kind = EDIT_SHAPE_ADD, .shapeKind = kind, .anchor = anchored ? d->hit.obj : (MS_ObjRef){ MS_OBJ_NONE, -1 },
+                  .pos = { round(c.x * 1e4) / 1e4, round(y0 * 1e4) / 1e4, round(c.z * 1e4) / 1e4 },
+                  .size = { size.x, size.y, size.z } };
     return Apply(m, d, KEY_ENTER, &op);
 }
 
@@ -638,7 +870,7 @@ EditModeResult EditModeUpdate(EditMode *m, Designer *d, Camera3D cam, float dt)
     if (!flying && !ctrl && !Alt()) {
         if (IsKeyPressed(KEY_H)) {      // a barrier: the volume mode's three clicks (designer.c)
             DesignerBarrierPlaceBegin(d);
-            SayStatic(m, false, "barrier: LMB first corner on a surface, LMB opposite corner, mouse / wheel height, LMB / ENTER");
+            SayStatic(m, false, "barrier: LMB first corner (a surface, else the work plane; ALT: the plane), LMB opposite corner, mouse / wheel height, LMB / ENTER");
             return EDITMODE_NONE;
         }
         if (IsKeyPressed(KEY_G)) return ModalStart(m, d, TRANSFORM_GRAB);
@@ -684,7 +916,7 @@ int EditModeDrawHud(const EditMode *m, const Designer *d, int x, int y)
             MapEditDescribe(d->selected[0], where, sizeof(where));
             snprintf(sel, sizeof(sel), "%d selected, first: %s %s", d->selectedCount,
                      d->selected[0].kind == MS_OBJ_MODEL ? "model" : d->selected[0].kind == MS_OBJ_LIGHT ? "light"
-                     : d->selected[0].kind == MS_OBJ_BARRIER ? "barrier" : "box", where);
+                     : d->selected[0].kind == MS_OBJ_BARRIER ? "barrier" : d->selected[0].kind == MS_OBJ_SHAPE ? "shape" : "box", where);
         }
         HudText(TextFormat("%s  |  undo %d, redo %d  |  %s", sel,
                            m->ed.undoCount, m->ed.redoCount, m->ed.autoSave ? "auto save" : "manual save"), x, y, dim);

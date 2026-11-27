@@ -266,9 +266,9 @@ int main(int argc, char **argv)
     ExpectExact("format-4", "# a newer map\nmonolith 4\nbox 0 0 0 1 1 1\n", 2,
                 "map format 4 is newer than this monolith (3): update monolith");
     ExpectExact("format-3-at", "monolith 3\nrepeat 2 0 0 1 at 0 0 5 box 0 0 0 1 1 1\n", 2,
-                "unknown keyword 'at' (expected group, box, block, stairs, waffle, barrier, model, light, material, "
-                "use, env, fogzone, paint, import, spawn, viewpoint, id or repeat)");
-    ExpectFile("comments-only", "# nothing\n\n   # but comments\n", "map is empty (no boxes and no models)");
+                "unknown keyword 'at' (expected group, box, block, stairs, waffle, barrier, shape, model, light, "
+                "material, use, env, fogzone, paint, import, spawn, viewpoint, id or repeat)");
+    ExpectFile("comments-only", "# nothing\n\n   # but comments\n", "map is empty (no boxes, models or shapes)");
 
     // Imports (docs/map-format.md 2.10): each file once (a second import names where it was first
     // imported; a cycle shows the chain of open files), inside the package, there, a .map file, one
@@ -344,7 +344,42 @@ int main(int argc, char **argv)
     ExpectExact("barrier-string", "monolith 3\nbox 0 0 0 1 1 1\nbarrier \"a\" 0 0 1 1 1\n", 3, "unexpected string \"a\"");
     ExpectExact("barrier-overflow", "monolith 3\nbox 0 0 0 1 1 1\nrepeat 2 3e38 0 0 barrier 3e38 0 0 3.1e38 1 1\n", 3,
                 "coordinate or size out of range");
-    ExpectFile("barrier-only", "monolith 3\nbarrier 0 0 0 1 1 1\n", "map is empty (no boxes and no models)");
+    ExpectFile("barrier-only", "monolith 3\nbarrier 0 0 0 1 1 1\n", "map is empty (no boxes, models or shapes)");
+    // shape (docs/map-format.md 2, Shapes): a known kind and a block's six numbers, an optional rot;
+    // sx, sz > 0, sy > 0 (a plane: 0); a paint line names parts of the shape's kind
+    static const char SHAPE_USAGE[] = "shape takes a kind and a block's six numbers: shape cube|sphere|cylinder|cone|capsule|plane "
+                                      "cx y0 cz sx sy sz [rot y p r]";
+    ExpectExact("shape-kind", "monolith 3\nbox 0 0 0 1 1 1\nshape cubes 0 0 0 1 1 1\n", 3,
+                "unknown shape kind 'cubes' (cube, sphere, cylinder, cone, capsule or plane)");
+    ExpectExact("shape-none", "monolith 3\nbox 0 0 0 1 1 1\nshape\n", 3, SHAPE_USAGE);
+    ExpectExact("shape-few", "monolith 3\nbox 0 0 0 1 1 1\nshape cube 0 0 0 1 1\n", 3, SHAPE_USAGE);
+    ExpectExact("shape-many", "monolith 3\nbox 0 0 0 1 1 1\nshape cube 0 0 0 1 1 1 2\n", 3, SHAPE_USAGE);
+    ExpectExact("shape-rot", "monolith 3\nbox 0 0 0 1 1 1\nshape cone 0 0 0 1 1 1 rot 30 0\n", 3,
+                "rot takes 3 numbers: rot yawDeg pitchDeg rollDeg");
+    ExpectExact("shape-number", "monolith 3\nbox 0 0 0 1 1 1\nshape sphere 0 0 0 1 x 1\n", 3, "bad number 'x'");
+    ExpectExact("shape-string", "monolith 3\nbox 0 0 0 1 1 1\nshape \"cube\" 0 0 0 1 1 1\n", 3, "unexpected string \"cube\"");
+    ExpectExact("shape-width", "monolith 3\nbox 0 0 0 1 1 1\nshape sphere 0 0 0 0 1 1\n", 3,
+                "a shape's sizes sx and sz must be > 0");
+    ExpectExact("shape-depth", "monolith 3\nbox 0 0 0 1 1 1\nshape capsule 0 0 0 1 1 -1\n", 3,
+                "a shape's sizes sx and sz must be > 0");
+    ExpectExact("shape-height", "monolith 3\nbox 0 0 0 1 1 1\nshape cylinder 0 0 0 1 0 1\n", 3,
+                "a shape's height sy must be > 0 (only a plane has none: 0)");
+    ExpectExact("shape-plane-height", "monolith 3\nbox 0 0 0 1 1 1\nshape plane 0 0 0 2 1 2\n", 3,
+                "a plane has no height: write 0");
+    ExpectExact("shape-overflow", "monolith 3\nbox 0 0 0 1 1 1\nrepeat 2 3e38 0 0 shape cube 3e38 0 0 1 1 1\n", 3,
+                "coordinate or size out of range");
+    WritePart("textures/p.png", "an atlas (only its name is checked here)\n");
+    ExpectExact("shape-paint-part", "monolith 3\nmaterial \"p\" paint \"textures/p.png\"\nuse \"p\"\nid 5 shape sphere 0 0 0 1 1 1\n"
+                "paint \"p\" 5:0 top 0 0 4 4\n", 5, "paint: a sphere has no part top (its parts: surface)");
+    ExpectExact("shape-paint-cone", "monolith 3\nmaterial \"p\" paint \"textures/p.png\"\nuse \"p\"\nid 5 shape cone 0 0 0 1 1 1\n"
+                "paint \"p\" 5:0 side,+x 0 0 4 4\n", 5, "paint: a cone has no part +x (its parts: side bottom)");
+    ExpectExact("shape-paint-twice", "monolith 3\nmaterial \"p\" paint \"textures/p.png\"\nuse \"p\"\nid 5 shape cylinder 0 0 0 1 1 1\n"
+                "paint \"p\" 5:0 side 0 0 4 4\npaint \"p\" 5:0 top,side 8 0 4 4\n", 6,
+                "paint: 5:0: a face of it is already in line 5's entry of p");
+    ExpectExact("box-paint-part", "monolith 3\nmaterial \"p\" paint \"textures/p.png\"\nuse \"p\"\nid 5 box 0 0 0 1 1 1\n"
+                "paint \"p\" 5:0 side 0 0 4 4\n", 5, "paint: side is not a face of a box (faces +x -x +y -y +z -z)");
+    ExpectExact("shape-paint-slot", "monolith 3\nmaterial \"p\" paint \"textures/p.png\"\nuse \"p\"\nid 5 shape cube 0 0 0 1 1 1\n"
+                "paint \"p\" 5:0 slot 0 0 0 4 4\n", 5, "paint: line 4 (id 5) makes no models (a box is painted by faces)");
     WritePart("parts/old.map", "monolith 2\nbox 0 0 0 1 1 1\n");
     WritePart("parts/none.map", "# no format line\nbox 0 0 0 1 1 1\n");
     snprintf(msg, sizeof(msg), "map format 2 is older than this monolith (3): run /migrate-map %s/import-old.map in "
@@ -361,7 +396,7 @@ int main(int argc, char **argv)
              "duplicate id 5 (also at import-duplicate-id.map:2)");
     ExpectExact("duplicate-id", "monolith 3\nid 5 box 0 0 0 1 1 1\nid 5 box 0 0 0 1 1 1\n", 3, "duplicate id 5 (also on line 2)");
     WritePart("parts/empty.map", "monolith 3\n# nothing\n");
-    ExpectFile("import-empty", "monolith 3\nimport \"parts/empty.map\"\n", "map is empty (no boxes and no models)");
+    ExpectFile("import-empty", "monolith 3\nimport \"parts/empty.map\"\n", "map is empty (no boxes, models or shapes)");
 
     LiveEditCases();
 

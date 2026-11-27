@@ -716,6 +716,50 @@ int main(int argc, char **argv)
         "--edit-script", T("live.txt"));
     RUN("edit-script-alone", 1, M, "--map", T("live-models2"), "--edit-script", T("live.txt"));
 
+    // Shapes (tests/shapes): the generated meshes, their draws and paint, a compiled copy, the triangle report,
+    // live edits of shape lines with a preview and shape-add
+    RUN("shot-shapes", 0, M, "--shot", T("shapes.png"), "--view", "7", "--map", "tests/shapes");
+    CopyTree("tests/shapes", T("shapes"));
+    RUN("compile-shapes", 0, M, "--map", T("shapes"), "--compile", T("shapes/shapes.mapb"));
+    RUN("shot-shapes-compiled", 0, M, "--shot", T("shapes-c.png"), "--view", "1", "--map", T("shapes/shapes.mapb"));
+    RUN("tri-report-shapes", 0, M, "--tri-report", T("shapes-tri.txt"), "--map", "tests/shapes");
+    WriteText(T("shapes-live.txt"),
+              "select line 143\npreview move 1 0 0\npreview turn 30\npreview end\nmove 0 0 1\nturn 45\nselect id 31\n"
+              "scale 1.2\nselect none\nshape-add capsule 0 0 -12 1 2 1\nundo\nredo\nselect line 161\nremove\n",
+              false);
+    RUN("edit-script-shapes", 0, M, "--shot", T("shapes-live.png"), "--view", "1", "--map", "tests/shapes", "--edit-script",
+        T("shapes-live.txt"));
+    // Shapes in the editor (docs/editor-tools.md 2.8, stream D): the picker's Shapes section (thumbnails)
+    // placing a cylinder at the crosshair, a cone on the work plane with ALT (input shim) and its undo,
+    // strokes on every kind's parts (first strokes allocate), face groups on a cylinder, save, a stroke
+    // through the screen, the draw panel over a shape, --pick on one, a shape selected by a click
+    CopyTree("tests/shapes", T("shapes-place"));
+    RUN("picker-shape", 0, M, "--shot", T("shapes-pick.png"), "--view", "2", "--shot-hud", "--map", T("shapes-place"),
+        "--model-picker", "cylinder", "--model-picker-key", "enter");
+    WriteText(T("shapes-place.in"),
+              "at 800 700\nwait 3\npress I\nwait 3\npress C\npress O\npress N\npress E\nwait 3\ndown ALT\npress ENTER\nup ALT\n"
+              "wait 3\ndown CTRL\npress Z\nup CTRL\nwait 3\n",
+              false);
+    RUN("picker-shape-plane", 0, M, "--shot", T("shapes-place.png"), "--shot-hud", "--view", "2", "--map", T("shapes-place"),
+        "--edit-mode", "--input-script", T("shapes-place.in"), "--work-plane", "1.5");
+    CopyTree("tests/shapes", T("shapes-paint"));
+    WriteText(T("shapes-paint.txt"),
+              "color 230 30 30 255\nsize 3\nstroke uv id 30:0 0 0.02 0.5 0.98 0.5\nstroke uv id 30:0 1 0.2 0.2 0.8 0.8\n"
+              "stroke uv id 31:0 3 0.1 0.1 0.9 0.9\nstroke uv id 32:0 0 0 0.5 1 0.5\nstroke uv id 33:0 1 0.2 0.5 0.8 0.5\n"
+              "stroke uv id 34:0 2 0 0.5 1 0.5\nstroke uv id 35:0 1 0.1 0.9 0.9 0.1\nfaces 0 0\n"
+              "stroke uv id 30:0 2 0.2 0.8 0.8 0.2\nfaces 0 1 1\nresize\nprint\nsave\n"
+              "stroke px 520 420 700 430\nhover px 600 380\nundo\nprint\n",
+              false);
+    RUN("paint-shapes", 0, M, "--shot", T("shapes-paint.png"), "--view", "2", "--map", T("shapes-paint"), "--paint-script",
+        T("shapes-paint.txt"));
+    RUN("draw-panel-shape", 0, M, "--shot", T("shapes-panel.png"), "--shot-hud", "--view", "2", "--map", "tests/shapes",
+        "--draw-panel", "--cursor", "600", "400");
+    RUN("pick-shape", 0, M, "--shot", T("shapes-pick2.png"), "--view", "2", "--eye", "-2", "1", "0", "--look", "180", "0", "--map",
+        "tests/shapes", "--pick");
+    WriteText(T("shapes-click.in"), "wait 2\nclick left\nwait 3\n", false);
+    RUN("click-shape", 0, M, "--shot", T("shapes-click.png"), "--shot-hud", "--view", "2", "--eye", "-2", "1", "0", "--look", "180",
+        "0", "--map", "tests/shapes", "--input-script", T("shapes-click.in"));
+
     // A step undone past the save point, then a new edit (the undone step moves to lost[]), then a change on
     // disk: the lost step is reported failed
     CopyTree("tests/models", T("lost-models"));
@@ -742,6 +786,24 @@ int main(int argc, char **argv)
     CopyTree("tests/imports", T("imp-flat"));
     WriteText(T("mtf.txt"), "select group \"part b\"\nmove-to-file \"parts/moved.map\"\nundo\nredo\n", false);
     RUN("apply-move-to-file", 0, M, "--apply-edits", T("mtf.txt"), "--map", nob_temp_sprintf("%s/imports-flat.map", T("imp-flat")));
+    // Groups as units (docs/editor-tools.md 3): every group op with its self-check, undo and redo, live
+    // across the parts (the main file's lines into a part's group, a new group, a copy, a delete), and
+    // the groups panel (F6) driven by the input shim: filter, rename field, a delete armed and done
+    WriteText(T("groups.txt"),
+              "select group \"part a\"\ngroup-rename \"part a\" \"part a renamed\"\nundo\nredo\n"
+              "group-duplicate \"part a renamed\" \"part a copy\" 0 0 4\nundo\nredo\n"
+              "select group \"main: before the imports\"\ngroup-move \"part b\"\nundo\nredo\n"
+              "select group \"main: after the imports\"\ngroup-new \"main: new\"\nundo\nredo\n"
+              "group-delete \"part a copy\"\nundo\nredo\nprint\n",
+              false);
+    RUN("edit-script-groups", 0, M, "--dump-scene", T("groups-scene.txt"), "--map",
+        nob_temp_sprintf("%s/imports.map", T("imp-pkg")), "--edit-script", T("groups.txt"));
+    WriteText(T("groups-input.txt"),
+              "wait 2\npress DOWN\ndown CTRL\npress R\nup CTRL\npress X\npress ENTER\nwait 2\npress DELETE\npress DELETE\n"
+              "wait 2\ndown CTRL\npress D\nup CTRL\nwait 2\n",
+              false);
+    RUN("groups-panel", 0, M, "--shot", T("groups.png"), "--view", "1", "--map", nob_temp_sprintf("%s/imports.map", T("imp-pkg")),
+        "--shot-hud", "--groups-panel", "part", "--input-script", T("groups-input.txt"));
     RUN("compile-imports", 0, M, "--map", nob_temp_sprintf("%s/imports.map", T("imp-pkg")), "--compile", nob_temp_sprintf("%s/imports.mapb", T("imp-pkg")));
     RUN("dump-entities", 0, M, "--dump-entities", T("entities.txt"), "--map", "tests/models");
     RUN("edit-mode-hud", 0, M, "--shot", T("edit.png"), "--view", "1", "--map", "tests/models", "--shot-hud",
@@ -961,6 +1023,15 @@ int main(int argc, char **argv)
     WriteText(T("input-noop.txt"), "at 860 352\ndown ALT\npress R\nup ALT\nclick left\n", false);
     RUN("input-noop", 0, M, "--shot", T("input-noop.png"), "--view", "1", "--map", T("input-square"), "--shot-hud",
         "--select", "32", "--edit-mode", "--input-script", T("input-noop.txt"));
+    // The pen in snip mode (strokes by drags, removing them) and volume corners on the work plane (ALT, PGUP)
+    WriteText(T("input-pen.txt"),
+              "press C\npress D\npress A\nat 400 650\ndown lmb\nmove 120 -60 6\nup lmb\npress O\nat 1200 450\ndown lmb\n"
+              "move 70 20 5\nup lmb\npress F\nat 700 200\ndown lmb\nmove 60 -10 4\nmove 40 40 4\nmove -60 10 4\nup lmb\n"
+              "press BACKSPACE\ndown SHIFT\npress BACKSPACE\nup SHIFT\nat 300 300\ndown lmb\nmove 50 50 3\nup lmb\nwait 2\n"
+              "press ESCAPE\nwait 3\npress V\nwait 2\ndown ALT\npress PAGE_UP\nclick left\nmove 100 20 4\nclick left\nup ALT\n"
+              "move 0 -30 3\nclick left\nwait 2\n",
+              false);
+    RUN("input-pen", 0, M, "--shot", T("input-pen.png"), "--view", "2", "--shot-hud", "--input-script", T("input-pen.txt"));
     WriteText(T("input-bad.txt"), "press NOKEY\n", false);
     RUN("input-bad", 1, M, "--shot", T("input-bad.png"), "--input-script", T("input-bad.txt"));
 
@@ -996,8 +1067,9 @@ int main(int argc, char **argv)
     RUN("picker-bad-key", 1, M, "--shot", T("pick7.png"), "--model-picker", "--model-picker-key", "maybe");
     RUN("shot-hud", 0, M, "--shot", T("hud.png"), "--view", "2", "--shot-hud", "--select", "192", "--select", "198",
         "--region", "100", "100", "300", "200", "--region", "800", "300", "200", "200", "--volume", "-11", "0", "-34",
-        "-7", "20", "34", "--volume", "3", "4", "12", "-4", "0", "4", "--type", "make it\\ntaller", "--pick",
-        "--pick-at", "10", "10", "--pick-at", "1590", "890");
+        "-7", "20", "34", "snip", "--volume", "3", "4", "12", "-4", "0", "4", "--type", "make it\\ntaller", "--pick",
+        "--pick-at", "10", "10", "--pick-at", "1590", "890", "--sketch", "arrow", "2", "200", "700", "600", "500", "--sketch",
+        "circle", "3", "1200", "400", "1260", "400", "--work-plane", "3");
 
     // --submit with the stub terminal (no window; MONOLITH_WORKSPACE empty: no workspace switch) into our own
     // requests folder: coordinator mode on the default map (its classifier still running when the editor quits:
@@ -1010,11 +1082,17 @@ int main(int argc, char **argv)
     RUN("submit-default", 0, "env", reqEnv, termEnv, nob_temp_sprintf("MONOLITH_STUB_LOG=%s", T("stub1.txt")),
         "MONOLITH_WORKSPACE=", "MONOLITH_STUB_CLASSIFIER=slow", M, "--shot", T("s1.png"), "--view", "2", "--select", "192", "--select", "193", "--region",
         "100", "100", "300", "200", "--region", "800", "300", "200", "200", "--volume", "-11", "0", "-34", "-7", "20",
-        "34", "--volume", "-4", "0", "4", "3", "4", "12", "--submit", "leakcheck: make these taller");
+        "34", "--volume", "-4", "0", "4", "3", "4", "12", "snip", "--sketch", "free", "1", "300", "200", "400", "180", "450", "260", "380",
+        "330", "305", "210", "--sketch", "line", "4", "100", "800", "700", "820", "--submit", "leakcheck: make these taller");
     RUN("submit-models", 0, "env", reqEnv, termEnv, nob_temp_sprintf("MONOLITH_STUB_LOG=%s", T("stub2.txt")),
         "MONOLITH_WORKSPACE=", "MONOLITH_LAUNCH=per-request", M, "--shot", T("s2.png"), "--view", "1", "--map",
         "tests/models", "--select", "36", "--region", "0", "0", "1600", "900", "--volume", "-50", "-1", "-50", "50", "30",
         "50", "--submit", "@heavy leakcheck: restyle the trees", "--submit-wait", "1", "--close-submitted");
+    // (shapes: two selected, a region over them, a 3D snip around them: kind `shape` in every list)
+    RUN("submit-shapes", 0, "env", reqEnv, termEnv, nob_temp_sprintf("MONOLITH_STUB_LOG=%s", T("stub4.txt")),
+        "MONOLITH_WORKSPACE=", M, "--shot", T("s7.png"), "--view", "2", "--eye", "-2", "1", "0", "--look", "180", "0", "--map",
+        "tests/shapes", "--select", "147", "--select", "149", "--region", "200", "300", "1200", "300", "--volume", "-12", "0", "-8",
+        "12", "3", "-4", "snip", "--sketch", "line", "1", "300", "450", "1300", "450", "--submit", "leakcheck: make these shapes red");
     RUN("submit-cancel", 0, "env", reqEnv, termEnv, "MONOLITH_CLAUDE=/nonexistent/claude", "MONOLITH_WORKSPACE=", M,
         "--shot", T("s3.png"), "--view", "2", "--submit", "leakcheck: cancel me", "--submit-wait", "1",
         "--close-submitted");

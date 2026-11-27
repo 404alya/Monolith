@@ -18,10 +18,12 @@ In the editor (edit mode, `--edit-script`) the edits change the working copy (`M
 | size | a box's / block's size about its centre |
 | duplicate | a new line after each source line: the copy, shifted |
 | add | `id N model "models/x.glb" x y z origin bottom` after the line of the object it stands on (so it joins that object's group, in its file); wrapped in `use "default"` ... `use "<active>"` when a `use` is active there (that file's own `use` lines decide: a part starts with none), which would restyle the model |
+| shape-add | `id N shape <kind> cx y0 cz sx sy sz` (`EDIT_SHAPE_ADD`: `op.shapeKind`, `op.pos` = cx y0 cz, `op.size` = sx sy sz, written with up to 4 decimals; sx, sz > 0, sy > 0 but a plane's 0): after the line of the first selected object (`op.anchor`: its file and group; wrapped in `use "default"` … `use "<active>"` when a `use` other than `"default"` is active there, as `add`), or with nothing selected at the end of the main map file (after its last non-empty line, with the same wrap rule). The new shape becomes the selection. A rebase finds the anchor by its entity id (`EditStep.anchorId`; stmt 0: no anchor) and refuses the step when it is gone |
 | barrier-add | `id N barrier x0 y0 z0 x1 y1 z1 [rot y p r]` (`EDIT_BARRIER_ADD`: corners with up to 4 decimals, `rot` only when given and not 0 0 0): after the line of the first selected object (`op.anchor`: its file and group), or with nothing selected at the end of the main map file's `# barriers` block (the lines under that comment up to the first empty one), which is made at the file's end with `group "barriers"` when there is none. Barriers have no material, so no `use` wrap. The new barrier becomes the selection. A rebase finds the anchor by its entity id (`EditStep.anchorId`; stmt 0: no anchor) and refuses the step when it is gone |
 | id | gives the objects' line an `id N` prefix (or changes it) and nothing else: a chosen N for one line (unique in the map, every file), or the next free one for each selected line without an id; a `repeat` line is not split (the id names the whole line) |
 | move-to-file | the selection's whole lines into another map-text file (the edit script only): [move-to-file](#move-to-file) |
 | id remove | the objects' lines lose their `id N` prefix (with the blanks after it) and nothing else; the objects stay, their entity ids become implicit (lines without an id are left alone; refused when no selected line has one) |
+| group-rename, group-delete, group-new, group-move, group-duplicate | a whole group by name: [Groups](#groups) |
 
 ### Turn
 
@@ -30,7 +32,8 @@ Any angle about any axis (yaw / pitch / roll or an axis), global or local (the o
 - **Models:** `rot` composed with the turn (added when the line has none).
 - **Box and block lines** ([live-editing.md](../live-editing.md) 11.9): the box's rotation R' = M R0 (local: R0 M). When R' is axis-aligned (a signed permutation) the box is written as plain corners again (box: the extents permuted; block: the sizes permuted and y0 from the centre) and a `rot` it had is removed; else its centre moves and `rot` is written / changed.
 - A yaw (world Y) adds to the yaw and a local roll to the roll, exactly; any other turn is decomposed to yaw / pitch / roll with 6 decimals.
-- Stairs, waffles and lights can't turn.
+- **Lights** turn only about a pivot, globally (`turn … pivot x y z`, a whole group turned as one: R on a whole-group selection, [Groups](#groups)): the position orbits the pivot, a spot's or directional light's direction turns with 6 decimals, the `clip` box turns with it (only by a turn that is a signed permutation, i.e. 90 degree steps about the axes: an axis-aligned box stays one; otherwise refused), a whole line's `repeat` steps turn (`LightTurn`). Any other turn of a light (about its own position, `local`, `rotation`) is refused as before.
+- Stairs and waffles can't turn.
 
 ### Splitting a `repeat` line
 
@@ -73,6 +76,26 @@ A map whose main file imports parts ([map-format.md](../map-format.md) §2.10, `
 - **Self-check:** the edit goes live (also with `--apply-edits`, which then writes and reloads), and the map before the move (after the split) and after it are compared entity by entity, sorted by id: the same set of ids, each with the same kind, shape and place (a box's bounds and turn, a model's file, transform, origin, collide, shadow and slot materials, a light's every field), the same material and group (by name), and the same paint entries. The order of the objects may change (lines appended to a part come earlier in the map's text). Any difference puts the texts back and refuses with the first one: `move-to-file refused (self-check: the map would not be the same): entity 84981c40:0 (box) would get another material or group` (two identical lines whose implicit keys would swap).
 - **Undo** restores every file byte for byte. A new part the undone step made leaves the working copy, but a file already written to disk stays there (nothing is deleted; it is no longer imported). Redo makes it again (an identical file left on disk is taken as it is).
 
+**Shape lines** (`shape <kind> cx y0 cz sx sy sz [rot y p r]`) are read like `block` lines shifted by one token: `Analyze` sets `Stmt.kw` to the kind word (so `kw + 1..6` are the numbers, `kw + 4` the first size and `kw + 7` the `rot` key, as after `block`) and takes the positions from `MS_PrimitiveArgs("block")`; `BlockPrim` treats `shape` as `block` where a line's layout matters. Every edit of a block works on them: move, turn, rotation, scale, size, remove, duplicate, id, move-to-file. Two differences: a turn keeps the `rot` unless the result is no rotation at all (`BoxTurn`'s `keepRot`: a quarter turn of a cylinder or a cone is not the same shape with swapped sizes, and a cube's parts would move to other faces), and a plane refuses a `size` with a height (`a plane has no height`; `scale` keeps its 0). `MapEditClassify` gives them `EDIT_CLASS_SHAPE` (`EditClassBoxLike`: the transform modal treats it as a block, and its preview keeps the rotation as the edit will); `TakeSnapshot` hashes a shape's kind, bounds and shape, and `print` names its kind `shape`.
+
+## Groups
+
+A group is its **name** ([editor-tools.md](../editor-tools.md) 3.1, [map-format.md](../map-format.md) §2.3): every `group "<name>"` statement with that name, in any file, is one group (a repeated name, as `"plain: grass"` in nine parts of a map, is edited as one). Five ops, each **one step** (one undo, byte for byte in every file it touched), live, rebased by op and its strings (`EditStep.groupName` / `groupNew`, `KeepOp`), all through `MoveStep` with move-to-file's self-check:
+
+| Op (script) | What it writes |
+|---|---|
+| `EDIT_GROUP_RENAME` (`group-rename "<old>" "<new>"`) | the quoted name of every `group "<old>"` line in every file (the bytes of the name only: a comment on the line stays). The selection stays |
+| `EDIT_GROUP_DELETE` (`group-delete "<name>"`) | every object line of the group (each entity whose group has the name: every block, every file), every `group "<name>"` line, the comment lines directly above a deleted line inside a block (not above its `group` line), the `group` / `use` lines whose scope (to the next line of its kind) held deleted objects and holds no other (`ScopeLinesGone`, move-to-file's rule), a block's blank lines when nothing else of it is left (so no empty `group` line or double blank line stays), and the `paint` lines of the deleted lines' ids in every file. `material`, `import`, `env`, `spawn`, `viewpoint`, `fogzone`, other `paint` lines and comments elsewhere stay. The selection becomes empty |
+| `EDIT_GROUP_NEW` (`group-new "<name>"`) | the selection's whole lines (a `repeat` copy split out first, as move-to-file) into a new block `group "<name>"` at the end of the file that holds them, after a blank line, each with the `use` it had where the one in effect there differs; source `group` / `use` lines left without objects go. The selection stays the same objects |
+| `EDIT_GROUP_MOVE` (`group-move "<name>"`) | the selection's whole lines (split as above; objects already in that group are left where they are) to the end of the group's **last block** (the last `group "<name>"` line in the map's text with every import pasted in, `ExpandedCompare`): after that block's last object line (or its `group` line when it has none), in that block's file, so also from another file; each with the `use` it had, and the `use` in effect there written back after them when it differs (the lines after keep their material) |
+| `EDIT_GROUP_DUPLICATE` (`group-duplicate "<name>" "<new>" dx dy dz`) | a copy of every object line of the group in map order (each written as `duplicate` writes a whole line: shifted, a new id, without its comment) in a new block `group "<new>"` (after a blank line) right after the last object line of the group's last block, each with the `use` its source line had; the `use` in effect there is written back after the block when it differs. Paint entries are not copied. The copies become the selection |
+
+**Refused** (nothing written, the reason in `MS_LastError()`): a name that isn't one (empty, with `"` or a control character: `GroupNameOk`), a group that doesn't exist (rename, delete, move, duplicate), a new name that exists already (rename: "group-move puts lines into a group"; new; duplicate), a rename to the same name, a group without objects (duplicate), lines of **several files** in one group-new / group-move (one file's lines at a time, as move-to-file), a selection already in the target group (move), an empty selection (new, move), the result not loading, and a failed self-check.
+
+**Self-check** (`MoveStep`, `SnapExpect`): the map before the edit (after a split) is changed into what the map after must be, then compared entity by entity as move-to-file is (geometry, materials and the group by name, `SnapEntity.group`, and the paint entries): rename: the group's entities in the new group; new / move: the moved entities in the target group; delete: the group's entities dropped and their paint entries left out (`TakeSnapshot(…, dropGroup)`); duplicate: new entities allowed in the new group only. Every other entity must be exactly as before. The refusal names the op: `group-move refused (self-check: the map would not be the same): …`.
+
+**The ops by name** (rename, delete, duplicate) take no lines of the selection: it only rides along as the step's selection (`selBefore`), and a rebase leaves out the objects of it that are gone instead of failing the step. Moving, turning and scaling a whole group are the plain `move`, `turn … pivot`, `scale … pivot` on `select group "<name>"` (with a pivot a turn takes the group's lights along: *Turn* above).
+
 **Barrier lines** (`barrier x0 y0 z0 x1 y1 z1 [rot y p r]`) are read like `box` lines (`MS_PrimitiveArgs("barrier")` is box's layout; `CornerPrim`), so every edit of a box works on them: move, turn (any axis; `rot` written or removed by the same rule), rotation, scale, size, remove, duplicate, id, move-to-file. `MapEditClassify` gives them `EDIT_CLASS_BARRIER`, which the transform modal treats as a box (`EditClassBoxLike`); `TakeSnapshot` hashes a barrier's bounds and shape, and `print` names its kind `barrier`.
 
 ## Edit script
@@ -96,6 +119,7 @@ A map whose main file imports parts ([map-format.md](../map-format.md) §2.10, `
 | `remove` | remove the selection |
 | `duplicate <dx> <dy> <dz>` | copies shifted by this |
 | `add "<models/x.glb>" <x> <y> <z>` | after the line of the first selected object |
+| `shape-add <kind> <cx> <y0> <cz> <sx> <sy> <sz>` | a new `shape` line (kind cube, sphere, cylinder, cone, capsule or plane): after the line of the first selected object, with nothing selected at the end of the main file (see *Edits*) |
 | `barrier-add <x0> <y0> <z0> <x1> <y1> <z1> [rot <yaw> <pitch> <roll>]` | a new `barrier` line (an invisible wall): after the line of the first selected object, with nothing selected at the end of the main file's `# barriers` block (see *Edits*) |
 | `id [<n>]` | the selection's line gets `id n` (one line), or without n each selected line without an id gets the next free one |
 | `id remove` | the selection's lines lose their `id n` prefix (objects stay) |
@@ -104,6 +128,11 @@ A map whose main file imports parts ([map-format.md](../map-format.md) §2.10, `
 | `paint-remove ...` | see below |
 | `material-set "<name>" <keys...>` | the keys replace the same keys of the material (the first occurrence on its lines, in the map's text order across its files; later ones go) or are added to its first line (in that line's file); `"-key"` removes a key |
 | `move-to-file "<path>.map"` | the selection's whole lines into that map-text file (a new part, or the end of one): [move-to-file](#move-to-file) |
+| `group-rename "<old>" "<new>"` | every `group "<old>"` line becomes `group "<new>"`: [Groups](#groups) |
+| `group-delete "<name>"` | the group's object lines, its `group` lines, their comments, the `use` lines left empty, its paint entries |
+| `group-new "<name>"` | the selection's whole lines into a new group at the end of their file |
+| `group-move "<name>"` | the selection's whole lines to the end of that group's last block |
+| `group-duplicate "<name>" "<new>" <dx> <dy> <dz>` | a shifted copy of the group as a new group right after it |
 | `undo`, `redo` | undo / redo one step |
 | `print` | the selection (entity id, kind, line (`line parts/lake.map:41` in a part), copy); with `--edit-script` also the unsaved count and the steps a rebase could not apply |
 
@@ -114,6 +143,8 @@ A map whose main file imports parts ([map-format.md](../map-format.md) §2.10, `
 **`paint-set "<material>"|own faces <+x,...>|slot <N> [<x> <y> <w> <h>] [nearest|trilinear]`:** the entry holding the first of the faces (or the slot) gets these faces (taken from the object's other entries) and rectangle. `nearest` / `trilinear`: an `own` entry's `paint_filter` (several objects selected: each one's entry, without a rectangle).
 
 **`paint-remove "<material>"|own [faces <+x,...>|slot <N>]`:** the faces leave the object's entries (an entry left without faces goes), or the slot's entry goes; without faces / slot: every entry of the object in that material.
+
+**Paint on shapes** (`EDIT_PAINT_ADD` / `SET` / `REMOVE` on a `shape` object, from the draw mode): the face bits are the shape's part bits and the statement names its parts (`PaintPartName`: `side,top`; a cube's `+x` … `-z`); `ReadPaintLine` reads a statement's names against its entity's kind (`PaintShapeKind`: `MS_FindEntity` of `id:index`; a statement whose entity is not a shape reads box faces only). The edit script's `faces <…>` words stay box faces (a cube's parts are the same).
 
 ### `--edit-script` only
 

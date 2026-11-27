@@ -15,6 +15,8 @@
 //                                       of an imported file: line <path>:<l>)
 //   range <r> <merged|instanced|models> "<material or model file>" objects <n> triangles <t>
 //         distance <m|always> bounds <x0 y0 z0 x1 y1 z1>       (distance: at detail_distance 1)
+//   shapes <n> shape_triangles <t>                             (only with shapes, after total; not in
+//   shape <kind> "<material>" shapes <n> triangles <t>          the counts above: their own draws)
 #include "trireport.h"
 #include <math.h>
 
@@ -119,6 +121,25 @@ bool WriteTriReport(const MS_Scene *s, const char *path, float detailDistance)
         // (the ranges' sum is the same count: a mismatch means this report is wrong)
         if (rangeTris != total) fprintf(f, "warning: the draw ranges hold %lld triangles\n", rangeTris);
         fprintf(f, "detail_distance %g factor %g\n", detailDistance, MS_DETAIL_FACTOR);
+        // Shapes (their own instanced draws, not in the ranges): one row per (kind, material), kinds in
+        // order, then materials (a map without shapes reports as before)
+        Count *shapeRows = s->shapeCount > 0 ? calloc((size_t)MS_SHAPE_KIND_COUNT * (size_t)s->materialCount, sizeof(Count)) : NULL;
+        ok = s->shapeCount == 0 || shapeRows;
+        if (ok && s->shapeCount > 0) {
+            long long shapeTris = 0;
+            for (int i = 0; i < s->shapeCount; i++) {
+                Count *C = &shapeRows[s->shapes[i].kind * s->materialCount + s->shapes[i].ref.material];
+                C->tris += MS_ShapeTriangles(s, i);
+                C->boxes++;
+                shapeTris += MS_ShapeTriangles(s, i);
+            }
+            fprintf(f, "shapes %d shape_triangles %lld\n", s->shapeCount, shapeTris);
+            for (int k = 0; k < MS_SHAPE_KIND_COUNT * s->materialCount; k++)
+                if (shapeRows[k].boxes > 0)
+                    fprintf(f, "shape %s \"%s\" shapes %d triangles %lld\n", MS_ShapeKindName((MS_ShapeKind)(k / s->materialCount)),
+                            s->materials[k % s->materialCount].name, shapeRows[k].boxes, shapeRows[k].tris);
+        }
+        free(shapeRows);
 
         for (int v = 0; v < s->viewpointCount; v++) {
             const MS_Viewpoint *V = &s->viewpoints[v];

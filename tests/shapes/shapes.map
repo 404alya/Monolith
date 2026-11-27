@@ -1,0 +1,197 @@
+monolith 3
+# shapes.map -- the test package of `shape` lines (generated primitives, docs/map-format.md 2, Shapes):
+# every kind (cube, sphere, cylinder, cone, capsule, plane) plain and turned, with flat, textured
+# (a CC0 texture), metallic and surface-shader materials; `repeat`, `id`, a capsule whose caps meet,
+# a plane that is two-sided, `collide off` and `shadow off` materials. Used by the engine
+# verification of shapes: dumps from text and compiled, shots of every viewpoint, the export, edit
+# scripts. Brief: MAP.md.
+
+# --- Materials
+material "default" albedo 180 180 180 roughness 0.9 metalness 0
+material "clay" albedo 196 118 86 roughness 0.85 metalness 0
+material "ground037" albedo_map "textures/ground037_color.jpg" roughness 0.9 metalness 0
+material "metal" albedo 186 190 196 roughness 0.35 metalness 0.85
+material "parts" shader "shaders/parts.glsl"
+material "parts" uniform u_colorA 0.85 0.8 0.7 uniform u_colorB 0.1 0.25 0.45
+material "tiled" albedo_map "textures/ground037_color.jpg" uv_scale 3 3 roughness 0.9
+material "ghost" albedo 120 200 140 roughness 0.6 collide off shadow off
+material "paintable" albedo 170 170 170 roughness 0.8 paint "textures/paint/paintable.png"
+
+# --- Environment: the built-in defaults, every key written out
+# Sky (sky.sunDirection follows sun.direction unless it is set)
+env sky.mode procedural
+env sky.size 1024
+env sky.skyTopColor 120 132 145
+env sky.skyHorizonColor 200 196 186
+env sky.skyHorizonCurve 0.15
+env sky.skyEnergy 1
+env sky.groundBottomColor 48 46 44
+env sky.groundHorizonColor 190 186 178
+env sky.groundHorizonCurve 0.02
+env sky.groundEnergy 1
+env sky.sunColor 255 236 205
+env sky.sunSizeDeg 2.5
+env sky.sunCurve 0.15
+env sky.sunEnergy 2
+# Ambient light (IBL): a copy of the sky with these keys changed
+env ambientSky.mode procedural
+env ambientSky.size 256
+env ambientSky.groundBottomColor 120 116 108
+env ambientSky.groundHorizonCurve 0.1
+# Sun: the shadowed directional light (static shadow tiles)
+env sun.enabled on
+env sun.direction 0.55 -0.78 0.3
+env sun.color 255 238 214
+env sun.energy 2
+env sun.specular 1
+env sun.fogEnergy 4
+env sun.range 100
+env sun.shadow on
+env sun.softness 2
+env sun.depthBias 0.0001
+env sun.slopeBias 0.0015
+env shadow.size 8192
+# R3D environment
+env background.color 130 130 130
+env background.energy 1
+env background.skyBlur 0
+env background.rotation 0 0 0 1
+env ambient.color 0 0 0
+env ambient.energy 0.9
+env ssao.enabled on
+env ssao.sampleCount 16
+env ssao.intensity 1.2
+env ssao.power 1
+env ssao.radius 1.2
+env ssao.bias 0.03
+env ssil.enabled on
+env ssil.sampleCount 16
+env ssil.giIntensity 1.2
+env ssil.aoIntensity 1
+env ssil.aoPower 1
+env ssil.radius 5
+env ssil.bias 0.03
+env ssgi.enabled off
+env ssgi.sliceCount 4
+env ssgi.edgeFade 0.1
+env ssgi.distanceFalloff 1
+env ssgi.normalRejection 0
+env ssgi.intensity 1
+env ssgi.denoiseSteps 4
+env ssr.enabled off
+env ssr.maxIterations 64
+env ssr.thickness 0.5
+env ssr.edgeFade 0.25
+env fog.mode exp2
+env fog.color 150 148 143
+env fog.start 1
+env fog.end 50
+env fog.density 0.0085
+env fog.skyAffect 0.7
+env volumetricFog.enabled on
+env volumetricFog.scatteringDensity 0.012
+env volumetricFog.absortionDensity 0.001
+env volumetricFog.scatteringColor 255 244 228
+env volumetricFog.anisotropy 0.4
+env volumetricFog.emissionColor 150 148 143
+env volumetricFog.emissionEnergy 0.12
+env volumetricFog.skyAffect 0.5
+env volumetricFog.length 90
+env volumetricFog.stepSize 0.75
+env dof.mode disabled
+env dof.focusPoint 10
+env dof.focusScale 1
+env dof.nearScale 1
+env dof.maxBlurSize 20
+env bloom.mode mix
+env bloom.levels 0.5
+env bloom.intensity 0.04
+env bloom.threshold 0
+env bloom.softThreshold 0.5
+env bloom.filterRadius 1
+env autoExposure.enabled off
+env autoExposure.minEV -1
+env autoExposure.maxEV 1
+env autoExposure.exposureCompensation 0
+env autoExposure.adaptationToBright 0.5
+env autoExposure.adaptationToDark 1
+env tonemap.mode agx
+env tonemap.exposure 0.9
+env tonemap.white 1
+env color.brightness 1
+env color.contrast 1.05
+env color.saturation 0.8
+# Quality presets: exposure factor when a preset turns bloom off (keeps the mean brightness)
+env bloom.offExposure 1.19
+
+# --- Player start (feet, yaw) and spectator viewpoints (eye, target)
+spawn 0 0 14 180
+viewpoint "Overview" 0 13 18 0 0 -2
+viewpoint "Plain row" 0 3.6 0.4 0 0.6 -6
+viewpoint "Turned row" 0 3.6 10 0 1.2 1
+viewpoint "Capsules and planes" 15 3 6 15 1 -4
+viewpoint "From below" -6 0.4 -1 -4 2.4 -4
+viewpoint "Top down" 0 16 -1 0 0 -1.01
+viewpoint "Painted" 2 4.6 17.5 2 0.8 8
+
+# --- Geometry
+group "ground"
+box -30 -1 -30 30 0 30
+
+group "plain row: every kind, axis-aligned"
+use "clay"
+shape cube -10 0 -6 2 2 2
+use "parts"
+shape sphere -6 0 -6 2 2 2
+use "ground037"
+shape cylinder -2 0 -6 2 2 2
+use "metal"
+shape cone 2 0 -6 2 2 2
+use "clay"
+shape capsule 6 0 -6 1.4 2.4 1.4
+use "parts"
+shape plane 10 0.01 -6 2.4 0 2.4
+
+group "turned row: every kind with rot"
+use "parts"
+shape cube -10 0.4 1 1.6 1.6 1.6 rot 30 20 10
+use "clay"
+shape sphere -6 0.2 1 3 1.4 2 rot 0 0 30
+use "parts"
+shape cylinder -2 0.5 1 1.2 2.6 1.2 rot 0 0 90
+use "ground037"
+shape cone 2 0.3 1 2 2.2 2 rot 0 25 0
+use "metal"
+shape capsule 6 0.4 1 0.9 2.6 0.9 rot 45 0 60
+use "parts"
+shape plane 10 1.2 1 2.4 0 2.4 rot 0 0 30
+
+group "capsules and planes: repeat, id, caps that meet"
+use "tiled"
+id 20 repeat 3 0 0 2.5 shape capsule 15 0 -7 0.8 2.2 0.8
+use "clay"
+id 21 shape capsule 18.5 0 -4 3 1.2 2
+use "ghost"
+shape cylinder 15 0 -1 1.5 0.6 1.5
+shape plane 18.5 0.02 -1 3 0 2
+
+group "painted: a paint entry on every kind"
+use "paintable"
+id 30 shape cylinder -8 0 8 1.6 2 1.6
+id 31 shape cube -4 0.3 8 1.6 1.6 1.6 rot 20 0 0
+id 32 shape sphere 0 0 8 2 2 2
+id 33 shape cone 4 0 8 2 2.2 2
+id 34 shape capsule 8 0 8 1.2 2.4 1.2
+id 35 shape plane 12 0.6 8 2.4 0 1.6 rot 0 -20 0
+use "default"
+
+# paint (draw mode)
+paint "paintable" 30:0 side 0 0 32 16
+paint "paintable" 30:0 top 32 0 16 16
+paint "paintable" 30:0 bottom 48 0 16 16
+paint "paintable" 31:0 +x,+y,+z 0 16 16 16
+paint "paintable" 32:0 surface 0 32 32 32
+paint "paintable" 33:0 side 16 16 32 16
+paint "paintable" 34:0 side 32 32 32 16
+paint "paintable" 34:0 top 48 16 16 16
+paint "paintable" 35:0 top 32 48 32 16

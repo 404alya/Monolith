@@ -469,6 +469,12 @@ the cursor (snapped on the hit face's axes like the old I; CTRL: exact) as a liv
 moves it. ESC / I close (I only while nothing is typed, as the inspector's I; phase 3b). Models from other packages are not listed (decided default: bringing one
 in is an asset import with a licence row, so it goes through a request).
 
+Since the editor-tools round its first six rows are the **shapes** ([editor-tools.md](editor-tools.md)
+§2.8): one per kind, filtered with the models; ENTER places the kind, 1 × 1 × 1 m (a plane 2 × 0 × 2),
+on the point `DesignerPickWorldPoint` gives (a surface, or the work plane with ALT or over the sky) as
+one `EDIT_SHAPE_ADD` (`EditModeAddShape`), selected. Their thumbnails are R3D's generated meshes of the
+kind in the same studio.
+
 Thumbnails: rendered when the picker is first opened after a load (a few per frame, so opening
 doesn't stall; rows without one yet show a placeholder), with R3D into a 128 × 128 render
 texture: the model alone at a far-away spot, a neutral studio environment swapped in for the

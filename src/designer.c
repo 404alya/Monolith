@@ -93,7 +93,28 @@ static void PickModels(Vector3 origin, Vector3 dir, const int *list, const float
     }
 }
 
-// PickBoxes + PickModels over everything are MS_Raycast's rules; it goes through the scene's BVH
+// Shapes list[0..n) (NULL: all shapes) after the boxes: by their triangles (MS_RaycastShape), the nearest
+// one (on equal distances the lower index), winning only when strictly nearer than the best box (as in
+// MS_Raycast). With minDist (ascending distances to the shapes' bounds) the loop stops at the first shape
+// that can't be nearer.
+static void PickShapes(Vector3 origin, Vector3 dir, const int *list, const float *minDist, int n, DesignerHit *best)
+{
+    float boxDist = ObjIsNone(best->obj) ? INFINITY : best->dist;
+    MS_Hit shape = { .obj = { MS_OBJ_NONE, -1 }, .dist = INFINITY };
+    for (int k = 0; k < n; k++) {
+        float limit = fminf(boxDist, shape.dist);
+        if (minDist && minDist[k] > limit) break;
+        int i = list ? list[k] : k;
+        MS_Hit h;
+        // (a little past the limit, so a tie is seen and decided here as MS_Raycast decides it)
+        if (!MS_RaycastShape(scene, i, origin, dir, isfinite(limit) ? limit * 1.0000001f : 0.0f, &h)) continue;
+        if (h.dist > shape.dist || (h.dist == shape.dist && i > shape.obj.index)) continue;
+        shape = h;
+    }
+    if (shape.obj.kind != MS_OBJ_NONE && shape.dist < boxDist) *best = (DesignerHit){ shape.obj, shape.point, shape.normal, shape.dist };
+}
+
+// PickBoxes + PickShapes + PickModels over everything are MS_Raycast's rules; it goes through the scene's BVH
 DesignerHit DesignerPick(Vector3 origin, Vector3 dir)
 {
     MS_Hit h = MS_Raycast(scene, origin, dir, 0.0f);
@@ -167,6 +188,17 @@ void DesignerPrintHit(DesignerHit hit)
                hit.normal.z, hit.dist, m->position.x, m->position.y, m->position.z, m->rotationDeg.x, m->rotationDeg.y,
                m->rotationDeg.z, m->scale.x, m->scale.y, m->scale.z, ORIGIN[m->origin % 3], m->translation.x,
                m->translation.y, m->translation.z, b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z);
+    } else if (hit.obj.kind == MS_OBJ_SHAPE) {
+        const MS_Shape *sh = &scene->shapes[hit.obj.index];
+        const MS_TurnedBox *t = &sh->shape;
+        printf("pick: shape %d  kind %s  group \"%s\"  material \"%s\"  line %s%s%d: %.*s\n"
+               "pick: point %.3f %.3f %.3f  normal %.3f %.3f %.3f  dist %.3f\n"
+               "pick: shape center %.3f %.3f %.3f  size %.3f %.3f %.3f  rot %.3f %.3f %.3f\n"
+               "pick: shape bounds min %.3f %.3f %.3f  max %.3f %.3f %.3f\n",
+               hit.obj.index, MS_ShapeKindName(sh->kind), r.group >= 0 ? scene->groups[r.group] : "", DesignerMaterialLabel(hit.obj),
+               MAPEDIT_LINE_AT(r.file, r.line), textLen, text, hit.point.x, hit.point.y, hit.point.z, hit.normal.x, hit.normal.y,
+               hit.normal.z, hit.dist, t->center.x, t->center.y, t->center.z, t->size.x, t->size.y, t->size.z, t->rotationDeg.x,
+               t->rotationDeg.y, t->rotationDeg.z, b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z);
     } else if (hit.obj.kind == MS_OBJ_BARRIER) {
         printf("pick: barrier %d  group \"%s\"  line %s%s%d: %.*s\n"
                "pick: point %.3f %.3f %.3f  normal %g %g %g  dist %.3f\n"
@@ -211,13 +243,17 @@ typedef struct {
     int *models;            // the same for models (by their world bounds)
     float *modelDist;
     int modelCount, modelsCap, modelDistCap;
+    int *shapes;            // and for shapes (by their world bounds)
+    float *shapeDist;
+    int shapeCount, shapesCap, shapeDistCap;
 } RegionCull;
 
-// Room for n boxes and m models
-static bool CullReserve(RegionCull *c, int n, int m)
+// Room for n boxes, m models and k shapes
+static bool CullReserve(RegionCull *c, int n, int m, int k)
 {
     return MS_RESERVE(c->list, c->listCap, n) && MS_RESERVE(c->minDist, c->minDistCap, n) &&
-           MS_RESERVE(c->models, c->modelsCap, m) && MS_RESERVE(c->modelDist, c->modelDistCap, m);
+           MS_RESERVE(c->models, c->modelsCap, m) && MS_RESERVE(c->modelDist, c->modelDistCap, m) &&
+           MS_RESERVE(c->shapes, c->shapesCap, k) && MS_RESERVE(c->shapeDist, c->shapeDistCap, k);
 }
 
 static void CullFree(RegionCull *c)
@@ -226,22 +262,25 @@ static void CullFree(RegionCull *c)
     free(c->minDist);
     free(c->models);
     free(c->modelDist);
+    free(c->shapes);
+    free(c->shapeDist);
     memset(c, 0, sizeof(*c));
 }
 
 // The one place region sampling asks the scene what a ray hits: the same hit as
-// DesignerPick (the crosshair), from the region's candidates only (boxes, then models).
+// DesignerPick (the crosshair), from the region's candidates only (boxes, shapes, then models).
 static RegionHit RegionPick(const RegionCull *c, Vector3 origin, Vector3 dir)
 {
     DesignerHit h = PickBoxes(origin, dir, c->list, c->minDist, c->count);
+    if (c->shapeCount > 0) PickShapes(origin, dir, c->shapes, c->shapeDist, c->shapeCount, &h);
     PickModels(origin, dir, c->models, c->modelDist, c->modelCount, &h);
     RegionHit r = { .obj = h.obj, .point = h.point, .normal = h.normal, .dist = h.dist };
     return r;
 }
 
-// Per box / model index, for CompareCull (qsort has no context); grown to the scene's counts
-static float *boxDist, *modelDist;
-static int boxDistCap, modelDistCap;
+// Per box / model / shape index, for CompareCull (qsort has no context); grown to the scene's counts
+static float *boxDist, *modelDist, *shapeDist;
+static int boxDistCap, modelDistCap, shapeDistCap;
 static int CompareCull(const void *a, const void *b)
 {
     int ia = *(const int *)a, ib = *(const int *)b;
@@ -252,6 +291,12 @@ static int CompareModelCull(const void *a, const void *b)
 {
     int ia = *(const int *)a, ib = *(const int *)b;
     if (modelDist[ia] != modelDist[ib]) return modelDist[ia] < modelDist[ib] ? -1 : 1;
+    return ia - ib;
+}
+static int CompareShapeCull(const void *a, const void *b)
+{
+    int ia = *(const int *)a, ib = *(const int *)b;
+    if (shapeDist[ia] != shapeDist[ib]) return shapeDist[ia] < shapeDist[ib] ? -1 : 1;
     return ia - ib;
 }
 
@@ -296,9 +341,11 @@ static bool OutsidePlanes(const Vector3 *n, Vector3 eye, BoundingBox bb)
 // in = NULL: from all boxes; else filtered from in's list (already sorted). False when out of memory.
 static bool BuildRegionCull(const RayFrame *f, Rectangle rect, const RegionCull *in, RegionCull *c)
 {
-    c->count = c->modelCount = 0;
-    if (!CullReserve(c, in ? in->count : scene->boxCount, in ? in->modelCount : scene->modelCount)) return false;
-    if (!in && (!MS_RESERVE(boxDist, boxDistCap, scene->boxCount) || !MS_RESERVE(modelDist, modelDistCap, scene->modelCount)))
+    c->count = c->modelCount = c->shapeCount = 0;
+    if (!CullReserve(c, in ? in->count : scene->boxCount, in ? in->modelCount : scene->modelCount,
+                     in ? in->shapeCount : scene->shapeCount)) return false;
+    if (!in && (!MS_RESERVE(boxDist, boxDistCap, scene->boxCount) || !MS_RESERVE(modelDist, modelDistCap, scene->modelCount) ||
+                !MS_RESERVE(shapeDist, shapeDistCap, scene->shapeCount)))
         return false;
     float x0 = rect.x, y0 = rect.y, x1 = rect.x + rect.width, y1 = rect.y + rect.height;
     Vector3 corner[4] = { RayThrough(f, x0, y0), RayThrough(f, x1, y0), RayThrough(f, x1, y1), RayThrough(f, x0, y1) };
@@ -321,6 +368,19 @@ static bool BuildRegionCull(const RayFrame *f, Rectangle rect, const RegionCull 
     if (!in) {
         if (c->modelCount > 1) qsort(c->models, c->modelCount, sizeof(c->models[0]), CompareModelCull);
         for (int k = 0; k < c->modelCount; k++) c->modelDist[k] = modelDist[c->models[k]];
+    }
+    // Shapes likewise (by their world bounds)
+    int scount = in ? in->shapeCount : scene->shapeCount;
+    for (int k = 0; k < scount; k++) {
+        int i = in ? in->shapes[k] : k;
+        if (OutsidePlanes(n, f->eye, scene->shapes[i].box)) continue;
+        if (in) c->shapeDist[c->shapeCount] = in->shapeDist[k];
+        else shapeDist[i] = BoxDistance(scene->shapes[i].box, f->eye) * (1.0f - 1e-5f) - 1e-4f;
+        c->shapes[c->shapeCount++] = i;
+    }
+    if (!in) {
+        if (c->shapeCount > 1) qsort(c->shapes, c->shapeCount, sizeof(c->shapes[0]), CompareShapeCull);
+        for (int k = 0; k < c->shapeCount; k++) c->shapeDist[k] = shapeDist[c->shapes[k]];
     }
 
     c->count = 0;
@@ -437,7 +497,27 @@ void DesignerFreeRegion(DesignRegionInfo *r)
     r->objectCount = r->edgeCount = 0;
 }
 
+// True if pixel (x, y) is inside the closed polygon poly[0..n) (even-odd rule)
+static bool InPolygon(const Vector2 *poly, int n, float x, float y)
+{
+    bool in = false;
+    for (int i = 0, j = n - 1; i < n; j = i++) {
+        Vector2 a = poly[i], b = poly[j];
+        if ((a.y > y) != (b.y > y) && x < (b.x - a.x) * (y - a.y) / (b.y - a.y) + a.x) in = !in;
+    }
+    return in;
+}
+
+// DesignerAnalyzeRegion over rect, counting only the rays inside the polygon poly[0..polyCount)
+// when poly is not NULL (a closed sketch: rect is its bounds); a region passes NULL
+static void AnalyzeRegionIn(Camera3D cam, int w, int h, Rectangle rect, const Vector2 *poly, int polyCount, DesignRegionInfo *out);
+
 void DesignerAnalyzeRegion(Camera3D cam, int w, int h, Rectangle rect, DesignRegionInfo *out)
+{
+    AnalyzeRegionIn(cam, w, h, rect, NULL, 0, out);
+}
+
+static void AnalyzeRegionIn(Camera3D cam, int w, int h, Rectangle rect, const Vector2 *poly, int polyCount, DesignRegionInfo *out)
 {
     double t0 = GetTime();
     memset(out, 0, sizeof(*out));
@@ -468,8 +548,9 @@ void DesignerAnalyzeRegion(Camera3D cam, int w, int h, Rectangle rect, DesignReg
     out->gridW = gx;
     out->gridH = gy;
 
-    int sky = 0, total = gx * gy;
-    unsigned int tallySize = 2u * (unsigned int)total;
+    // (a polygon: only the rays inside it count; total grows as they are cast)
+    int sky = 0, cells = gx * gy, total = poly ? 0 : cells;
+    unsigned int tallySize = 2u * (unsigned int)cells;
     if (!(tally = calloc(tallySize, sizeof(TallySlot)))) goto oom;
     out->depthMin = INFINITY;
     out->depthMax = 0.0f;
@@ -486,6 +567,10 @@ void DesignerAnalyzeRegion(Camera3D cam, int w, int h, Rectangle rect, DesignReg
                 float y = rect.y + (j + 0.5f) * cellH;
                 for (int i = ti; i < i1; i++) {
                     float x = rect.x + (i + 0.5f) * cellW;
+                    if (poly) {
+                        if (!InPolygon(poly, polyCount, x, y)) continue;
+                        total++;
+                    }
                     RegionHit r = RegionPick(&tileCull, f.eye, RayThrough(&f, x, y));
                     if (r.obj.kind == MS_OBJ_NONE) { sky++; continue; }
                     TallyAdd(tally, tallySize, r.obj);
@@ -495,9 +580,10 @@ void DesignerAnalyzeRegion(Camera3D cam, int w, int h, Rectangle rect, DesignReg
             }
         }
     }
+    out->samples = total;
     out->hasDepth = sky < total;
     if (!out->hasDepth) out->depthMin = out->depthMax = 0.0f;
-    out->sky = (float)sky / total;
+    out->sky = total > 0 ? (float)sky / total : 0.0f;
 
     int n = 0;
     for (unsigned int i = 0; i < tallySize; i++) n += tally[i].samples > 0;
@@ -532,6 +618,38 @@ void DesignerFreeVolume(DesignVolumeInfo *v)
     free(v->objects);
     v->objects = NULL;
     v->objectCount = 0;
+    for (int k = 0; k < SNIP_VIEW_COUNT; k++) {
+        if (v->images[k].data) UnloadImage(v->images[k]);
+        v->images[k] = (Image){ 0 };
+    }
+}
+
+// --- 3D snips (docs/editor-tools.md 5): four cameras framing the box, perspective, fovy SNIP_FOVY, on
+// a SNIP_W x SNIP_H image; each far enough back that the box's bounding sphere fits the narrower
+// (vertical) field of view
+#define SNIP_FOVY 40.0f
+#define SNIP_W 1024
+#define SNIP_H 768
+
+void DesignerSnipViews(BoundingBox box, Camera3D viewCam, DesignSnipView *out)
+{
+    Vector3 c = Vector3Scale(Vector3Add(box.min, box.max), 0.5f);
+    float r = fmaxf(0.5f * Vector3Distance(box.min, box.max), VOLUME_MIN_SIZE);
+    float dist = r / sinf(0.5f * SNIP_FOVY * DEG2RAD) * 1.02f;
+    Vector3 fwd = Vector3Normalize(Vector3Subtract(viewCam.target, viewCam.position));
+    if (!(Vector3Length(fwd) > 0.5f)) fwd = (Vector3){ 0.0f, 0.0f, -1.0f };
+    // (looking nearly straight up or down: the up vector can't be +y)
+    Vector3 viewUp = fabsf(fwd.y) > 0.99f ? (Vector3){ 0.0f, 0.0f, fwd.y > 0.0f ? 1.0f : -1.0f } : (Vector3){ 0.0f, 1.0f, 0.0f };
+    static const char *const SIDES[SNIP_VIEW_COUNT] = { "view", "front", "side", "top" };
+    const Vector3 back[SNIP_VIEW_COUNT] = { Vector3Negate(fwd), { 0, 0, 1 }, { 1, 0, 0 }, { 0, 1, 0 } };
+    const Vector3 up[SNIP_VIEW_COUNT] = { viewUp, { 0, 1, 0 }, { 0, 1, 0 }, { 0, 0, -1 } };
+    for (int k = 0; k < SNIP_VIEW_COUNT; k++) {
+        out[k] = (DesignSnipView){
+            .side = SIDES[k], .width = SNIP_W, .height = SNIP_H,
+            .camera = { .position = Vector3Add(c, Vector3Scale(back[k], dist)), .target = c, .up = up[k], .fovy = SNIP_FOVY,
+                        .projection = CAMERA_PERSPECTIVE },
+        };
+    }
 }
 
 static int CompareVolumeObject(const void *pa, const void *pb)
@@ -559,10 +677,10 @@ static float CellCover(float a, float b, float min, float step, int i)
     return fmaxf(fminf(b, c1) - fmaxf(a, c0), 0.0f) / step;
 }
 
-// Objects: every box and model whose world bounds overlap the volume (a positive overlap on
+// Objects: every box, model and shape whose world bounds overlap the volume (a positive overlap on
 // every axis; a flat object only needs to lie within the volume on its flat axis). Empty
 // share: a grid of at most VOLUME_SAMPLES cells; each cell sums the exact overlap of every
-// object's bounds with it, capped at the whole cell (models count by their AABB and objects
+// object's bounds with it, capped at the whole cell (models and shapes count by their AABB and objects
 // that overlap each other twice, so it errs toward solid; testing only cell centres was off
 // by 5 points for 2.2 m pillars in 2.3 m cells). Floor: a ray straight down
 // from the centre (DesignerPick: boxes that contain the centre are skipped).
@@ -577,8 +695,10 @@ void DesignerAnalyzeVolume(BoundingBox v, float snap, DesignVolumeInfo *out)
     double vol = (double)(vmx[0] - vmn[0]) * (vmx[1] - vmn[1]) * (vmx[2] - vmn[2]);
 
     int cap = 0;
-    for (int i = 0; i < scene->boxCount + scene->modelCount; i++) {
-        MS_ObjRef o = i < scene->boxCount ? (MS_ObjRef){ MS_OBJ_BOX, i } : (MS_ObjRef){ MS_OBJ_MODEL, i - scene->boxCount };
+    for (int i = 0; i < scene->boxCount + scene->modelCount + scene->shapeCount; i++) {
+        MS_ObjRef o = i < scene->boxCount ? (MS_ObjRef){ MS_OBJ_BOX, i }
+                    : i < scene->boxCount + scene->modelCount ? (MS_ObjRef){ MS_OBJ_MODEL, i - scene->boxCount }
+                    : (MS_ObjRef){ MS_OBJ_SHAPE, i - scene->boxCount - scene->modelCount };
         BoundingBox b = MS_ObjectBounds(scene, o);
         const float bmn[3] = { b.min.x, b.min.y, b.min.z }, bmx[3] = { b.max.x, b.max.y, b.max.z };
         double inVol = 1.0, ofObj = 1.0;
@@ -668,9 +788,13 @@ void DesignerMessagef(Designer *d, bool error, const char *fmt, ...)
     MessageShown(d, error);
 }
 
-// The kinds the designer selects: boxes, models and barriers (lights only through the edit script)
-static bool Selectable(MS_ObjKind k) { return k == MS_OBJ_BOX || k == MS_OBJ_MODEL || k == MS_OBJ_BARRIER; }
-static const MS_ObjKind SELECTABLE[3] = { MS_OBJ_BOX, MS_OBJ_MODEL, MS_OBJ_BARRIER };
+// The kinds the designer selects: boxes, models, barriers and shapes (lights only through the edit script)
+static bool Selectable(MS_ObjKind k)
+{
+    return k == MS_OBJ_BOX || k == MS_OBJ_MODEL || k == MS_OBJ_BARRIER || k == MS_OBJ_SHAPE;
+}
+#define SELECTABLE_COUNT 4
+static const MS_ObjKind SELECTABLE[SELECTABLE_COUNT] = { MS_OBJ_BOX, MS_OBJ_MODEL, MS_OBJ_BARRIER, MS_OBJ_SHAPE };
 
 // selected[] position + 1 of an object, 0 = not selected (d->selPos, grown on demand)
 static int SelectionIndexOf(const Designer *d, MS_ObjRef o)
@@ -691,11 +815,13 @@ static bool SetSelPos(Designer *d, MS_ObjRef o, int pos)
 // Objects of one kind: count, map line, group
 static int KindCount(MS_ObjKind k)
 {
-    return k == MS_OBJ_MODEL ? scene->modelCount : k == MS_OBJ_BARRIER ? scene->barrierCount : scene->boxCount;
+    return k == MS_OBJ_MODEL ? scene->modelCount : k == MS_OBJ_BARRIER ? scene->barrierCount
+         : k == MS_OBJ_SHAPE ? scene->shapeCount : scene->boxCount;
 }
 static const MS_Ref *KindRef(MS_ObjKind k, int i)
 {
-    return k == MS_OBJ_MODEL ? &scene->models[i].ref : k == MS_OBJ_BARRIER ? &scene->barriers[i].ref : &scene->boxRefs[i];
+    return k == MS_OBJ_MODEL ? &scene->models[i].ref : k == MS_OBJ_BARRIER ? &scene->barriers[i].ref
+         : k == MS_OBJ_SHAPE ? &scene->shapes[i].ref : &scene->boxRefs[i];
 }
 
 int DesignerObjNth(MS_ObjRef o)
@@ -769,19 +895,19 @@ bool DesignerSelectObject(Designer *d, MS_ObjRef o)
 
 void DesignerSelectLine(Designer *d, int file, int line)
 {
-    for (int s = 0; s < 3; s++) {
+    for (int s = 0; s < SELECTABLE_COUNT; s++) {
         MS_ObjKind k = SELECTABLE[s];
         for (int i = 0; i < KindCount(k); i++)
             if (KindRef(k, i)->line == line && KindRef(k, i)->file == file && !SelectionAdd(d, (MS_ObjRef){ k, i })) return;
     }
 }
 
-// The object's whole group, boxes, models and barriers (an object without a group stands alone)
+// The object's whole group, boxes, models, barriers and shapes (an object without a group stands alone)
 static void SelectGroupOf(Designer *d, MS_ObjRef o)
 {
     int g = KindRef(o.kind, o.index)->group;
     if (g < 0) { SelectionAdd(d, o); return; }
-    for (int s = 0; s < 3; s++) {
+    for (int s = 0; s < SELECTABLE_COUNT; s++) {
         MS_ObjKind k = SELECTABLE[s];
         for (int i = 0; i < KindCount(k); i++)
             if (KindRef(k, i)->group == g && !SelectionAdd(d, (MS_ObjRef){ k, i })) return;
@@ -868,8 +994,8 @@ void DesignerSync(Designer *d)
     d->keyCap = 0;
     d->selectedCount = 0;
 
-    GeoIndex geo[MS_OBJ_BARRIER + 1] = { 0 };
-    bool geoOk[MS_OBJ_BARRIER + 1] = { false };
+    GeoIndex geo[MS_OBJ_SHAPE + 1] = { 0 };
+    bool geoOk[MS_OBJ_SHAPE + 1] = { false };
     for (int s = 0; s < oldCount; s++) {
         const DesignerSelKey *k = &old[s];
         MS_ObjKind kind = k->kind;
@@ -895,7 +1021,7 @@ void DesignerSync(Designer *d)
         }
         if (found >= 0) SelectionAdd(d, (MS_ObjRef){ kind, found });
     }
-    for (int i = 0; i <= MS_OBJ_BARRIER; i++) { free(geo[i].head); free(geo[i].next); }
+    for (int i = 0; i <= MS_OBJ_SHAPE; i++) { free(geo[i].head); free(geo[i].next); }
     for (int s = 0; s < oldCount; s++) free(old[s].groupName);
     free(old);
 
@@ -1274,16 +1400,60 @@ void DesignerSetAngleSnap(Designer *d, float deg) { if (deg > 0.0f && isfinite(d
 
 static float SnapTo(float x, float step) { return roundf(x / step) * step; }
 
-// The crosshair hit point, snapped on the axes along the hit face (none with Ctrl)
-static Vector3 VolumePoint(const Designer *d)
+static bool CtrlDown(void) { return IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL); }
+static bool AltDown(void) { return IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT); }
+
+// --- World points (docs/editor-tools.md 1): a surface hit, else the work plane, a horizontal plane
+// y = WorkPlaneY. Its height: after the first corner that corner's (the footprint is flat); before
+// it the height PGUP / PGDN or --work-plane set, else the last volume's base, else the camera's
+// feet (eye - MS_DEFAULT_EYE_HEIGHT) on the snap grid.
+static float WorkPlaneY(const Designer *d, Vector3 eye)
 {
-    Vector3 p = d->hit.point, n = d->hit.normal;
-    if (IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL)) return p;
+    if (d->volumeMode && d->volumeStep != VOLUME_STEP_FIRST) return d->volA.y;
+    if (d->workPlaneSet) return d->workPlaneY;
+    if (d->volumeCount > 0) return d->volumes[d->volumeCount - 1].box.min.y;
+    return SnapTo(eye.y - MS_DEFAULT_EYE_HEIGHT, VolumeSnap(d));
+}
+
+// The world point of the ray (origin, dir) that hit `hit` (DesignerWorldPoint): a surface hit
+// snapped on the axes along the hit face (exactly as the volume corners always were), else the
+// work plane's crossing snapped in x and z; Ctrl: exact. *normal may be NULL.
+static WorldPointKind WorldPointOf(const Designer *d, DesignerHit hit, Vector3 origin, Vector3 dir, WorldPointMode mode,
+                                   Vector3 *out, Vector3 *normal)
+{
+    bool exact = CtrlDown();
     float s = VolumeSnap(d);
-    if (fabsf(n.x) < 0.9f) p.x = SnapTo(p.x, s);
-    if (fabsf(n.y) < 0.9f) p.y = SnapTo(p.y, s);
-    if (fabsf(n.z) < 0.9f) p.z = SnapTo(p.z, s);
-    return p;
+    if (mode == WORLD_POINT_SURFACE && !ObjIsNone(hit.obj)) {
+        Vector3 p = hit.point, n = hit.normal;
+        if (!exact) {
+            if (fabsf(n.x) < 0.9f) p.x = SnapTo(p.x, s);
+            if (fabsf(n.y) < 0.9f) p.y = SnapTo(p.y, s);
+            if (fabsf(n.z) < 0.9f) p.z = SnapTo(p.z, s);
+        }
+        *out = p;
+        if (normal) *normal = n;
+        return WORLD_POINT_ON_SURFACE;
+    }
+    // The plane: only in front of the eye and not farther than WORK_PLANE_MAX_DIST along the ray
+    float y = WorkPlaneY(d, origin);
+    if (fabsf(dir.y) < 1e-6f) return WORLD_POINT_NONE;
+    float t = (y - origin.y) / dir.y;
+    if (!(t > 0.0f) || t > WORK_PLANE_MAX_DIST) return WORLD_POINT_NONE;
+    Vector3 p = { origin.x + dir.x * t, y, origin.z + dir.z * t };
+    if (!exact) {
+        p.x = SnapTo(p.x, s);
+        p.z = SnapTo(p.z, s);
+    }
+    *out = p;
+    if (normal) *normal = (Vector3){ 0.0f, 1.0f, 0.0f };
+    return WORLD_POINT_ON_PLANE;
+}
+
+// The volume corner a click would place now: the last pick's ray and hit (the crosshair's, or the
+// edit mode's cursor for a barrier), the plane even over a surface while Alt is held
+static WorldPointKind VolumePoint(const Designer *d, Vector3 *out)
+{
+    return WorldPointOf(d, d->hit, d->pickPos, d->pickDir, AltDown() ? WORLD_POINT_PLANE : WORLD_POINT_SURFACE, out, NULL);
 }
 
 // The volume being made, from the clicks so far: after the first click a flat footprint up
@@ -1291,7 +1461,8 @@ static Vector3 VolumePoint(const Designer *d)
 static BoundingBox VolumeDraft(const Designer *d)
 {
     bool second = d->volumeStep == VOLUME_STEP_SECOND;
-    Vector3 a = d->volA, b = second ? VolumePoint(d) : d->volB;
+    Vector3 a = d->volA, b = d->volB;
+    if (second && VolumePoint(d, &b) == WORLD_POINT_NONE) b = a;    // (nothing under the crosshair: no footprint yet)
     float base = second ? fminf(a.y, b.y) : d->volBase;
     float h = 0.0f;
     if (!second) {
@@ -1315,6 +1486,7 @@ bool DesignerAddVolume(Designer *d, BoundingBox box)
         return false;
     }
     slot->box = v;
+    slot->snip = false;
     d->activeVolume = d->volumeCount - 1;
     return true;
 }
@@ -1352,6 +1524,7 @@ static void VolumeModeEnd(Designer *d)
     VolumeCancel(d);
     d->volumeMode = false;
     d->barrierPlace = false;
+    if (!d->workPlaneFixed) d->workPlaneSet = false;    // (the plane follows its rule again next time)
 }
 
 void DesignerVolumeModeEnd(Designer *d) { VolumeModeEnd(d); }
@@ -1394,7 +1567,7 @@ bool DesignerTakeBarrier(Designer *d, BoundingBox *box)
 
 // Arrows / PgUp / PgDn on the active volume. The horizontal arrows follow the world axis
 // nearest to the camera's forward / right, so "up" pushes the volume away from the eye.
-static void VolumeEdit(Designer *d)
+static void VolumeEdit(Designer *d, bool planeKeys)
 {
     if (d->activeVolume < 0 || d->activeVolume >= d->volumeCount) return;
     static const int KEYS[6] = { KEY_UP, KEY_DOWN, KEY_RIGHT, KEY_LEFT, KEY_PAGE_UP, KEY_PAGE_DOWN };
@@ -1407,7 +1580,7 @@ static void VolumeEdit(Designer *d)
     float s = VolumeSnap(d);
     BoundingBox *v = &d->volumes[d->activeVolume].box;
     for (int k = 0; k < 6; k++) {
-        if (!KeyRepeat(KEYS[k])) continue;
+        if (!KeyRepeat(KEYS[k]) || (planeKeys && k >= 4)) continue;     // (PGUP / PGDN: the work plane's)
         Vector3 dir = dirs[k];
         float *mn[3] = { &v->min.x, &v->min.y, &v->min.z }, *mx[3] = { &v->max.x, &v->max.y, &v->max.z };
         int a = dir.x != 0.0f ? 0 : dir.y != 0.0f ? 1 : 2;
@@ -1427,6 +1600,27 @@ static void VolumeEdit(Designer *d)
     }
 }
 
+// True while the next click would land on the work plane (the pick is sky, or Alt is held)
+static bool WorkPlaneNext(const Designer *d)
+{
+    return d->volumeMode && d->volumeStep != VOLUME_STEP_HEIGHT && (ObjIsNone(d->hit.obj) || AltDown());
+}
+
+// PGUP / PGDN before the first corner while the plane would be used: the plane one snap step up /
+// down (then it keeps that height until volume mode ends). ALT+PGUP / PGDN stay the active volume's
+// (grow its top / bottom) when there is one. True when the plane took the keys this frame.
+static bool WorkPlaneKeys(Designer *d)
+{
+    if (d->volumeStep != VOLUME_STEP_FIRST || !WorkPlaneNext(d)) return false;
+    if (AltDown() && !d->barrierPlace && d->activeVolume >= 0 && d->activeVolume < d->volumeCount) return false;
+    int dir = KeyRepeat(KEY_PAGE_UP) ? 1 : KeyRepeat(KEY_PAGE_DOWN) ? -1 : 0;
+    if (dir == 0) return true;      // (they stay the plane's while it is in use, even unpressed)
+    d->workPlaneY = SnapTo(WorkPlaneY(d, d->pickPos), VolumeSnap(d)) + dir * VolumeSnap(d);
+    d->workPlaneSet = true;
+    DesignerMessagef(d, false, "work plane y %.2f m", d->workPlaneY);
+    return true;
+}
+
 static DesignerAction VolumeInput(Designer *d)
 {
     bool shift = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
@@ -1442,8 +1636,10 @@ static DesignerAction VolumeInput(Designer *d)
         }
         if (d->volumeStep == VOLUME_STEP_SECOND) {
             if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-                if (ObjIsNone(d->hit.obj)) { DesignerMessageStatic(d, true, "no surface under the crosshair"); return DESIGNER_NONE; }
-                d->volB = VolumePoint(d);
+                if (VolumePoint(d, &d->volB) == WORLD_POINT_NONE) {
+                    DesignerMessageStatic(d, true, "neither a surface nor the work plane under the crosshair");
+                    return DESIGNER_NONE;
+                }
                 d->volBase = fminf(d->volA.y, d->volB.y);
                 float dy = fabsf(d->volA.y - d->volB.y);
                 d->volHeight = dy >= VolumeSnap(d) ? dy : VOLUME_DEFAULT_HEIGHT;
@@ -1481,16 +1677,25 @@ static DesignerAction VolumeInput(Designer *d)
         VolumeModeEnd(d);
         return DESIGNER_NONE;
     }
+    bool planeKeys = WorkPlaneKeys(d);
     if (d->barrierPlace) {
         // A barrier: only the first corner (and the snap step) here; the volumes stay as they are
         if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-            if (ObjIsNone(d->hit.obj)) DesignerMessageStatic(d, true, "no surface under the cursor");
-            else {
-                d->volA = VolumePoint(d);
-                d->volumeStep = VOLUME_STEP_SECOND;
-            }
+            if (VolumePoint(d, &d->volA) == WORLD_POINT_NONE) DesignerMessageStatic(d, true, "neither a surface nor the work plane under the cursor");
+            else d->volumeStep = VOLUME_STEP_SECOND;
         }
         if (IsKeyPressed(KEY_N)) DesignerMessagef(d, false, "snap %g m", DesignerCycleSnap(d));
+        return DESIGNER_NONE;
+    }
+    if (IsKeyPressed(KEY_X)) {
+        // The active volume as a 3D snip, or not (docs/editor-tools.md 5)
+        if (d->activeVolume < 0 || d->activeVolume >= d->volumeCount) DesignerMessageStatic(d, true, "no volume to mark as a 3D snip");
+        else {
+            DesignVolume *v = &d->volumes[d->activeVolume];
+            v->snip = !v->snip;
+            DesignerMessagef(d, false, v->snip ? "V%d: 3D snip (images of only what is inside it go with the request)"
+                                                : "V%d: no longer a 3D snip", d->activeVolume + 1);
+        }
         return DESIGNER_NONE;
     }
     if (IsKeyPressed(KEY_H)) {
@@ -1504,11 +1709,8 @@ static DesignerAction VolumeInput(Designer *d)
         return DESIGNER_NONE;
     }
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-        if (ObjIsNone(d->hit.obj)) DesignerMessageStatic(d, true, "no surface under the crosshair");
-        else {
-            d->volA = VolumePoint(d);
-            d->volumeStep = VOLUME_STEP_SECOND;
-        }
+        if (VolumePoint(d, &d->volA) == WORLD_POINT_NONE) DesignerMessageStatic(d, true, "neither a surface nor the work plane under the crosshair");
+        else d->volumeStep = VOLUME_STEP_SECOND;
         return DESIGNER_NONE;
     }
     if (IsKeyPressed(KEY_N)) DesignerMessagef(d, false, "volume snap %g m", DesignerCycleSnap(d));
@@ -1529,7 +1731,7 @@ static DesignerAction VolumeInput(Designer *d)
             if (d->activeVolume >= d->volumeCount) d->activeVolume = d->volumeCount - 1;
         }
     }
-    VolumeEdit(d);
+    VolumeEdit(d, planeKeys);
     return DESIGNER_NONE;
 }
 
@@ -1545,11 +1747,14 @@ static DesignerAction VolumeInput(Designer *d)
 // Esc in the prompt box closes the box (discarding the text, as always) and returns to
 // snip mode with the regions intact; a successful submit ends snip mode.
 
+static void DropSketches(Designer *d);     // (below: the pen)
+
 void DesignerSnipBegin(Designer *d)
 {
     d->snipping = true;
     d->dragging = false;
     d->regionCount = 0;
+    DropSketches(d);
     if (d->interactive) EnableCursor();
 }
 
@@ -1559,6 +1764,7 @@ void DesignerSnipEnd(Designer *d)
     d->snipping = false;
     d->dragging = false;
     d->regionCount = 0;
+    DropSketches(d);
     d->freezeFrames = 2;    // GLFW can report one big mouse jump when the cursor is captured again
     if (d->interactive) DisableCursor();
 }
@@ -1592,6 +1798,254 @@ static Rectangle DragRect(const Designer *d)
                                   d->dragEnd.y - d->dragStart.y }, GetScreenWidth(), GetScreenHeight());
 }
 
+// --- Sketches: the pen of snip mode (D; docs/editor-tools.md 4): strokes over the frozen frame,
+// numbered S1, S2, ... A free stroke keeps a point every SKETCH_FREE_STEP px of the cursor's path and
+// is closed when it ends within SKETCH_CLOSE_PX of its start; a line or an arrow is its press and
+// release points; a circle is centre (press) and rim (release) while it is dragged,
+// SKETCH_CIRCLE_POINTS rim points once done. Strokes are dropped with the regions when snip mode
+// ends (they belong to its camera).
+
+#define SKETCH_FREE_STEP 3.0f       // px between the points a free stroke keeps
+#define SKETCH_CLOSE_PX 16.0f       // a free stroke ending this near its start is closed
+#define SKETCH_MIN_PX 4.0f          // a shorter stroke (a click) is dropped
+#define SKETCH_CIRCLE_POINTS 64
+
+void DesignerFreeSketch(DesignSketch *s)
+{
+    free(s->points);
+    s->points = NULL;
+    s->pointCount = s->pointCap = 0;
+}
+
+void DesignerFreeSketchInfo(DesignSketchInfo *i)
+{
+    free(i->worldPoints);
+    free(i->worldHit);
+    free(i->objects);
+    DesignerFreeRegion(&i->region);
+    i->worldPoints = NULL;
+    i->worldHit = NULL;
+    i->objects = NULL;
+    i->sampleCount = i->objectCount = 0;
+}
+
+// Drops every stroke (snip mode ends, Shift+Backspace)
+static void DropSketches(Designer *d)
+{
+    for (int i = 0; i < d->sketchCount; i++) DesignerFreeSketch(&d->sketches[i]);
+    d->sketchCount = 0;
+}
+
+// The finished strokes: all but the one a pen drag is still drawing (the last); what a request sends
+static int DoneSketches(const Designer *d)
+{
+    return d->sketchCount - (d->pen && d->dragging && d->sketchCount > 0 ? 1 : 0);
+}
+
+// Length of the polyline (closed: with the segment back to the start), px
+static float StrokeLength(const Vector2 *p, int n, bool closed)
+{
+    float len = 0.0f;
+    for (int i = 1; i < n; i++) len += Vector2Distance(p[i - 1], p[i]);
+    if (closed && n > 2) len += Vector2Distance(p[n - 1], p[0]);
+    return len;
+}
+
+// The stroke's points become the SKETCH_CIRCLE_POINTS rim points of the circle around c through r
+// (from r's angle on). False when out of memory.
+static bool CircleFill(DesignSketch *s, Vector2 c, Vector2 r)
+{
+    if (!MS_RESERVE(s->points, s->pointCap, SKETCH_CIRCLE_POINTS)) return false;
+    float rad = Vector2Distance(c, r), a0 = atan2f(r.y - c.y, r.x - c.x);
+    for (int k = 0; k < SKETCH_CIRCLE_POINTS; k++) {
+        float a = a0 - 2.0f * PI * k / SKETCH_CIRCLE_POINTS;
+        s->points[k] = (Vector2){ c.x + rad * cosf(a), c.y + rad * sinf(a) };
+    }
+    s->pointCount = SKETCH_CIRCLE_POINTS;
+    s->closed = true;
+    return true;
+}
+
+// A finished stroke: a circle gets its rim, a free stroke its closed flag. False when it is too
+// small to mean anything (a click) or out of memory: the caller drops it.
+static bool SketchFinish(DesignSketch *s)
+{
+    if (s->pointCount < 2) return false;
+    if (s->kind == SKETCH_CIRCLE) {
+        if (Vector2Distance(s->points[0], s->points[1]) < SKETCH_MIN_PX * 0.5f) return false;
+        return CircleFill(s, s->points[0], s->points[1]);
+    }
+    float len = StrokeLength(s->points, s->pointCount, false);
+    if (len < SKETCH_MIN_PX) return false;
+    s->closed = s->kind == SKETCH_FREE && s->pointCount >= 4 && len > 2.0f * SKETCH_CLOSE_PX &&
+                Vector2Distance(s->points[0], s->points[s->pointCount - 1]) <= SKETCH_CLOSE_PX;
+    return true;
+}
+
+// A new empty stroke at the end of d->sketches (NULL when out of memory)
+static DesignSketch *SketchPush(Designer *d, SketchKind kind, int color)
+{
+    DesignSketch *s = MS_PUSH(d->sketches, d->sketchCount, d->sketchCap);
+    if (!s) return NULL;
+    *s = (DesignSketch){ .kind = kind, .color = color };
+    return s;
+}
+
+static bool SketchAppend(DesignSketch *s, Vector2 p)
+{
+    Vector2 *slot = MS_PUSH(s->points, s->pointCount, s->pointCap);
+    if (!slot) return false;
+    *slot = p;
+    return true;
+}
+
+bool DesignerAddSketch(Designer *d, SketchKind kind, int color, const Vector2 *pts, int n)
+{
+    if (kind < SKETCH_FREE || kind > SKETCH_CIRCLE) return MS_SetError("unknown sketch kind %d", (int)kind);
+    if (color < 0 || color >= SKETCH_COLOR_COUNT) return MS_SetError("sketch colour %d is not 1-%d", color + 1, SKETCH_COLOR_COUNT);
+    if (n < 2) return MS_SetError("a sketch needs two points at least");
+    for (int i = 0; i < n; i++)
+        if (!isfinite(pts[i].x) || !isfinite(pts[i].y)) return MS_SetError("a sketch point is not a number");
+    DesignSketch *s = SketchPush(d, kind, color);
+    if (!s) return MS_SetError("out of memory: sketch not added");
+    // (a line, an arrow, a circle: the first and the last point given)
+    bool ok = true;
+    if (kind == SKETCH_FREE) for (int i = 0; i < n && ok; i++) ok = SketchAppend(s, pts[i]);
+    else ok = SketchAppend(s, pts[0]) && SketchAppend(s, pts[n - 1]);
+    if (ok && SketchFinish(s)) return true;
+    DesignerFreeSketch(s);
+    d->sketchCount--;
+    return ok ? MS_SetError("the sketch is shorter than %g px", SKETCH_MIN_PX) : MS_SetError("out of memory: sketch not added");
+}
+
+// The pen's input in snip mode (the pen is on): colour, kind and removing strokes while no stroke is
+// being drawn; a drag with LMB draws one
+static void PenInput(Designer *d)
+{
+    if (!d->dragging) {
+        for (int k = 0; k < SKETCH_COLOR_COUNT; k++) if (IsKeyPressed(KEY_ONE + k)) d->penColor = k;
+        if (IsKeyPressed(KEY_F)) d->penKind = SKETCH_FREE;
+        if (IsKeyPressed(KEY_L)) d->penKind = SKETCH_LINE;
+        if (IsKeyPressed(KEY_A)) d->penKind = SKETCH_ARROW;
+        if (IsKeyPressed(KEY_O)) d->penKind = SKETCH_CIRCLE;
+        if (KeyRepeat(KEY_BACKSPACE) && d->sketchCount > 0) {
+            if (IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT)) {
+                DesignerMessagef(d, false, "%d stroke%s cleared", d->sketchCount, d->sketchCount == 1 ? "" : "s");
+                DropSketches(d);
+            } else {
+                DesignerMessagef(d, false, "S%d removed", d->sketchCount);
+                DesignerFreeSketch(&d->sketches[--d->sketchCount]);
+            }
+        }
+    }
+    Vector2 m = GetMousePosition();
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !d->dragging) {
+        DesignSketch *s = SketchPush(d, d->penKind, d->penColor);
+        if (!s || !SketchAppend(s, m)) {
+            if (s) d->sketchCount--;
+            DesignerMessageStatic(d, true, "out of memory: stroke not started");
+            return;
+        }
+        d->dragging = true;
+        d->dragStart = d->dragEnd = m;
+    }
+    if (!d->dragging) return;
+    // The stroke being drawn is the last one
+    DesignSketch *s = &d->sketches[d->sketchCount - 1];
+    d->dragEnd = m;
+    bool ok = true;
+    if (s->kind == SKETCH_FREE) {
+        if (Vector2Distance(s->points[s->pointCount - 1], m) >= SKETCH_FREE_STEP) ok = SketchAppend(s, m);
+    } else if (s->pointCount < 2) ok = SketchAppend(s, m);
+    else s->points[1] = m;
+    if (ok && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) return;
+    d->dragging = false;
+    // (released: a free stroke ends where the button came up)
+    if (ok && s->kind == SKETCH_FREE && Vector2Distance(s->points[s->pointCount - 1], m) >= 1.0f) ok = SketchAppend(s, m);
+    if (!ok || !SketchFinish(s)) {
+        DesignerFreeSketch(s);
+        d->sketchCount--;
+        if (!ok) DesignerMessageStatic(d, true, "out of memory: stroke dropped");
+    }
+}
+
+// What a stroke touches: the hits of its first and last points, up to SKETCH_SAMPLES rays evenly
+// spaced along it (one per 4 px), the objects they hit, and for a closed stroke the region analysis of
+// its inside. Picks as DesignerPickAt does (the frame's rays, DesignerPick).
+void DesignerAnalyzeSketch(Camera3D cam, int w, int h, const DesignSketch *s, DesignSketchInfo *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->start.obj = out->end.obj = (MS_ObjRef){ MS_OBJ_NONE, -1 };
+    out->region.centerObj = (MS_ObjRef){ MS_OBJ_NONE, -1 };
+    int n = s->pointCount;
+    if (n < 1 || w <= 0 || h <= 0) return;
+    RayFrame f = MakeRayFrame(cam, w, h);
+    const Vector2 *p = s->points;
+    out->start = DesignerPick(f.eye, RayThrough(&f, p[0].x, p[0].y));
+    out->end = DesignerPick(f.eye, RayThrough(&f, p[n - 1].x, p[n - 1].y));
+
+    // Samples at equal steps of the path's length (a closed one comes back to its start)
+    float len = StrokeLength(p, n, s->closed);
+    int count = len > 0.0f ? (int)fminf((float)SKETCH_SAMPLES, fmaxf(2.0f, ceilf(len / 4.0f) + 1.0f)) : 1;
+    unsigned int tallySize = 2u * (unsigned int)count;
+    TallySlot *tally = calloc(tallySize, sizeof(TallySlot));
+    out->worldPoints = malloc(sizeof(Vector3) * count);
+    out->worldHit = malloc(sizeof(bool) * count);
+    if (!tally || !out->worldPoints || !out->worldHit) goto oom;
+    int segs = s->closed && n > 2 ? n : n - 1, seg = 0;
+    float segStart = 0.0f;      // path length at the start of segment seg
+    for (int k = 0; k < count; k++) {
+        float t = count > 1 ? len * k / (count - 1) : 0.0f;
+        Vector2 at = p[0];
+        while (seg < segs) {
+            Vector2 a = p[seg], b = p[(seg + 1) % n];
+            float sl = Vector2Distance(a, b);
+            if (t <= segStart + sl || seg == segs - 1) {
+                at = Vector2Lerp(a, b, sl > 0.0f ? Clamp((t - segStart) / sl, 0.0f, 1.0f) : 0.0f);
+                break;
+            }
+            segStart += sl;
+            seg++;
+        }
+        DesignerHit hit = DesignerPick(f.eye, RayThrough(&f, at.x, at.y));
+        out->worldHit[k] = !ObjIsNone(hit.obj);
+        out->worldPoints[k] = hit.point;
+        if (out->worldHit[k]) TallyAdd(tally, tallySize, hit.obj);
+    }
+    out->sampleCount = count;
+    int objects = 0;
+    for (unsigned int i = 0; i < tallySize; i++) objects += tally[i].samples > 0;
+    if (objects > 0 && !(out->objects = malloc(sizeof(DesignRegionObject) * objects))) goto oom;
+    objects = 0;
+    for (unsigned int i = 0; i < tallySize; i++)
+        if (tally[i].samples > 0) out->objects[objects++] = (DesignRegionObject){ tally[i].obj, tally[i].samples, (float)tally[i].samples / count };
+    if (objects > 1) qsort(out->objects, objects, sizeof(out->objects[0]), CompareRegionObjects);
+    out->objectCount = objects;
+    free(tally);
+    tally = NULL;
+
+    // A closed stroke outlines an area: its inside as a region (its bounds' rays inside it)
+    if (s->closed && n >= 3) {
+        float x0 = p[0].x, y0 = p[0].y, x1 = x0, y1 = y0;
+        for (int i = 1; i < n; i++) {
+            x0 = fminf(x0, p[i].x);
+            y0 = fminf(y0, p[i].y);
+            x1 = fmaxf(x1, p[i].x);
+            y1 = fmaxf(y1, p[i].y);
+        }
+        Rectangle r = ClampRect((Rectangle){ x0, y0, x1 - x0, y1 - y0 }, w, h);
+        if (r.width >= 1.0f && r.height >= 1.0f) {
+            AnalyzeRegionIn(cam, w, h, r, p, n, &out->region);
+            out->hasRegion = true;
+        }
+    }
+    return;
+oom:
+    TraceLog(LOG_WARNING, "monolith: sketch analysis: out of memory");
+    free(tally);
+    DesignerFreeSketchInfo(out);
+}
+
 static DesignerAction SnipInput(Designer *d)
 {
     if (IsKeyPressed(KEY_ESCAPE) || IsKeyPressed(KEY_C) || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) {
@@ -1600,6 +2054,15 @@ static DesignerAction SnipInput(Designer *d)
     }
     if (!d->dragging && (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER))) {
         DesignerOpenPrompt(d, NULL);
+        return DESIGNER_NONE;
+    }
+    // D: rectangles or the pen (strokes and regions both stay and go into the same request)
+    if (!d->dragging && IsKeyPressed(KEY_D)) {
+        d->pen = !d->pen;
+        return DESIGNER_NONE;
+    }
+    if (d->pen) {
+        PenInput(d);
         return DESIGNER_NONE;
     }
     Vector2 m = GetMousePosition();
@@ -1655,6 +2118,7 @@ void DesignerPickCamera(Designer *d, Camera3D cam)
     d->pickTarget = cam.target;
     d->eye = cam.position;
     d->viewFwd = Vector3Normalize(Vector3Subtract(cam.target, cam.position));
+    d->pickDir = d->viewFwd;
     d->hit = PickShown(d, cam.position, d->viewFwd);
 }
 
@@ -1677,7 +2141,28 @@ void DesignerPickCursor(Designer *d, Camera3D cam, int w, int h, Vector2 px)
     d->eye = cam.position;
     d->viewFwd = Vector3Normalize(Vector3Subtract(cam.target, cam.position));
     RayFrame f = MakeRayFrame(cam, w > 0 ? w : 1, h > 0 ? h : 1);
-    d->hit = PickShown(d, cam.position, RayThrough(&f, px.x, px.y));
+    d->pickDir = RayThrough(&f, px.x, px.y);
+    d->hit = PickShown(d, cam.position, d->pickDir);
+}
+
+// The ray through `cursor` of the window-sized frame `cam` renders (the crosshair: its centre, bit
+// for bit the crosshair ray), picked as the designer picks (barriers while they are shown)
+WorldPointKind DesignerWorldPoint(const Designer *d, Camera3D cam, Vector2 cursor, WorldPointMode mode,
+                                  Vector3 *out, Vector3 *normal)
+{
+    int w = GetScreenWidth(), h = GetScreenHeight();
+    RayFrame f = MakeRayFrame(cam, w > 0 ? w : 1, h > 0 ? h : 1);
+    Vector3 dir = RayThrough(&f, cursor.x, cursor.y);
+    DesignerHit hit = { .obj = { MS_OBJ_NONE, -1 } };
+    if (mode == WORLD_POINT_SURFACE) hit = PickShown(d, cam.position, dir);
+    return WorldPointOf(d, hit, cam.position, dir, mode, out, normal);
+}
+
+WorldPointKind DesignerPickWorldPoint(const Designer *d, WorldPointMode mode, Vector3 *out, Vector3 *normal)
+{
+    if (!d->pickValid) return WORLD_POINT_NONE;     // (no ray yet: nothing picked since the last load)
+    return WorldPointOf(d, mode == WORLD_POINT_SURFACE ? d->hit : (DesignerHit){ .obj = { MS_OBJ_NONE, -1 } }, d->pickPos,
+                        d->pickDir, mode, out, normal);
 }
 
 void DesignerAdoptVersion(Designer *d)
@@ -1755,6 +2240,12 @@ void DesignerFreeRequest(DesignRequest *req)
     free(req->regions);
     for (int i = 0; i < req->volumeCount; i++) DesignerFreeVolume(&req->volumes[i]);
     free(req->volumes);
+    for (int i = 0; i < req->sketchCount; i++) {
+        DesignerFreeSketch(&req->sketches[i]);
+        DesignerFreeSketchInfo(&req->sketchInfos[i]);
+    }
+    free(req->sketches);
+    free(req->sketchInfos);
     memset(req, 0, sizeof(*req));
 }
 
@@ -1766,7 +2257,10 @@ bool DesignerBuildRequest(const Designer *d, Camera3D cam, float yaw, float pitc
     req->selected = malloc(sizeof(MS_ObjRef) * (d->selectedCount > 0 ? d->selectedCount : 1));
     req->regions = calloc(d->regionCount > 0 ? d->regionCount : 1, sizeof(DesignRegionInfo));
     req->volumes = calloc(d->volumeCount > 0 ? d->volumeCount : 1, sizeof(DesignVolumeInfo));
-    if (!req->prompt || !req->selected || !req->regions || !req->volumes) {
+    int sketchCount = DoneSketches(d);
+    req->sketches = calloc(sketchCount > 0 ? sketchCount : 1, sizeof(DesignSketch));
+    req->sketchInfos = calloc(sketchCount > 0 ? sketchCount : 1, sizeof(DesignSketchInfo));
+    if (!req->prompt || !req->selected || !req->regions || !req->volumes || !req->sketches || !req->sketchInfos) {
         DesignerFreeRequest(req);
         return false;
     }
@@ -1796,9 +2290,30 @@ bool DesignerBuildRequest(const Designer *d, Camera3D cam, float yaw, float pitc
     for (int i = 0; i < d->volumeCount; i++) {
         DesignVolumeInfo *v = &req->volumes[i];
         DesignerAnalyzeVolume(d->volumes[i].box, VolumeSnap(d), v);
+        v->snip = d->volumes[i].snip;
+        if (v->snip) DesignerSnipViews(v->box, cam, v->views);     // (main.c renders them)
         TraceLog(LOG_INFO, "monolith: volume %d: %.2f x %.2f x %.2f m, %d object%s, empty %.0f%%, %d cells, %.1f ms",
                  i + 1, v->box.max.x - v->box.min.x, v->box.max.y - v->box.min.y, v->box.max.z - v->box.min.z,
                  v->objectCount, v->objectCount == 1 ? "" : "s", 100.0f * v->empty, v->grid[0] * v->grid[1] * v->grid[2], v->ms);
+    }
+    // Sketches: copies of the strokes (the designer drops its own when snip mode ends) and what each touches
+    for (int i = 0; i < sketchCount; i++) {
+        const DesignSketch *src = &d->sketches[i];
+        DesignSketch *c = &req->sketches[i];
+        *c = (DesignSketch){ .kind = src->kind, .color = src->color, .closed = src->closed };
+        if (!MS_RESERVE(c->points, c->pointCap, src->pointCount)) {
+            DesignerFreeRequest(req);
+            return false;
+        }
+        memcpy(c->points, src->points, sizeof(Vector2) * src->pointCount);
+        c->pointCount = src->pointCount;
+        req->sketchCount = i + 1;
+        double t0 = GetTime();
+        DesignerAnalyzeSketch(cam, width, height, c, &req->sketchInfos[i]);
+        const DesignSketchInfo *si = &req->sketchInfos[i];
+        TraceLog(LOG_INFO, "monolith: sketch S%d: %d point%s, %d samples, %d object%s%s, %.1f ms", i + 1, c->pointCount,
+                 c->pointCount == 1 ? "" : "s", si->sampleCount, si->objectCount, si->objectCount == 1 ? "" : "s",
+                 si->hasRegion ? ", closed: region analysed" : "", (GetTime() - t0) * 1000.0);
     }
     return true;
 }
@@ -1896,12 +2411,17 @@ static void TurnedCorners(const MS_TurnedBox *t, BoundingBox aabb, Vector3 eye, 
     }
 }
 
-// The oriented corners of a model, a turned box or a turned barrier (false: an axis-aligned box or
-// barrier, MS_ObjectBounds is then its shape)
+// The oriented corners of a model, a turned box, a turned barrier or a shape (false: an axis-aligned
+// box or barrier, MS_ObjectBounds is then its shape). A shape is outlined as its box (turned with it; a
+// plane's box is flat: its rectangle, not the collider's 1 cm below it).
 static bool ObjCorners(MS_ObjRef o, Vector3 eye, Vector3 *q)
 {
     if (o.kind == MS_OBJ_MODEL) {
         ModelCorners(&scene->models[o.index], eye, q);
+        return true;
+    }
+    if (o.kind == MS_OBJ_SHAPE) {
+        TurnedCorners(&scene->shapes[o.index].shape, scene->shapes[o.index].box, eye, q);
         return true;
     }
     if (o.kind == MS_OBJ_BARRIER) {
@@ -2042,6 +2562,58 @@ static void DrawHelpBar(const char *mode, Color modeColor, const char *hints, in
     UiHints(hints, x + pw + 10, y + (30 - UiLineHeight(UI_S)) / 2, UI_S, UI_INK);
 }
 
+#define WORK_PLANE_CELLS 4      // the work plane's patch: grid lines -4..4 steps around the point
+
+// The work plane under a corner about to be placed in the air (inside BeginOverlay3D, depth test
+// on): a patch of snap-step grid lines around the point, fainter toward its edge (faint through
+// walls, stronger where visible), and a tick straight down to the first surface below it, so a point
+// in the air shows where it stands over the ground. A live overlay only.
+static void DrawWorkPlane(const Designer *d, Vector3 p, Color c)
+{
+    float s = VolumeSnap(d), y = p.y;
+    float cx = SnapTo(p.x, s), cz = SnapTo(p.z, s);    // (Ctrl: an exact point on the grid's patch)
+    const int N = WORK_PLANE_CELLS;
+    for (int pass = 0; pass < 2; pass++) {
+        if (pass == 0) rlDisableDepthTest();
+        else rlEnableDepthTest();
+        float scale = pass == 0 ? 0.3f : 0.8f;
+        for (int k = -N; k <= N; k++) {
+            for (int j = -N; j < N; j++) {
+                // Each segment as faint as its middle is far from the point (1 at the centre, 0 past the edge)
+                float along = (j + 0.5f) / (N + 0.5f), across = (float)k / (N + 0.5f);
+                float a = scale * fmaxf(0.0f, 1.0f - sqrtf(along * along + across * across));
+                if (a <= 0.0f) continue;
+                Color col = Fade(c, a);
+                DrawLine3D((Vector3){ cx + j * s, y, cz + k * s }, (Vector3){ cx + (j + 1) * s, y, cz + k * s }, col);
+                DrawLine3D((Vector3){ cx + k * s, y, cz + j * s }, (Vector3){ cx + k * s, y, cz + (j + 1) * s }, col);
+            }
+        }
+        rlDrawRenderBatchActive();
+    }
+    DesignerHit below = DesignerPick(p, (Vector3){ 0.0f, -1.0f, 0.0f });
+    if (!ObjIsNone(below.obj)) {
+        float t = 0.15f;
+        DrawLine3D(p, below.point, Fade(c, 0.7f));
+        DrawLine3D((Vector3){ below.point.x - t, below.point.y, below.point.z }, (Vector3){ below.point.x + t, below.point.y, below.point.z }, c);
+        DrawLine3D((Vector3){ below.point.x, below.point.y, below.point.z - t }, (Vector3){ below.point.x, below.point.y, below.point.z + t }, c);
+    }
+}
+
+// A box's 12 edges dashed (a 3D snip volume): dashes of about 0.25 m, at least 3 and at most 40 per edge
+static void DrawDashedBox(BoundingBox b, Color c)
+{
+    Vector3 p[8];
+    for (int i = 0; i < 8; i++) p[i] = (Vector3){ (i & 1) ? b.max.x : b.min.x, (i & 2) ? b.max.y : b.min.y, (i & 4) ? b.max.z : b.min.z };
+    static const int E[12][2] = { { 0, 1 }, { 2, 3 }, { 4, 5 }, { 6, 7 }, { 0, 2 }, { 1, 3 }, { 4, 6 }, { 5, 7 },
+                                  { 0, 4 }, { 1, 5 }, { 2, 6 }, { 3, 7 } };
+    for (int e = 0; e < 12; e++) {
+        Vector3 a = p[E[e][0]], q = p[E[e][1]];
+        int n = (int)Clamp(Vector3Distance(a, q) / 0.25f, 3.0f, 40.0f);
+        for (int k = 0; k < n; k++)
+            DrawLine3D(Vector3Lerp(a, q, (float)k / n), Vector3Lerp(a, q, (k + 0.6f) / n), c);
+    }
+}
+
 // Volume label: a pill with the text, centred above screen point p (kept on screen)
 static void DrawVolumeTab(Vector2 p, const char *text, int w, int h)
 {
@@ -2067,7 +2639,9 @@ void DesignerDrawVolumes(const Designer *d, Camera3D cam, int w, int h, bool mar
 {
     bool live = !marked && d->volumeMode;
     bool making = live && d->volumeStep != VOLUME_STEP_FIRST;
-    bool aim = live && d->volumeStep != VOLUME_STEP_HEIGHT && !ObjIsNone(d->hit.obj);
+    // Where a click would put the corner (snapped): a surface point or the work plane's
+    Vector3 aimAt = { 0 };
+    WorldPointKind aim = live && d->volumeStep != VOLUME_STEP_HEIGHT ? VolumePoint(d, &aimAt) : WORLD_POINT_NONE;
     if (d->volumeCount == 0 && !live) return;
     BoundingBox draft = making ? VolumeDraft(d) : (BoundingBox){ 0 };
     // The active volume stands out only while it can be edited (not while a barrier is made)
@@ -2078,7 +2652,11 @@ void DesignerDrawVolumes(const Designer *d, Camera3D cam, int w, int h, bool mar
     // Volumes are often behind walls (that is what they are for): a faint outline on top of
     // everything first, then, depth-tested, translucent faces and the strong outline
     rlDisableDepthTest();
-    for (int i = 0; i < d->volumeCount; i++) DrawBoundingBox(d->volumes[i].box, Fade(VOLUME_COLOR, i == active ? 0.5f : 0.3f));
+    for (int i = 0; i < d->volumeCount; i++) {
+        Color col = Fade(VOLUME_COLOR, i == active ? 0.5f : 0.3f);
+        if (d->volumes[i].snip) DrawDashedBox(d->volumes[i].box, col);
+        else DrawBoundingBox(d->volumes[i].box, col);
+    }
     if (making) DrawBoundingBox(draft, Fade(draftColor, 0.5f));
     rlDrawRenderBatchActive();
     rlEnableDepthTest();
@@ -2089,12 +2667,15 @@ void DesignerDrawVolumes(const Designer *d, Camera3D cam, int w, int h, bool mar
     }
     if (making) DrawCubeV(Vector3Scale(Vector3Add(draft.min, draft.max), 0.5f), Vector3Subtract(draft.max, draft.min), Fade(draftColor, 0.12f));
     rlDrawRenderBatchActive();
-    for (int i = 0; i < d->volumeCount; i++)
-        DrawBoundingBox(d->volumes[i].box, Fade(VOLUME_COLOR, active < 0 || i == active ? 1.0f : 0.6f));
+    for (int i = 0; i < d->volumeCount; i++) {
+        Color col = Fade(VOLUME_COLOR, active < 0 || i == active ? 1.0f : 0.6f);
+        if (d->volumes[i].snip) DrawDashedBox(d->volumes[i].box, col);     // (a 3D snip)
+        else DrawBoundingBox(d->volumes[i].box, col);
+    }
     if (making) DrawBoundingBox(draft, draftColor);
-    if (aim) {
-        // Where a click would put the corner (snapped)
-        Vector3 p = VolumePoint(d);
+    if (aim == WORLD_POINT_ON_PLANE) DrawWorkPlane(d, aimAt, draftColor);
+    if (aim != WORLD_POINT_NONE) {
+        Vector3 p = aimAt;
         float s = 0.012f * Vector3Distance(cam.position, p) + 0.03f;
         DrawLine3D((Vector3){ p.x - s, p.y, p.z }, (Vector3){ p.x + s, p.y, p.z }, draftColor);
         DrawLine3D((Vector3){ p.x, p.y - s, p.z }, (Vector3){ p.x, p.y + s, p.z }, draftColor);
@@ -2105,8 +2686,10 @@ void DesignerDrawVolumes(const Designer *d, Camera3D cam, int w, int h, bool mar
     char text[96];
     for (int i = 0; i < d->volumeCount; i++) {
         BoundingBox v = d->volumes[i].box;
-        if (i == active) snprintf(text, sizeof(text), "V%d   %.2f x %.2f x %.2f m", i + 1, v.max.x - v.min.x, v.max.y - v.min.y, v.max.z - v.min.z);
-        else snprintf(text, sizeof(text), "V%d", i + 1);
+        const char *snip = d->volumes[i].snip ? " snip" : "";
+        if (i == active) snprintf(text, sizeof(text), "V%d%s   %.2f x %.2f x %.2f m", i + 1, snip, v.max.x - v.min.x, v.max.y - v.min.y,
+                                  v.max.z - v.min.z);
+        else snprintf(text, sizeof(text), "V%d%s", i + 1, snip);
         VolumeTab(v, text, cam, w, h);
     }
     if (making) {
@@ -2119,23 +2702,30 @@ void DesignerDrawVolumes(const Designer *d, Camera3D cam, int w, int h, bool mar
         VolumeTab(draft, text, cam, w, h);
     }
 
+    // (the plane's keys while a click would land on it: ALT+click forces it, PGUP / PGDN move it)
+    bool plane = live && WorkPlaneNext(d) && d->volumeStep == VOLUME_STEP_FIRST;
     if (live && !d->promptOpen && d->barrierPlace) {
         const char *help = d->volumeStep == VOLUME_STEP_SECOND
-            ? "{LMB} opposite footprint corner|{CTRL} no snap|{RMB} / {ESC} cancel"
+            ? "{LMB} opposite footprint corner|{ALT} on the work plane|{CTRL} no snap|{RMB} / {ESC} cancel"
             : d->volumeStep == VOLUME_STEP_HEIGHT
             ? "mouse up / down or {wheel} height ({SHIFT} x4)|{CTRL} no snap|{LMB} / {ENTER} write the barrier|{RMB} / {ESC} cancel"
-            : TextFormat("{LMB} first corner on a surface|{N} snap %g m|{CTRL} no snap|{RMB} / {ESC} cancel", VolumeSnap(d));
+            : TextFormat("{LMB} first corner|{ALT} on the work plane%s|{N} snap %g m|{CTRL} no snap|{RMB} / {ESC} cancel",
+                         plane ? "|{PGUP} / {PGDN} plane height" : "", VolumeSnap(d));
         DrawHelpBar("BARRIER", BARRIER_COLOR, help, w, h);
     } else if (live && !d->promptOpen) {
         const char *help;
         if (d->volumeStep == VOLUME_STEP_SECOND)
-            help = "{LMB} opposite footprint corner|{CTRL} no snap|{RMB} / {ESC} cancel";
+            help = "{LMB} opposite footprint corner|{ALT} on the work plane|{CTRL} no snap|{RMB} / {ESC} cancel";
         else if (d->volumeStep == VOLUME_STEP_HEIGHT)
             help = "mouse up / down or {wheel} height ({SHIFT} x4)|{CTRL} no snap|{LMB} / {ENTER} done|{RMB} / {ESC} cancel";
+        else if (plane)
+            help = TextFormat("{LMB} corner on the work plane|{PGUP} / {PGDN} plane height|{[} {]} active|arrows move|"
+                              "{N} snap %g m|{DEL} / {SHIFT+DEL} remove / all|{H} barrier|{X} 3D snip|{ENTER} request|{V} / {ESC} leave",
+                              VolumeSnap(d));     // (the volume count is in the HUD line)
         else
-            help = TextFormat("{LMB} first corner|{[} {]} active|arrows, {PGUP} / {PGDN} move ({ALT} grow, {ALT+SHIFT} shrink)|"
-                              "{N} snap %g m|{DEL} / {SHIFT+DEL} remove / clear|{H} barrier from it|{ENTER} request|{V} / {ESC} leave   (%d volume%s)",
-                              VolumeSnap(d), d->volumeCount, d->volumeCount == 1 ? "" : "s");
+            help = TextFormat("{LMB} corner ({ALT}: plane)|{[} {]} active|arrows {PGUP} {PGDN} move ({ALT} grow, {ALT+SHIFT} shrink)|"
+                              "{N} snap %g m|{DEL} / {SHIFT+DEL} remove / all|{H} barrier|{X} 3D snip|{ENTER} request|{V} / {ESC} leave",
+                              VolumeSnap(d));     // (the volume count is in the HUD line)
         DrawHelpBar("VOLUME", VOLUME_COLOR, help, w, h);
     }
 }
@@ -2172,15 +2762,17 @@ int DesignerDrawHud(const Designer *d, int x, int y)
     } else {
         // Distinct group names, in selection order
         static char text[512];
-        int models = 0, barriers = 0;
+        int models = 0, barriers = 0, shapes = 0;
         for (int i = 0; i < d->selectedCount; i++) {
             models += d->selected[i].kind == MS_OBJ_MODEL;
             barriers += d->selected[i].kind == MS_OBJ_BARRIER;
+            shapes += d->selected[i].kind == MS_OBJ_SHAPE;
         }
-        int boxes = d->selectedCount - models - barriers, n;
+        int boxes = d->selectedCount - models - barriers - shapes, n;
         if (models == 0) n = snprintf(text, sizeof(text), "selected: %d box%s", boxes, boxes == 1 ? "" : "es");
         else n = snprintf(text, sizeof(text), "selected: %d box%s, %d model%s", boxes, boxes == 1 ? "" : "es",
                           models, models == 1 ? "" : "s");
+        if (shapes > 0) n += snprintf(text + n, sizeof(text) - n, ", %d shape%s", shapes, shapes == 1 ? "" : "s");
         if (barriers > 0) n += snprintf(text + n, sizeof(text) - n, ", %d barrier%s", barriers, barriers == 1 ? "" : "s");
         n += snprintf(text + n, sizeof(text) - n, "  [");
         unsigned char *seen = MS_RESERVE(scratch.seen, scratch.seenCap, scene->groupCount + 1) ? scratch.seen : NULL;
@@ -2220,7 +2812,11 @@ int DesignerDrawHud(const Designer *d, int x, int y)
             HudText(TextFormat("  at %.2f %.2f %.2f  rot %.1f %.1f %.1f  scale %.2f %.2f %.2f", m->position.x, m->position.y,
                     m->position.z, m->rotationDeg.x, m->rotationDeg.y, m->rotationDeg.z, m->scale.x, m->scale.y, m->scale.z),
                     x, y, dim);
-        } else if (d->hit.obj.kind == MS_OBJ_BARRIER)
+        } else if (d->hit.obj.kind == MS_OBJ_SHAPE)
+            HudText(TextFormat("crosshair: %s  |  shape %s  |  material %s  |  line %s%s%d  |  %s  |  shape %d  |  %.1f m", group,
+                    MS_ShapeKindName(scene->shapes[d->hit.obj.index].kind), DesignerMaterialLabel(d->hit.obj),
+                    MAPEDIT_LINE_AT(r.file, r.line), idText, d->hit.obj.index, d->hit.dist), x, y, main);
+        else if (d->hit.obj.kind == MS_OBJ_BARRIER)
             HudText(TextFormat("crosshair: %s  |  barrier (invisible wall)  |  line %s%s%d  |  %s  |  barrier %d  |  %.1f m",
                     group, MAPEDIT_LINE_AT(r.file, r.line), idText, d->hit.obj.index, d->hit.dist), x, y, main);
         else
@@ -2245,9 +2841,12 @@ int DesignerDrawHud(const Designer *d, int x, int y)
         int n = snprintf(text, sizeof(text), "volumes: %d", d->volumeCount);
         if (d->activeVolume >= 0 && d->activeVolume < d->volumeCount) {
             BoundingBox v = d->volumes[d->activeVolume].box;
-            snprintf(text + n, sizeof(text) - n, "  |  V%d min %.2f %.2f %.2f  max %.2f %.2f %.2f%s", d->activeVolume + 1,
-                     v.min.x, v.min.y, v.min.z, v.max.x, v.max.y, v.max.z, d->volumeMode ? "  (arrows edit it)" : "");
+            n += snprintf(text + n, sizeof(text) - n, "  |  V%d min %.2f %.2f %.2f  max %.2f %.2f %.2f%s", d->activeVolume + 1,
+                          v.min.x, v.min.y, v.min.z, v.max.x, v.max.y, v.max.z, d->volumeMode ? "  (arrows edit it)" : "");
         }
+        // (the work plane while the next click would land on it: docs/editor-tools.md 1.2)
+        if (WorkPlaneNext(d) && n < (int)sizeof(text))
+            snprintf(text + n, sizeof(text) - n, "  |  work plane y %.2f m", WorkPlaneY(d, d->pickPos));
         UiHudMark(text, x, y, UI_HUD_LINE, UI_S, VOLUME_COLOR);  // (the frames' colour)
         y += 20;
     }
@@ -2313,28 +2912,149 @@ void DesignerDrawRegions(const Designer *d, int w, int h, bool marked)
     }
     if (!d->snipping) return;
 
-    // A plain drag replaces the regions, so while it runs only the new one shows
+    // A plain drag replaces the regions, so while it runs only the new one shows (a drag with the pen
+    // is a stroke: DesignerDrawSketches)
     if (!MS_RESERVE(scratch.rects, scratch.rectsCap, d->regionCount + 1)) return;
     Rectangle *rects = scratch.rects;
     int n = 0;
-    bool replacing = d->dragging && !d->dragAdd;
+    bool rectDrag = d->dragging && !d->pen;
+    bool replacing = rectDrag && !d->dragAdd;
     if (!replacing) for (int i = 0; i < d->regionCount; i++) rects[n++] = d->regions[i].rect;
-    Rectangle drag = d->dragging ? DragRect(d) : (Rectangle){ 0 };
-    if (d->dragging) rects[n++] = drag;
+    Rectangle drag = rectDrag ? DragRect(d) : (Rectangle){ 0 };
+    if (rectDrag) rects[n++] = drag;
 
     DimOutside(rects, n, w, h, (Color){ 0, 0, 0, 120 });
     if (!replacing)
         for (int i = 0; i < d->regionCount; i++) DrawRegionFrame(d->regions[i].rect, i + 1, true, w);
-    if (d->dragging && drag.width > 0.0f && drag.height > 0.0f) {
+    if (rectDrag && drag.width > 0.0f && drag.height > 0.0f) {
         int number = replacing ? 1 : d->regionCount + 1;
         DrawRegionFrame(drag, number, true, w);
     }
 
-    if (!d->promptOpen) {
-        const char *help = TextFormat("drag new region|{SHIFT}+drag add|{ENTER} request|{RMB} / {ESC} / {C} cancel"
+    if (!d->promptOpen && d->pen) {
+        static const char *const KINDS[] = { "free", "line", "arrow", "circle" };
+        const char *help = TextFormat("drag draw|{1}-{4} colour: %s|{F} {L} {A} {O} kind: %s|{BACKSPACE} undo ({SHIFT}: all)|{D} rectangles|"
+                                      "{ENTER} request|{RMB} / {ESC} / {C} cancel   (%d stroke%s, %d region%s)",
+                                      DesignerSketchColorName(d->penColor), KINDS[d->penKind % 4], d->sketchCount,
+                                      d->sketchCount == 1 ? "" : "s", d->regionCount, d->regionCount == 1 ? "" : "s");
+        DrawHelpBar("SNIP: PEN", DesignerSketchColor(d->penColor), help, w, h);
+    } else if (!d->promptOpen) {
+        const char *help = TextFormat("drag new region|{SHIFT}+drag add|{D} pen|{ENTER} request|{RMB} / {ESC} / {C} cancel"
                                       "   (%d region%s)", d->regionCount, d->regionCount == 1 ? "" : "s");
         DrawHelpBar("SNIP", REGION_COLOR, help, w, h);
     }
+}
+
+// --- Sketches (docs/editor-tools.md 4): scene-side colours (they are drawn into the request images,
+// so they stay these constants whatever the UI looks like; docs/ui-design.md 2)
+static const Color SKETCH_COLORS[SKETCH_COLOR_COUNT] = {
+    { 240, 64, 56, 255 }, { 255, 214, 40, 255 }, { 64, 150, 255, 255 }, { 245, 245, 245, 255 },
+};
+static const char *const SKETCH_COLOR_NAMES[SKETCH_COLOR_COUNT] = { "red", "yellow", "blue", "white" };
+static const char *const SKETCH_KIND_NAMES[] = { "free", "line", "arrow", "circle" };
+#define SKETCH_THICK 3.0f                       // px, the stroke
+#define SKETCH_RIM (Color){ 16, 16, 16, 255 }   // a 1 px dark rim around it (reads on bright fog and in shade)
+
+Color DesignerSketchColor(int color) { return SKETCH_COLORS[(unsigned)color % SKETCH_COLOR_COUNT]; }
+const char *DesignerSketchColorName(int color) { return SKETCH_COLOR_NAMES[(unsigned)color % SKETCH_COLOR_COUNT]; }
+const char *DesignerSketchKindName(SketchKind kind) { return SKETCH_KIND_NAMES[(unsigned)kind % 4]; }
+
+// A polyline of thick segments with round joints (closed: back to its start)
+static void StrokeLines(const Vector2 *p, int n, bool closed, float thick, Color c)
+{
+    for (int i = 1; i < n; i++) DrawLineEx(p[i - 1], p[i], thick, c);
+    if (closed && n > 2) DrawLineEx(p[n - 1], p[0], thick, c);
+    for (int i = 0; i < n; i++) DrawCircleSector(p[i], thick * 0.5f, 0.0f, 360.0f, 8, c);
+}
+
+// A triangle in raylib's winding (whatever order the corners come in)
+static void Triangle(Vector2 a, Vector2 b, Vector2 c, Color col)
+{
+    float cross = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+    if (cross < 0.0f) DrawTriangle(a, b, c, col);
+    else DrawTriangle(a, c, b, col);
+}
+
+// One stroke: pass 0 its dark rim, pass 1 its colour. A circle still being dragged (two points: centre
+// and rim) is drawn as the circle it will become.
+static void DrawStroke(const DesignSketch *s, int pass)
+{
+    float thick = pass == 0 ? SKETCH_THICK + 2.0f : SKETCH_THICK;
+    Color c = pass == 0 ? SKETCH_RIM : DesignerSketchColor(s->color);
+    const Vector2 *p = s->points;
+    int n = s->pointCount;
+    if (n < 1) return;
+    if (s->kind == SKETCH_CIRCLE && n == 2) {
+        Vector2 rim[SKETCH_CIRCLE_POINTS];      // (stack scratch: one circle's fixed point count)
+        float rad = Vector2Distance(p[0], p[1]);
+        for (int k = 0; k < SKETCH_CIRCLE_POINTS; k++) {
+            float a = 2.0f * PI * k / SKETCH_CIRCLE_POINTS;
+            rim[k] = (Vector2){ p[0].x + rad * cosf(a), p[0].y + rad * sinf(a) };
+        }
+        StrokeLines(rim, SKETCH_CIRCLE_POINTS, true, thick, c);
+        return;
+    }
+    if (s->kind != SKETCH_ARROW || n < 2) {
+        StrokeLines(p, n, s->closed, thick, c);
+        return;
+    }
+    // An arrow: the shaft up to the head's base, the head a triangle with its tip at the release point
+    Vector2 a = p[0], b = p[n - 1];
+    float len = Vector2Distance(a, b);
+    if (len < 1.0f) return;
+    Vector2 dir = Vector2Scale(Vector2Subtract(b, a), 1.0f / len), perp = { -dir.y, dir.x };
+    float head = fminf(18.0f, len * 0.45f), half = head * 0.55f, grow = pass == 0 ? 1.5f : 0.0f;
+    Vector2 base = Vector2Subtract(b, Vector2Scale(dir, head));
+    Vector2 shaft[2] = { a, Vector2Add(base, Vector2Scale(dir, 1.0f)) };
+    StrokeLines(shaft, 2, false, thick, c);
+    Vector2 tip = Vector2Add(b, Vector2Scale(dir, grow * 1.6f));
+    Vector2 back = Vector2Subtract(base, Vector2Scale(dir, grow));
+    Triangle(tip, Vector2Add(back, Vector2Scale(perp, half + grow)), Vector2Subtract(back, Vector2Scale(perp, half + grow)), c);
+}
+
+// The label tab "S<n>" above the stroke's first point, in its colour (kept on a w x h target)
+static void DrawStrokeLabel(const DesignSketch *s, int number, int w, int h)
+{
+    if (s->pointCount < 1) return;
+    char text[16];
+    snprintf(text, sizeof(text), "S%d", number);
+    // (a circle being dragged: above its centre's rim point at the top)
+    Vector2 p = s->points[0];
+    if (s->kind == SKETCH_CIRCLE && s->pointCount == 2) p.y -= Vector2Distance(s->points[0], s->points[1]);
+    int tw = UiTagWidth(text), th = UI_PILL_H;
+    int lx = (int)p.x - tw / 2, ly = (int)p.y - th - 8;
+    if (lx + tw > w - 1) lx = w - 1 - tw;
+    if (lx < 1) lx = 1;
+    if (ly + th > h - 1) ly = h - 1 - th;
+    if (ly < 1) ly = 1;
+    UiTag(text, lx, ly, DesignerSketchColor(s->color), (Color){ 16, 16, 16, 255 });
+}
+
+// The first n strokes, rims first, then the colours, then the labels
+static void DrawSketchList(const Designer *d, int n, int w, int h)
+{
+    for (int pass = 0; pass < 2; pass++)
+        for (int i = 0; i < n; i++) DrawStroke(&d->sketches[i], pass);
+    for (int i = 0; i < n; i++) DrawStrokeLabel(&d->sketches[i], i + 1, w, h);
+}
+
+// (marked: only the finished strokes, as the request sends them)
+void DesignerDrawSketches(const Designer *d, int w, int h, bool marked)
+{
+    if (d->sketchCount == 0 || (!marked && !d->snipping)) return;
+    DrawSketchList(d, marked ? DoneSketches(d) : d->sketchCount, w, h);
+}
+
+// sketch.png: on a target the caller cleared to transparent. Colour blends as usual, alpha adds
+// up (src + dst * (1 - src)), so the strokes keep their own alpha instead of its square
+void DesignerDrawSketchesAlone(const Designer *d, int w, int h)
+{
+    if (DoneSketches(d) == 0) return;
+    rlDrawRenderBatchActive();
+    rlSetBlendFactorsSeparate(RL_SRC_ALPHA, RL_ONE_MINUS_SRC_ALPHA, RL_ONE, RL_ONE_MINUS_SRC_ALPHA, RL_FUNC_ADD, RL_FUNC_ADD);
+    BeginBlendMode(BLEND_CUSTOM_SEPARATE);
+    DrawSketchList(d, DoneSketches(d), w, h);
+    EndBlendMode();
 }
 
 void DesignerDrawPrompt(Designer *d, int w, int h)
@@ -2354,10 +3074,13 @@ void DesignerDrawPrompt(Designer *d, int w, int h)
         UiSheet(box);
 
         int tx = (int)box.x + PROMPT_PAD, ty = (int)box.y + PROMPT_PAD;
-        char regions[64] = "";
+        char regions[112] = "";     // (three counts)
         int rn = 0;
         if (d->regionCount > 0) rn = snprintf(regions, sizeof(regions), " + %d region%s", d->regionCount, d->regionCount == 1 ? "" : "s");
-        if (d->volumeCount > 0) snprintf(regions + rn, sizeof(regions) - rn, " + %d volume%s", d->volumeCount, d->volumeCount == 1 ? "" : "s");
+        if (d->volumeCount > 0)
+            rn += snprintf(regions + rn, sizeof(regions) - rn, " + %d volume%s", d->volumeCount, d->volumeCount == 1 ? "" : "s");
+        if (d->sketchCount > 0)
+            snprintf(regions + rn, sizeof(regions) - rn, " + %d sketch%s", d->sketchCount, d->sketchCount == 1 ? "" : "es");
         int hy = ty + (PROMPT_HEADER_H - 8 - UiLineHeight(UI_S)) / 2;
         UiTextBold("Request for Claude", tx, hy, UI_S, UI_INK);
         UiHints(TextFormat("(%d selected%s%s)|{Enter} send|{Shift+Enter} new line|{Ctrl+V} paste|{Esc} %s",
@@ -2372,8 +3095,8 @@ void DesignerDrawPrompt(Designer *d, int w, int h)
 
         Color ink = UI_INK;
         if (d->promptLen == 0) {
-            UiText(d->regionCount > 0 || d->volumeCount > 0
-                   ? "Describe the change. The crosshair point, the selected boxes, the screen regions and the volumes are sent along."
+            UiText(d->regionCount > 0 || d->volumeCount > 0 || d->sketchCount > 0
+                   ? "Describe the change. The crosshair point, the selected boxes, the screen regions, sketches and volumes are sent along."
                    : "Describe the change. The crosshair point and the selected boxes are sent along.",
                    tx, ty, PROMPT_FONT, UI_FAINT);
         }
@@ -2410,9 +3133,13 @@ void DesignerFree(Designer *d)
     DesignerClearSelection(d);
     free(d->selected);
     free(d->keys);
-    for (int k = 0; k <= MS_OBJ_BARRIER; k++) free(d->selPos[k]);
+    for (int k = 0; k <= MS_OBJ_SHAPE; k++) free(d->selPos[k]);
     free(d->regions);
     free(d->volumes);
+    DropSketches(d);
+    free(d->sketches);
+    d->sketches = NULL;
+    d->sketchCap = 0;
     free(d->prompt);
     d->selected = NULL;
     d->keys = NULL;
@@ -2421,7 +3148,7 @@ void DesignerFree(Designer *d)
     d->volumeCount = d->volumeCap = 0;
     d->prompt = NULL;
     d->selectedCap = d->keyCap = d->regionCount = d->regionCap = d->promptLen = d->promptCap = d->cursor = 0;
-    for (int k = 0; k <= MS_OBJ_BARRIER; k++) { d->selPos[k] = NULL; d->selPosCap[k] = 0; }
+    for (int k = 0; k <= MS_OBJ_SHAPE; k++) { d->selPos[k] = NULL; d->selPosCap[k] = 0; }
     // The file-level scratch (one designer per process)
     free(scratch.seen);
     free(scratch.ys);
@@ -2434,6 +3161,7 @@ void DesignerFree(Designer *d)
     promptLineCap = 0;
     free(boxDist);
     free(modelDist);
-    boxDist = modelDist = NULL;
-    boxDistCap = modelDistCap = 0;
+    free(shapeDist);
+    boxDist = modelDist = shapeDist = NULL;
+    boxDistCap = modelDistCap = shapeDistCap = 0;
 }

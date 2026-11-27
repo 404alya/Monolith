@@ -153,14 +153,32 @@ static void Row(Ctx *c, const char *label, int labelW, Color ink, Rectangle *sli
 
 static bool TargetSet(const DrawMode *dm) { return dm->target.version != 0; }
 
+// The target is a box's face or a shape's part (its faces / parts are grouped in the Faces section)
 static bool TargetBox(const DrawMode *dm)
 {
     const MS_SurfaceHit *h = &dm->target.hit;
-    return TargetSet(dm) && dm->target.ok && h->hit.obj.kind == MS_OBJ_BOX && h->face >= 0 && h->face < 6;
+    return TargetSet(dm) && dm->target.ok && (h->hit.obj.kind == MS_OBJ_BOX || h->hit.obj.kind == MS_OBJ_SHAPE) && h->face >= 0 &&
+           h->face < 6;
 }
 
-// The face buttons follow the target box's groups; the user's unapplied changes stay until the
-// target is another box (and an undo or an apply brings them in step again)
+// The target is a shape (its parts' names on the buttons)
+static const MS_Shape *TargetShape(const DrawMode *dm)
+{
+    const MS_SurfaceHit *h = &dm->target.hit;
+    return TargetBox(dm) && h->hit.obj.kind == MS_OBJ_SHAPE && h->hit.obj.index < scene->shapeCount ? &scene->shapes[h->hit.obj.index]
+                                                                                                    : NULL;
+}
+
+// The name on face button f: a box's face, a shape's part
+static const char *FaceButtonName(const DrawMode *dm, int f)
+{
+    const MS_Shape *S = TargetShape(dm);
+    const char *n = S ? MS_ShapePartName(S->kind, f) : f < 6 ? FACE_NAMES[f] : NULL;
+    return n ? n : "";
+}
+
+// The face buttons follow the target box's (shape's) groups; the user's unapplied changes stay until the
+// target is another box or shape (and an undo or an apply brings them in step again)
 static void SyncFaces(DrawPanel *p, const DrawMode *dm)
 {
     static const unsigned char separate[6] = { 0, 1, 2, 3, 4, 5 };
@@ -803,63 +821,69 @@ static void SectionDensity(Ctx *c)
     DensityButtons(c, "Resize to density", true, true);
 }
 
-// faces[] with the numbers closed up in order (0 2 2 5 -> 0 1 1 2)
-static void CloseUp(unsigned char faces[6])
+// faces[0..count) with the numbers closed up in order (0 2 2 5 -> 0 1 1 2); faces past count stay
+static void CloseUp(unsigned char faces[6], int count)
 {
     unsigned char map[6];
     int next = 0;
     for (int n = 0; n < 6; n++) {
         bool used = false;
-        for (int f = 0; f < 6; f++) used |= faces[f] == n;
+        for (int f = 0; f < count; f++) used |= faces[f] == n;
         map[n] = (unsigned char)(used ? next++ : 0);
     }
-    for (int f = 0; f < 6; f++) faces[f] = map[faces[f] < 6 ? faces[f] : 0];
+    for (int f = 0; f < count; f++) faces[f] = map[faces[f] < 6 ? faces[f] : 0];
 }
 
 static void SectionFaces(Ctx *c)
 {
     DrawPanel *p = c->p;
     const DrawMode *dm = c->dm;
-    // (boxes only; the others say why not)
+    // (boxes and shapes of 2 or more parts; the others say why not)
     if (!TargetBox(dm) && c->p->only != DRAWPANEL_FACES) return;
     Header(c, "Faces", "same number: one rectangle");
     if (!TargetBox(dm) || !dm->target.facesOk) {
-        c->y += Wrapped(c, "point at a box: its faces' paint is grouped here", UI_S, UI_DIM, 2) + GAP;
+        c->y += Wrapped(c, TargetShape(dm) ? "a sphere has one part: nothing to group"
+                                           : "point at a box or a shape: its faces' (parts') paint is grouped here", UI_S, UI_DIM, 2) + GAP;
         return;
     }
     const unsigned char *cells = dm->target.groups;
-    // A button per face: its name (dim) and its cell number; a click counts the number on (lit:
-    // changed, not applied yet)
-    int bw = (c->w - 5 * GAP) / 6;
-    int left = c->x + (c->w - (6 * bw + 5 * GAP)) / 2;
-    for (int f = 0; f < 6; f++) {
+    const MS_Shape *S = TargetShape(dm);
+    int count = dm->target.faceCount > 0 && dm->target.faceCount <= 6 ? dm->target.faceCount : 6;
+    // A button per face (a shape's part): its name (dim) and its cell number; a click counts the number
+    // on (lit: changed, not applied yet)
+    int bw = (c->w - (count - 1) * GAP) / count;
+    int left = c->x + (c->w - (count * bw + (count - 1) * GAP)) / 2;
+    for (int f = 0; f < count; f++) {
         Rectangle r = { (float)(left + f * (bw + GAP)), (float)c->y, (float)bw, BUTTON_H };
         bool lit = p->faces[f] != cells[f];
-        if (Button(c, r, NULL, lit)) p->faces[f] = (unsigned char)((p->faces[f] + 1) % 6);
+        if (Button(c, r, NULL, lit)) p->faces[f] = (unsigned char)((p->faces[f] + 1) % count);
         if (Drawing(c)) {
+            const char *name = FaceButtonName(dm, f);
             const char *n = TextFormat("%d", p->faces[f] < 6 ? p->faces[f] : 0);
-            int nw = UiMeasureBold(n, UI_M), fw = UiMeasure(FACE_NAMES[f], UI_XS);
+            int nw = UiMeasureBold(n, UI_M), fw = UiMeasure(name, UI_XS);
             int x = (int)r.x + ((int)r.width - fw - 5 - nw) / 2;
-            UiText(FACE_NAMES[f], x, (int)r.y + (BUTTON_H - UiLineHeight(UI_XS)) / 2 + 1, UI_XS, lit ? UiAlpha(UI_ON_INK, 0.6f) : UI_DIM);
+            UiText(name, x, (int)r.y + (BUTTON_H - UiLineHeight(UI_XS)) / 2 + 1, UI_XS, lit ? UiAlpha(UI_ON_INK, 0.6f) : UI_DIM);
             UiTextBold(n, x + fw + 5, (int)r.y + (BUTTON_H - UiLineHeight(UI_M)) / 2, UI_M, lit ? UI_ON_INK : UI_INK);
         }
     }
     c->y += BUTTON_H + GAP;
-    // Apply, and the two presets (they set the buttons; Apply applies them)
-    const char *labels[3] = { "Apply", "All separate", "Sides together" };
+    // Apply, and the two presets (they set the buttons; Apply applies them). A round shape's second
+    // preset puts every part together (a cube's: the sides, as a box's)
+    bool round = S && S->kind != MS_SHAPE_CUBE;
+    const char *labels[3] = { "Apply", "All separate", round ? "All together" : "Sides together" };
     int tw[3], total = 0;
     for (int k = 0; k < 3; k++) total += tw[k] = UiMeasure(labels[k], UI_M) + 16;
     int room = c->w - 2 * GAP, x = c->x;
     for (int k = 0; k < 3; k++) {
         int w = k < 2 ? tw[k] * room / total : c->x + c->w - x;
         Rectangle r = { (float)x, (float)c->y, (float)w, BUTTON_H };
-        if (Button(c, r, labels[k], k == 0 && memcmp(p->faces, cells, 6) != 0)) {
+        if (Button(c, r, labels[k], k == 0 && memcmp(p->faces, cells, (size_t)count) != 0)) {
             if (k == 0) {
-                CloseUp(p->faces);
+                CloseUp(p->faces, count);
                 c->act = DRAWPANEL_ACT_FACES;
             } else {
-                static const unsigned char presets[2][6] = { { 0, 1, 2, 3, 4, 5 }, { 0, 0, 1, 2, 0, 0 } };
-                memcpy(p->faces, presets[k - 1], 6);
+                static const unsigned char presets[3][6] = { { 0, 1, 2, 3, 4, 5 }, { 0, 0, 1, 2, 0, 0 }, { 0, 0, 0, 0, 0, 0 } };
+                memcpy(p->faces, presets[k == 2 && round ? 2 : k - 1], (size_t)count);
             }
         }
         x += w + GAP;
