@@ -35,11 +35,11 @@ Little-endian only, every field a fixed-width integer or an IEEE-754 `float`, ev
 | Offset | Type | Field |
 |---|---|---|
 | 0 | `u8[8]` | magic `89 4D 41 50 42 0D 0A 1A` (`\x89MAPB\r\n\x1a`: not text, and catches a file mangled by newline conversion) |
-| 8 | `u32` | binary-format version, `MS_COMPILED_VERSION` (13; see *Versions* below). Separate from the map format version `MS_FORMAT_VERSION`; bumped whenever a record or section changes |
+| 8 | `u32` | binary-format version, `MS_COMPILED_VERSION` (14; see *Versions* below). Separate from the map format version `MS_FORMAT_VERSION`; bumped whenever a record or section changes |
 | 12 | `u32` | header size (64) |
 | 16 | `u32` | byte-order tag `0x01020304` (a big-endian reader sees `0x04030201` and refuses the file) |
 | 20 | `u32` | map format version of the source (`MS_FORMAT_VERSION`, 3) |
-| 24 | `u32` | section count (20) |
+| 24 | `u32` | section count (21) |
 | 28 | `u32` | offset of the section table |
 | 32 | `u64` | file size in bytes (a truncated file fails here) |
 | 40 | `u64` | FNV-1a 64 of the source `.map` bytes (the main file; `sources[0]` repeats it) |
@@ -73,17 +73,19 @@ Little-endian only, every field a fixed-width integer or an IEEE-754 `float`, ev
 | 18 | paint | `u32 material` (`0xFFFFFFFF`: the model slot's own material), `u32 kind` (0 a box, 1 a model instance), `u32 object` (index into boxes or models), `u32 facesOrSlot` (a box: bit f for face f, +x −x +y −y +z −z; a model: the slot), `u32 x, y, w, h` (texels of the atlas), `u32 filter` (`paint own … paint_filter`: 0 trilinear, 1 nearest; 0 for a material's entry), `i32 line, file`: one record per `paint` line in map order, also the ones that don't draw | 44 |
 | 19 | sources | `u32 path; i32 importFile, importLine; u32 pad; u64 size, hash`: every map-text file the map was compiled from, `[0]` the main file (its name, size and hash equal the header's; `importFile` −1, `importLine` 0), then each imported file in the order the parser first reached it (`path` package-relative as normalised, a `.map` file, each once; `importFile` an earlier source, `importLine` ≥ 1: the `import` line that reached it); `size` at most 4 MB; `pad` 0 | 32 |
 | 20 | fog zones | `f32 min[3], max[3], fade; u32 set; f32 density, start, end, skyAffect; u8 color[4]`: one record per `fogzone` line in map order; `set` says which values the line gives (bit 0 `fog.density`, 1 `fog.color`, 2 `fog.start`, 3 `fog.end`, 4 `fog.skyAffect`; the other values 0), `color` sRGB RGBA. The reader checks them as the parser does (box within the coordinate limit, min ≤ max, `fade` ≥ 0, at least one known bit, each value in its `env` key's range) | 52 |
+| 21 | barriers | `f32 min[3], max[3], rotationDeg[3]; i32 line, file, prim, group, material, copy, part`: one record per `barrier` copy (after `repeat`) in map order, the box **as written** (corners ordered) and its rotation (0 0 0: not turned); the reader rebuilds the world AABB and the turned shape with the parser's code (bits as a text load) and checks finite ordered corners, a finite rotation, the reference (`material`: the `use` active at the line) and map order; barriers count toward the object cap | 64 |
 
 **Turned boxes:** for a box with a box turn record, its `boxes` record holds the box **as written** (the two corners before the turn, ordered), not its world AABB; the reader rebuilds the turned-box record (centre, size, axes) and the AABB with the parser's own code, so the bits match a text load. Every other box is stored as its corners.
 
-**Versions:** the reader reads exactly one binary-format version, 12, and only files compiled from the current map format (3); the writer writes the same. Any other file is refused and nothing is loaded:
+**Versions:** the reader reads exactly one binary-format version, 14, and only files compiled from the current map format (3); the writer writes the same. Any other file is refused and nothing is loaded:
 
-- another binary-format version: `compiled map version 12; this runtime reads compiled map version 13: compile the map again`;
+- another binary-format version: `compiled map version 13; this runtime reads compiled map version 14: compile the map again`;
 - compiled from an older map format (every file an earlier monolith wrote): `compiled map of map format 2; this runtime reads map format 3: compile the map again`;
 - compiled from a newer map format: `compiled map of map format 4 is newer than this runtime (3): update monolith`.
 
 **Version history** (the versions before 7 are in the git history of this file and of `CM_VERSION`):
 
+- 14 (2026-11-27, barriers, [map-format.md](map-format.md) §2.1 *Barriers*): the new section 21, `barriers`, one record per `barrier` copy. Every existing `.mapb` must be compiled again.
 - 13 (2026-11-25, fog zones, [map-format.md](map-format.md) §2.5): the new section 20, `fog zones`, one record per `fogzone` line. Every existing `.mapb` must be compiled again.
 - 12 (2026-11-22, materials that cast no shadow): materials gain `u32 noShadow` at the end (`shadow off`; 212 → 216 bytes). Every existing `.mapb` must be compiled again.
 - 11 (2026-11-22, light shadow biases): lights gain `depthBias, slopeBias` after `clipMax` (-1 = R3D's default for the type; 120 → 128 bytes). Every existing `.mapb` must be compiled again.
@@ -112,7 +114,7 @@ A compiled file is input like any other. Before it trusts a byte, the reader che
 - every float finite, and the checks the parser makes on the same values (exactly those: a file the parser could have produced always loads): box corners ordered with finite sizes, box turns in range (box < box count), strictly increasing, with finite angles that are not all 0 and a turned box whose centre, size and AABB stay finite, a material's paint atlas a path inside the package that exists, its `paint_filter` 0 or 1 and its `paintGrid` −1, 0 or 1..1024, paint entries naming a material with a paint atlas (or a model slot's own material, then a model), a box with faces 1..63 or a model with a slot, made by a line with an explicit `id`, a rectangle of at least 1 × 1 texel, `paint_filter` only on own entries, no two rectangles of one atlas sharing a texel and no face or slot of an object in two entries of one material (the parser's own check, `PaintConflict`), a material's `uv_faces` none or a layout the parser accepts (cells 0..5, every number up to the largest used, on a material with `uv_scale 1 1` and `uv_offset 0 0`) and its `filter` 0 or 1, spawn and viewpoint positions within ±1 000 000 m (light positions only finite: `repeat` may shift them past the limit), model scale > 0, a point light without a direction and the others with a unit one, spot `inner <= outer`, a light clip box ordered and not flat, viewpoint eye ≠ target, the `env` checks (`CheckEnvValue`, the parser's own function: ranges, `shadow.size`, sky sizes, non-zero sun and sky directions), enum values, integer ranges;
 - every path package-relative (no absolute path, drive letter, backslash or `..`; the parser's own check), and the file present;
 - the sources: at least one, `[0]` the header's source (name, size, hash, no import line), the others what an `import` line can name (a normalised package path, each file once, reached from a line of an earlier source, at most 4 MB; the editor build also checks that it names a `.map` file: a game build reads no map text, and its runtime holds no `.map` name at all, `./build.sh test export_strip`);
-- material 0 named `default`, statement keys unique and not 0, boxes, models and lights in map order, a map that makes at least one box or model.
+- material 0 named `default`, statement keys unique and not 0, boxes, models, lights and barriers in map order, a map that makes at least one box or model.
 
 A file that fails any check is rejected with `<file>: <message>` (for example `forest.mapb: compiled map: section 'boxes' lies outside the file`, or `forest.mapb: compiled map version 10; this runtime reads compiled map version 9: compile the map again`) and nothing is loaded; a bad file never crashes the reader. Errors found later in the load (a texture that won't load) name the source map and line, as for a text load: `forest.map:41: cannot load the texture "textures/bark.png"`.
 

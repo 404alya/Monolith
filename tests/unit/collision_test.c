@@ -3,8 +3,10 @@
 // player walks up the 30 degree ramp onto the platform and stands on the slope, walks down it
 // without leaving the ground, and stops at the 45 degree yawed wall's true face (its AABB would
 // stop it more than 0.3 m earlier). Also MS_ColliderTop / MS_ColliderBottom on axis-aligned
-// colliders (exactly max.y / min.y) and MS_Raycast's turned face normal. Last, a material with
+// colliders (exactly max.y / min.y) and MS_Raycast's turned face normal. Then a material with
 // `collide off` (a small map it writes into build/unit/): its box doesn't block but is still picked.
+// Last, `barrier` lines (another small map): the same ramp, platform and yawed wall as invisible
+// barriers block, carry and stop the player like the boxes, while MS_Raycast passes through them.
 //   ./build.sh test collision          (builds it with ASan + UBSan and runs it)
 //   collision_test <tests/rotated>
 #include "player.h"
@@ -147,6 +149,70 @@ int main(int argc, char **argv)
     Check(MS_FirstCollision(scene, body) == 0, "the solid slab still collides", MS_FirstCollision(scene, body), 0);
     h = MS_Raycast(scene, (Vector3){ 0, 0.25f, 3 }, (Vector3){ 0, 0, -1 }, 0.0f);
     Check(h.obj.kind == MS_OBJ_BOX && h.obj.index == 1, "raycast still picks the collide-off blade", h.obj.index, 1);
+    MS_Unload(scene);
+
+    // `barrier` (docs/map-format.md 2.1, Barriers): tests/rotated's ramp (block 10 2.1268 -5 10 0.4 3 rot 0 0 30),
+    // platform and yawed wall (block 0 0 -15 6 3 0.4 rot 45 0 0) written as barriers over a ground box
+    snprintf(path, sizeof(path), "%s/../../build/unit/barrier.map", argv[1]);
+    f = fopen(path, "w");
+    if (!f) { fprintf(stderr, "collision_test: cannot write %s\n", path); return 1; }
+    fputs("monolith 3\n"
+          "box -100 -1 -100 100 0 100\n"
+          "barrier 5 2.1268 -6.5 15 2.5268 -3.5 rot 0 0 30\n"
+          "barrier 14.3 0 -7 20 5 -3\n"
+          "barrier -3 0 -15.2 3 3 -14.8 rot 45 0 0\n", f);
+    fclose(f);
+    scene = MS_Load(path, &(MS_LoadOptions){ .noGpu = true });
+    if (!scene) { fprintf(stderr, "collision_test: %s\n", MS_LastError()); MS_ClearError(); return 1; }
+    Check(scene->boxCount == 1 && scene->barrierCount == 3 && scene->colliderCount == 4 && scene->barrierColliderFirst == 1,
+          "barriers: 1 box, 3 barriers, colliders = box then barriers", scene->barrierColliderFirst, 1);
+    Check(scene->barriers[0].turned && !scene->barriers[1].turned && scene->barriers[2].turned, "barriers: which are turned",
+          scene->barriers[1].turned, 0);
+    Check(scene->entityCount == 4 && scene->entityObjects[1].kind == MS_OBJ_BARRIER && scene->barrierEntities[2] == 3,
+          "barriers are entities, in map order", scene->barrierEntities[2], 3);
+    bool walk = false;
+    BoundingBox pb = scene->colliders[2];
+    Check(MS_ColliderTop(scene, 2, pb, &walk) == pb.max.y && walk && MS_ColliderBottom(scene, 2, pb) == pb.min.y,
+          "axis-aligned barrier: top = max.y, walkable", MS_ColliderTop(scene, 2, pb, NULL), pb.max.y);
+
+    // Up the invisible ramp onto the invisible platform, and down again
+    p = (Player){ .feet = { 2.0f, 0.0f, -5.0f }, .grounded = true };
+    Steps(&p, (Vector3){ 0 }, 10);
+    maxErr = 0.0;
+    airborne = 0;
+    for (int i = 0; i < 600 && p.feet.x < 17.0f; i++) {
+        PlayerStep(&p, (Vector3){ 1, 0, 0 }, false, false, 1.0f / 60.0f);
+        double front = p.feet.x + PLAYER_RADIUS;
+        if (front > 5.8 && front < 14.2) {
+            maxErr = fmax(maxErr, fabs(p.feet.y - RampTop(front)));
+            airborne += !p.grounded;
+        }
+    }
+    Check(p.feet.x >= 17.0f && fabsf(p.feet.y - 5.0f) < 1e-4f, "barriers: up the ramp, on the platform (feet y)", p.feet.y, 5.0);
+    Check(maxErr < 0.003 && airborne == 0, "barriers: on the turned ramp (max error)", maxErr, 0.0);
+    for (int i = 0; i < 600 && p.feet.x > 3.0f; i++) PlayerStep(&p, (Vector3){ -1, 0, 0 }, false, false, 1.0f / 60.0f);
+    Check(p.feet.x <= 3.0f && fabsf(p.feet.y) < 1e-4f, "barriers: walked down onto the ground (feet y)", p.feet.y, 0.0);
+
+    // Stopped by the yawed barrier's true face, as by the box
+    p = (Player){ .feet = { 0.0f, 0.0f, -8.0f }, .grounded = true };
+    Steps(&p, (Vector3){ 0, 0, -1 }, 400);
+    Check(p.feet.z >= contact - 1e-4 && p.feet.z <= contact + 0.06, "barriers: stopped at the yawed barrier's face (feet z)",
+          p.feet.z, contact);
+    Check(scene->colliders[3].max.z + PLAYER_RADIUS - p.feet.z >= 0.3, "barriers: its AABB would have stopped it earlier (m)",
+          scene->colliders[3].max.z + PLAYER_RADIUS - p.feet.z, 0.3);
+
+    // Invisible: MS_Raycast passes through (the ground below the platform is hit), MS_RaycastBarriers finds them
+    h = MS_Raycast(scene, (Vector3){ 0, 1.5f, -8 }, (Vector3){ 0, 0, -1 }, 0.0f);
+    Check(h.obj.kind == MS_OBJ_NONE, "barriers: raycast passes through the yawed barrier", h.obj.kind, MS_OBJ_NONE);
+    h = MS_Raycast(scene, (Vector3){ 17, 10, -5 }, (Vector3){ 0, -1, 0 }, 0.0f);
+    Check(h.obj.kind == MS_OBJ_BOX && h.obj.index == 0 && fabsf(h.dist - 10.0f) < 1e-5f,
+          "barriers: raycast down through the platform hits the ground", h.dist, 10.0);
+    h = MS_RaycastBarriers(scene, (Vector3){ 0, 1.5f, -8 }, (Vector3){ 0, 0, -1 }, 0.0f);
+    Check(h.obj.kind == MS_OBJ_BARRIER && h.obj.index == 2 && fabsf(h.dist - (float)(7.0 - 0.2 / s45)) < 1e-4f &&
+          fabsf(h.normal.x - (float)s45) < 1e-5f, "barriers: MS_RaycastBarriers hits the yawed one's face", h.dist, 7.0 - 0.2 / s45);
+    h = MS_RaycastBarriers(scene, (Vector3){ 17, 10, -5 }, (Vector3){ 0, -1, 0 }, 0.0f);
+    Check(h.obj.kind == MS_OBJ_BARRIER && h.obj.index == 1 && h.dist == 5.0f && h.normal.y == 1.0f,
+          "barriers: MS_RaycastBarriers hits the platform's top", h.dist, 5.0);
     MS_Unload(scene);
 
     printf("collision_test: %s (%d failed)\n", fails ? "FAILED" : "OK", fails);

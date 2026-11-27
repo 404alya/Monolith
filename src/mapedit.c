@@ -216,6 +216,9 @@ static bool Tokenize(Stmt *st)
 }
 
 // Reads the statement's prefixes, keyword and positional numbers. False with a reason.
+// A line of two opposite corners: `box`, or `barrier` (an invisible wall written like a box)
+static bool CornerPrim(const char *prim) { return strcmp(prim, "box") == 0 || strcmp(prim, "barrier") == 0; }
+
 static bool Analyze(Stmt *st, const char *text, int len, const char **why)
 {
     st->text = text;
@@ -878,7 +881,7 @@ static bool SignedPermutation(const Mat3 *m, int src[3])
 // of a box / block line, from its positional numbers vals[]
 static void BoxShape(const Stmt *st, const double *vals, double e[3], double c[3])
 {
-    bool box = strcmp(st->prim, "box") == 0;
+    bool box = CornerPrim(st->prim);
     int sz = st->kw + 4;
     for (int a = 0; a < 3; a++) {
         e[a] = box ? fabs(vals[a + 3] - vals[a]) : TokValue(st, sz + a);
@@ -918,7 +921,7 @@ static void RwBoxTurn(Ctx *C, const Stmt *st, double *vals, const double P[3], b
 {
     const EditOp *op = C->op;
     Rewrite *w = &C->rw;
-    bool box = strcmp(st->prim, "box") == 0;
+    bool box = CornerPrim(st->prim);
     int sz = st->kw + 4;
     double e[3], c[3], ypr[3], nv[3], ne[3];
     int src[3];
@@ -953,7 +956,7 @@ static bool RwTransform(Ctx *C, const Stmt *st, double *vals, bool whole)
 {
     const EditOp *op = C->op;
     Rewrite *w = &C->rw;
-    bool box = st->kind == ST_BOX && strcmp(st->prim, "box") == 0, block = st->kind == ST_BOX && strcmp(st->prim, "block") == 0;
+    bool box = st->kind == ST_BOX && CornerPrim(st->prim), block = st->kind == ST_BOX && strcmp(st->prim, "block") == 0;
     bool turn = op->kind == EDIT_ROTATE || op->kind == EDIT_SET_ROTATION;
     const char *what = turn ? "turn" : op->kind == EDIT_SCALE ? "scale" : "resize";
     if (st->kind == ST_LIGHT) { Refuse(C, "lights can't %s (only their position moves)", what); return false; }
@@ -1073,7 +1076,7 @@ static bool RwTransform(Ctx *C, const Stmt *st, double *vals, bool whole)
 bool MapEditPreviewTransform(const EditOp *op, int cls, const MS_Transform *in, MS_Transform *out)
 {
     *out = *in;
-    bool box = cls == EDIT_CLASS_BOX || cls == EDIT_CLASS_BLOCK, model = cls == EDIT_CLASS_MODEL;
+    bool box = EditClassBoxLike(cls), model = cls == EDIT_CLASS_MODEL;
     double p[3] = { in->position.x, in->position.y, in->position.z }, P[3];
     memcpy(P, op->hasPivot ? op->pivot : p, sizeof(P));
     if (op->kind == EDIT_MOVE) {
@@ -2356,7 +2359,8 @@ static bool GroupSelection(const MS_ObjRef *sel, int selCount, StmtSel **out, in
         int e = MS_ObjectEntity(scene, sel[i]);
         if (e < 0) continue;
         const MS_Source *src = &scene->entitySources[e];
-        *turnedBoxes += sel[i].kind == MS_OBJ_BOX && scene->boxTurned && scene->boxTurned[sel[i].index] >= 0;
+        *turnedBoxes += (sel[i].kind == MS_OBJ_BOX && scene->boxTurned && scene->boxTurned[sel[i].index] >= 0) ||
+                        (sel[i].kind == MS_OBJ_BARRIER && scene->barriers[sel[i].index].turned);
         *models += sel[i].kind == MS_OBJ_MODEL;
         *lights += sel[i].kind == MS_OBJ_LIGHT;
         StmtSel *S = NULL;
@@ -2629,6 +2633,77 @@ done:
 }
 
 // Fills the files' outs (one per changed line) and P->sel for op on sel[]. False with the refusal in MS_LastError().
+// --- barrier-add (EDIT_BARRIER_ADD) -------------------------------------------------------------
+
+// The line `# barriers` of F (0-based), -1 when it has none
+static int BarrierBlockLine(const PFile *F)
+{
+    for (int l = 0; l < F->lineCount; l++) {
+        const LineSpan *ls = &F->lines[l];
+        const char *s = F->text + ls->start, *e = F->text + ls->contentEnd;
+        while (s < e && (*s == ' ' || *s == '\t')) s++;
+        while (e > s && (e[-1] == ' ' || e[-1] == '\t')) e--;
+        if (e - s == 10 && memcmp(s, "# barriers", 10) == 0) return l;
+    }
+    return -1;
+}
+
+// A new `id N barrier ...` line: after the anchor's line (its file, its group), else at the end of the
+// main file's `# barriers` block (the lines after that comment up to the first empty one), else at the
+// end of the main file under a new `# barriers` comment with `group "barriers"`. Barriers have no
+// material, so no `use` wrap is needed.
+static bool BarrierAdd(Ctx *C, Patch *P)
+{
+    const EditOp *op = C->op;
+    char v[9][NUMBER_MAX];
+    for (int i = 0; i < 6; i++) {
+        if (!isfinite(op->corners[i]) || fabs(op->corners[i]) > 1e6) return Refuse(C, "barrier corner out of range");
+        FormatNum(op->corners[i], 4, v[i], sizeof(v[i]));
+    }
+    for (int a = 0; a < 3; a++)
+        if (op->corners[a] == op->corners[a + 3]) return Refuse(C, "a barrier needs a size on every axis");
+    for (int i = 0; op->hasRot && i < 3; i++) {
+        if (!isfinite(op->ypr[i])) return Refuse(C, "barrier rotation out of range");
+        FormatNum(op->ypr[i], 4, v[6 + i], sizeof(v[6 + i]));
+    }
+    bool rot = op->hasRot && (op->ypr[0] != 0.0 || op->ypr[1] != 0.0 || op->ypr[2] != 0.0);
+    int id = C->nextId++;
+
+    const MS_Ref *r = op->anchor.kind != MS_OBJ_NONE ? MS_ObjectRef(scene, op->anchor) : NULL;
+    if (op->anchor.kind != MS_OBJ_NONE && !r) return Refuse(C, "the object to put it after is gone");
+    int file = r ? r->file : 0;
+    PFile *F = PatchFile(P, file);
+    if (!F || F->lineCount < 1) return Refuse(C, "the map file is empty");
+    int after;          // 1-based line the new one follows
+    bool block = false; // a new `# barriers` block first
+    if (r) {
+        if (r->line < 1 || r->line > F->lineCount) return Refuse(C, "line %s%s%d is not in the file", LINE_AT(r->file, r->line));
+        after = r->line;
+    } else {
+        int b = BarrierBlockLine(F);
+        if (b >= 0) {
+            after = b + 1;
+            while (after < F->lineCount && F->lines[after].contentEnd > F->lines[after].start) after++;
+        } else {
+            after = F->lineCount;
+            while (after > 1 && F->lines[after - 1].contentEnd == F->lines[after - 1].start) after--;   // (trailing empty lines)
+            block = true;
+        }
+    }
+    const LineSpan *ls = &F->lines[after - 1];
+    LineOut *o = OutFor(F, after);
+    if (!o) return Refuse(C, "out of memory");
+    SbAdd(&o->text, F->text + ls->start, ls->contentEnd - ls->start);
+    if (block) SbStr(&o->text, "\n\n# barriers\ngroup \"barriers\"");
+    SbFmt(&o->text, "\nid %d barrier %s %s %s %s %s %s", id, v[0], v[1], v[2], v[3], v[4], v[5]);
+    if (rot) SbFmt(&o->text, " rot %s %s %s", v[6], v[7], v[8]);
+    if (o->text.oom) return Refuse(C, "out of memory");
+    SelAdd(P, (unsigned int)id, 0);
+    if (r) PatchWhat(P, "added a barrier after line %s%s%d", LINE_AT(file, after));
+    else PatchWhat(P, "added a barrier %s %s %s .. %s %s %s (main file, # barriers)", v[0], v[1], v[2], v[3], v[4], v[5]);
+    return true;
+}
+
 static bool BuildPatch(Ctx *C, Patch *P, const MS_ObjRef *sel, int selCount)
 {
     const EditOp *op = C->op;
@@ -2644,6 +2719,10 @@ static bool BuildPatch(Ctx *C, Patch *P, const MS_ObjRef *sel, int selCount)
     }
     if (op->kind == EDIT_PAINT_ADD || op->kind == EDIT_PAINT_SET || op->kind == EDIT_PAINT_REMOVE) {
         ok = PaintOp(C, P, sel, selCount, &st);
+        goto done;
+    }
+    if (op->kind == EDIT_BARRIER_ADD) {
+        ok = BarrierAdd(C, P);
         goto done;
     }
     if (op->kind == EDIT_ADD) {
@@ -2722,8 +2801,8 @@ static bool BuildPatch(Ctx *C, Patch *P, const MS_ObjRef *sel, int selCount)
         const char *bad;
         if (!Analyze(&st, F->text + ls->start, ls->contentEnd - ls->start, &bad)) { Refuse(C, "%s", bad); goto doneSel; }
         if (CopyCount(&st) != S->copies) { Refuse(C, "line %s%s%d: the copies don't match the loaded map", LINE_AT(S->file, S->line)); goto doneSel; }
-        if (IsTransform(op) && st.kind == ST_BOX && strcmp(st.prim, "box") != 0 && strcmp(st.prim, "block") != 0) {
-            Refuse(C, "line %s%s%d: %s can't %s (only box and block lines)", LINE_AT(S->file, S->line), st.prim,
+        if (IsTransform(op) && st.kind == ST_BOX && !CornerPrim(st.prim) && strcmp(st.prim, "block") != 0) {
+            Refuse(C, "line %s%s%d: %s can't %s (only box, block and barrier lines)", LINE_AT(S->file, S->line), st.prim,
                      op->kind == EDIT_ROTATE || op->kind == EDIT_SET_ROTATION ? "turn" : op->kind == EDIT_SCALE ? "be scaled" : "be resized");
             goto doneSel;
         }
@@ -3233,6 +3312,11 @@ static bool TakeSnapshot(Snapshot *S)
             g = HashBytes(g, bias, sizeof(bias));
             g = HashBytes(g, &L->clip, sizeof(L->clip));
             if (L->clip) g = HashBytes(g, &L->clipBox, sizeof(BoundingBox));
+        } else if (o.kind == MS_OBJ_BARRIER) {
+            const MS_Barrier *b = &scene->barriers[o.index];
+            g = HashBytes(g, &b->box, sizeof(BoundingBox));
+            g = HashBytes(g, &b->turned, sizeof(b->turned));
+            if (b->turned) g = HashBytes(g, &b->shape, sizeof(MS_TurnedBox));
         }
         l = HashName(l, r ? MaterialName(r->material) : NULL);
         l = HashName(l, r && r->group >= 0 && r->group < scene->groupCount ? scene->groups[r->group] : NULL);
@@ -3266,14 +3350,14 @@ static const char *IdText(MS_EntityId id)
 // TextFormat string)
 static const char *SnapshotDiff(const Snapshot *a, const Snapshot *b)
 {
-    static const char *const KIND[] = { "object", "box", "model", "light" };
+    static const char *const KIND[] = { "object", "box", "model", "light", "barrier" };
     for (int i = 0, j = 0; i < a->n || j < b->n; ) {
         int c = i >= a->n ? 1 : j >= b->n ? -1 : CompareSnap(&a->v[i], &b->v[j]);
-        if (c < 0) return TextFormat("entity %s (%s) would be gone", IdText(a->v[i].id), KIND[a->v[i].kind & 3]);
-        if (c > 0) return TextFormat("entity %s (%s) would be new", IdText(b->v[j].id), KIND[b->v[j].kind & 3]);
+        if (c < 0) return TextFormat("entity %s (%s) would be gone", IdText(a->v[i].id), KIND[a->v[i].kind % 5]);
+        if (c > 0) return TextFormat("entity %s (%s) would be new", IdText(b->v[j].id), KIND[b->v[j].kind % 5]);
         if (a->v[i].kind != b->v[j].kind) return TextFormat("entity %s would be another kind of object", IdText(a->v[i].id));
-        if (a->v[i].geom != b->v[j].geom) return TextFormat("entity %s (%s) would change its shape or place", IdText(a->v[i].id), KIND[a->v[i].kind & 3]);
-        if (a->v[i].look != b->v[j].look) return TextFormat("entity %s (%s) would get another material or group", IdText(a->v[i].id), KIND[a->v[i].kind & 3]);
+        if (a->v[i].geom != b->v[j].geom) return TextFormat("entity %s (%s) would change its shape or place", IdText(a->v[i].id), KIND[a->v[i].kind % 5]);
+        if (a->v[i].look != b->v[j].look) return TextFormat("entity %s (%s) would get another material or group", IdText(a->v[i].id), KIND[a->v[i].kind % 5]);
         i++;
         j++;
     }
@@ -3422,6 +3506,11 @@ static bool KeepOp(EditStep *step, const EditOp *op)
         step->op.modelPath = step->modelPath;
         int e = MS_ObjectEntity(scene, op->anchor);
         if (e >= 0) step->anchorId = scene->entityIds[e];
+    }
+    if (op->kind == EDIT_BARRIER_ADD) {
+        int e = op->anchor.kind != MS_OBJ_NONE ? MS_ObjectEntity(scene, op->anchor) : -1;
+        if (e >= 0) step->anchorId = scene->entityIds[e];
+        else step->op.anchor = (MS_ObjRef){ MS_OBJ_NONE, -1 };
     }
     if (op->kind == EDIT_MOVE_TO_FILE) {
         if (!(step->filePath = MS_StrDup(op->filePath ? op->filePath : ""))) return false;
@@ -4017,6 +4106,15 @@ unsigned char MapEditRebase(MapEditor *E, MS_EntityId **outSel, int *outSelCount
                 why = MonoStrf("what it stood on (entity %08x:%d) is gone", st->anchorId.stmt, st->anchorId.index);
             } else op.anchor = scene->entityObjects[e];
         }
+        if (!bad && op.kind == EDIT_BARRIER_ADD && st->anchorId.stmt) {
+            // (after the object it was put after; without one: the main file's `# barriers` block)
+            MS_EntityId id = MapId(map, mapCount, st->anchorId);
+            int e = id.stmt ? MS_FindEntity(scene, id) : -1;
+            if (e < 0) {
+                bad = true;
+                why = MonoStrf("the object it followed (entity %08x:%d) is gone", st->anchorId.stmt, st->anchorId.index);
+            } else op.anchor = scene->entityObjects[e];
+        }
         // Paint (docs/painting.md 12): the draw mode provides the canvas again, or replays the strokes
         // onto a PNG that changed on disk; a step of paint alone goes back onto the stack as it is
         if (!bad && st->paint) {
@@ -4122,6 +4220,7 @@ void MapEditAnchor(MS_ObjRef o, double out[3])
     if (o.kind == MS_OBJ_BOX && o.index >= 0 && o.index < scene->boxCount) p = scene->boxes[o.index].min;
     else if (o.kind == MS_OBJ_MODEL && o.index >= 0 && o.index < scene->modelCount) p = scene->models[o.index].position;
     else if (o.kind == MS_OBJ_LIGHT && o.index >= 0 && o.index < scene->lightCount) p = scene->lights[o.index].light.position;
+    else if (o.kind == MS_OBJ_BARRIER && o.index >= 0 && o.index < scene->barrierCount) p = scene->barriers[o.index].box.min;
     out[0] = Round4(p.x);
     out[1] = Round4(p.y);
     out[2] = Round4(p.z);
@@ -4193,7 +4292,8 @@ void MapEditClassify(const MS_ObjRef *objs, int count, unsigned char *classes)
             const char *bad;        // (not shown: the class only)
             if (indexed[f] > 0 && line >= 1 && line <= F->lineCount &&
                 Analyze(&st, F->text + F->lines[line - 1].start, F->lines[line - 1].contentEnd - F->lines[line - 1].start, &bad))
-                c = strcmp(st.prim, "box") == 0 ? EDIT_CLASS_BOX : strcmp(st.prim, "block") == 0 ? EDIT_CLASS_BLOCK : EDIT_CLASS_OTHER_BOX;
+                c = strcmp(st.prim, "box") == 0 ? EDIT_CLASS_BOX : strcmp(st.prim, "block") == 0 ? EDIT_CLASS_BLOCK
+                  : strcmp(st.prim, "barrier") == 0 ? EDIT_CLASS_BARRIER : EDIT_CLASS_OTHER_BOX;
             lastPrim = scene->entitySources[e].prim;
             lastClass = c;
         }
@@ -4229,7 +4329,10 @@ static void SelectIds(ObjList *l, const MS_EntityId *ids, int n)
     }
 }
 
-static const char *KindName(MS_ObjKind k) { return k == MS_OBJ_BOX ? "box" : k == MS_OBJ_MODEL ? "model" : k == MS_OBJ_LIGHT ? "light" : "none"; }
+static const char *KindName(MS_ObjKind k)
+{
+    return k == MS_OBJ_BOX ? "box" : k == MS_OBJ_MODEL ? "model" : k == MS_OBJ_LIGHT ? "light" : k == MS_OBJ_BARRIER ? "barrier" : "none";
+}
 
 // Script words: whitespace-separated, "..." one word, '#' ends the line (in place)
 static int ScriptWords(char *line, char **w, int max)
@@ -4433,6 +4536,16 @@ static int RunScript(MapEditor *E, const char *scriptPath, bool live)
             isEdit = n == 5 && ScriptNum(w[2], &op.pos[0]) && ScriptNum(w[3], &op.pos[1]) && ScriptNum(w[4], &op.pos[2]) && sel.n > 0;
             if (isEdit) op.anchor = sel.v[0];
             else MsgSetStatic(&msg, "add \"<model file>\" <x> <y> <z> (after the first selected object's line)");
+        } else if (strcmp(w[0], "barrier-add") == 0) {
+            // barrier-add <x0> <y0> <z0> <x1> <y1> <z1> [rot <y> <p> <r>]: after the first selected object's
+            // line, else at the end of the main file's `# barriers` block
+            op.kind = EDIT_BARRIER_ADD;
+            isEdit = n == 7 || (n == 11 && strcmp(w[7], "rot") == 0);
+            for (int i = 0; isEdit && i < 6; i++) isEdit = ScriptNum(w[1 + i], &op.corners[i]);
+            op.hasRot = n == 11;
+            for (int i = 0; isEdit && op.hasRot && i < 3; i++) isEdit = ScriptNum(w[8 + i], &op.ypr[i]);
+            op.anchor = sel.n > 0 ? sel.v[0] : (MS_ObjRef){ MS_OBJ_NONE, -1 };
+            if (!isEdit) MsgSetStatic(&msg, "barrier-add <x0> <y0> <z0> <x1> <y1> <z1> [rot <yaw> <pitch> <roll>]");
         } else if (strcmp(w[0], "material-set") == 0) {
             // material-set "<name>" <keys...> (docs/painting.md 10.3)
             op.kind = EDIT_MATERIAL_SET;
@@ -4590,7 +4703,7 @@ static int RunScript(MapEditor *E, const char *scriptPath, bool live)
                  ScriptPreview(&sel, delta, NULL, &previewing, &previewFrom);
             MsgSetf(&msg, ok ? "preview: %d object%s shifted" : "preview move <dx> <dy> <dz> (needs a selection; refused?)",
                     sel.n, sel.n == 1 ? "" : "s");
-        } else MsgSetf(&msg, "unknown command '%s' (select also move turn rotation scale size remove duplicate add id material-set paint-add paint-set paint-remove move-to-file undo redo print%s)", w[0],
+        } else MsgSetf(&msg, "unknown command '%s' (select also move turn rotation scale size remove duplicate add barrier-add id material-set paint-add paint-set paint-remove move-to-file undo redo print%s)", w[0],
                        live ? " save disk preview" : "");
 
         if (isEdit && previewOp) {

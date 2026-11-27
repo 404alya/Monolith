@@ -42,6 +42,7 @@ static const KeyRow ROWS[] = {
     { 1, "LEFT / RIGHT", "fly to the previous / next viewpoint" },
     { 1, "P", "print and copy the view as --pos / --look" },
     { 1, "G", "move the player here" },
+    { 1, "O", "show / hide the barriers (invisible walls; never in walk mode)" },
     { 1, "R", "fly back to where the last finished request was made", EDITING },
     { 1, "TAB", "back to walking" },
 
@@ -64,6 +65,7 @@ static const KeyRow ROWS[] = {
     { 3, "arrows, PGUP / PGDN", "volume mode: move the active volume one snap step" },
     { 3, "ALT (+SHIFT) + arrows", "volume mode: grow (shrink) that side" },
     { 3, "DELETE / SHIFT+DELETE", "volume mode: remove the active volume / all of them" },
+    { 3, "H", "volume mode: a barrier line (invisible wall) from the active volume; the volume stays", EDITING },
     { 3, "N", "snap step 0.1 / 0.25 / 0.5 / 1 / 2 m (CTRL: no snap)" },
 
     { 4, "M", "enter / leave edit mode (ESC leaves too)" },
@@ -78,6 +80,7 @@ static const KeyRow ROWS[] = {
     { 4, "DELETE", "remove" },
     { 4, "CTRL+D", "duplicate" },
     { 4, "I", "the model picker: add a model at the cursor" },
+    { 4, "H", "a barrier (invisible wall): LMB corner, LMB opposite corner, mouse / wheel height, LMB / ENTER" },
     { 4, "CTRL+I", "give the selection's line an id" },
     { 4, "CTRL+S", "save the edits to the map file" },
     { 4, "CTRL+Z / CTRL+SHIFT+Z", "undo / redo (also CTRL+Y)" },

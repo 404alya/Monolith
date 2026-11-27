@@ -18,6 +18,7 @@ In the editor (edit mode, `--edit-script`) the edits change the working copy (`M
 | size | a box's / block's size about its centre |
 | duplicate | a new line after each source line: the copy, shifted |
 | add | `id N model "models/x.glb" x y z origin bottom` after the line of the object it stands on (so it joins that object's group, in its file); wrapped in `use "default"` ... `use "<active>"` when a `use` is active there (that file's own `use` lines decide: a part starts with none), which would restyle the model |
+| barrier-add | `id N barrier x0 y0 z0 x1 y1 z1 [rot y p r]` (`EDIT_BARRIER_ADD`: corners with up to 4 decimals, `rot` only when given and not 0 0 0): after the line of the first selected object (`op.anchor`: its file and group), or with nothing selected at the end of the main map file's `# barriers` block (the lines under that comment up to the first empty one), which is made at the file's end with `group "barriers"` when there is none. Barriers have no material, so no `use` wrap. The new barrier becomes the selection. A rebase finds the anchor by its entity id (`EditStep.anchorId`; stmt 0: no anchor) and refuses the step when it is gone |
 | id | gives the objects' line an `id N` prefix (or changes it) and nothing else: a chosen N for one line (unique in the map, every file), or the next free one for each selected line without an id; a `repeat` line is not split (the id names the whole line) |
 | move-to-file | the selection's whole lines into another map-text file (the edit script only): [move-to-file](#move-to-file) |
 | id remove | the objects' lines lose their `id N` prefix (with the blanks after it) and nothing else; the objects stay, their entity ids become implicit (lines without an id are left alone; refused when no selected line has one) |
@@ -72,6 +73,8 @@ A map whose main file imports parts ([map-format.md](../map-format.md) §2.10, `
 - **Self-check:** the edit goes live (also with `--apply-edits`, which then writes and reloads), and the map before the move (after the split) and after it are compared entity by entity, sorted by id: the same set of ids, each with the same kind, shape and place (a box's bounds and turn, a model's file, transform, origin, collide, shadow and slot materials, a light's every field), the same material and group (by name), and the same paint entries. The order of the objects may change (lines appended to a part come earlier in the map's text). Any difference puts the texts back and refuses with the first one: `move-to-file refused (self-check: the map would not be the same): entity 84981c40:0 (box) would get another material or group` (two identical lines whose implicit keys would swap).
 - **Undo** restores every file byte for byte. A new part the undone step made leaves the working copy, but a file already written to disk stays there (nothing is deleted; it is no longer imported). Redo makes it again (an identical file left on disk is taken as it is).
 
+**Barrier lines** (`barrier x0 y0 z0 x1 y1 z1 [rot y p r]`) are read like `box` lines (`MS_PrimitiveArgs("barrier")` is box's layout; `CornerPrim`), so every edit of a box works on them: move, turn (any axis; `rot` written or removed by the same rule), rotation, scale, size, remove, duplicate, id, move-to-file. `MapEditClassify` gives them `EDIT_CLASS_BARRIER`, which the transform modal treats as a box (`EditClassBoxLike`); `TakeSnapshot` hashes a barrier's bounds and shape, and `print` names its kind `barrier`.
+
 ## Edit script
 
 `--apply-edits <file>`: one command per line; `#` starts a comment.
@@ -93,6 +96,7 @@ A map whose main file imports parts ([map-format.md](../map-format.md) §2.10, `
 | `remove` | remove the selection |
 | `duplicate <dx> <dy> <dz>` | copies shifted by this |
 | `add "<models/x.glb>" <x> <y> <z>` | after the line of the first selected object |
+| `barrier-add <x0> <y0> <z0> <x1> <y1> <z1> [rot <yaw> <pitch> <roll>]` | a new `barrier` line (an invisible wall): after the line of the first selected object, with nothing selected at the end of the main file's `# barriers` block (see *Edits*) |
 | `id [<n>]` | the selection's line gets `id n` (one line), or without n each selected line without an id gets the next free one |
 | `id remove` | the selection's lines lose their `id n` prefix (objects stay) |
 | `paint-add ...` | see below |

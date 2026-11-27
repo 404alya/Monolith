@@ -6,7 +6,8 @@
 //   ./build.sh test compiled           (builds it, compiles tests/models and tests/rotated, runs it on both)
 //   compiled_test <package folder>       (a copy of a package with its <name>.mapb in it)
 // A package with turned boxes (box turns, section 17) gets the box-turn cases; one without them
-// the cases that need tests/models' uniforms, lights and model paths.
+// the cases that need tests/models' uniforms, lights and model paths; one with two or more barriers
+// (section 21, tests/barrier) the barrier cases.
 #include "monolith_scene.h"
 #include <stdint.h>
 #include <stdlib.h>
@@ -18,7 +19,7 @@ static char dir[1024], fuzzPath[1100];
 // The header and section table fields this test changes (docs/compiled-map.md, section 2)
 enum { H_VERSION = 8, H_SIZE = 12, H_ORDER = 16, H_FORMAT = 20, H_COUNT = 24, H_TABLE = 28, H_FILESIZE = 32 };
 enum { S_STRINGS = 1, S_BOXES = 2, S_MATERIALS = 4, S_LIGHTS = 7, S_MODEL_FILES = 9, S_STATEMENTS = 13, S_ENV = 14,
-       S_BOX_TURNS = 17, S_PAINT = 18, S_SOURCES = 19, S_FOG_ZONES = 20, S_SECTIONS = 20 };
+       S_BOX_TURNS = 17, S_PAINT = 18, S_SOURCES = 19, S_FOG_ZONES = 20, S_BARRIERS = 21, S_SECTIONS = 21 };
 // A material record and its line files, face layout, filter and padding bytes, its paint atlas path,
 // paint filter and padding, noPrepass, drawDistance, paintGrid, the paint key's line and file, noShadow
 enum { MAT_SIZE = 216, MAT_FILE = 48, MAT_SHADER_FILE = 52, MAT_MAP_FILE = 56, MAT_UV_SCALE = 104, MAT_CULL = 124,
@@ -31,6 +32,10 @@ enum { MAT_SIZE = 216, MAT_FILE = 48, MAT_SHADER_FILE = 52, MAT_MAP_FILE = 56, M
 enum { BOX_SIZE = 52, BOX_FILE = 28, BOX_STATEMENT = 32, BOX_GROUP = 36, BOX_MATERIAL = 40,
        LIGHT_SIZE = 128, LIGHT_DIRECTION = 16, LIGHT_CLIP = 64, LIGHT_CLIP_MIN = 68, LIGHT_CLIP_MAX = 80,
        LIGHT_DEPTH_BIAS = 92, LIGHT_SLOPE_BIAS = 96, LIGHT_FILE = 104 };
+// A barrier record: corners as written, rotation, then the source reference (line, file, statement,
+// group, material, copy, part)
+enum { BAR_SIZE = 64, BAR_MIN = 0, BAR_MAX = 12, BAR_ROT = 24, BAR_FILE = 40, BAR_STATEMENT = 44, BAR_GROUP = 48,
+       BAR_MATERIAL = 52 };
 // A source record: path, the import line's file and line, padding, size, hash
 enum { SRC_PATH = 0, SRC_IMPORT_FILE = 4, SRC_IMPORT_LINE = 8, SRC_PAD = 12, SRC_SIZE = 16, SRC_HASH = 24 };
 
@@ -383,6 +388,54 @@ int main(int argc, char **argv)
         else printf("ok   box file %u (the last source) loads\n", srcCount - 1);
         free(ok);
         printf("ok   %u sources in the file\n", srcCount);
+    }
+    uint32_t barE, bars = Section(orig, S_BARRIERS, &barE), barCount = Rd32(orig, barE + 8);
+    if (barCount >= 2) {
+        // Barriers: corners as written (ordered, finite), a finite rotation, a valid reference, map order
+        uint32_t stmtE, last = bars + BAR_SIZE * (barCount - 1);
+        Section(orig, S_STATEMENTS, &stmtE);
+        CASE("barrier corners unordered", Wr32(c, bars + BAR_MIN, 0x7F000000u));
+        CASE("barrier min NaN", Wr32(c, bars + BAR_MIN + 4, 0x7FC00000u));
+        CASE("barrier max infinite", Wr32(c, last + BAR_MAX + 8, 0x7F800000u));
+        CASE("barrier rotation NaN", Wr32(c, bars + BAR_ROT + 4, 0x7FC00000u));
+        CASE("barrier centre out of range", { Wr32(c, bars + BAR_MIN, 0x7F61B1E6u); Wr32(c, bars + BAR_MAX, 0x7F61B1E6u); });
+        CASE("barrier file = the source count", Wr32(c, bars + BAR_FILE, srcCount));
+        CASE("barrier statement = the statement count", Wr32(c, bars + BAR_STATEMENT, Rd32(orig, stmtE + 8)));
+        CASE("barrier group -2", Wr32(c, bars + BAR_GROUP, 0xFFFFFFFEu));
+        CASE("barrier material -1", Wr32(c, bars + BAR_MATERIAL, 0xFFFFFFFFu));
+        CASE("barriers out of map order", Wr32(c, bars + BAR_SIZE + BAR_STATEMENT, Rd32(orig, bars + BAR_STATEMENT) - 1));
+        CASE("more barriers than MS_MAX_OBJECTS", Wr32(c, barE + 8, 1000001u));
+        // Loaded as valid: the first barrier turned (yaw 45)
+        unsigned char *ok = Copy(orig, size);
+        Wr32(ok, bars + BAR_ROT, 0x42340000u);
+        if (!Load(ok, size)) { printf("FAIL barrier yaw 45: %s\n", MS_LastError()); fails++; }
+        else printf("ok   barrier yaw 45 loads\n");
+        free(ok);
+        printf("ok   %u barriers in the file\n", barCount);
+        // The game's runtime (this build: no parser, as --export ships it) on the compiled barriers: a player
+        // box inside the first one collides, MS_Raycast passes through it, MS_RaycastBarriers hits it
+        unsigned char *as = Copy(orig, size);
+        FILE *bf = fopen(fuzzPath, "wb");
+        bool written = bf && fwrite(as, 1, size, bf) == size;
+        if (bf) fclose(bf);
+        free(as);
+        MS_Scene *bs = written ? MS_Load(fuzzPath, &(MS_LoadOptions){ .noGpu = true }) : NULL;
+        if (!bs) { printf("FAIL the barrier package does not load: %s\n", MS_LastError()); fails++; }
+        else {
+            const MS_Barrier *b0 = &bs->barriers[0];
+            Vector3 c = { (b0->box.min.x + b0->box.max.x) * 0.5f, (b0->box.min.y + b0->box.max.y) * 0.5f,
+                          (b0->box.min.z + b0->box.max.z) * 0.5f };
+            BoundingBox body = { { c.x - 0.05f, c.y - 0.05f, c.z - 0.05f }, { c.x + 0.05f, c.y + 0.05f, c.z + 0.05f } };
+            int hit = MS_FirstCollision(bs, body);
+            Vector3 from = { c.x, c.y, c.z + 5.0f }, dir = { 0, 0, -1 };
+            MS_Hit r = MS_Raycast(bs, from, dir, 0.0f), rb = MS_RaycastBarriers(bs, from, dir, 0.0f);
+            bool ok = hit == bs->barrierColliderFirst && (int)barCount == bs->barrierCount &&
+                      r.obj.kind != MS_OBJ_BARRIER && rb.obj.kind == MS_OBJ_BARRIER && rb.obj.index == 0;
+            if (!ok) { printf("FAIL compiled barriers: collision %d (want %d), raycast kind %d, barrier raycast %d:%d\n", hit,
+                              bs->barrierColliderFirst, (int)r.obj.kind, (int)rb.obj.kind, rb.obj.index); fails++; }
+            else printf("ok   compiled barriers block (collider %d), MS_Raycast passes, MS_RaycastBarriers hits\n", hit);
+            MS_Unload(bs);
+        }
     }
     if (srcCount > 1) {
         // (the package-specific cases below are tests/models' and tests/rotated's)

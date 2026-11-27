@@ -699,6 +699,7 @@ static int Run(int argc, char **argv)
     bool eyeSet = false, lookSet = false;   // --eye / --look given (they override --view)
     Vector3 eye = { 0 };
     bool pickFlag = false, shotHud = false;
+    bool showBarriersFlag = false;          // --show-barriers: the barrier overlay in a --shot
     bool editModeFlag = false;          // --edit-mode
     const char *editIdText = NULL;      // --edit-id
     const char *editModalSpec = NULL;   // --edit-modal
@@ -924,6 +925,7 @@ static int Run(int argc, char **argv)
             i += 2;
         }
         else if (strcmp(a, "--shot-hud") == 0) shotHud = true;
+        else if (strcmp(a, "--show-barriers") == 0) showBarriersFlag = true;
         else if (strcmp(a, "--edit-mode") == 0) editModeFlag = true;
         else if (strcmp(a, "--edit-id") == 0) { NEED(1); editIdText = argv[++i]; }
         else if (strcmp(a, "--edit-modal") == 0) { NEED(1); editModalSpec = argv[++i]; }
@@ -1831,6 +1833,15 @@ static int Run(int argc, char **argv)
         offApplied = true;
         R3D_Environment *env = R3D_GetEnvironment();
         if (!typing && IsKeyPressed(KEY_F1))    hud = !hud;
+        // O (spectator mode): the barrier overlay on / off, kept in the settings file (barrier_overlay)
+        if (spec.active && !typing && IsKeyPressed(KEY_O)) {
+            gfx.barrierOverlay = gfxSaved.barrierOverlay = !gfx.barrierOverlay;
+            MsgSetStatic(&mapMessage, gfx.barrierOverlay ? "barriers shown (O hides them)" : "barriers hidden (O shows them)");
+            mapMessageError = false;
+            mapMessageTime = 3.0f;
+            if (settingsSaveFile && !GfxSave(&gfxSaved, settingsSaveFile))
+                TraceLog(LOG_WARNING, "monolith: settings could not be saved to %s", settingsSaveFile);
+        }
         if (!typing && IsKeyPressed(KEY_F12)) {
             char shot[1100];
             if (SaveScreenshot(shot, sizeof(shot))) {
@@ -2041,7 +2052,8 @@ static int Run(int argc, char **argv)
                 bool idPanel = EditModeCapturesInput(&edit), modal = EditModeModalRunning(&edit);
                 // The rotate gizmo under the free cursor: an LMB press there is its drag, not a
                 // selection click (DesignerUpdate skips that frame)
-                bool gizmoOk = editKeys && editCursor == 1 && !idPanel && !modal && !typing && !IsMouseButtonDown(MOUSE_BUTTON_RIGHT);
+                bool gizmoOk = editKeys && editCursor == 1 && !idPanel && !modal && !typing && !IsMouseButtonDown(MOUSE_BUTTON_RIGHT) &&
+                               !designer.barrierPlace;     // (a barrier's corner clicks go to the designer)
                 bool gizmoClick = EditModeGizmoHover(&edit, &designer, SpectatorCamera(&spec), GetMousePosition(), gizmoOk) && gizmoOk &&
                                   IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
                 bool drawKey = !idPanel && !modal && !typing && !designer.promptOpen && !designer.snipping && IsKeyPressed(KEY_B) &&
@@ -2053,7 +2065,7 @@ static int Run(int argc, char **argv)
                 } else if (!idPanel && !modal && !gizmoClick) {
                     action = DesignerUpdate(&designer, dt);
                     typing = DesignerCapturesInput(&designer);
-                    if (designer.snipping || designer.volumeMode) edit.active = false;   // C and V leave the edit mode
+                    if (designer.snipping || (designer.volumeMode && !designer.barrierPlace)) edit.active = false;   // C and V leave the edit mode
                 }
                 // Manual edits rewrite and reload the map: then the environment applies again,
                 // as after a hot reload (the selection already follows the edited objects)
@@ -2066,7 +2078,7 @@ static int Run(int argc, char **argv)
                 bool modKeys = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL) || IsKeyDown(KEY_LEFT_ALT) ||
                                IsKeyDown(KEY_RIGHT_ALT) || IsMouseButtonDown(MOUSE_BUTTON_RIGHT);
                 if (edit.active && !typing && action == DESIGNER_NONE && !EditModeCapturesInput(&edit) &&
-                    !EditModeModalRunning(&edit) && !modKeys && IsKeyPressed(KEY_I))
+                    !EditModeModalRunning(&edit) && !modKeys && !designer.barrierPlace && IsKeyPressed(KEY_I))
                     ModelPickerOpen(&picker, &edit, NULL);
                 // (view-only: no edit mode to open the picker in; I says why)
                 if (!MONOLITH_EDITING && !drawKey && !typing && action == DESIGNER_NONE && !modKeys && IsKeyPressed(KEY_I))
@@ -2126,6 +2138,10 @@ static int Run(int argc, char **argv)
         Camera3D camera = spec.active ? SpectatorCamera(&spec) : PlayerCamera(&player);
         // (edit mode with a free cursor: what is under the cursor, not the crosshair)
         bool cursorPick = editCursor == 1 && (!hidden || scripted);
+        // The barrier overlay (O, the setting barrier_overlay): spectator mode only, never walking; a
+        // --shot only with --show-barriers. While it is on the pick sees barriers (designer.c PickShown)
+        bool barriersShown = shotPath ? showBarriersFlag : spec.active && gfx.barrierOverlay && (!bench || emulateWindow);
+        DesignerShowBarriers(&designer, barriersShown);
         if (cursorPick) DesignerPickCursor(&designer, camera, GetScreenWidth(), GetScreenHeight(), GetMousePosition());
         else if (spec.active || shotPath) DesignerPickCamera(&designer, camera);
         InspectorApply(&inspector);     // buffer view and draw filter (nothing while it is off)
@@ -2190,7 +2206,7 @@ static int Run(int argc, char **argv)
                 DrawSceneCache(&reuse);
                 if (shotTarget.id) EndTextureMode();
             } else {
-                shadowUpdated = DrawScene(camera, shotTarget, (drawUi && designerUi) || inspectUi);   // overlays depth-test
+                shadowUpdated = DrawScene(camera, shotTarget, (drawUi && designerUi) || inspectUi || barriersShown);   // overlays depth-test
             }
             if (bench && shadowUpdated && benchFrame >= 0 && benchFrame < benchFrames) benchShadowUpdates[benchView]++;
             // The screen eyedropper (docs/painting.md 18.8): the scene is in its target and nothing is
@@ -2205,6 +2221,12 @@ static int Run(int argc, char **argv)
                 DrawModeScreenPicked(&drawMode, ok, picked);
             }
 
+            // The barrier overlay first: every other overlay (the selection's outlines) goes over it
+            if (barriersShown && (shotPath || (drawUi && hud))) {
+                if (shotTarget.id) BeginTextureMode(shotTarget);
+                DesignerDrawBarriers(&designer, camera);
+                if (shotTarget.id) EndTextureMode();
+            }
             bool uiToTarget = (drawUi && shotPath) || emulateWindow;
             if (uiToTarget) BeginTextureMode(shotTarget);
             if (inspectUi) {

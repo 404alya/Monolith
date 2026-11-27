@@ -1,0 +1,149 @@
+monolith 3
+# barrier.map -- the test package of `barrier` lines (invisible walls, docs/map-format.md 2.1, Barriers): an
+# axis-aligned barrier on a ledge, a turned one, a repeat row, one with an id, one in an imported
+# file. Used by the engine verification of barriers: dumps from text and compiled, shots with and
+# without the barrier lines (identical), the overlay shot (--show-barriers), edit scripts. Brief: MAP.md.
+
+# --- Materials
+material "default" albedo 180 180 180 roughness 0.9 metalness 0
+material "stone" albedo 150 140 125 roughness 0.85
+material "post" albedo 90 150 110 roughness 0.8
+
+# --- Environment: the built-in defaults, every key written out
+# Sky (sky.sunDirection follows sun.direction unless it is set)
+env sky.mode procedural
+env sky.size 1024
+env sky.skyTopColor 120 132 145
+env sky.skyHorizonColor 200 196 186
+env sky.skyHorizonCurve 0.15
+env sky.skyEnergy 1
+env sky.groundBottomColor 48 46 44
+env sky.groundHorizonColor 190 186 178
+env sky.groundHorizonCurve 0.02
+env sky.groundEnergy 1
+env sky.sunColor 255 236 205
+env sky.sunSizeDeg 2.5
+env sky.sunCurve 0.15
+env sky.sunEnergy 2
+# Ambient light (IBL): a copy of the sky with these keys changed
+env ambientSky.mode procedural
+env ambientSky.size 256
+env ambientSky.groundBottomColor 120 116 108
+env ambientSky.groundHorizonCurve 0.1
+# Sun: the shadowed directional light (static shadow tiles)
+env sun.enabled on
+env sun.direction 0.55 -0.78 0.3
+env sun.color 255 238 214
+env sun.energy 2
+env sun.specular 1
+env sun.fogEnergy 4
+env sun.range 100
+env sun.shadow on
+env sun.softness 2
+env sun.depthBias 0.0001
+env sun.slopeBias 0.0015
+env shadow.size 8192
+# R3D environment
+env background.color 130 130 130
+env background.energy 1
+env background.skyBlur 0
+env background.rotation 0 0 0 1
+env ambient.color 0 0 0
+env ambient.energy 0.9
+env ssao.enabled on
+env ssao.sampleCount 16
+env ssao.intensity 1.2
+env ssao.power 1
+env ssao.radius 1.2
+env ssao.bias 0.03
+env ssil.enabled on
+env ssil.sampleCount 16
+env ssil.giIntensity 1.2
+env ssil.aoIntensity 1
+env ssil.aoPower 1
+env ssil.radius 5
+env ssil.bias 0.03
+env ssgi.enabled off
+env ssgi.sliceCount 4
+env ssgi.edgeFade 0.1
+env ssgi.distanceFalloff 1
+env ssgi.normalRejection 0
+env ssgi.intensity 1
+env ssgi.denoiseSteps 4
+env ssr.enabled off
+env ssr.maxIterations 64
+env ssr.thickness 0.5
+env ssr.edgeFade 0.25
+env fog.mode exp2
+env fog.color 150 148 143
+env fog.start 1
+env fog.end 50
+env fog.density 0.0085
+env fog.skyAffect 0.7
+env volumetricFog.enabled on
+env volumetricFog.scatteringDensity 0.012
+env volumetricFog.absortionDensity 0.001
+env volumetricFog.scatteringColor 255 244 228
+env volumetricFog.anisotropy 0.4
+env volumetricFog.emissionColor 150 148 143
+env volumetricFog.emissionEnergy 0.12
+env volumetricFog.skyAffect 0.5
+env volumetricFog.length 90
+env volumetricFog.stepSize 0.75
+env dof.mode disabled
+env dof.focusPoint 10
+env dof.focusScale 1
+env dof.nearScale 1
+env dof.maxBlurSize 20
+env bloom.mode mix
+env bloom.levels 0.5
+env bloom.intensity 0.04
+env bloom.threshold 0
+env bloom.softThreshold 0.5
+env bloom.filterRadius 1
+env autoExposure.enabled off
+env autoExposure.minEV -1
+env autoExposure.maxEV 1
+env autoExposure.exposureCompensation 0
+env autoExposure.adaptationToBright 0.5
+env autoExposure.adaptationToDark 1
+env tonemap.mode agx
+env tonemap.exposure 0.9
+env tonemap.white 1
+env color.brightness 1
+env color.contrast 1.05
+env color.saturation 0.8
+# Quality presets: exposure factor when a preset turns bloom off (keeps the mean brightness)
+env bloom.offExposure 1.19
+
+# --- Player start (feet, yaw) and spectator viewpoints (eye, target)
+spawn 0 0 6 180
+viewpoint "Overview" 16 11 14 2 0 -4
+viewpoint "Ledge" 7 3.62 -1 7 2.5 -10
+viewpoint "Row" -2 2 8 -2 0.5 0
+
+# --- Geometry
+group "ground"
+box -30 -1 -30 30 0 30
+
+group "ledge"
+use "stone"
+box 4 0 -6 10 2 0
+box -6 0 -10 -5 3 0
+use "post"
+box 2 0 -12 2.3 1.2 -11.7
+
+# --- Barriers: invisible, they only stop the player
+group "limits"
+# the far edge of the ledge (2 m high, so the player can't walk off it)
+id 7 barrier 4 2 -6.2 10 4 -6
+# the map's west edge
+barrier -20 0 -20 -19 4 20
+# a yawed wall across the path to the post
+barrier 0 0 -10 6 3 -9.6 rot 30 0 0
+# a row of three low blocks
+repeat 3 2 0 0 barrier -4 0 2 -3.5 1 2.5
+use "default"
+
+import "parts/fence.map"
+import "parts/gate.map"

@@ -106,7 +106,8 @@ static void BeaconDrawSystem(const World *w, const MS_Scene *s, R3D_Mesh cube, R
 
 static const char *KindName(MS_ObjKind k)
 {
-    return k == MS_OBJ_BOX ? "box" : k == MS_OBJ_MODEL ? "model" : k == MS_OBJ_LIGHT ? "light" : "none";
+    return k == MS_OBJ_BOX ? "box" : k == MS_OBJ_MODEL ? "model" : k == MS_OBJ_LIGHT ? "light"
+         : k == MS_OBJ_BARRIER ? "barrier" : "none";
 }
 
 // One entity with all its components, as a line
@@ -126,15 +127,17 @@ static const char *Describe(const MS_Scene *s, int e)
 
 static void PrintSummary(const MS_Scene *s)
 {
-    int kinds[4] = { 0 }, explicitIds = 0;
+    int kinds[MS_OBJ_BARRIER + 1] = { 0 }, explicitIds = 0;
     for (int e = 0; e < s->entityCount; e++) {
         kinds[s->entityObjects[e].kind]++;
         explicitIds += MS_ENTITY_EXPLICIT(s->entityIds[e]);
     }
-    printf("%d entities: %d boxes, %d models, %d lights; %d with an `id` line\n", s->entityCount,
-           kinds[MS_OBJ_BOX], kinds[MS_OBJ_MODEL], kinds[MS_OBJ_LIGHT], explicitIds);
+    printf("%d entities: %d boxes, %d models, %d lights", s->entityCount, kinds[MS_OBJ_BOX], kinds[MS_OBJ_MODEL],
+           kinds[MS_OBJ_LIGHT]);
+    if (kinds[MS_OBJ_BARRIER] > 0) printf(", %d barriers", kinds[MS_OBJ_BARRIER]);  // (invisible walls)
+    printf("; %d with an `id` line\n", explicitIds);
     // The first entity of each kind
-    for (int k = MS_OBJ_BOX; k <= MS_OBJ_LIGHT; k++)
+    for (int k = MS_OBJ_BOX; k <= MS_OBJ_BARRIER; k++)
         for (int e = 0; e < s->entityCount; e++)
             if (s->entityObjects[e].kind == (MS_ObjKind)k) { printf("  %s\n", Describe(s, e)); break; }
 }

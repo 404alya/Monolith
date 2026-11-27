@@ -109,6 +109,19 @@ Units are metres; +Y is up. Numbers are plain decimals, e.g. `12`, `-4.5`, `0.75
 - `rot 0 0 0` is the box without `rot`.
 - A turned box draws, collides and picks as its turned shape. Its `boxes[]` / `colliders[]` entry is its world AABB (`MS_Scene.turnedBoxes`, `boxTurned`).
 
+#### Barriers: `barrier x0 y0 z0 x1 y1 z1 [rot y p r]`
+
+An invisible wall (user-facing: `docs/map-format.md` §2.1, *Barriers*): it blocks the player exactly like a `box` of the same corners and turn, and nothing else sees it. It is a statement with its own object kind, not a material key on boxes, so that `boxes[]`, box indices, the draw ranges, `--dump-boxes` and every cache stay as they are (the developer's call, 2026-11-27).
+
+- **Record.** `MS_Barrier` (`scene->barriers`, `barrierCount`): its world AABB `box`, `turned`, the exact shape `shape` (an `MS_TurnedBox`, filled for every barrier: an axis-aligned one has rotation 0 and the world's axes, so collision code needs no lookup table) and its `MS_Ref` (line, file, statement, group, repeat copy; material: the `use` active there, never used; part 0). Parsed by `ParseBarrier` (`id` / `repeat` / `group` / imports as for `box`; `rot` is never shifted), with the box's float math (`TurnedBoxMake`), so a barrier and a box written alike have bit-identical shapes. `SceneData.barrierWritten` keeps each one as written (corners ordered) for the compiled map, as `turnedWritten` does for boxes.
+- **Colliders.** `colliders[] = boxes, model colliders, barriers`: box indices keep matching `boxes[]` and model colliders keep theirs, so `src/player.c`'s `colliders[hit]` keeps working. `scene->barrierColliderFirst` (= `colliderCount - barrierCount`) is barrier 0's collider; a collider index `c >= barrierColliderFirst` is barrier `c - barrierColliderFirst`. With barriers and no models, `colliders` is its own array (boxes copied, then the barriers), no longer `boxes` itself. The collider BVH covers them; `MS_FirstCollision` / `MS_Collides` test a barrier's exact shape (`OverlapsTurned` when turned), `MS_ColliderTop` / `MS_ColliderBottom` give a turned barrier's span (`TurnedSpanY`) and walkability, as for turned boxes. `collide off` doesn't apply (a barrier has no material).
+- **Not drawn, not in any cache.** Barriers are never in `boxes[]`, the draw ranges, `UploadBoxes`, the shadow tiles, the light shadows, the fog cache, the AO volume (all of them read boxes and models only) or `scene->bounds` (`FinishGeometry` leaves them out, so the regions the caches cover don't move). A live edit (`MS_EditSetText`) that changes only barrier lines is no full upload (they are object statements, not in the look hash) and marks nothing dirty: the caches are restamped and kept. The edit preview moves a barrier's record, collider and entity transform and refits the collider BVH, with nothing dirty either.
+- **Object kind** `MS_OBJ_BARRIER` (appended, so the other kinds keep their numbers). Everything that switches over `MS_ObjKind` learns it: in the runtime `BuildEntities`, `MS_ObjectRef` / `MS_ObjectBounds` / `MS_ObjectEntity`, `MS_EditPreviewBegin` / `Set` / `End`, `Publish` (`barrierEntities`); in the editor `src/mapedit.c` (`KindName`, the edit classes `EDIT_CLASS_BARRIER`, `TakeSnapshot`, the anchor of a selection), `src/designer.c` (`KindCount` / `KindRef`, the selection tables, pointing), `src/launcher.c` (`ObjKindName`, the bundle's `request.json` / `request.md`), `src/editmode.c` (the HUD's kind name), `src/idpanel.c`, `src/transform.c` (the gizmo's single-object frame) and `src/dumpscene.c` (`--dump-entities`). `src/drawmode.c` (painting) and `src/inspector.c` (draw ranges) never see one: their picks go through `MS_Raycast`.
+- **Picking.** `MS_Raycast` skips barriers (a ray hits what is visible: pointing, painting, a game's line of sight); `MS_RaycastBarriers` tests the barriers alone (exact shape, a barrier containing the origin skipped), which the editor's overlay uses to pick them while it is on.
+- **Entities.** `entityCount = boxCount + modelCount + lightCount + barrierCount`; `objEntities` holds boxes, models, lights, then barriers. A barrier's implicit id is its statement's key like any other line's (its text starts with `barrier`, so it never equals a box line's and existing ids don't shift); its transform is its shape's centre, rotation and size.
+- **Compiled map.** Section 21 `barriers` (`CmBarrier`: the corners as written, the rotation, the `CmRef`), `CM_VERSION` 14 (`docs/compiled-map.md`).
+- **Limits.** Barriers count toward `MS_MAX_OBJECTS` with boxes, models and lights.
+
 ### Lights
 
 ```
@@ -304,7 +317,7 @@ env <key> <value...>
 
 **Source lines.** Every box remembers the map line of the statement that made it and that line's map-text file (`boxRefs[]`: `line`, `file`).
 
-**Entities.** Every box, model and light is an entity (the `MS_Scene` `entity*` arrays) with a stable id: the line's `id` (or a key derived from the statement's text) and its index within the line.
+**Entities.** Every box, model, light and barrier is an entity (the `MS_Scene` `entity*` arrays) with a stable id: the line's `id` (or a key derived from the statement's text) and its index within the line.
 
 **Errors** are reported as `file:line: message`. Besides syntax errors (unknown keyword, wrong argument count, bad number) these include a missing file, a path outside the package, an undefined material, too many objects, a spot light whose `inner` angle exceeds `outer` (`spot light: inner must be <= outer`), and a map with no boxes and no models (`map is empty (no boxes and no models)`; the compiled-map reader refuses it too). A line in an imported file is reported with that file's path (`maps/x/parts/lake.map:41: …`); the imports' own messages are in the next section.
 

@@ -266,8 +266,8 @@ int main(int argc, char **argv)
     ExpectExact("format-4", "# a newer map\nmonolith 4\nbox 0 0 0 1 1 1\n", 2,
                 "map format 4 is newer than this monolith (3): update monolith");
     ExpectExact("format-3-at", "monolith 3\nrepeat 2 0 0 1 at 0 0 5 box 0 0 0 1 1 1\n", 2,
-                "unknown keyword 'at' (expected group, box, block, stairs, waffle, model, light, material, use, env, "
-                "fogzone, paint, import, spawn, viewpoint, id or repeat)");
+                "unknown keyword 'at' (expected group, box, block, stairs, waffle, barrier, model, light, material, "
+                "use, env, fogzone, paint, import, spawn, viewpoint, id or repeat)");
     ExpectFile("comments-only", "# nothing\n\n   # but comments\n", "map is empty (no boxes and no models)");
 
     // Imports (docs/map-format.md 2.10): each file once (a second import names where it was first
@@ -333,6 +333,18 @@ int main(int argc, char **argv)
                 "fogzone: fade must be 0 or more metres");
     ExpectExact("fogzone-density", "monolith 3\nbox 0 0 0 1 1 1\nfogzone 0 0 0 1 1 1 fade 5 fog.density -1\n", 3,
                 "fog.density must be >= 0 and <= 1000000");
+    // barrier (docs/map-format.md 2.2): two corners and an optional rot, like a box line
+    ExpectExact("barrier-few", "monolith 3\nbox 0 0 0 1 1 1\nbarrier 0 0 0 1 1\n", 3,
+                "barrier takes two corners: barrier x0 y0 z0 x1 y1 z1 [rot y p r]");
+    ExpectExact("barrier-many", "monolith 3\nbox 0 0 0 1 1 1\nbarrier 0 0 0 1 1 1 2\n", 3,
+                "barrier takes two corners: barrier x0 y0 z0 x1 y1 z1 [rot y p r]");
+    ExpectExact("barrier-rot", "monolith 3\nbox 0 0 0 1 1 1\nbarrier 0 0 0 1 1 1 rot 30 0\n", 3,
+                "rot takes 3 numbers: rot yawDeg pitchDeg rollDeg");
+    ExpectExact("barrier-number", "monolith 3\nbox 0 0 0 1 1 1\nbarrier 0 0 0 1 x 1\n", 3, "bad number 'x'");
+    ExpectExact("barrier-string", "monolith 3\nbox 0 0 0 1 1 1\nbarrier \"a\" 0 0 1 1 1\n", 3, "unexpected string \"a\"");
+    ExpectExact("barrier-overflow", "monolith 3\nbox 0 0 0 1 1 1\nrepeat 2 3e38 0 0 barrier 3e38 0 0 3.1e38 1 1\n", 3,
+                "coordinate or size out of range");
+    ExpectFile("barrier-only", "monolith 3\nbarrier 0 0 0 1 1 1\n", "map is empty (no boxes and no models)");
     WritePart("parts/old.map", "monolith 2\nbox 0 0 0 1 1 1\n");
     WritePart("parts/none.map", "# no format line\nbox 0 0 0 1 1 1\n");
     snprintf(msg, sizeof(msg), "map format 2 is older than this monolith (3): run /migrate-map %s/import-old.map in "

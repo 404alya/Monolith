@@ -45,6 +45,7 @@ bool DumpScene(const MS_Scene *s, const char *path, bool diff)
     fprintf(f, "counts boxes %d models %d modelFiles %d materials %d lights %d groups %d colliders %d", s->boxCount,
             s->modelCount, s->modelFileCount, s->materialCount, s->lightCount, s->groupCount, s->colliderCount);
     if (s->turnedBoxCount > 0) fprintf(f, " turned %d", s->turnedBoxCount);    // (only when the map has turned boxes)
+    if (s->barrierCount > 0) fprintf(f, " barriers %d", s->barrierCount);      // (only when it has barriers)
     fprintf(f, "\n");
     for (int i = 0; i < s->groupCount; i++) {
         fprintf(f, "group");
@@ -109,7 +110,7 @@ bool DumpScene(const MS_Scene *s, const char *path, bool diff)
                 M->translation.x, M->translation.y, M->translation.z, M->bounds.min.x, M->bounds.min.y, M->bounds.min.z,
                 M->bounds.max.x, M->bounds.max.y, M->bounds.max.z);
     }
-    for (int i = s->boxCount; i < s->colliderCount; i++) {
+    for (int i = s->boxCount; i < s->barrierColliderFirst; i++) {     // (the model colliders; barriers below)
         fprintf(f, "collider");
         Index(f, diff, i);
         HexBox(f, s->colliders[i]);
@@ -164,6 +165,25 @@ bool DumpScene(const MS_Scene *s, const char *path, bool diff)
         if (z->set & MS_FOGZONE_SKYAFFECT) fprintf(f, " fog.skyAffect %a", z->skyAffect);
         fprintf(f, "\n");
     }
+    // The `barrier` lines' copies: world AABB (= its collider), source, and a turned one's shape
+    // (a map without barriers dumps as before)
+    for (int i = 0; i < s->barrierCount; i++) {
+        const MS_Barrier *b = &s->barriers[i];
+        fprintf(f, "barrier");
+        Index(f, diff, i);
+        HexBox(f, b->box);
+        Line(f, s, diff, b->ref.file, b->ref.line);
+        GroupRef(f, s, diff, b->ref.group);
+        if (b->turned) {
+            fprintf(f, " rot");
+            Hex3(f, b->shape.rotationDeg);
+            fprintf(f, " center");
+            Hex3(f, b->shape.center);
+            fprintf(f, " size");
+            Hex3(f, b->shape.size);
+        }
+        fprintf(f, "\n");
+    }
     return fclose(f) == 0;
 }
 
@@ -171,14 +191,14 @@ bool DumpEntities(const MS_Scene *s, const char *path)
 {
     FILE *f = fopen(path, "w");
     if (!f) return false;
-    static const char *const KIND[] = { "none", "box", "model", "light" };
+    static const char *const KIND[] = { "none", "box", "model", "light", "barrier" };
     fprintf(f, "monolith-entity-dump 1\nmap \"%s\" entities %d\n", s->path, s->entityCount);
     for (int e = 0; e < s->entityCount; e++) {
         MS_EntityId id = s->entityIds[e];
         const MS_Source *src = &s->entitySources[e];
         const MS_Transform *t = &s->entityTransforms[e];
         fprintf(f, "entity %d id %08x:%d %s %s %d", e, id.stmt, id.index,
-                MS_ENTITY_EXPLICIT(id) ? "explicit" : "implicit", KIND[s->entityObjects[e].kind % 4], s->entityObjects[e].index);
+                MS_ENTITY_EXPLICIT(id) ? "explicit" : "implicit", KIND[s->entityObjects[e].kind % 5], s->entityObjects[e].index);
         Line(f, s, false, src->file, src->line);
         fprintf(f, " copy %d part %d position", src->copy, src->part);
         Hex3(f, t->position);

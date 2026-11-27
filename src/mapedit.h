@@ -37,6 +37,10 @@ typedef enum {
     EDIT_MOVE_TO_FILE,      // the selected objects' whole lines (a `repeat` copy split out first) move to
                             // map-text file filePath, with the `group` / `use` they had (docs/code/mapedit.md
                             // "move-to-file"; the edit script only)
+    EDIT_BARRIER_ADD,       // a new line `id N barrier x0 y0 z0 x1 y1 z1 [rot y p r]` (corners[], with
+                            // hasRot ypr[]): after anchor's line (its file and group), or with anchor kind
+                            // MS_OBJ_NONE at the end of the main map file's `# barriers` block (made at its
+                            // end, with `group "barriers"`, when it has none); the new barrier is selected
 } EditOpKind;
 
 // Faces of a paint entry (bits of EditOp.paint.faces): +x -x +y -y +z -z
@@ -62,11 +66,15 @@ typedef struct {
                             // position + `scale`: each model axis takes the factor of the world axis
                             // nearest to it; local: factor[i] scales the models' own axis i)
     double size[3];         // EDIT_SIZE: box / block size in metres about its centre, 0 = keep
-    double ypr[3];          // EDIT_SET_ROTATION: yaw, pitch, roll in degrees (R = Ry Rx Rz)
+    double ypr[3];          // EDIT_SET_ROTATION (EDIT_BARRIER_ADD with hasRot): yaw, pitch, roll in degrees
+                            // (R = Ry Rx Rz)
     const char *modelPath;  // EDIT_ADD: package-relative model file
     const char *filePath;   // EDIT_MOVE_TO_FILE: the package-relative map-text file the lines go to
     double pos[3];          // EDIT_ADD: where it stands (origin bottom)
-    MS_ObjRef anchor;       // EDIT_ADD: the new line goes right after this object's line (its group)
+    MS_ObjRef anchor;       // EDIT_ADD, EDIT_BARRIER_ADD: the new line goes right after this object's line
+                            // (its group); EDIT_BARRIER_ADD with kind MS_OBJ_NONE: the main file's `# barriers`
+    double corners[6];      // EDIT_BARRIER_ADD: x0 y0 z0 x1 y1 z1 (world; written with up to 4 decimals)
+    bool hasRot;            // EDIT_BARRIER_ADD: `rot ypr[0] ypr[1] ypr[2]` too
     int id;                 // EDIT_ID: the id the selected objects' line gets (1..2147483647, unique in
                             // the file; one line only); 0 = each line without an id gets the next free one
     const char *matName;    // EDIT_MATERIAL_SET: the material
@@ -107,7 +115,8 @@ typedef struct PaintStep PaintStep;
 typedef struct {
     EditOp op;
     char *modelPath, *filePath;
-    MS_EntityId anchorId;   // EDIT_ADD: the entity of op.anchor (a rebase finds it by this)
+    MS_EntityId anchorId;   // EDIT_ADD, EDIT_BARRIER_ADD: the entity of op.anchor (a rebase finds it by this;
+                            // stmt 0: none, EDIT_BARRIER_ADD's end of the main file)
     EditHunk *hunks;
     int hunkCount, hunkCap;
     unsigned long long hashBefore, hashAfter;
@@ -305,7 +314,10 @@ typedef enum {
     EDIT_CLASS_BOX = 0, EDIT_CLASS_BLOCK, EDIT_CLASS_OTHER_BOX,  // `box`, `block`, stairs / waffle
     EDIT_CLASS_MODEL, EDIT_CLASS_LIGHT, EDIT_CLASS_DIR_LIGHT,     // a directional light has no position
     EDIT_CLASS_NONE,                                            // not from a line of the map text
+    EDIT_CLASS_BARRIER,                                         // `barrier` (edited like a `box` line)
 } EditObjClass;
+// A class whose line is two corners or a block (`box`, `block`, `barrier`): moves, turns, scales and resizes
+static inline bool EditClassBoxLike(int c) { return c == EDIT_CLASS_BOX || c == EDIT_CLASS_BLOCK || c == EDIT_CLASS_BARRIER; }
 // classes[i] for objs[i] (each line read once; allocates only while reading the lines)
 void MapEditClassify(const MS_ObjRef *objs, int count, unsigned char *classes);
 // The transform an object of class cls (EditObjClass) gets from op (EDIT_MOVE, EDIT_ROTATE,

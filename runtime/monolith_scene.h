@@ -38,10 +38,10 @@
 // Scene contents (read-only for callers; valid until MS_Unload)
 // ======================================================================================
 
-typedef enum { MS_OBJ_NONE = 0, MS_OBJ_BOX, MS_OBJ_MODEL, MS_OBJ_LIGHT } MS_ObjKind;
+typedef enum { MS_OBJ_NONE = 0, MS_OBJ_BOX, MS_OBJ_MODEL, MS_OBJ_LIGHT, MS_OBJ_BARRIER } MS_ObjKind;
 
-// An object of the scene: a box (index into boxes[]), a model instance (into models[]) or a
-// light (into lights[]; MS_Raycast never returns lights)
+// An object of the scene: a box (index into boxes[]), a model instance (into models[]), a light
+// (into lights[]) or a barrier (into barriers[]). MS_Raycast never returns lights or barriers.
 typedef struct { MS_ObjKind kind; int index; } MS_ObjRef;
 
 // Where an object came from in the map text
@@ -58,7 +58,7 @@ typedef struct {
 } MS_Ref;
 
 // ======================================================================================
-// Entities: every box, model instance and light, with its data attached as components
+// Entities: every box, model instance, light and barrier, with its data attached as components
 // ======================================================================================
 // Entities are numbered 0..entityCount-1 in map order (one load; a reload renumbers them).
 // What stays the same across loads is the MS_EntityId: the statement's key plus the object's
@@ -76,9 +76,10 @@ typedef struct {
 #define MS_ENTITY_EXPLICIT(eid) (((eid).stmt & 0x80000000u) == 0)
 
 typedef struct {
-    Vector3 position;       // boxes: the centre; models: the position as written; lights: the position
-    Vector3 rotationDeg;    // models and turned boxes: yaw, pitch, roll; other boxes and lights: 0
-    Vector3 scale;          // boxes: the size (a turned box: along its own axes); models: the scale; lights: 1
+    Vector3 position;       // boxes, barriers: the centre; models: the position as written; lights: the position
+    Vector3 rotationDeg;    // models, turned boxes and barriers: yaw, pitch, roll; other boxes and lights: 0
+    Vector3 scale;          // boxes, barriers: the size (turned: along their own axes); models: the scale;
+                            // lights: 1
 } MS_Transform;
 
 // A turned box (a `box` / `block` line with `rot`): the box before it turned, and its rotation
@@ -89,6 +90,19 @@ typedef struct {
     Vector3 rotationDeg;    // yaw, pitch, roll as written (R = Ry * Rx * Rz, about center)
     Vector3 axis[3];        // its own x, y, z axes in the world: the columns of R (unit)
 } MS_TurnedBox;
+
+// A `barrier` line: an invisible wall. It blocks the player exactly like a box of the same shape
+// (MS_Collides, MS_FirstCollision, MS_ColliderTop / MS_ColliderBottom), but it is not drawn, casts
+// no shadow and is in no draw range, cache or box list (boxes[]); MS_Raycast passes through it
+// (MS_RaycastBarriers finds it) and scene->bounds leaves it out. Its collider is
+// colliders[barrierColliderFirst + i]. Every barrier keeps its exact shape in `shape` (an
+// axis-aligned one: rotation 0, the world's axes), so no lookup table is needed.
+typedef struct {
+    BoundingBox box;        // world AABB (a turned barrier: of its turned shape) = its colliders[] entry
+    bool turned;            // written with a nonzero `rot`
+    MS_TurnedBox shape;     // centre, size along its own axes, rotation as written, axes
+    MS_Ref ref;             // line, file, statement, group, repeat copy (material: the `use` active there, unused; part 0)
+} MS_Barrier;
 
 typedef struct {
     int line, file, prim;   // map line, its map-text file and the statement index (= MS_Ref)
@@ -217,9 +231,15 @@ typedef struct {
     const MS_SlotMaterial *modelSlots;
     int modelSlotCount;
 
-    const BoundingBox *colliders;   // boxes first (same indices as boxes[]), then model colliders; the boxes
-                                    // of a `collide off` material (MS_Material.noCollide) are here too
+    const BoundingBox *colliders;   // boxes first (same indices as boxes[]), then model colliders, then
+                                    // barriers (from barrierColliderFirst); the boxes of a `collide off`
+                                    // material (MS_Material.noCollide) are here too
     int colliderCount;
+
+    const MS_Barrier *barriers;     // `barrier` lines (invisible walls), in map order
+    int barrierCount;
+    int barrierColliderFirst;       // colliders[barrierColliderFirst + i] is barrier i (= colliderCount -
+                                    // barrierCount); a collider index c is a barrier when c >= it
 
     const MS_Material *materials;   // [0] = "default"
     int materialCount;
@@ -239,18 +259,19 @@ typedef struct {
     const MS_FogZone *fogZones;     // `fogzone` lines, in map order
     int fogZoneCount;
 
-    BoundingBox bounds;             // everything (boxes, models, lights)
+    BoundingBox bounds;             // everything drawn or lit (boxes, models, lights; not barriers)
 
     // Entities (see "Entities" above): components indexed by entity, in map order
-    int entityCount;                // = boxCount + modelCount + lightCount
+    int entityCount;                // = boxCount + modelCount + lightCount + barrierCount
     const MS_EntityId *entityIds;   // stable id
-    const MS_ObjRef *entityObjects; // the box, model instance or light it is
+    const MS_ObjRef *entityObjects; // the box, model instance, light or barrier it is
     const MS_Transform *entityTransforms;
     const MS_Source *entitySources;
-    const int *entityModels;        // model file (index into modelFiles[]), -1 for boxes and lights
+    const int *entityModels;        // model file (index into modelFiles[]), -1 for boxes, lights and barriers
     const int *boxEntities;         // object index -> entity, per kind
     const int *modelEntities;
     const int *lightEntities;
+    const int *barrierEntities;
 
     MS_Private *priv;               // GPU resources, caches, parsed data
 } MS_Scene;
@@ -425,10 +446,10 @@ const char *MS_LineText(const MS_Scene *scene, int file, int line, int *length);
 // is MS_MapFileAt(scene, file)->hash). "" with *size 0 when out of range. Valid until the next reload.
 const char *MS_MapText(const MS_Scene *scene, int file, int *size);
 
-// The argument layout of a box primitive (box, block, stairs, waffle): returns the argument
-// count and fills axes[0..count-1] with what `repeat` shifts: MS_AXIS_X/Y/Z, MS_AXIS_NONE
-// (a size), MS_AXIS_INT (a count). -1 if `name` is not a box primitive. For tools that edit
-// map lines.
+// The argument layout of a box primitive (box, block, stairs, waffle; and `barrier`, laid out as
+// `box`): returns the argument count and fills axes[0..count-1] with what `repeat` shifts:
+// MS_AXIS_X/Y/Z, MS_AXIS_NONE (a size), MS_AXIS_INT (a count). -1 if `name` is none of them. For
+// tools that edit map lines.
 enum { MS_AXIS_NONE = 0, MS_AXIS_X, MS_AXIS_Y, MS_AXIS_Z, MS_AXIS_INT };
 int MS_PrimitiveArgs(const char *name, unsigned char axes[8]);
 
@@ -714,8 +735,14 @@ typedef struct {
 // First object along the ray within maxDist (<= 0: unlimited). Boxes that contain the
 // origin are skipped (so you can pick out of a box you are inside); models are tested
 // against their bounds, then their triangles where available (MS_RaycastModel). On equal
-// distances the lower box index wins, and a box wins over a model.
+// distances the lower box index wins, and a box wins over a model. Barriers are invisible:
+// the ray passes through them (MS_RaycastBarriers tests them alone).
 MS_Hit MS_Raycast(const MS_Scene *scene, Vector3 origin, Vector3 dir, float maxDist);
+
+// The first barrier along the ray within maxDist (<= 0: unlimited), by its exact (turned) shape, with
+// the same rules as MS_Raycast's boxes (a barrier containing the origin is skipped; on equal distances
+// the lower index wins). obj.kind MS_OBJ_NONE when none is hit. Nothing else blocks the ray.
+MS_Hit MS_RaycastBarriers(const MS_Scene *scene, Vector3 origin, Vector3 dir, float maxDist);
 
 // One model instance: its world bounds first, then its triangles (a BVH over a CPU copy of
 // the mesh). Without triangle data (noGpu scenes) the bounds are hit like a box (an origin
@@ -723,8 +750,9 @@ MS_Hit MS_Raycast(const MS_Scene *scene, Vector3 origin, Vector3 dir, float maxD
 // (<= 0: unlimited).
 bool MS_RaycastModel(const MS_Scene *scene, int model, Vector3 origin, Vector3 dir, float maxDist, MS_Hit *hit);
 
-// Strict overlap (touching is not a hit) of `box` with any collider (a turned box: its turned
-// shape, not its AABB). Boxes of a `collide off` material (MS_Material.noCollide) never collide.
+// Strict overlap (touching is not a hit) of `box` with any collider (a turned box or barrier: its
+// turned shape, not its AABB). Barriers collide; boxes of a `collide off` material
+// (MS_Material.noCollide) never do.
 bool MS_Collides(const MS_Scene *scene, BoundingBox box);
 // The lowest index into scene->colliders that `box` strictly overlaps, -1 for none
 int MS_FirstCollision(const MS_Scene *scene, BoundingBox box);

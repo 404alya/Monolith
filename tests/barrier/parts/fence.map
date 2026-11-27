@@ -1,0 +1,4 @@
+monolith 3
+# An imported part: a barrier in a file of its own (imports may hold barriers)
+group "imported"
+barrier 12 0 -2 12.5 2 2

@@ -4,6 +4,8 @@ Terms used across these pages, in alphabetical order.
 
 **AO volume, baked AO** (`--ao baked`): ambient occlusion computed once per map load into a 3D texture around the boxes, instead of per frame (SSAO / SSIL). Cheaper and stable when the camera turns; a quality trade-off used by the high and medium presets.
 
+**Barrier:** an invisible wall, a `barrier x0 y0 z0 x1 y1 z1 [rot y p r]` line: it stops the player exactly like a box of that shape but is never drawn, casts no shadow and changes nothing in the look. Spectator mode shows the barriers as a red overlay (**O**); **H** in edit mode places one ([map-format.md](map-format.md) §2.1, [user-guide.md](user-guide.md#barriers-h-o)). The opposite of a `collide off` material (drawn, but not blocking).
+
 **Brief, design brief:** a map's `MAP.md`: its style, scale, materials, lighting, rules for new content and named groups. Every request on the map is carried out in its style ([map-format.md](map-format.md) §1.2).
 
 **Bundle:** the folder the editor writes for one request, `requests/<date>_<slug>/`: the prompt, screenshots, the camera, what the crosshair hit, the selection, the regions and the volumes, and later the result.
@@ -20,7 +22,7 @@ Terms used across these pages, in alphabetical order.
 
 **Edit mode, manual edit:** key M in spectator mode: move, turn, remove, duplicate or add the selected objects yourself. Each edit is a minimal text edit to the map file (with undo / redo); no request is made ([user-guide.md](user-guide.md)).
 
-**Entity, entity id:** every box, model instance and light of a loaded map, with its data (transform, source line, model file) attached as components. Its id stays the same across reloads: the line's `id n` (or a key from the line's text) plus the object's index within the line ([map-format.md](map-format.md) §2.9).
+**Entity, entity id:** every box, model instance, light and barrier of a loaded map, with its data (transform, source line, model file) attached as components. Its id stays the same across reloads: the line's `id n` (or a key from the line's text) plus the object's index within the line ([map-format.md](map-format.md) §2.9).
 
 **Face groups** (`uv_faces`): which of a box's six faces share texture space. Faces with the same number share one cell of the material's texture; without the key every face shows the whole texture ([map-format.md](map-format.md)). In draw mode the faces of one `paint` entry share one rectangle of the paint atlas (the draw panel's Faces section; [painting.md](painting.md)).
 
@@ -28,7 +30,7 @@ Terms used across these pages, in alphabetical order.
 
 **Frame reuse:** when the camera and everything else that affects the image stand still, the editor shows the last rendered frame again instead of rendering a new one.
 
-**Group:** a named set of boxes, models and lights in a map (`group "clearing: camp"`). Requests and the HUD refer to things by group; Ctrl+click selects one.
+**Group:** a named set of boxes, models, lights and barriers in a map (`group "clearing: camp"`). Requests and the HUD refer to things by group; Ctrl+click selects one.
 
 **Hot reload:** the editor watches the map package's files and reloads the map when one changes, keeping the old version loaded while a new one has errors.
 

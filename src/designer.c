@@ -109,6 +109,7 @@ const char *DesignerMaterialLabel(MS_ObjRef o)
 {
     const MS_Ref *r = MS_ObjectRef(scene, o);
     int m = r ? r->material : -1;
+    if (o.kind == MS_OBJ_BARRIER) return "(none: a barrier is invisible)";
     if (m >= 0 && m < scene->materialCount) return scene->materials[m].name;
     if (o.kind != MS_OBJ_MODEL) return "default";
     const MS_ModelInstance *mi = &scene->models[o.index];
@@ -166,6 +167,13 @@ void DesignerPrintHit(DesignerHit hit)
                hit.normal.z, hit.dist, m->position.x, m->position.y, m->position.z, m->rotationDeg.x, m->rotationDeg.y,
                m->rotationDeg.z, m->scale.x, m->scale.y, m->scale.z, ORIGIN[m->origin % 3], m->translation.x,
                m->translation.y, m->translation.z, b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z);
+    } else if (hit.obj.kind == MS_OBJ_BARRIER) {
+        printf("pick: barrier %d  group \"%s\"  line %s%s%d: %.*s\n"
+               "pick: point %.3f %.3f %.3f  normal %g %g %g  dist %.3f\n"
+               "pick: barrier min %.3f %.3f %.3f  max %.3f %.3f %.3f\n",
+               hit.obj.index, r.group >= 0 ? scene->groups[r.group] : "", MAPEDIT_LINE_AT(r.file, r.line), textLen, text,
+               hit.point.x, hit.point.y, hit.point.z, hit.normal.x, hit.normal.y, hit.normal.z, hit.dist,
+               b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z);
     } else {
         printf("pick: box %d  group \"%s\"  material \"%s\"  line %s%s%d: %.*s\n"
                "pick: point %.3f %.3f %.3f  normal %g %g %g  dist %.3f\n"   // (%g: -1 0 0 as before, a turned face in full)
@@ -660,16 +668,20 @@ void DesignerMessagef(Designer *d, bool error, const char *fmt, ...)
     MessageShown(d, error);
 }
 
+// The kinds the designer selects: boxes, models and barriers (lights only through the edit script)
+static bool Selectable(MS_ObjKind k) { return k == MS_OBJ_BOX || k == MS_OBJ_MODEL || k == MS_OBJ_BARRIER; }
+static const MS_ObjKind SELECTABLE[3] = { MS_OBJ_BOX, MS_OBJ_MODEL, MS_OBJ_BARRIER };
+
 // selected[] position + 1 of an object, 0 = not selected (d->selPos, grown on demand)
 static int SelectionIndexOf(const Designer *d, MS_ObjRef o)
 {
-    if ((o.kind != MS_OBJ_BOX && o.kind != MS_OBJ_MODEL) || o.index < 0 || o.index >= d->selPosCap[o.kind]) return -1;
+    if (!Selectable(o.kind) || o.index < 0 || o.index >= d->selPosCap[o.kind]) return -1;
     return d->selPos[o.kind][o.index] - 1;
 }
 
 static bool SetSelPos(Designer *d, MS_ObjRef o, int pos)
 {
-    if (o.kind != MS_OBJ_BOX && o.kind != MS_OBJ_MODEL) return false;
+    if (!Selectable(o.kind)) return false;
     if (pos == 0 && o.index >= d->selPosCap[o.kind]) return true;
     if (!MS_RESERVE(d->selPos[o.kind], d->selPosCap[o.kind], o.index + 1)) return false;
     d->selPos[o.kind][o.index] = pos;
@@ -677,8 +689,14 @@ static bool SetSelPos(Designer *d, MS_ObjRef o, int pos)
 }
 
 // Objects of one kind: count, map line, group
-static int KindCount(MS_ObjKind k) { return k == MS_OBJ_MODEL ? scene->modelCount : scene->boxCount; }
-static const MS_Ref *KindRef(MS_ObjKind k, int i) { return k == MS_OBJ_MODEL ? &scene->models[i].ref : &scene->boxRefs[i]; }
+static int KindCount(MS_ObjKind k)
+{
+    return k == MS_OBJ_MODEL ? scene->modelCount : k == MS_OBJ_BARRIER ? scene->barrierCount : scene->boxCount;
+}
+static const MS_Ref *KindRef(MS_ObjKind k, int i)
+{
+    return k == MS_OBJ_MODEL ? &scene->models[i].ref : k == MS_OBJ_BARRIER ? &scene->barriers[i].ref : &scene->boxRefs[i];
+}
 
 int DesignerObjNth(MS_ObjRef o)
 {
@@ -745,25 +763,29 @@ void DesignerClearSelection(Designer *d)
 
 bool DesignerSelectObject(Designer *d, MS_ObjRef o)
 {
-    if ((o.kind != MS_OBJ_BOX && o.kind != MS_OBJ_MODEL) || o.index < 0 || o.index >= KindCount(o.kind)) return false;
+    if (!Selectable(o.kind) || o.index < 0 || o.index >= KindCount(o.kind)) return false;
     return SelectionAdd(d, o);
 }
 
 void DesignerSelectLine(Designer *d, int file, int line)
 {
-    for (int k = MS_OBJ_BOX; k <= MS_OBJ_MODEL; k++)
+    for (int s = 0; s < 3; s++) {
+        MS_ObjKind k = SELECTABLE[s];
         for (int i = 0; i < KindCount(k); i++)
             if (KindRef(k, i)->line == line && KindRef(k, i)->file == file && !SelectionAdd(d, (MS_ObjRef){ k, i })) return;
+    }
 }
 
-// The object's whole group, boxes and models (an object without a group stands alone)
+// The object's whole group, boxes, models and barriers (an object without a group stands alone)
 static void SelectGroupOf(Designer *d, MS_ObjRef o)
 {
     int g = KindRef(o.kind, o.index)->group;
     if (g < 0) { SelectionAdd(d, o); return; }
-    for (int k = MS_OBJ_BOX; k <= MS_OBJ_MODEL; k++)
+    for (int s = 0; s < 3; s++) {
+        MS_ObjKind k = SELECTABLE[s];
         for (int i = 0; i < KindCount(k); i++)
             if (KindRef(k, i)->group == g && !SelectionAdd(d, (MS_ObjRef){ k, i })) return;
+    }
 }
 
 static bool SameBox(BoundingBox a, BoundingBox b)
@@ -846,8 +868,8 @@ void DesignerSync(Designer *d)
     d->keyCap = 0;
     d->selectedCount = 0;
 
-    GeoIndex geo[3] = { 0 };
-    bool geoOk[3] = { false };
+    GeoIndex geo[MS_OBJ_BARRIER + 1] = { 0 };
+    bool geoOk[MS_OBJ_BARRIER + 1] = { false };
     for (int s = 0; s < oldCount; s++) {
         const DesignerSelKey *k = &old[s];
         MS_ObjKind kind = k->kind;
@@ -873,7 +895,7 @@ void DesignerSync(Designer *d)
         }
         if (found >= 0) SelectionAdd(d, (MS_ObjRef){ kind, found });
     }
-    for (int i = 0; i < 3; i++) { free(geo[i].head); free(geo[i].next); }
+    for (int i = 0; i <= MS_OBJ_BARRIER; i++) { free(geo[i].head); free(geo[i].next); }
     for (int s = 0; s < oldCount; s++) free(old[s].groupName);
     free(old);
 
@@ -1329,6 +1351,7 @@ static void VolumeModeEnd(Designer *d)
 {
     VolumeCancel(d);
     d->volumeMode = false;
+    d->barrierPlace = false;
 }
 
 void DesignerVolumeModeEnd(Designer *d) { VolumeModeEnd(d); }
@@ -1338,6 +1361,35 @@ void DesignerVolumeModeBegin(Designer *d)
     if (d->snipping || d->volumeMode) return;
     d->volumeMode = true;
     d->volumeStep = VOLUME_STEP_FIRST;
+}
+
+// --- Barriers by hand: the same three clicks, the box goes to the edit mode (EDIT_BARRIER_ADD)
+
+void DesignerBarrierPlaceBegin(Designer *d)
+{
+    if (d->snipping || d->volumeMode) return;
+    d->volumeMode = true;
+    d->volumeStep = VOLUME_STEP_FIRST;
+    d->barrierPlace = true;
+}
+
+// A finished box becomes the pending barrier (grown to VOLUME_MIN_SIZE per axis, as a volume)
+static void BarrierReady(Designer *d, BoundingBox box)
+{
+    BoundingBox v = { Vector3Min(box.min, box.max), Vector3Max(box.min, box.max) };
+    if (v.max.x - v.min.x < VOLUME_MIN_SIZE) v.max.x = v.min.x + VOLUME_MIN_SIZE;
+    if (v.max.y - v.min.y < VOLUME_MIN_SIZE) v.max.y = v.min.y + VOLUME_MIN_SIZE;
+    if (v.max.z - v.min.z < VOLUME_MIN_SIZE) v.max.z = v.min.z + VOLUME_MIN_SIZE;
+    d->barrierBox = v;
+    d->barrierPending = true;
+}
+
+bool DesignerTakeBarrier(Designer *d, BoundingBox *box)
+{
+    if (!d->barrierPending) return false;
+    d->barrierPending = false;
+    *box = d->barrierBox;
+    return true;
 }
 
 // Arrows / PgUp / PgDn on the active volume. The horizontal arrows follow the world axis
@@ -1382,7 +1434,10 @@ static DesignerAction VolumeInput(Designer *d)
 
     if (d->volumeStep != VOLUME_STEP_FIRST) {
         if (IsKeyPressed(KEY_ESCAPE) || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) {
-            VolumeCancel(d);
+            if (d->barrierPlace) {      // (back to the edit mode)
+                VolumeModeEnd(d);
+                DesignerMessageStatic(d, false, "barrier cancelled");
+            } else VolumeCancel(d);
             return DESIGNER_NONE;
         }
         if (d->volumeStep == VOLUME_STEP_SECOND) {
@@ -1405,6 +1460,11 @@ static DesignerAction VolumeInput(Designer *d)
         float wheel = GetMouseWheelMove();
         if (wheel != 0.0f) d->volHeight = SnapTo(d->volHeight, VolumeSnap(d)) + wheel * VolumeSnap(d) * (shift ? 4.0f : 1.0f);
         d->volHeight = fmaxf(d->volHeight, VOLUME_MIN_SIZE);
+        if ((IsMouseButtonPressed(MOUSE_BUTTON_LEFT) || enter) && d->barrierPlace) {
+            BarrierReady(d, VolumeDraft(d));    // (the edit mode writes it and selects it)
+            VolumeModeEnd(d);
+            return DESIGNER_NONE;
+        }
         if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) || enter) {
             if (DesignerAddVolume(d, VolumeDraft(d))) {
                 BoundingBox v = d->volumes[d->activeVolume].box;
@@ -1417,7 +1477,26 @@ static DesignerAction VolumeInput(Designer *d)
     }
 
     if (IsKeyPressed(KEY_ESCAPE) || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) {
+        if (d->barrierPlace) DesignerMessageStatic(d, false, "barrier cancelled");
         VolumeModeEnd(d);
+        return DESIGNER_NONE;
+    }
+    if (d->barrierPlace) {
+        // A barrier: only the first corner (and the snap step) here; the volumes stay as they are
+        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+            if (ObjIsNone(d->hit.obj)) DesignerMessageStatic(d, true, "no surface under the cursor");
+            else {
+                d->volA = VolumePoint(d);
+                d->volumeStep = VOLUME_STEP_SECOND;
+            }
+        }
+        if (IsKeyPressed(KEY_N)) DesignerMessagef(d, false, "snap %g m", DesignerCycleSnap(d));
+        return DESIGNER_NONE;
+    }
+    if (IsKeyPressed(KEY_H)) {
+        // The active volume as a barrier line (the volume stays): the edit mode writes it
+        if (d->activeVolume < 0 || d->activeVolume >= d->volumeCount) DesignerMessageStatic(d, true, "no volume to make a barrier of");
+        else BarrierReady(d, d->volumes[d->activeVolume].box);
         return DESIGNER_NONE;
     }
     if (enter) {
@@ -1544,6 +1623,24 @@ static DesignerAction SnipInput(Designer *d)
     return DESIGNER_NONE;
 }
 
+// What the designer points at: DesignerPick, and with the barrier overlay on the nearest barrier when
+// it is in front of the visible hit (barriers are invisible: only the overlay makes them pickable)
+static DesignerHit PickShown(const Designer *d, Vector3 origin, Vector3 dir)
+{
+    DesignerHit hit = DesignerPick(origin, dir);
+    if (!d->showBarriers || scene->barrierCount == 0) return hit;
+    MS_Hit b = MS_RaycastBarriers(scene, origin, dir, ObjIsNone(hit.obj) ? 0.0f : hit.dist);
+    if (b.obj.kind != MS_OBJ_NONE && (ObjIsNone(hit.obj) || b.dist < hit.dist)) hit = (DesignerHit){ b.obj, b.point, b.normal, b.dist };
+    return hit;
+}
+
+void DesignerShowBarriers(Designer *d, bool on)
+{
+    if (d->showBarriers == on) return;
+    d->showBarriers = on;
+    d->pickValid = false;       // (the pick sees them, or no longer)
+}
+
 void DesignerPickCamera(Designer *d, Camera3D cam)
 {
     // A still camera over the same scene hits the same thing (the ray cast is most of a reused
@@ -1558,7 +1655,7 @@ void DesignerPickCamera(Designer *d, Camera3D cam)
     d->pickTarget = cam.target;
     d->eye = cam.position;
     d->viewFwd = Vector3Normalize(Vector3Subtract(cam.target, cam.position));
-    d->hit = DesignerPick(cam.position, d->viewFwd);
+    d->hit = PickShown(d, cam.position, d->viewFwd);
 }
 
 DesignerHit DesignerPickAt(Camera3D cam, int w, int h, float x, float y)
@@ -1579,7 +1676,8 @@ void DesignerPickCursor(Designer *d, Camera3D cam, int w, int h, Vector2 px)
     d->pickTarget = cam.target;
     d->eye = cam.position;
     d->viewFwd = Vector3Normalize(Vector3Subtract(cam.target, cam.position));
-    d->hit = DesignerPickAt(cam, w, h, px.x, px.y);
+    RayFrame f = MakeRayFrame(cam, w > 0 ? w : 1, h > 0 ? h : 1);
+    d->hit = PickShown(d, cam.position, RayThrough(&f, px.x, px.y));
 }
 
 void DesignerAdoptVersion(Designer *d)
@@ -1725,6 +1823,8 @@ static struct {
 #define HIT_COLOR   (Color){ 90, 220, 255, 255 }
 #define REGION_COLOR (Color){ 240, 90, 220, 255 }
 #define VOLUME_COLOR (Color){ 70, 235, 170, 255 }
+#define BARRIER_COLOR (Color){ 255, 80, 70, 255 }       // the barrier overlay: wires (and a barrier being made)
+#define BARRIER_FILL  (Color){ 220, 40, 35, 255 }       //   and its translucent fill
 
 // Distance from the eye to the nearest point of a box (0 inside)
 static float BoxDistance(BoundingBox b, Vector3 p)
@@ -1782,13 +1882,10 @@ static void ModelCorners(const MS_ModelInstance *m, Vector3 eye, Vector3 *out)
     }
 }
 
-// The 8 corners of a turned box (docs/live-editing.md 11.2), pushed out like ModelCorners;
-// false for an axis-aligned box (scene->boxes[i] is then the box)
-static bool TurnedBoxCorners(int i, Vector3 eye, Vector3 *out)
+// The 8 corners of turned box t (world AABB `aabb`), pushed out like ModelCorners
+static void TurnedCorners(const MS_TurnedBox *t, BoundingBox aabb, Vector3 eye, Vector3 *out)
 {
-    if (!scene->boxTurned || scene->boxTurned[i] < 0) return false;
-    const MS_TurnedBox *t = &scene->turnedBoxes[scene->boxTurned[i]];
-    float e = fminf(0.004f + 0.0015f * BoxDistance(scene->boxes[i], eye), 0.1f);
+    float e = fminf(0.004f + 0.0015f * BoxDistance(aabb, eye), 0.1f);
     for (int k = 0; k < 8; k++) {
         Vector3 dir = { 0 };
         dir = Vector3Add(dir, Vector3Scale(t->axis[0], (k & 1) ? t->size.x * 0.5f : -t->size.x * 0.5f));
@@ -1797,17 +1894,24 @@ static bool TurnedBoxCorners(int i, Vector3 eye, Vector3 *out)
         float len = Vector3Length(dir);
         out[k] = Vector3Add(t->center, len > 0.0f ? Vector3Scale(dir, (len + e) / len) : dir);
     }
-    return true;
 }
 
-// The oriented corners of a model or a turned box (false: an axis-aligned box)
+// The oriented corners of a model, a turned box or a turned barrier (false: an axis-aligned box or
+// barrier, MS_ObjectBounds is then its shape)
 static bool ObjCorners(MS_ObjRef o, Vector3 eye, Vector3 *q)
 {
     if (o.kind == MS_OBJ_MODEL) {
         ModelCorners(&scene->models[o.index], eye, q);
         return true;
     }
-    return TurnedBoxCorners(o.index, eye, q);
+    if (o.kind == MS_OBJ_BARRIER) {
+        const MS_Barrier *b = &scene->barriers[o.index];
+        if (b->turned) TurnedCorners(&b->shape, b->box, eye, q);
+        return b->turned;
+    }
+    if (!scene->boxTurned || scene->boxTurned[o.index] < 0) return false;
+    TurnedCorners(&scene->turnedBoxes[scene->boxTurned[o.index]], scene->boxes[o.index], eye, q);
+    return true;
 }
 
 // Outline of an object: a box's (inflated) AABB, a model's or a turned box's oriented box
@@ -1821,7 +1925,7 @@ static void DrawObjWires(MS_ObjRef o, Vector3 eye, Color col)
         return;
     }
     Vector3 c, s;
-    InflatedBox(scene->boxes[o.index], eye, &c, &s);
+    InflatedBox(MS_ObjectBounds(scene, o), eye, &c, &s);
     DrawCubeWiresV(c, s, col);
 }
 
@@ -1841,7 +1945,7 @@ static void DrawObjTint(MS_ObjRef o, Vector3 eye, Color col)
         return;
     }
     Vector3 c, s;
-    InflatedBox(scene->boxes[o.index], eye, &c, &s);
+    InflatedBox(MS_ObjectBounds(scene, o), eye, &c, &s);
     DrawCubeV(c, s, col);
 }
 
@@ -1875,6 +1979,25 @@ static void EndOverlay3D(void)
 }
 
 void DesignerBeginOverlay3D(Camera3D cam) { BeginOverlay3D(cam); }
+
+void DesignerDrawBarriers(const Designer *d, Camera3D cam)
+{
+    (void)d;
+    if (scene->barrierCount == 0) return;
+    Vector3 eye = cam.position;
+    BeginOverlay3D(cam);
+    // As the volumes: a faint outline on top of everything (a barrier behind a wall stays findable),
+    // then, depth-tested, the translucent fill (no depth writes) and the strong outline
+    rlDisableDepthTest();
+    for (int i = 0; i < scene->barrierCount; i++) DrawObjWires((MS_ObjRef){ MS_OBJ_BARRIER, i }, eye, Fade(BARRIER_COLOR, 0.25f));
+    rlDrawRenderBatchActive();
+    rlEnableDepthTest();
+    rlDisableDepthMask();
+    for (int i = 0; i < scene->barrierCount; i++) DrawObjTint((MS_ObjRef){ MS_OBJ_BARRIER, i }, eye, Fade(BARRIER_FILL, 0.22f));
+    rlDrawRenderBatchActive();
+    for (int i = 0; i < scene->barrierCount; i++) DrawObjWires((MS_ObjRef){ MS_OBJ_BARRIER, i }, eye, BARRIER_COLOR);
+    EndOverlay3D();
+}
 void DesignerEndOverlay3D(void) { EndOverlay3D(); }
 
 void DesignerDrawOverlay(const Designer *d, Camera3D cam, bool hover)
@@ -1947,15 +2070,16 @@ void DesignerDrawVolumes(const Designer *d, Camera3D cam, int w, int h, bool mar
     bool aim = live && d->volumeStep != VOLUME_STEP_HEIGHT && !ObjIsNone(d->hit.obj);
     if (d->volumeCount == 0 && !live) return;
     BoundingBox draft = making ? VolumeDraft(d) : (BoundingBox){ 0 };
-    // The active volume stands out only while it can be edited
-    int active = live ? d->activeVolume : -1;
+    // The active volume stands out only while it can be edited (not while a barrier is made)
+    int active = live && !d->barrierPlace ? d->activeVolume : -1;
+    Color draftColor = d->barrierPlace ? BARRIER_COLOR : VOLUME_COLOR;     // (a barrier: the overlay's colour)
 
     BeginOverlay3D(cam);
     // Volumes are often behind walls (that is what they are for): a faint outline on top of
     // everything first, then, depth-tested, translucent faces and the strong outline
     rlDisableDepthTest();
     for (int i = 0; i < d->volumeCount; i++) DrawBoundingBox(d->volumes[i].box, Fade(VOLUME_COLOR, i == active ? 0.5f : 0.3f));
-    if (making) DrawBoundingBox(draft, Fade(VOLUME_COLOR, 0.5f));
+    if (making) DrawBoundingBox(draft, Fade(draftColor, 0.5f));
     rlDrawRenderBatchActive();
     rlEnableDepthTest();
     rlDisableDepthMask();
@@ -1963,18 +2087,18 @@ void DesignerDrawVolumes(const Designer *d, Camera3D cam, int w, int h, bool mar
         BoundingBox v = d->volumes[i].box;
         DrawCubeV(Vector3Scale(Vector3Add(v.min, v.max), 0.5f), Vector3Subtract(v.max, v.min), Fade(VOLUME_COLOR, i == active ? 0.12f : 0.07f));
     }
-    if (making) DrawCubeV(Vector3Scale(Vector3Add(draft.min, draft.max), 0.5f), Vector3Subtract(draft.max, draft.min), Fade(VOLUME_COLOR, 0.12f));
+    if (making) DrawCubeV(Vector3Scale(Vector3Add(draft.min, draft.max), 0.5f), Vector3Subtract(draft.max, draft.min), Fade(draftColor, 0.12f));
     rlDrawRenderBatchActive();
     for (int i = 0; i < d->volumeCount; i++)
         DrawBoundingBox(d->volumes[i].box, Fade(VOLUME_COLOR, active < 0 || i == active ? 1.0f : 0.6f));
-    if (making) DrawBoundingBox(draft, VOLUME_COLOR);
+    if (making) DrawBoundingBox(draft, draftColor);
     if (aim) {
         // Where a click would put the corner (snapped)
         Vector3 p = VolumePoint(d);
         float s = 0.012f * Vector3Distance(cam.position, p) + 0.03f;
-        DrawLine3D((Vector3){ p.x - s, p.y, p.z }, (Vector3){ p.x + s, p.y, p.z }, VOLUME_COLOR);
-        DrawLine3D((Vector3){ p.x, p.y - s, p.z }, (Vector3){ p.x, p.y + s, p.z }, VOLUME_COLOR);
-        DrawLine3D((Vector3){ p.x, p.y, p.z - s }, (Vector3){ p.x, p.y, p.z + s }, VOLUME_COLOR);
+        DrawLine3D((Vector3){ p.x - s, p.y, p.z }, (Vector3){ p.x + s, p.y, p.z }, draftColor);
+        DrawLine3D((Vector3){ p.x, p.y - s, p.z }, (Vector3){ p.x, p.y + s, p.z }, draftColor);
+        DrawLine3D((Vector3){ p.x, p.y, p.z - s }, (Vector3){ p.x, p.y, p.z + s }, draftColor);
     }
     EndOverlay3D();
 
@@ -1986,12 +2110,23 @@ void DesignerDrawVolumes(const Designer *d, Camera3D cam, int w, int h, bool mar
         VolumeTab(v, text, cam, w, h);
     }
     if (making) {
-        snprintf(text, sizeof(text), "V%d   %.2f x %.2f x %.2f m", d->volumeCount + 1, draft.max.x - draft.min.x,
-                 draft.max.y - draft.min.y, draft.max.z - draft.min.z);
+        if (d->barrierPlace)
+            snprintf(text, sizeof(text), "barrier   %.2f x %.2f x %.2f m", draft.max.x - draft.min.x, draft.max.y - draft.min.y,
+                     draft.max.z - draft.min.z);
+        else
+            snprintf(text, sizeof(text), "V%d   %.2f x %.2f x %.2f m", d->volumeCount + 1, draft.max.x - draft.min.x,
+                     draft.max.y - draft.min.y, draft.max.z - draft.min.z);
         VolumeTab(draft, text, cam, w, h);
     }
 
-    if (live && !d->promptOpen) {
+    if (live && !d->promptOpen && d->barrierPlace) {
+        const char *help = d->volumeStep == VOLUME_STEP_SECOND
+            ? "{LMB} opposite footprint corner|{CTRL} no snap|{RMB} / {ESC} cancel"
+            : d->volumeStep == VOLUME_STEP_HEIGHT
+            ? "mouse up / down or {wheel} height ({SHIFT} x4)|{CTRL} no snap|{LMB} / {ENTER} write the barrier|{RMB} / {ESC} cancel"
+            : TextFormat("{LMB} first corner on a surface|{N} snap %g m|{CTRL} no snap|{RMB} / {ESC} cancel", VolumeSnap(d));
+        DrawHelpBar("BARRIER", BARRIER_COLOR, help, w, h);
+    } else if (live && !d->promptOpen) {
         const char *help;
         if (d->volumeStep == VOLUME_STEP_SECOND)
             help = "{LMB} opposite footprint corner|{CTRL} no snap|{RMB} / {ESC} cancel";
@@ -1999,7 +2134,7 @@ void DesignerDrawVolumes(const Designer *d, Camera3D cam, int w, int h, bool mar
             help = "mouse up / down or {wheel} height ({SHIFT} x4)|{CTRL} no snap|{LMB} / {ENTER} done|{RMB} / {ESC} cancel";
         else
             help = TextFormat("{LMB} first corner|{[} {]} active|arrows, {PGUP} / {PGDN} move ({ALT} grow, {ALT+SHIFT} shrink)|"
-                              "{N} snap %g m|{DEL} / {SHIFT+DEL} remove / clear|{ENTER} request|{V} / {ESC} leave   (%d volume%s)",
+                              "{N} snap %g m|{DEL} / {SHIFT+DEL} remove / clear|{H} barrier from it|{ENTER} request|{V} / {ESC} leave   (%d volume%s)",
                               VolumeSnap(d), d->volumeCount, d->volumeCount == 1 ? "" : "s");
         DrawHelpBar("VOLUME", VOLUME_COLOR, help, w, h);
     }
@@ -2037,12 +2172,17 @@ int DesignerDrawHud(const Designer *d, int x, int y)
     } else {
         // Distinct group names, in selection order
         static char text[512];
-        int models = 0;
-        for (int i = 0; i < d->selectedCount; i++) models += d->selected[i].kind == MS_OBJ_MODEL;
-        int boxes = d->selectedCount - models, n;
-        if (models == 0) n = snprintf(text, sizeof(text), "selected: %d box%s  [", boxes, boxes == 1 ? "" : "es");
-        else n = snprintf(text, sizeof(text), "selected: %d box%s, %d model%s  [", boxes, boxes == 1 ? "" : "es",
+        int models = 0, barriers = 0;
+        for (int i = 0; i < d->selectedCount; i++) {
+            models += d->selected[i].kind == MS_OBJ_MODEL;
+            barriers += d->selected[i].kind == MS_OBJ_BARRIER;
+        }
+        int boxes = d->selectedCount - models - barriers, n;
+        if (models == 0) n = snprintf(text, sizeof(text), "selected: %d box%s", boxes, boxes == 1 ? "" : "es");
+        else n = snprintf(text, sizeof(text), "selected: %d box%s, %d model%s", boxes, boxes == 1 ? "" : "es",
                           models, models == 1 ? "" : "s");
+        if (barriers > 0) n += snprintf(text + n, sizeof(text) - n, ", %d barrier%s", barriers, barriers == 1 ? "" : "s");
+        n += snprintf(text + n, sizeof(text) - n, "  [");
         unsigned char *seen = MS_RESERVE(scratch.seen, scratch.seenCap, scene->groupCount + 1) ? scratch.seen : NULL;
         if (!seen) return 0;
         if (scene->groupCount > 0) memset(seen, 0, scene->groupCount);
@@ -2080,7 +2220,10 @@ int DesignerDrawHud(const Designer *d, int x, int y)
             HudText(TextFormat("  at %.2f %.2f %.2f  rot %.1f %.1f %.1f  scale %.2f %.2f %.2f", m->position.x, m->position.y,
                     m->position.z, m->rotationDeg.x, m->rotationDeg.y, m->rotationDeg.z, m->scale.x, m->scale.y, m->scale.z),
                     x, y, dim);
-        } else
+        } else if (d->hit.obj.kind == MS_OBJ_BARRIER)
+            HudText(TextFormat("crosshair: %s  |  barrier (invisible wall)  |  line %s%s%d  |  %s  |  barrier %d  |  %.1f m",
+                    group, MAPEDIT_LINE_AT(r.file, r.line), idText, d->hit.obj.index, d->hit.dist), x, y, main);
+        else
             HudText(TextFormat("crosshair: %s  |  material %s  |  line %s%s%d  |  %s  |  box %d  |  %.1f m",
                     group, DesignerMaterialLabel(d->hit.obj), MAPEDIT_LINE_AT(r.file, r.line), idText, d->hit.obj.index, d->hit.dist),
                     x, y, main);
@@ -2267,7 +2410,7 @@ void DesignerFree(Designer *d)
     DesignerClearSelection(d);
     free(d->selected);
     free(d->keys);
-    for (int k = 0; k < 3; k++) free(d->selPos[k]);
+    for (int k = 0; k <= MS_OBJ_BARRIER; k++) free(d->selPos[k]);
     free(d->regions);
     free(d->volumes);
     free(d->prompt);
@@ -2278,7 +2421,7 @@ void DesignerFree(Designer *d)
     d->volumeCount = d->volumeCap = 0;
     d->prompt = NULL;
     d->selectedCap = d->keyCap = d->regionCount = d->regionCap = d->promptLen = d->promptCap = d->cursor = 0;
-    for (int k = 0; k < 3; k++) { d->selPos[k] = NULL; d->selPosCap[k] = 0; }
+    for (int k = 0; k <= MS_OBJ_BARRIER; k++) { d->selPos[k] = NULL; d->selPosCap[k] = 0; }
     // The file-level scratch (one designer per process)
     free(scratch.seen);
     free(scratch.ys);

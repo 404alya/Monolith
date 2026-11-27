@@ -19,6 +19,7 @@ GfxSettings GfxDefaults(void)
     s.fpsCap = 0;
     s.frameReuse = true;
     s.editSave = 0;
+    s.barrierOverlay = true;
     return s;
 }
 
@@ -153,6 +154,8 @@ static const Row ROWS[] = {
     // --- Editor (keep these rows last: the view-only build's panel stops before them, GfxRowCount)
     { GFX_GROUP_EDITOR, 0, "Save edits", "edit_save", "manual: CTRL+S writes the map; auto: every edit, undo and redo at once",
       V_ENUM, OFF(editSave), .names = NAMES("manual", "auto") },
+    { GFX_GROUP_EDITOR, 0, "Barrier overlay", "barrier_overlay", "spectator mode shows the invisible barriers (O toggles it)",
+      V_BOOL, OFF(barrierOverlay) },
 };
 #define ROW_COUNT ((int)(sizeof(ROWS) / sizeof(ROWS[0])))
 

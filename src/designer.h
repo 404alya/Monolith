@@ -137,11 +137,11 @@ typedef struct {
 
     DesignerHit hit;        // under the crosshair (refreshed by DesignerPick / DesignerUpdate)
 
-    MS_ObjRef *selected;    // boxes and models, no duplicates (heap)
+    MS_ObjRef *selected;    // boxes, models and barriers, no duplicates (heap)
     DesignerSelKey *keys;   // parallel to selected[]
     int selectedCount, selectedCap, keyCap;
-    int *selPos[3];         // per kind (MS_OBJ_BOX, MS_OBJ_MODEL): object index -> position in
-    int selPosCap[3];       // selected[] + 1, 0 = not selected (O(1) membership for big selections)
+    int *selPos[MS_OBJ_BARRIER + 1];    // per kind (MS_OBJ_BOX, MS_OBJ_MODEL, MS_OBJ_BARRIER): object index ->
+    int selPosCap[MS_OBJ_BARRIER + 1];  // position in selected[] + 1, 0 = not selected (O(1) membership)
     unsigned int version;   // scene->version the indices refer to
 
     // Snip mode (C): screen regions dragged out over a frozen camera. Regions are
@@ -173,6 +173,15 @@ typedef struct {
     Vector2 pickPx;
     bool editMode;          // edit mode (set by the caller every frame): the hit follows the cursor and
                             // an RMB press doesn't clear the selection (the caller does that on an RMB click)
+
+    // Barriers (invisible walls; docs/user-guide.md "Barriers"). showBarriers: the overlay is on
+    // (DesignerShowBarriers): it draws them and the pick sees them, nearer than the visible hit.
+    // barrierPlace: the volume mode's three clicks make a barrier (edit mode, H); a finished one, or
+    // the active volume turned into one (volume mode, H), waits in barrierBox until the edit mode
+    // writes it (DesignerTakeBarrier, EDIT_BARRIER_ADD)
+    bool showBarriers;
+    bool barrierPlace, barrierPending;
+    BoundingBox barrierBox;
 
     // Prompt box
     bool promptOpen;
@@ -276,6 +285,17 @@ void DesignerSetAngleSnap(Designer *d, float deg);
 void DesignerVolumeModeEnd(Designer *d);
 // Volume mode on (V; the draw mode's V: docs/painting.md 13.1)
 void DesignerVolumeModeBegin(Designer *d);
+// The barrier overlay on / off (the pick follows: it sees barriers only while they are shown)
+void DesignerShowBarriers(Designer *d, bool on);
+// Edit mode's H: the volume mode's three clicks (first corner, opposite footprint corner, height)
+// make a barrier instead of a volume; RMB / ESC cancel it
+void DesignerBarrierPlaceBegin(Designer *d);
+// A barrier made by hand (placed, or a volume turned into one) and not written yet: true once, with
+// its box (then it is taken)
+bool DesignerTakeBarrier(Designer *d, BoundingBox *box);
+// Every barrier as a translucent fill with wire edges in the overlay's colour (inside an R3D frame's
+// target, depth-tested against it like the selection outlines)
+void DesignerDrawBarriers(const Designer *d, Camera3D cam);
 // 3D drawing over the scene, depth-tested against it with the overlay's bias (the draw mode's
 // brush cursor uses the same as the selection outlines); End restores what 2D drawing expects
 void DesignerBeginOverlay3D(Camera3D cam);

@@ -11,7 +11,7 @@ The version line comes first:
 ```
 monolith-scene-dump 1
 map "<path>" format <n>
-counts boxes <n> models <n> modelFiles <n> materials <n> lights <n> groups <n> colliders <n> [turned <n>]
+counts boxes <n> models <n> modelFiles <n> materials <n> lights <n> groups <n> colliders <n> [turned <n>] [barriers <n>]
 box <i> <minx miny minz maxx maxy maxz>  line <[path:]l> group <g> material <m>
     [rot <3 hex> center <3 hex> size <3 hex>]
 modelfile <i> "<path>" loaded <yes|no> meshes <n> triangles <n> materials <n> bounds <6 hex>
@@ -23,6 +23,7 @@ material <i> "<name>" line <[path:]l> shader "<path>" unlit <on|off> [draw_dista
 light <i> <point|spot|dir> line <[path:]l> position <3 hex> direction <3 hex> color r g b energy <hex> range <hex> shadow <on|off> [depthBias <hex>] [slopeBias <hex>] [clip <3 hex> <3 hex>]
 sun direction <3 hex> energy <hex> range <hex> shadow <on|off>
 fogzone <i> <6 hex: min, max> fade <hex> [fog.density <hex>] [fog.color r g b a] [fog.start <hex>] [fog.end <hex>] [fog.skyAffect <hex>]
+barrier <i> <6 hex: min, max> line <[path:]l> group <g> [rot <3 hex> center <3 hex> size <3 hex>]
 ```
 
 **Lines of imported files.** `line <l>` is a line of the main map file. A line in a file the map imports (`docs/map-format.md` §2.10) prints `line <path>:<l>`, with the file's package-relative path (`line parts/lake.map:41`). So the dumps of a map without imports are byte for byte what they were before imports existed. The same holds for the `line` field of `--dump-entities`.
@@ -30,7 +31,8 @@ fogzone <i> <6 hex: min, max> fade <hex> [fog.density <hex>] [fog.color r g b a]
 | Item | Notes |
 |---|---|
 | `box` | A turned box adds `rot`, `center` and `size` (its rotation and shape); its six numbers are then its world AABB. |
-| `collider` | Model colliders only; i ≥ boxes. |
+| `collider` | Model colliders only; boxes ≤ i < `barrierColliderFirst`. |
+| `barrier` | A `barrier` line's copy: its world AABB (its collider), then for a turned one its rotation and shape as for a box. A map without barriers has neither these lines nor `barriers` in `counts`, so its dump is as before. `--dump-boxes` never lists barriers. |
 
 ## --dump-entities
 
@@ -39,7 +41,7 @@ Writes the entities (`runtime/monolith_scene.h`, "Entities"), in map order:
 ```
 monolith-entity-dump 1
 map "<path>" entities <n>
-entity <e> id <stmt as 8 hex digits>:<index> <explicit|implicit> <box|model|light> <object index>
+entity <e> id <stmt as 8 hex digits>:<index> <explicit|implicit> <box|model|light|barrier> <object index>
        line <[path:]l> copy <c> part <p> position <3 hex> rotationDeg <3 hex> scale <3 hex> model <file|-1>
 ```
 

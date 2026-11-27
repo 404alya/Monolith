@@ -1,0 +1,4 @@
+monolith 3
+# A second imported part: a turned barrier under a repeat, in its own group
+group "gate"
+repeat 2 0 0 3 barrier 14 0 4 14.4 2.5 5 rot 15 0 0

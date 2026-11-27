@@ -16,6 +16,7 @@ typedef struct {
     bool frameReuse;            // interactive frame reuse (main.c "Frame reuse")
     // Editor (not graphics, but the same file and panel; never part of MS_Quality or the runtime)
     int editSave;               // 0 manual (CTRL+S writes the map), 1 auto (every edit is written at once)
+    bool barrierOverlay;        // spectator mode shows the barriers (O; default on); never in walk mode
 } GfxSettings;
 
 // Ultra (= the map exactly), no vsync, uncapped, frame reuse on, single-sampled window:

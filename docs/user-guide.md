@@ -22,7 +22,7 @@ The HUD at the top shows what is going on (the mode, the effects, the selection,
 | F12 | save a screenshot in `screenshots/` (named by date and time) |
 | Esc | close the prompt box, leave snip or volume mode or close the panel (it does not quit: close the window). With nothing to close it shows a **See keybindings** button: Enter or a click opens the keybindings panel, every key of the editor in one section per mode (←/→ or a click on a tab changes the section, typing searches all of them, Esc closes) |
 
-In **spectator mode** you fly freely: WASD + mouse, E / Q (or Space) up and down, the mouse wheel sets the base speed (1–400 m/s), Shift ×4 and Alt ×0.25. ← / → fly to the previous / next viewpoint of the map. **P** prints the current view as `--pos … --look …` (the feet position) and copies it, handy for a `viewpoint` line or a command line. **G** moves the walking player to the camera.
+In **spectator mode** you fly freely: WASD + mouse, E / Q (or Space) up and down, the mouse wheel sets the base speed (1–400 m/s), Shift ×4 and Alt ×0.25. ← / → fly to the previous / next viewpoint of the map. **P** prints the current view as `--pos … --look …` (the feet position) and copies it, handy for a `viewpoint` line or a command line. **G** moves the walking player to the camera. **O** shows or hides the map's barriers (invisible walls; *Barriers* below).
 
 The map reloads by itself whenever one of its files changes, whether you edited it or Claude did. The bottom-left HUD line says `map reloaded (N boxes)`, or shows the parse error in red; the previous version stays loaded until the file is valid again.
 
@@ -63,6 +63,7 @@ Points snap to a grid (**N** cycles 0.1, 0.25, 0.5, 1 and 2 m; 0.5 m to start) a
 | arrows, PgUp / PgDn | move the active volume one step (the arrows follow the world axis nearest to where you look; they don't fly to viewpoints in this mode) |
 | Alt + those keys | grow the volume on that side; Alt+Shift shrinks it |
 | Delete / Shift+Delete | remove the active volume / all volumes |
+| H | write the active volume into the map as a barrier (an invisible wall, *Barriers* below); the volume stays |
 | Enter | open the prompt box |
 | V, Esc or right click | leave volume mode (the volumes stay) |
 
@@ -90,6 +91,7 @@ Small changes don't need Claude: select objects as usual (click, Shift+click, Ct
 | Delete | remove |
 | Ctrl+D | duplicate: the copies go one footprint to the right and become the selection |
 | I | the **model picker**: add one of the package's models at the point under the cursor (see *Adding a model* below) |
+| H | place a **barrier** (an invisible wall) with three clicks, as a volume (see *Barriers* below) |
 | Ctrl+I | give the selection's line an id. With objects of one line selected, a small panel opens: type the number (it starts with the line's id, or the next free one), Enter sets it, Esc cancels, an empty field takes the next free id; the number must be unused in the map. With objects of several lines selected, each line without an id gets the next free one at once. Only the `id n` in front of the line changes (a `repeat` line keeps all its copies: the id names the line, its objects are `n:0`, `n:1`, …) |
 | M or Esc | leave edit mode (V and C leave it too); the arrows fly to viewpoints again. With unsaved edits the first press only reminds you |
 | Ctrl+S | save the edits to the map file (also outside edit mode, in spectator mode) |
@@ -105,6 +107,12 @@ Editing one copy of a `repeat` row (a single pillar of a row of eight) splits th
 **Undo** (Ctrl+Z) puts the old text back, byte for byte; redo (Ctrl+Shift+Z or Ctrl+Y) applies the edit again; both are live like an edit, and saving doesn't end the history (undo past the save point and the count of unsaved edits goes up again). **When the map changes on disk** while you have unsaved edits (a request finishes, you save it in a text editor), the editor loads the new file and applies your unsaved edits again on top of it, each to the same objects (found by their entity ids, so lines that moved don't matter). An edit whose objects are gone, or that no longer fits the line, is listed in red in the HUD ("could not re-apply: …") until you clear the list with **Ctrl+Shift+Delete**; the history before your last save is dropped. Without unsaved edits such a change just clears the history, so an undo never takes back a change you didn't make here. If a request of yours is queued or running on the same map, the first edit after your last save (and a save) only warns you (the request's session may be changing the same lines); press the key again within 3 seconds to go ahead.
 
 **Picking the model.** Each request runs on a fast, default or heavy Claude model. A small separate Claude run (the AI classifier, on Fable; Opus when Fable is busy) reads the request and its context and picks the tier before the request is queued; that takes a few seconds and never holds up the editor. Start the prompt with `@fast`, `@default` or `@heavy` to choose yourself (no classifier then). If the classifier fails or takes longer than 30 seconds, the request runs on the default tier. `MONOLITH_CLASSIFIER=off` turns it off ([command-line.md](command-line.md)).
+
+### Barriers (H, O)
+
+A barrier is an invisible wall: it stops the player like a box but is never drawn, casts no shadow and changes nothing in the look of the map, in the editor, in exports and in games ([map-format.md](map-format.md) §2.1 *Barriers*). Use one where the player must not go but nothing should be seen: a map edge, a ledge nobody should walk off, a gap between two buildings. In spectator mode the barriers show as **red translucent boxes with red edges**, fainter where something hides them; **O** hides or shows them (the **Barrier overlay** setting, F2 group *Editor*, remembers it; on to start). Walk mode never shows them, so walking shows the map as a player sees it. While they are shown, a barrier in front of what you point at is pointed at instead: click it to select it, and in edit mode G / S / Alt+R / R, the arrows, Delete and Ctrl+D work on it as on a box (a barrier line is edited like a `box` line); when they are hidden clicks go through them.
+
+To **place one by hand**, press **H** in edit mode and click as for a volume: a first corner on a surface, the opposite corner of the footprint, then the height with the mouse or the wheel (the **N** snap grid applies, Ctrl places points exactly, a right click or Esc cancels). The third click or Enter writes one line `id N barrier x0 y0 z0 x1 y1 z1` into the map as one edit (Ctrl+Z takes it back, Ctrl+S or auto save writes it) and selects the new barrier, so G / S / Alt+R / the arrows / Delete / Ctrl+D work on it at once. With something selected the line goes right after the first selected object's line (in its file and group); with nothing selected it goes to the end of the main map file, under a `# barriers` comment in a `group "barriers"` (made the first time). In volume mode **H** turns the active volume into a barrier the same way (the volume stays). To ask Claude instead, say so in a request ("stop the player walking off this ledge"): it writes the same one line.
 
 ### Painting (B)
 
@@ -206,7 +214,7 @@ Removing and giving ids are manual edits like any other: live, undoable with Ctr
 
 ## Graphics settings (F2)
 
-The panel has a preset selector, rows for display, shadows, ambient occlusion, fog, post-processing and performance, the editor's **Save edits** row (manual / auto, see *Editing by hand*; not a graphics setting and not part of a preset), and a live frame time readout. Use the arrow keys or the mouse; values that differ from the preset are pink, with a pink bar beside them. Heavy changes (shadow map size, AO mode, fog cache, preset) take a frame to apply; a new shadow map size reloads the map (about a second, your selection is kept). Esc or F2 closes and saves.
+The panel has a preset selector, rows for display, shadows, ambient occlusion, fog, post-processing and performance, the editor's **Save edits** row (manual / auto, see *Editing by hand*) and **Barrier overlay** row (on / off, the **O** key; see *Barriers*), neither a graphics setting nor part of a preset, and a live frame time readout. Use the arrow keys or the mouse; values that differ from the preset are pink, with a pink bar beside them. Heavy changes (shadow map size, AO mode, fog cache, preset) take a frame to apply; a new shadow map size reloads the map (about a second, your selection is kept). Esc or F2 closes and saves.
 
 **The map is the source of the look.** Every setting is relative to the map: **ultra** shows exactly what the map describes, and an effect the map turns off stays off. The one exception is **Detail distance** (display rows, x1 in every preset): small objects far from the camera, whose boxes would cover a pixel or two, are not drawn (their shadows stay). x2 keeps them twice as far, x0.5 drops them earlier, off draws everything. A map can keep a material always drawn, or give it its own distance (`draw_distance`, [map-format.md](map-format.md)).
 

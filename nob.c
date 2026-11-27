@@ -1238,7 +1238,7 @@ static bool PrepareLibrary(const UnitTest *t, const char *out, Nob_Cmd *run);
 // msg, paintunwrap, parse_error), each with its script's flags, sources and run.
 static const UnitTest UNIT_TESTS[] = {
     {
-        // corruption test of the compiled-map reader (tests/unit/compiled_test.c): four packages, copied
+        // corruption test of the compiled-map reader (tests/unit/compiled_test.c): five packages, copied
         // into build/unit/compiled/ and compiled there with monolith --compile (PrepareCompiled), each run
         // through the test; the runtime as a game has it (no MONOLITH_EDITOR)
         .name = "compiled",
@@ -1246,7 +1246,7 @@ static const UnitTest UNIT_TESTS[] = {
         .includes = (const char *[]){"runtime", NULL},
         .r3d = true,
         .game = true,
-        .each = (const char *[]){"models", "rotated", "longname", "imports", NULL},
+        .each = (const char *[]){"models", "rotated", "longname", "imports", "barrier", NULL},
         .args = (const char *[]){"{out}/{each}", NULL},
         .prepare = PrepareCompiled,
     },
@@ -2487,18 +2487,19 @@ static bool PrepareCompiled(const UnitTest *t, const char *out, Nob_Cmd *run)
     }
     if (!WriteLine(nob_temp_sprintf("%s/longname.map", longDir), mapText)) return false;
 
-    // models, rotated and imports: refresh the copies (nothing is removed from them)
-    const char *copied[] = {"models", "rotated", "imports"};
+    // models, rotated, imports and barrier: refresh the copies (nothing is removed from them)
+    const char *copied[] = {"models", "rotated", "imports", "barrier"};
     for (size_t i = 0; i < NOB_ARRAY_LEN(copied); i++) {
         const char *dir = nob_temp_sprintf("%s/%s", out, copied[i]);
         if (!CopyInto(nob_temp_sprintf("%s/tests/%s", gRoot, copied[i]), dir)) return false;
     }
 
-    // the compile of all four, in the order the test runs them
+    // the compile of all five, in the order the test runs them
     return CompilePackage(out, nob_temp_sprintf("%s/models", out), "models") &&
            CompilePackage(out, nob_temp_sprintf("%s/rotated", out), "rotated") &&
            CompilePackage(out, longDir, "longname") &&
-           CompilePackage(out, nob_temp_sprintf("%s/imports", out), "imports");
+           CompilePackage(out, nob_temp_sprintf("%s/imports", out), "imports") &&
+           CompilePackage(out, nob_temp_sprintf("%s/barrier", out), "barrier");
 }
 
 // Appends the files `pattern` matches to `files`, in the order bash's glob gives them (sorted by the locale's

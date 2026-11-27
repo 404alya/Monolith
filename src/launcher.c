@@ -215,11 +215,15 @@ static const char *GroupName(int g)
 // lookups go through these and the runtime's MS_ObjectRef / MS_ObjectBounds, so models
 // work here once the runtime has them (MS_ObjectRef covers MS_OBJ_MODEL).
 static bool ObjValid(MS_ObjRef o) { return MS_ObjectRef(scene, o) != NULL; }
-static const char *ObjKindName(MS_ObjRef o) { return o.kind == MS_OBJ_BOX ? "box" : o.kind == MS_OBJ_MODEL ? "model" : "none"; }
+static const char *ObjKindName(MS_ObjRef o)
+{
+    return o.kind == MS_OBJ_BOX ? "box" : o.kind == MS_OBJ_MODEL ? "model" : o.kind == MS_OBJ_BARRIER ? "barrier" : "none";
+}
 static BoundingBox ObjBounds(MS_ObjRef o) { return MS_ObjectBounds(scene, o); }
-// A turned box's record (a box line with `rot`; its bounds are then its world AABB), NULL otherwise
+// A turned box's or barrier's record (a line with `rot`; its bounds are then its world AABB), NULL otherwise
 static const MS_TurnedBox *ObjTurn(MS_ObjRef o)
 {
+    if (o.kind == MS_OBJ_BARRIER) return scene->barriers[o.index].turned ? &scene->barriers[o.index].shape : NULL;
     return o.kind == MS_OBJ_BOX && scene->boxTurned && scene->boxTurned[o.index] >= 0 ? &scene->turnedBoxes[scene->boxTurned[o.index]]
                                                                                     : NULL;
 }
@@ -254,9 +258,10 @@ static const char *KeyText(long long key, int *len)
     return KeyLine(key) > 0 ? MS_LineText(scene, KeyFile(key), KeyLine(key), len) : NULL;
 }
 static int ObjGroup(MS_ObjRef o) { return MS_ObjectRef(scene, o)->group; }
-// Material name (models: their override material; NULL = the model's own materials)
+// Material name (models: their override material; NULL = the model's own materials, or a barrier: none)
 static const char *ObjMaterial(MS_ObjRef o)
 {
+    if (o.kind == MS_OBJ_BARRIER) return NULL;
     int m = MS_ObjectRef(scene, o)->material;
     return m >= 0 && m < scene->materialCount ? scene->materials[m].name : NULL;
 }
@@ -292,7 +297,7 @@ static CopyInfo ObjCopy(MS_ObjRef o)
 {
     CopyInfo c = { .nth = ObjNth(o), .perCopy = 1 };
     long long key = ObjKey(o);
-    int count = o.kind == MS_OBJ_MODEL ? scene->modelCount : scene->boxCount;
+    int count = o.kind == MS_OBJ_MODEL ? scene->modelCount : o.kind == MS_OBJ_BARRIER ? scene->barrierCount : scene->boxCount;
     c.total = c.nth + 1;
     for (int i = o.index + 1; i < count && ObjKey((MS_ObjRef){ o.kind, i }) == key; i++) c.total++;
     // The line's placement prefixes: repeat n dx dy dz (up to 3)
@@ -1715,20 +1720,27 @@ static void WriteRequestMdBody(FILE *f, const Bundle *B)
         fprintf(f, "Nothing: the crosshair points at the sky (no object hit).\n\n");
     }
 
-    int selModels = 0;
-    for (int i = 0; i < B->selCount; i++) selModels += B->sel[i].kind == MS_OBJ_MODEL;
-    fprintf(f, "## Selection (%d box%s, %d model%s)\n\n", B->selCount - selModels, B->selCount - selModels == 1 ? "" : "es",
-            selModels, selModels == 1 ? "" : "s");
+    int selModels = 0, selBarriers = 0;
+    for (int i = 0; i < B->selCount; i++) {
+        selModels += B->sel[i].kind == MS_OBJ_MODEL;
+        selBarriers += B->sel[i].kind == MS_OBJ_BARRIER;
+    }
+    int selBoxes = B->selCount - selModels - selBarriers;
+    fprintf(f, "## Selection (%d box%s, %d model%s", selBoxes, selBoxes == 1 ? "" : "es", selModels, selModels == 1 ? "" : "s");
+    // (barriers: invisible walls, docs/map-format.md 2.1; named only when there are any)
+    if (selBarriers > 0) fprintf(f, ", %d barrier%s", selBarriers, selBarriers == 1 ? "" : "s");
+    fprintf(f, ")\n\n");
     if (B->selCount == 0) fprintf(f, "Nothing is selected.\n\n");
     for (int k = 0; k < B->selLineCount; k++) {
         const SelLine *sl = &B->selLines[k];
         MS_ObjRef first = B->selOrder[sl->first];
         bool model = first.kind == MS_OBJ_MODEL;
+        const char *kind = ObjKindName(first);      // (box, model or barrier: one kind per line)
         fprintf(f, "### Line ");
         PutLine(f, sl->line);
         fprintf(f, ", group \"%s\", material \"%s\", %d %s%s\n\n", GroupName(ObjGroup(first)),
-                DesignerMaterialLabel(first), sl->count, model ? "model" : "box",
-                sl->count == 1 ? "" : model ? "s" : "es");
+                DesignerMaterialLabel(first), sl->count, kind,
+                sl->count == 1 ? "" : first.kind == MS_OBJ_BOX ? "es" : "s");
         MdLine(f, sl->line);
         fprintf(f, "*copy* = the object's index among the line's objects (0-based) of their total");
         MdRepeats(f, first);
@@ -1737,10 +1749,10 @@ static void WriteRequestMdBody(FILE *f, const Bundle *B)
                               "|---|---|---|---|---|---|---|---|\n");
         bool turned = false;    // a line with turned boxes gets a rotation column (min / max: world bounds)
         for (int i = sl->first; i < sl->first + sl->count && !model; i++) turned |= ObjTurn(B->selOrder[i]) != NULL;
-        if (turned) fprintf(f, "Turned boxes: min, max, centre and size are their world bounds; `rot` turns the box as written "
-                               "about its centre.\n\n| box | copy | min | max | centre | size | rot (yaw pitch roll) |\n"
-                               "|---|---|---|---|---|---|---|\n");
-        else if (!model) fprintf(f, "| box | copy | min | max | centre | size |\n|---|---|---|---|---|---|\n");
+        if (turned) fprintf(f, "Turned %s%s: min, max, centre and size are their world bounds; `rot` turns the %s as written "
+                               "about its centre.\n\n| %s | copy | min | max | centre | size | rot (yaw pitch roll) |\n"
+                               "|---|---|---|---|---|---|---|\n", kind, first.kind == MS_OBJ_BOX ? "es" : "s", kind, kind);
+        else if (!model) fprintf(f, "| %s | copy | min | max | centre | size |\n|---|---|---|---|---|---|\n", kind);
         for (int i = sl->first; i < sl->first + sl->count; i++) {
             MS_ObjRef o = B->selOrder[i];
             BoundingBox b = ObjBounds(o);

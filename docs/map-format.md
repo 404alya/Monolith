@@ -67,7 +67,7 @@ Each statement takes one line, so a line number identifies an object. The parser
 ```
 # comment                      '#' starts a comment anywhere outside "quotes"
 monolith 3                     format version, the first statement (required)
-group "name"                   every following box, model and light belongs to this group, until the next group
+group "name"                   every following box, model, light and barrier belongs to this group, until the next group
 ```
 
 ### 2.1 Box primitives
@@ -89,6 +89,22 @@ block 0 0 -15 6 3 0.4 rot 45 0 0                # a wall turned 45 degrees about
 repeat 5 2 0 0 block -14 0 -4 1 2 0.3 rot 30 0 0   # five posts in a row along x, each yawed 30 degrees
 ```
 
+**Barriers: invisible walls.** A `barrier` line stops the player without anything visible there (map edges, a ledge the player shouldn't walk off, a gap a player could slip through):
+
+```
+barrier x0 y0 z0 x1 y1 z1 [rot yawDeg pitchDeg rollDeg]
+barrier -20 0 -20 -19 4 20                      # the west edge of the map: 4 m high, 40 m long
+id 7 barrier 4 2 -6.2 10 4 -6                   # along the far edge of a 2 m ledge, so nobody walks off it
+barrier 0 0 -10 6 3 -9.6 rot 30 0 0             # a yawed wall across a path
+repeat 3 2 0 0 barrier -4 0 2 -3.5 1 2.5        # a row of three low blocks
+```
+
+- It takes two opposite corners and an optional `rot` exactly like `box` (the same float math, so a barrier and a box written alike have the same shape), with `id`, `repeat`, `group`, in the main file or any imported part. No `block`, `stairs` or `waffle` form.
+- It **blocks the player exactly as a box of that shape would**: walls stop, tops can be stood on, a turned barrier collides as its turned shape and a walkable slope (up to 46°) can be walked up, like a turned box.
+- It is **invisible**: not drawn, no shadow, not in the depth pre-pass or any cache (shadow tiles, AO volume, fog cache), so a map looks exactly the same with or without its barriers. Pointing, painting and `MS_Raycast` pass through it (a game's line of sight sees what is visible). The editor's spectator mode shows barriers as a red overlay (**O** toggles it; walk mode never shows them; [user-guide.md](user-guide.md#barriers-h-o)) and lets them be selected and edited like boxes.
+- Barriers are not boxes: they are not in `--dump-boxes` or the box indices, and `use` / materials don't apply. `--dump-scene` lists them (`barrier …` lines), `--dump-entities` lists them as kind `barrier`, the compiled map stores them, and `--export` keeps them in the exported colliders.
+- Rule of thumb: an invisible limit → `barrier`; a visible thing the player walks through (grass, foliage) → a material with `collide off` (§2.4).
+
 Examples, from the default brutalist map and the pine forest, plus a sketch for a neon street:
 
 ```
@@ -101,12 +117,12 @@ block 6 0 -12 3 2.6 2                   # neon street: a 3 x 2 m market stall, 2
 
 ### 2.2 Placement prefixes
 
-They go in front of a primitive (box primitive, `model` or `light`) on the same line.
+They go in front of a primitive (box primitive, `barrier`, `model` or `light`) on the same line.
 
 - `repeat n dx dy dz` makes n copies (n ≥ 0). Copy *i* (0-based) is shifted by `i · (dx, dy, dz)`. Up to **3** repeats on one line make a grid. The first repeat is the outer loop, so it decides the object order.
 - `repeat n dx dy dz from k` counts the copies from *k*: copy *i* = k … k+n−1 is shifted by `i · (dx, dy, dz)`. It gives exactly the same floats as copies k… of the longer row, so a row split in two (`repeat 3 0 0 2.6 …` + `repeat 5 0 0 2.6 from 3 …`) keeps every position bit for bit, even with steps like 2.6 where moving the start value into the coordinates would change the last bit. Manual edits write it when they split a row (§2.9); for whole and half-number steps they write plain start values instead.
 - `id n` gives the line's objects a stable name (an integer 1 … 2147483647, unique in the file, written first: `id 12 repeat 4 0 0 3 box …`). It changes nothing in the scene. It is the key of the line's entities (§2.9), so they keep their identity when the line's numbers change. Manual edits add it to the lines they change; keep it when you edit such a line, and when you split it, keep it on the first piece only (two lines with the same id fail to load).
-- Shifts move **position arguments only** (box: all six numbers; block: `cx y0 cz`; stairs: `cx baseY startZ`; waffle: `x0 x1 y0 y1 z`; model and light: `x y z`, never a direction). Sizes, `steps`, `rise`, `run`, `depth`, `bayW`, `floorH`, rotations and scales are never shifted.
+- Shifts move **position arguments only** (box and barrier: all six numbers; block: `cx y0 cz`; stairs: `cx baseY startZ`; waffle: `x0 x1 y0 y1 z`; model and light: `x y z`, never a direction). Sizes, `steps`, `rise`, `run`, `depth`, `bayW`, `floorH`, rotations and scales are never shifted.
 
 ```
 repeat 4 9 0 0 repeat 8 0 0 9 block -36 0 -32 2.2 20 2.2   # monolith: 4 x 8 pillar grid, x -36..-9, z -32..31
@@ -118,7 +134,7 @@ Each shifted number is computed as `(i·d1 + j·d2 + k·d3) + value` in float, i
 
 ### 2.3 Groups
 
-A box, model or light belongs to the most recent `group` above it. Each `group` statement creates a new group, even when the name repeats, so **don't reuse a group name** in a second place: add the lines to the existing block instead. In the editor, Ctrl+click selects one group statement's objects. Group names can be any length but can't contain `"`. A map's groups are listed in its `MAP.md` (*Groups and landmarks*).
+A box, model, light or barrier belongs to the most recent `group` above it. Each `group` statement creates a new group, even when the name repeats, so **don't reuse a group name** in a second place: add the lines to the existing block instead. In the editor, Ctrl+click selects one group statement's objects. Group names can be any length but can't contain `"`. A map's groups are listed in its `MAP.md` (*Groups and landmarks*).
 
 ### 2.4 Materials
 
@@ -261,18 +277,18 @@ model "models/tree_pineTallC.glb" -30.07 0 15.26 rot 35 0 0 scale 12.84 origin b
 
 ### 2.8 Limits and errors
 
-**No limits on content:** any number of boxes, models, groups, materials, lights and viewpoints, and lines of any length (everything is allocated as needed). Sanity caps only: at most 1 000 000 objects (boxes + model instances + lights) per map, so a `repeat` grid that multiplies to millions fails with a clear message, and 4 MB per map-text file (the main `.map` and each file it imports, §2.10; nothing caps their total but the object cap). Spawn, viewpoint and light positions are limited to ±1 000 000 m, and a spot light's `inner` angle must not exceed `outer`. **Errors** (unknown keyword, wrong argument count, bad number, a missing file, a path outside the package, an undefined material, too many objects, a map with no boxes and no models) are reported as `file:line: message`.
+**No limits on content:** any number of boxes, models, groups, materials, lights and viewpoints, and lines of any length (everything is allocated as needed). Sanity caps only: at most 1 000 000 objects (boxes + model instances + lights + barriers) per map, so a `repeat` grid that multiplies to millions fails with a clear message, and 4 MB per map-text file (the main `.map` and each file it imports, §2.10; nothing caps their total but the object cap). Spawn, viewpoint and light positions are limited to ±1 000 000 m, and a spot light's `inner` angle must not exceed `outer`. **Errors** (unknown keyword, wrong argument count, bad number, a missing file, a path outside the package, an undefined material, too many objects, a map with no boxes and no models) are reported as `file:line: message`.
 
 ### 2.9 Entities and manual edits
 
-Every box, model instance and light is an **entity**: an id plus its data (components) in the runtime's entity arrays (`MS_Scene.entityIds`, `entityObjects`, `entityTransforms`, `entitySources`, `entityModels`; `MS_FindEntity`, `MS_ObjectEntity` in `runtime/monolith_scene.h`). The id is the line's key plus the object's index within the line:
+Every box, model instance, light and barrier is an **entity**: an id plus its data (components) in the runtime's entity arrays (`MS_Scene.entityIds`, `entityObjects`, `entityTransforms`, `entitySources`, `entityModels`; `MS_FindEntity`, `MS_ObjectEntity` in `runtime/monolith_scene.h`). The id is the line's key plus the object's index within the line:
 
 - a line with `id n` has the key *n*: stable as long as the line keeps its `id`, wherever it moves and however its numbers change;
 - a line without one has a key derived from its text (shown with bit 31 set, e.g. `a278642c`): stable while that text stays the same, also when other lines are inserted, removed or moved; it changes when the line itself changes. Identical lines are numbered in map order, so removing the first of two identical lines gives the second one the first one's key.
 
 `examples/05_entities` shows how a game uses them (its own components and systems, lookup by id). `--dump-entities <file>` lists them (`entity <e> id <key>:<index> explicit|implicit <kind> …`).
 
-**Manual edits** (the edit mode, **M**, and `--apply-edits`) change the map file itself, with the smallest text edit, and the editor reloads it: moving or turning an object rewrites the numbers on its line (and adds `id n` to it), removing it deletes the line, and one copy of a `repeat` line is split out onto its own line (the other copies keep their exact floats, with `from` where needed). Giving a line an id (**Ctrl+I**, the script's `id [n]`) changes only its `id n` prefix; removing one (**Delete** in the id panel, **F5**, the script's `id remove`) deletes only that prefix (with the blanks after it), and the line's objects get implicit keys again. Duplicated and added objects are new lines with a new `id`; an added model goes right after the line of the object it stands on (in its group), wrapped in `use "default"` … `use "<material>"` when a `use` is active there (a `use` would restyle it). Comments, spacing, groups and every other line stay as they were. Boxes from `box` and `block` lines turn freely, like models: about any axis, globally or about their own axes (`local`), each about its own centre or orbiting a pivot (`turn … pivot x y z`). The result is written the simplest way: when the box ends up axis-aligned (a 90° step, or a turned box turned back) its corners are rewritten (a block's sizes swap places) and a `rot` it had is removed; otherwise its centre moves and `rot yaw pitch roll` is written (a turn about the vertical adds to the yaw and one about the box's own z to the roll, exactly; any other turn is composed and written with 6 decimals). `rotation y p r` (the script) / reset sets an absolute rotation (`0 0 0`: the plain box again; on a model it removes `rot`). Boxes can be scaled (corners about a pivot; a block's centre and sizes; a turned box's extents along its own axes, each by the factor of the world axis nearest to it) and resized (`size`, along the box's own axes). Stairs and waffles can only move. A model's turn about another axis than the vertical composes with its `rot` (R = Ry · Rx · Rz) and is written back as yaw, pitch and roll with 6 decimals; a turn about the vertical adds to the yaw and one about the model's own z to the roll, exactly. Scaling a model multiplies its `scale` (each model axis by the factor of the world axis nearest to it) and moves its position about the pivot. A turned or scaled whole `repeat` line with a pivot gets its steps turned or scaled too.
+**Manual edits** (the edit mode, **M**, and `--apply-edits`) change the map file itself, with the smallest text edit, and the editor reloads it: moving or turning an object rewrites the numbers on its line (and adds `id n` to it), removing it deletes the line, and one copy of a `repeat` line is split out onto its own line (the other copies keep their exact floats, with `from` where needed). Giving a line an id (**Ctrl+I**, the script's `id [n]`) changes only its `id n` prefix; removing one (**Delete** in the id panel, **F5**, the script's `id remove`) deletes only that prefix (with the blanks after it), and the line's objects get implicit keys again. Duplicated and added objects are new lines with a new `id`; an added model goes right after the line of the object it stands on (in its group), wrapped in `use "default"` … `use "<material>"` when a `use` is active there (a `use` would restyle it). Comments, spacing, groups and every other line stay as they were. Boxes from `box` and `block` lines turn freely, like models: about any axis, globally or about their own axes (`local`), each about its own centre or orbiting a pivot (`turn … pivot x y z`). The result is written the simplest way: when the box ends up axis-aligned (a 90° step, or a turned box turned back) its corners are rewritten (a block's sizes swap places) and a `rot` it had is removed; otherwise its centre moves and `rot yaw pitch roll` is written (a turn about the vertical adds to the yaw and one about the box's own z to the roll, exactly; any other turn is composed and written with 6 decimals). `rotation y p r` (the script) / reset sets an absolute rotation (`0 0 0`: the plain box again; on a model it removes `rot`). Boxes can be scaled (corners about a pivot; a block's centre and sizes; a turned box's extents along its own axes, each by the factor of the world axis nearest to it) and resized (`size`, along the box's own axes). `barrier` lines are edited exactly like `box` lines (move, turn, scale, resize, duplicate, remove); a new one (the edit mode's **H**, volume mode's **H**, the script's `barrier-add`) is a new `id n barrier …` line after the first selected object's line, or with nothing selected at the end of the main file's `# barriers` block (made, with `group "barriers"`, when the file has none). Stairs and waffles can only move. A model's turn about another axis than the vertical composes with its `rot` (R = Ry · Rx · Rz) and is written back as yaw, pitch and roll with 6 decimals; a turn about the vertical adds to the yaw and one about the model's own z to the roll, exactly. Scaling a model multiplies its `scale` (each model axis by the factor of the world axis nearest to it) and moves its position about the pivot. A turned or scaled whole `repeat` line with a pivot gets its steps turned or scaled too.
 
 ### 2.10 Imports: one map in several files
 
@@ -303,7 +319,7 @@ The rules:
 - **A file is read once per map.** Importing it a second time, or a cycle (a file that imports itself, directly or through other parts), is an error. Parts may import other parts (nesting, at most 256 files deep).
 - **Materials are one list for the whole map,** in the order of the text with every import pasted in: a material is defined before a `use` names it, and a `material` line in any file defines that material or adds keys to it.
 - **Each part starts fresh:** no `use` (the `"default"` material) and no `group`. After the import line, the importing file's `use` and `group` are what they were before it, so moving an import line never restyles the lines around it.
-- **`env`, `fogzone`, `spawn` and `viewpoint` belong in the main file.** In a part they are an error that says so. Everything else (boxes, models, lights, groups, materials, `use`, `paint`, `repeat`, `id`) may go in any file.
+- **`env`, `fogzone`, `spawn` and `viewpoint` belong in the main file.** In a part they are an error that says so. Everything else (boxes, barriers, models, lights, groups, materials, `use`, `paint`, `repeat`, `id`) may go in any file.
 - **`id n` values are unique across the whole map,** not per file; a duplicate names both lines (`file:line`).
 - **Errors name the file that holds the line:** `maps/x/parts/lake.map:41: unknown material "wter"`.
 

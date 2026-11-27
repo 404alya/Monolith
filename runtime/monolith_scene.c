@@ -335,6 +335,10 @@ typedef struct {
     int viewpointCount, viewpointCap;
     MS_FogZone *fogZones;               // `fogzone` lines (main file only, like env)
     int fogZoneCount, fogZoneCap;
+    MS_Barrier *barriers;               // `barrier` lines (invisible walls; MS_Barrier)
+    int barrierCount, barrierCap;
+    BoundingBox *barrierWritten;        // parallel to barriers[]: each as written (corners ordered), for
+    int barrierWrittenCap;              // compiled maps, which rebuild the record from it bit for bit
     bool hasSpawn;
     Vector3 spawnFeet;
     float spawnYawDeg, spawnPitchDeg;
@@ -371,7 +375,8 @@ typedef struct {
     int paintTableRows;
     Texture2D paintTableTex;
     bool anyPaint;
-    BoundingBox *colliders;             // boxes, then model colliders (only with models)
+    BoundingBox *colliders;             // boxes, then model colliders, then barriers (only with models or
+                                        // barriers: OwnColliders)
     int colliderCount;
     BvhNode *colliderNodes;             // BVH over the published colliders (MS_Raycast, MS_FirstCollision)
     int *colliderOrder;                 // collider indices in leaf order
@@ -392,7 +397,7 @@ typedef struct {
     MS_Source *entitySources;
     int *entityModels;
     int entityCount;
-    int *objEntities;                   // boxes, then models, then lights
+    int *objEntities;                   // boxes, then models, then lights, then barriers
     int *entityHash;
     int entityHashCap;
 
@@ -502,6 +507,7 @@ struct EditPreview {
     BoundingBox *colliderOrig;          // models' world colliders, objs[i]'s at colliderAt[i]
     int *colliderAt;
     MS_LightDef *lightOrig;             // lights
+    MS_Barrier *barrierOrig;            // barriers
     MS_Transform *entityOrig;
     BoundingBox *reach;                 // per object: everything it covered since Begin
     unsigned char *boxSel;              // per box: selected
@@ -1498,6 +1504,31 @@ static void TurnedBoxMake(BoundingBox written, Vector3 rotationDeg, MS_TurnedBox
         aabb->min = Vector3Min(aabb->min, q);
         aabb->max = Vector3Max(aabb->max, q);
     }
+}
+
+// The objects a map has made so far (what MS_MAX_OBJECTS caps): boxes, models, lights, barriers
+static inline int ObjectCount(const SceneData *d)
+{
+    return d->boxCount + d->modelCount + d->lightCount + d->barrierCount;
+}
+
+// A barrier from its box as written (corners ordered) and its rotation, with the box's float math: a
+// turned one as TurnedBox makes it (its AABB from TurnedBoxMake), an axis-aligned one keeps the
+// corners as written for its AABB and gets its shape with rotation 0 (the world's axes). False when a
+// coordinate or size is not finite (Box's and TurnedBox's checks).
+static bool BarrierMake(BoundingBox written, Vector3 rotationDeg, MS_Barrier *b)
+{
+    b->turned = rotationDeg.x != 0.0f || rotationDeg.y != 0.0f || rotationDeg.z != 0.0f;
+    BoundingBox a;
+    TurnedBoxMake(written, b->turned ? rotationDeg : (Vector3){ 0 }, &b->shape, &a);
+    b->box = b->turned ? a : written;
+    const float f[] = { b->box.min.x, b->box.min.y, b->box.min.z, b->box.max.x, b->box.max.y, b->box.max.z,
+                        b->box.max.x - b->box.min.x, b->box.max.y - b->box.min.y, b->box.max.z - b->box.min.z,
+                        b->shape.center.x, b->shape.center.y, b->shape.center.z,
+                        b->shape.size.x, b->shape.size.y, b->shape.size.z };
+    for (int i = 0; i < (int)(sizeof(f) / sizeof(f[0])); i++)
+        if (!isfinite(f[i])) return false;
+    return true;
 }
 
 // #endregion
@@ -2664,7 +2695,7 @@ static bool ParseValue(Parser *P, int type, Token *v, int nv, void *dst)
 static bool Box(Parser *P, float x0, float y0, float z0, float x1, float y1, float z1)
 {
     SceneData *d = P->d;
-    if (d->boxCount + d->modelCount + d->lightCount >= MS_MAX_OBJECTS) return false;
+    if (ObjectCount(d) >= MS_MAX_OBJECTS) return false;
     BoundingBox b = {
         { fminf(x0, x1), fminf(y0, y1), fminf(z0, z1) },
         { fmaxf(x0, x1), fmaxf(y0, y1), fmaxf(z0, z1) },
@@ -2885,6 +2916,53 @@ static bool ParsePrimitive(Parser *P, const PrimDef *def, Token *args, int argc,
     return true;
 }
 
+// barrier x0 y0 z0 x1 y1 z1 [rot yawDeg pitchDeg rollDeg] (args = the tokens after "barrier";
+// docs/map-format.md 2.1, Barriers): an invisible wall. The corners are shifted by `repeat` like a box's, `rot`
+// never (each copy turns about its own centre); `rot 0 0 0` is the barrier without rot.
+static bool ParseBarrier(Parser *P, Token *args, int n, const Placement *pl)
+{
+    static const char *USAGE = "barrier takes two corners: barrier x0 y0 z0 x1 y1 z1 [rot y p r]";
+    SceneData *d = P->d;
+    Vector3 rot = { 0 };
+    int argc = n;
+    if (n > 6 && strcmp(args[6].s, "rot") == 0) {
+        if (n != 10) return Fail(P, "rot takes 3 numbers: rot yawDeg pitchDeg rollDeg", NULL);
+        for (int i = 0; i < 3; i++)
+            if (!NumF(P, args[7 + i], &((float *)&rot)[i])) return false;
+        argc = 6;
+    }
+    if (argc != 6) return Fail(P, "%s", USAGE);
+    float v[6];
+    for (int a = 0; a < 6; a++)
+        if (!NumF(P, args[a], &v[a])) return false;
+
+    bool shifted = pl->reps > 0;
+    int cnt[MS_REPEATS_MAX] = { 1, 1, 1 };
+    for (int r = 0; r < pl->reps; r++) cnt[r] = pl->repN[r];
+    for (int i0 = 0; i0 < cnt[0]; i0++)
+    for (int i1 = 0; i1 < cnt[1]; i1++)
+    for (int i2 = 0; i2 < cnt[2]; i2++) {
+        if (ObjectCount(d) >= MS_MAX_OBJECTS)
+            return Fail(P, "too many objects (a map makes at most 1000000 boxes, models and lights)", NULL);
+        int idx[MS_REPEATS_MAX] = { i0, i1, i2 };
+        float off[3], p[6];
+        CopyOffset(pl, idx, off);
+        BeginCopy(P, cnt, i0, i1, i2);
+        // Unshifted lines use the numbers as written (no "+ 0", which would turn -0 into 0), as ParsePrimitive
+        for (int a = 0; a < 6; a++) p[a] = shifted ? off[a % 3] + v[a] : v[a];
+        BoundingBox w = { { fminf(p[0], p[3]), fminf(p[1], p[4]), fminf(p[2], p[5]) },
+                          { fmaxf(p[0], p[3]), fmaxf(p[1], p[4]), fmaxf(p[2], p[5]) } };
+        MS_Barrier b = { .ref = P->cur };
+        if (!BarrierMake(w, rot, &b)) return Fail(P, "coordinate or size out of range", NULL);
+        if (!MS_RESERVE(d->barrierWritten, d->barrierWrittenCap, d->barrierCount + 1)) return Fail(P, "out of memory", NULL);
+        MS_Barrier *slot = MS_PUSH(d->barriers, d->barrierCount, d->barrierCap);
+        if (!slot) return Fail(P, "out of memory", NULL);
+        *slot = b;
+        d->barrierWritten[d->barrierCount - 1] = w;
+    }
+    return true;
+}
+
 // light point|spot|dir ... (args = the tokens after "light")
 static bool ParseLight(Parser *P, Token *args, int n, const Placement *pl)
 {
@@ -2963,7 +3041,7 @@ static bool ParseLight(Parser *P, Token *args, int n, const Placement *pl)
     for (int i1 = 0; i1 < cnt[1]; i1++)
     for (int i2 = 0; i2 < cnt[2]; i2++) {
         SceneData *d = P->d;
-        if (d->boxCount + d->modelCount + d->lightCount >= MS_MAX_OBJECTS)
+        if (ObjectCount(d) >= MS_MAX_OBJECTS)
             return Fail(P, "too many objects (a map makes at most 1000000 boxes, models and lights)", NULL);
         int idx[MS_REPEATS_MAX] = { i0, i1, i2 };
         float off[3];
@@ -3994,7 +4072,7 @@ static bool ParseModel(Parser *P, Token *args, int n, const Placement *pl)
     for (int i0 = 0; i0 < cnt[0]; i0++)
     for (int i1 = 0; i1 < cnt[1]; i1++)
     for (int i2 = 0; i2 < cnt[2]; i2++) {
-        if (d->boxCount + d->modelCount + d->lightCount >= MS_MAX_OBJECTS)
+        if (ObjectCount(d) >= MS_MAX_OBJECTS)
             return Fail(P, "too many objects (a map makes at most 1000000 boxes, models and lights)", NULL);
         if (d->modelColliderCount + perCopy > MS_MAX_OBJECTS) return Fail(P, "too many model collision boxes (max 1000000)", NULL);
         int idx[MS_REPEATS_MAX] = { i0, i1, i2 };
@@ -4311,10 +4389,11 @@ static bool ParseStatement(Parser *P, Token *tok, int n)
         return ParseModel(P, &tok[t + 1], n - t - 1, &pl);
     }
     if (!NoStrings(P, tok, 0, n)) return false;
+    if (strcmp(prim, "barrier") == 0) return ParseBarrier(P, &tok[t + 1], n - t - 1, &pl);
     for (int i = 0; i < COUNT(PRIMS); i++)
         if (strcmp(prim, PRIMS[i].name) == 0) return ParsePrimitive(P, &PRIMS[i], &tok[t + 1], n - t - 1, &pl);
-    return Fail(P, "unknown keyword '%s' (expected group, box, block, stairs, waffle, model, light, material, use, env, "
-                   "fogzone, paint, import, spawn, viewpoint, id or repeat)", prim);
+    return Fail(P, "unknown keyword '%s' (expected group, box, block, stairs, waffle, barrier, model, light, material, "
+                   "use, env, fogzone, paint, import, spawn, viewpoint, id or repeat)", prim);
 }
 
 // The lines of one map-text file (P->cur.file), each statement parsed in turn
@@ -4380,7 +4459,7 @@ static bool ParseText(Parser *P, const char *text, int size)
 // (CmRead*) in ReadCompiled's list after the sections its records point into, and the matching
 // section writer (CmPut*). The layout goes into docs/compiled-map.md.
 
-#define CM_VERSION          13         // MS_COMPILED_VERSION: bump on any change to a record or section
+#define CM_VERSION          14         // MS_COMPILED_VERSION: bump on any change to a record or section
 #define CM_BYTE_ORDER       0x01020304u
 #define CM_NONE             0xFFFFFFFFu // a string field without a string
 #define CM_MAX_ENV          4096        // env records (the key tables have ~120 keys)
@@ -4510,6 +4589,15 @@ typedef struct {
     uint8_t color[4];
 } CmFogZone;
 
+// A `barrier` line's copy (section "barriers", map order): the box as written (corners ordered, after
+// repeat), its rotation as written (0 0 0: not turned) and its source reference. The reader rebuilds
+// the record (BarrierMake), so the bits match a text load.
+typedef struct {
+    float min[3], max[3];
+    float rotationDeg[3];
+    CmRef ref;
+} CmBarrier;
+
 // A model file the map's `model` lines use: its path and the line that first names it (and its file)
 typedef struct {
     uint32_t path;
@@ -4573,8 +4661,8 @@ typedef struct {
 enum {
     CM_STRINGS = 1, CM_BOXES, CM_GROUPS, CM_MATERIALS, CM_UNIFORMS, CM_SAMPLERS, CM_LIGHTS, CM_VIEWPOINTS,
     CM_MODEL_FILES, CM_MODELS, CM_COLLIDERS, CM_SLOTS, CM_STATEMENTS, CM_ENV, CM_SPAWN, CM_DEPS,
-    CM_BOX_TURNS, CM_PAINT, CM_SOURCES, CM_FOG_ZONES,
-    CM_SECTIONS = CM_FOG_ZONES
+    CM_BOX_TURNS, CM_PAINT, CM_SOURCES, CM_FOG_ZONES, CM_BARRIERS,
+    CM_SECTIONS = CM_BARRIERS
 };
 
 // What the code knows about one section: its name (for messages), its record size and the most
@@ -4607,6 +4695,7 @@ static const CmSectionInfo CM_SECTION[CM_SECTIONS + 1] = {
     [CM_PAINT]       = { "paint", sizeof(CmPaint), MS_MAX_OBJECTS },
     [CM_SOURCES]     = { "sources", sizeof(CmSource), MS_MAX_OBJECTS },
     [CM_FOG_ZONES]   = { "fog zones", sizeof(CmFogZone), MS_MAX_OBJECTS },
+    [CM_BARRIERS]    = { "barriers", sizeof(CmBarrier), MS_MAX_OBJECTS },
 };
 
 // --- Reader
@@ -5493,6 +5582,35 @@ static bool CmReadFogZones(CmReader *R)
     return true;
 }
 
+// The barriers as ParseBarrier leaves them: the box as written with ordered corners, finite numbers
+// (BarrierMake's checks on the rebuilt record), a source reference, in map order; and within
+// MS_MAX_OBJECTS with the other objects (read last of them)
+static bool CmReadBarriers(CmReader *R)
+{
+    SceneData *d = R->d;
+    uint32_t n = R->sec[CM_BARRIERS].count;
+    if (n == 0) return true;
+    if ((int64_t)d->boxCount + d->modelCount + d->lightCount + n > MS_MAX_OBJECTS)
+        return CmFail(R, "compiled map: too many objects (at most %d)", MS_MAX_OBJECTS);
+    if (!MS_RESERVE(d->barriers, d->barrierCap, (int)n) || !MS_RESERVE(d->barrierWritten, d->barrierWrittenCap, (int)n))
+        return CmFail(R, "out of memory");
+    for (uint32_t i = 0; i < n; i++) {
+        CmBarrier c;
+        CmRecord(R, CM_BARRIERS, i, &c);
+        BoundingBox w = { V3(c.min), V3(c.max) };
+        MS_Barrier b = { 0 };
+        if (!FiniteOrdered(c.min, c.max) || !FiniteBox(w) || !Finite3(c.rotationDeg) ||
+            !BarrierMake(w, V3(c.rotationDeg), &b))
+            return CmFail(R, "barrier %u: coordinate, size or rotation out of range", i);
+        if (!CmReadRef(R, &c.ref, false, "barrier", i, &b.ref)) return false;
+        if (i > 0 && b.ref.prim < d->barriers[i - 1].ref.prim) return CmFail(R, "barrier %u: out of map order", i);
+        d->barriers[i] = b;
+        d->barrierWritten[i] = w;
+        d->barrierCount = (int)i + 1;
+    }
+    return true;
+}
+
 // The one spawn record (CmReadHeader checked there is exactly one), present or not
 static bool CmReadSpawn(CmReader *R)
 {
@@ -5672,6 +5790,7 @@ static bool ReadCompiled(SceneData *d, const char *bytes, int size)
            CmReadLights(&R) &&
            CmReadViewpoints(&R) &&
            CmReadFogZones(&R) &&
+           CmReadBarriers(&R) &&        // (after boxes, models and lights: the object cap)
            CmReadSpawn(&R) &&
            CmReadEnv(&R) &&
            CmReadDeps(&R) &&
@@ -6053,6 +6172,18 @@ static void CmPutFogZones(CmWriter *W, const SceneData *d)
     }
 }
 
+// The barriers in map order, each as written (ParseBarrier's corners) with its rotation
+static void CmPutBarriers(CmWriter *W, const SceneData *d)
+{
+    for (int i = 0; i < d->barrierCount; i++) {
+        const MS_Barrier *b = &d->barriers[i];
+        const BoundingBox *w = &d->barrierWritten[i];
+        Vector3 rot = b->turned ? b->shape.rotationDeg : (Vector3){ 0 };
+        CmBarrier c = { CM_XYZ(w->min), CM_XYZ(w->max), CM_XYZ(rot), CmRefOf(b->ref) };
+        CmPut(W, CM_BARRIERS, &c);
+    }
+}
+
 // Always one record, also without a `spawn` line (hasSpawn 0)
 static void CmPutSpawn(CmWriter *W, const SceneData *d)
 {
@@ -6158,6 +6289,7 @@ static unsigned char *WriteCompiled(const SceneData *d, int *outSize)
     CmPutLights(&W, d);
     CmPutViewpoints(&W, d);
     CmPutFogZones(&W, d);
+    CmPutBarriers(&W, d);
     CmPutSpawn(&W, d);
     CmPutEnvironment(&W, &d->env);
     CmPutDeps(&W, d);
@@ -6792,12 +6924,12 @@ static unsigned int EntityHash(MS_EntityId id, int cap)
     return (h ^ (h >> 15)) & (unsigned int)(cap - 1);
 }
 
-// The entities (after ResolveModels): every box, model and light in map order (the three
+// The entities (after ResolveModels): every box, model, light and barrier in map order (the four
 // arrays merged by statement), each with its components and its id: the statement's key and
 // the object's index within the statement
 static bool BuildEntities(SceneData *d)
 {
-    int n = d->boxCount + d->modelCount + d->lightCount, m = n > 0 ? n : 1;
+    int n = ObjectCount(d), m = n > 0 ? n : 1;
     int cap = 16;
     while (cap < 2 * n) cap *= 2;
     d->entityIds = malloc(sizeof(MS_EntityId) * m);
@@ -6811,15 +6943,23 @@ static bool BuildEntities(SceneData *d)
     if (!d->entityIds || !d->entityObjects || !d->entityTransforms || !d->entitySources || !d->entityModels ||
         !d->objEntities || !d->entityHash)
         return false;
-    int ib = 0, im = 0, il = 0, lastPrim = -1, index = 0;
+    int ib = 0, im = 0, il = 0, ia = 0, lastPrim = -1, index = 0;
     for (int e = 0; e < n; e++) {
         int pb = ib < d->boxCount ? d->boxRefs[ib].prim : INT_MAX;
         int pm = im < d->modelCount ? d->models[im].ref.prim : INT_MAX;
         int pli = il < d->lightCount ? d->lights[il].ref.prim : INT_MAX;
+        int pa = ia < d->barrierCount ? d->barriers[ia].ref.prim : INT_MAX;
         const MS_Ref *r;
         MS_Transform tr = { .scale = { 1, 1, 1 } };
         int model = -1;
-        if (pb <= pm && pb <= pli) {
+        if (pa < pb && pa < pm && pa < pli) {
+            // a barrier (a statement makes one kind of object, so the order among equal prims is moot)
+            const MS_TurnedBox *t = &d->barriers[ia].shape;
+            r = &d->barriers[ia].ref;
+            tr = (MS_Transform){ t->center, t->rotationDeg, t->size };
+            d->entityObjects[e] = (MS_ObjRef){ MS_OBJ_BARRIER, ia };
+            d->objEntities[d->boxCount + d->modelCount + d->lightCount + ia++] = e;
+        } else if (pb <= pm && pb <= pli) {
             BoundingBox b = d->boxes[ib];
             const MS_TurnedBox *t = TurnedOf(d, ib);
             r = &d->boxRefs[ib];
@@ -6858,11 +6998,36 @@ static bool BuildEntities(SceneData *d)
     return true;
 }
 
-// The colliders MS_Scene publishes: boxes, then model colliders (without models: the box array itself)
+// Whether the colliders are an array of their own (boxes copied, then model colliders and barriers);
+// without models and barriers they are the box array itself
+static inline bool OwnColliders(const SceneData *d)
+{
+    return d->modelCount > 0 || d->barrierCount > 0;
+}
+
+// The colliders MS_Scene publishes: boxes, then model colliders, then barriers (without models and
+// barriers: the box array itself)
 static const BoundingBox *PublishedColliders(const SceneData *d, int *count)
 {
-    *count = d->modelCount > 0 ? d->colliderCount : d->boxCount;
-    return d->modelCount > 0 ? d->colliders : d->boxes;
+    *count = OwnColliders(d) ? d->colliderCount : d->boxCount;
+    return OwnColliders(d) ? d->colliders : d->boxes;
+}
+
+// The first barrier's index in the colliders (they come last)
+static inline int BarrierColliderFirst(const SceneData *d)
+{
+    int n;
+    PublishedColliders(d, &n);
+    return n - d->barrierCount;
+}
+
+// The exact shape of collider c when it is not its AABB (a turned box or barrier), else NULL
+static inline const MS_TurnedBox *ColliderTurn(const SceneData *d, int c)
+{
+    if (c < d->boxCount) return TurnedOf(d, c);
+    if (d->barrierCount == 0) return NULL;      // (a model collider: always its AABB)
+    int b = c - BarrierColliderFirst(d);
+    return b >= 0 && b < d->barrierCount && d->barriers[b].turned ? &d->barriers[b].shape : NULL;
 }
 
 // Node `ni` over colliderOrder[first, first + count): leaves of <= 4 colliders, split at the
@@ -7377,13 +7542,14 @@ static BoundingBox RotatedFileBounds(const SceneData *d, const MS_ModelInstance 
 }
 
 // Transforms, world bounds and colliders of every instance (file bounds: zero box when the
-// files were not loaded); then the collider list (boxes first)
+// files were not loaded); then the collider list (boxes first, barriers last)
 static bool ResolveModels(SceneData *d)
 {
     RotBoundsCache cache = { 0 };
     int nc = d->boxCount;
-    if (d->modelCount > 0) {
-        d->colliders = malloc(sizeof(BoundingBox) * ((size_t)d->boxCount + (size_t)d->modelColliderCount));
+    if (OwnColliders(d)) {
+        d->colliders = malloc(sizeof(BoundingBox) *
+                              ((size_t)d->boxCount + (size_t)d->modelColliderCount + (size_t)d->barrierCount));
         if (!d->colliders) {
             ErrSet("%s: out of memory", d->path);
             return false;
@@ -7427,7 +7593,8 @@ static bool ResolveModels(SceneData *d)
             for (int k = 0; k < localCount; k++) d->colliders[nc++] = TransformBox(d->localColliders[localFirst + k], m);
         M->colliderCount = nc - M->colliderFirst;
     }
-    d->colliderCount = nc;
+    for (int i = 0; i < d->barrierCount; i++) d->colliders[nc++] = d->barriers[i].box;   // (last: box and model
+    d->colliderCount = nc;                                                                  //  indices stay)
     free(cache.e);
     return true;
 }
@@ -9229,6 +9396,8 @@ static void FreeData(SceneData *d)
     for (int i = 0; i < d->viewpointCount; i++) free((char *)d->viewpoints[i].name);
     free(d->viewpoints);
     free(d->fogZones);
+    free(d->barriers);
+    free(d->barrierWritten);
     free(d->boxes);
     free(d->boxRefs);
     free(d->turned);
@@ -9294,8 +9463,12 @@ static void Publish(MS_Scene *s, SceneData *d)
     s->modelFileCount = d->modelFileCount;
     s->modelSlots = d->modelSlots;
     s->modelSlotCount = d->modelSlotCount;
-    // Boxes first, then the model colliders (without models: the box array itself)
+    // Boxes first, then the model colliders, then the barriers (without models and barriers: the box
+    // array itself)
     s->colliders = PublishedColliders(d, &s->colliderCount);
+    s->barriers = d->barriers;
+    s->barrierCount = d->barrierCount;
+    s->barrierColliderFirst = s->colliderCount - d->barrierCount;
     s->materials = d->materials;
     s->materialCount = d->materialCount;
     s->groups = (const char *const *)d->groups;
@@ -9322,6 +9495,7 @@ static void Publish(MS_Scene *s, SceneData *d)
     s->boxEntities = d->objEntities;
     s->modelEntities = d->objEntities + d->boxCount;
     s->lightEntities = d->objEntities + d->boxCount + d->modelCount;
+    s->barrierEntities = d->objEntities + d->boxCount + d->modelCount + d->lightCount;
 }
 
 #ifdef MONOLITH_EDITOR
@@ -9722,6 +9896,8 @@ const char *MS_MapText(const MS_Scene *s, int file, int *size)
 
 int MS_PrimitiveArgs(const char *name, unsigned char axes[8])
 {
+    // (a barrier line's numbers are a box line's: two corners, shifted alike by repeat)
+    if (strcmp(name, "barrier") == 0) name = "box";
     for (int i = 0; i < COUNT(PRIMS); i++)
         if (strcmp(name, PRIMS[i].name) == 0) {
             memcpy(axes, PRIMS[i].kind, sizeof(PRIMS[i].kind));
@@ -11125,7 +11301,7 @@ static void PreviewFree(struct EditPreview *v)
     for (int r = 0; v->turnMesh && r < v->drawRanges; r++) R3D_UnloadMesh(v->turnMesh[r]);
     R3D_UnloadMeshData(v->cube);
     free(v->objs); free(v->boxOrig); free(v->turnOrig); free(v->modelOrig); free(v->localFirst); free(v->colliderOrig); free(v->colliderAt);
-    free(v->lightOrig); free(v->entityOrig); free(v->reach); free(v->boxSel); free(v->hiddenOrig); free(v->ranges);
+    free(v->lightOrig); free(v->barrierOrig); free(v->entityOrig); free(v->reach); free(v->boxSel); free(v->hiddenOrig); free(v->ranges);
     free(v->meshOrig); free(v->instMat); free(v->instSlot); free(v->instScaleOrig); free(v->modelRangeOrig);
     free(v->bufBox); free(v->turnMesh); free(v->turnBounds); free(v->drawMat); free(v->drawFirst); free(v->drawCount); free(v->drawBounds);
     free(v);
@@ -11318,7 +11494,7 @@ bool MS_EditPreviewBegin(MS_Scene *s, const MS_ObjRef *objs, int count)
     if (p->pv || !p->gpu || !d || !d->gpu || count <= 0) return false;
     for (int i = 0; i < count; i++) {
         int n = objs[i].kind == MS_OBJ_BOX ? d->boxCount : objs[i].kind == MS_OBJ_MODEL ? d->modelCount
-              : objs[i].kind == MS_OBJ_LIGHT ? d->lightCount : 0;
+              : objs[i].kind == MS_OBJ_LIGHT ? d->lightCount : objs[i].kind == MS_OBJ_BARRIER ? d->barrierCount : 0;
         if (objs[i].index < 0 || objs[i].index >= n) return false;
         if (objs[i].kind == MS_OBJ_BOX && (!d->boxOrder || !d->boxRangeOf)) return false;
         if (objs[i].kind == MS_OBJ_MODEL && (!d->modelSlotOf || !d->modelRangeOf)) return false;
@@ -11334,6 +11510,7 @@ bool MS_EditPreviewBegin(MS_Scene *s, const MS_ObjRef *objs, int count)
     v->localFirst = calloc(nc, sizeof(int));
     v->colliderAt = calloc(nc, sizeof(int));
     v->lightOrig = calloc(nc, sizeof(MS_LightDef));
+    v->barrierOrig = calloc(nc, sizeof(MS_Barrier));
     v->entityOrig = calloc(nc, sizeof(MS_Transform));
     v->reach = calloc(nc, sizeof(BoundingBox));
     v->boxSel = calloc(d->boxCount > 0 ? (size_t)d->boxCount : 1, 1);
@@ -11350,7 +11527,8 @@ bool MS_EditPreviewBegin(MS_Scene *s, const MS_ObjRef *objs, int count)
     v->instScaleOrig = malloc(sizeof(Vector3) * nc);
     v->trisDrawn = d->boxTrisDrawn;
     v->meshCount = d->boxMeshCount;
-    bool ok = v->objs && v->boxOrig && v->turnOrig && v->modelOrig && v->localFirst && v->colliderAt && v->lightOrig && v->entityOrig && v->reach &&
+    bool ok = v->objs && v->boxOrig && v->turnOrig && v->modelOrig && v->localFirst && v->colliderAt && v->lightOrig && v->barrierOrig &&
+              v->entityOrig && v->reach &&
               v->boxSel && v->modelRangeOrig && v->bufBox && v->turnMesh && v->turnBounds && v->drawMat && v->drawFirst && v->drawCount && v->drawBounds &&
               v->instMat && v->instSlot && v->instScaleOrig;
     // What everything was at Begin
@@ -11359,7 +11537,8 @@ bool MS_EditPreviewBegin(MS_Scene *s, const MS_ObjRef *objs, int count)
         MS_ObjRef o = objs[i];
         v->objs[i] = o;
         int e = d->objEntities[o.kind == MS_OBJ_BOX ? o.index : o.kind == MS_OBJ_MODEL ? d->boxCount + o.index
-                               : d->boxCount + d->modelCount + o.index];
+                               : o.kind == MS_OBJ_LIGHT ? d->boxCount + d->modelCount + o.index
+                               : d->boxCount + d->modelCount + d->lightCount + o.index];
         v->entityOrig[i] = d->entityTransforms[e];
         if (o.kind == MS_OBJ_BOX) {
             v->boxOrig[i] = v->reach[i] = d->boxes[o.index];
@@ -11373,6 +11552,9 @@ bool MS_EditPreviewBegin(MS_Scene *s, const MS_ObjRef *objs, int count)
             int lf = 0;     // its `collide box` boxes: after those of the instances before it
             for (int k = 0; k < o.index; k++) if (d->models[k].collide == MS_COLLIDE_BOXES) lf += d->models[k].colliderCount;
             v->localFirst[i] = lf;
+        } else if (o.kind == MS_OBJ_BARRIER) {
+            v->barrierOrig[i] = d->barriers[o.index];
+            v->reach[i] = d->barriers[o.index].box;
         } else {
             v->lightOrig[i] = d->lights[o.index];
             v->reach[i] = (BoundingBox){ d->lights[o.index].light.position, d->lights[o.index].light.position };
@@ -11537,7 +11719,7 @@ bool MS_EditPreviewSet(MS_Scene *s, const MS_Transform *tr)
                 if (TurnedOf(d, o.index)) d->turned[d->boxTurned[o.index]] = t;
             }
             d->boxes[o.index] = after;
-            if (d->modelCount > 0) d->colliders[o.index] = after;
+            if (OwnColliders(d)) d->colliders[o.index] = after;
             d->entityTransforms[e].position = tr[i].position;
             d->entityTransforms[e].rotationDeg = r;
             d->entityTransforms[e].scale = tr[i].scale;
@@ -11554,6 +11736,19 @@ bool MS_EditPreviewSet(MS_Scene *s, const MS_Transform *tr)
             after = M->bounds;
             d->entityTransforms[e] = (MS_Transform){ M->position, M->rotationDeg, M->scale };
             colliders = colliders || M->colliderCount > 0;
+        } else if (o.kind == MS_OBJ_BARRIER) {
+            // Its record and collider follow (centre + size + rotation, as a box); it is in no cache
+            MS_Barrier *B = &d->barriers[o.index];
+            e = d->objEntities[d->boxCount + d->modelCount + d->lightCount + o.index];
+            Vector3 h = Vector3Scale(tr[i].scale, 0.5f);
+            BoundingBox w = { Vector3Subtract(tr[i].position, h), Vector3Add(tr[i].position, h) };
+            MS_Barrier b = { .ref = B->ref };
+            if (BarrierMake(w, tr[i].rotationDeg, &b)) *B = b;
+            d->colliders[BarrierColliderFirst(d) + o.index] = B->box;
+            d->entityTransforms[e] = (MS_Transform){ B->shape.center, B->shape.rotationDeg, B->shape.size };
+            v->reach[i] = BoundsUnion(v->reach[i], B->box);
+            colliders = true;
+            continue;
         } else {
             MS_LightDef *L = &d->lights[o.index];
             e = d->objEntities[d->boxCount + d->modelCount + o.index];
@@ -11595,7 +11790,7 @@ void MS_EditPreviewEnd(MS_Scene *s)
         if (o.kind == MS_OBJ_BOX) {
             d->boxes[o.index] = v->boxOrig[i];
             if (TurnedOf(d, o.index)) d->turned[d->boxTurned[o.index]] = v->turnOrig[i];
-            if (d->modelCount > 0) d->colliders[o.index] = v->boxOrig[i];
+            if (OwnColliders(d)) d->colliders[o.index] = v->boxOrig[i];
             d->entityTransforms[d->objEntities[o.index]] = v->entityOrig[i];
             colliders = true;
         } else if (o.kind == MS_OBJ_MODEL) {
@@ -11606,6 +11801,12 @@ void MS_EditPreviewEnd(MS_Scene *s)
             colliders = colliders || M->colliderCount > 0;
             PreviewModelInstance(d, o.index);
             d->entityTransforms[d->objEntities[d->boxCount + o.index]] = v->entityOrig[i];
+        } else if (o.kind == MS_OBJ_BARRIER) {
+            d->barriers[o.index] = v->barrierOrig[i];
+            d->colliders[BarrierColliderFirst(d) + o.index] = v->barrierOrig[i].box;
+            d->entityTransforms[d->objEntities[d->boxCount + d->modelCount + d->lightCount + o.index]] = v->entityOrig[i];
+            colliders = true;
+            continue;       // (in no static cache)
         } else if (o.kind == MS_OBJ_LIGHT) {
             d->lights[o.index] = v->lightOrig[i];
             if (d->lightShadowDrawn) d->lightShadowDrawn[o.index] = false;
@@ -13105,6 +13306,67 @@ MS_Hit MS_Raycast(const MS_Scene *s, Vector3 origin, Vector3 dir, float maxDist)
     return best;
 }
 
+MS_Hit MS_RaycastBarriers(const MS_Scene *s, Vector3 origin, Vector3 dir, float maxDist)
+{
+    MS_Hit best = { .obj = { MS_OBJ_NONE, -1 }, .dist = INFINITY };
+    float limit = maxDist > 0.0f ? maxDist : INFINITY;
+    const SceneData *sd = s->priv->d;
+    int first = BarrierColliderFirst(sd);
+
+    // Through the colliders' BVH, as MS_Raycast's boxes, testing only the barriers' colliders
+    int stack[128], sp = 0;
+    if (sd->barrierCount > 0 && sd->colliderNodeCount > 0) stack[sp++] = 0;
+    while (sp > 0) {
+        const BvhNode *nd = &sd->colliderNodes[stack[--sp]];
+        float nodeNear, nodeFar;
+        if (!RayBox(origin, dir, nd->mn, nd->mx, &nodeNear, &nodeFar, NULL) || nodeFar < 0.0f ||
+            nodeNear > best.dist || nodeNear > limit) continue;
+        if (nd->count == 0) {
+            if (sp + 2 <= 128) { stack[sp++] = nd->left; stack[sp++] = nd->left + 1; }
+            continue;
+        }
+        for (int k = nd->first; k < nd->first + nd->count; k++) {
+            int i = sd->colliderOrder[k] - first;
+            if (i < 0) continue;
+            // The slab test in the barrier's own frame (its axes are the world's when it isn't turned)
+            const MS_Barrier *B = &sd->barriers[i];
+            const MS_TurnedBox *T = &B->shape;
+            float O[3], D[3], mn[3], mx[3];
+            Vector3 rel = Vector3Subtract(origin, T->center);
+            for (int a = 0; a < 3; a++) {
+                O[a] = B->turned ? Vector3DotProduct(rel, T->axis[a]) : ((const float *)&origin)[a];
+                D[a] = B->turned ? Vector3DotProduct(dir, T->axis[a]) : ((const float *)&dir)[a];
+                mn[a] = B->turned ? -((const float *)&T->size)[a] * 0.5f : ((const float *)&B->box.min)[a];
+                mx[a] = B->turned ? ((const float *)&T->size)[a] * 0.5f : ((const float *)&B->box.max)[a];
+            }
+            float tNear = -INFINITY, tFar = INFINITY;
+            int axis = -1;
+            bool miss = false;
+            for (int a = 0; a < 3 && !miss; a++) {
+                if (fabsf(D[a]) < 1e-12f) {
+                    if (O[a] < mn[a] || O[a] > mx[a]) miss = true;
+                    continue;
+                }
+                float t1 = (mn[a] - O[a]) / D[a], t2 = (mx[a] - O[a]) / D[a];
+                if (t1 > t2) { float t = t1; t1 = t2; t2 = t; }
+                if (t1 > tNear) { tNear = t1; axis = a; }
+                if (t2 < tFar) tFar = t2;
+                if (tNear > tFar) miss = true;
+            }
+            // (an origin inside the barrier: skipped, so one can point out of it)
+            if (miss || axis < 0 || tNear < 0.0f || tNear > best.dist || tNear > limit) continue;
+            if (tNear == best.dist && i > best.obj.index) continue;
+            best.obj = (MS_ObjRef){ MS_OBJ_BARRIER, i };
+            best.dist = tNear;
+            best.point = Vector3Add(origin, Vector3Scale(dir, tNear));
+            float sgn = D[axis] > 0.0f ? -1.0f : 1.0f;
+            best.normal = Vector3Scale(T->axis[axis], sgn);
+        }
+    }
+    if (best.obj.kind == MS_OBJ_NONE) best.dist = 0.0f;
+    return best;
+}
+
 // Slab test; tNear < 0 when the origin is inside. False on a miss.
 static bool RayBox(Vector3 o, Vector3 d, Vector3 mn, Vector3 mx, float *tNear, float *tFar, int *axis)
 {
@@ -13247,10 +13509,10 @@ int MS_FirstCollision(const MS_Scene *s, BoundingBox a)
         }
         for (int k = nd->first; k < nd->first + nd->count; k++) {
             int i = d->colliderOrder[k];
-            // (a box of a `collide off` material never blocks)
+            // (a box of a `collide off` material never blocks; a turned box or barrier by its shape)
             if (i < d->boxCount && s->materials[s->boxRefs[i].material].noCollide) continue;
             if ((first < 0 || i < first) && Overlaps(a, s->colliders[i].min, s->colliders[i].max) &&
-                (i >= d->boxCount || !TurnedOf(d, i) || OverlapsTurned(a, TurnedOf(d, i)))) first = i;
+                (!ColliderTurn(d, i) || OverlapsTurned(a, ColliderTurn(d, i)))) first = i;
         }
     }
     return first;
@@ -13316,7 +13578,7 @@ float MS_ColliderTop(const MS_Scene *s, int c, BoundingBox box, bool *walkable)
     const SceneData *d = s->priv->d;
     if (walkable) *walkable = true;
     if (c < 0 || c >= s->colliderCount) return 0.0f;
-    const MS_TurnedBox *t = c < d->boxCount ? TurnedOf(d, c) : NULL;
+    const MS_TurnedBox *t = ColliderTurn(d, c);
     if (!t) return s->colliders[c].max.y;
     if (walkable) {
         float up = fmaxf(fabsf(t->axis[0].y), fmaxf(fabsf(t->axis[1].y), fabsf(t->axis[2].y)));
@@ -13330,7 +13592,7 @@ float MS_ColliderBottom(const MS_Scene *s, int c, BoundingBox box)
 {
     const SceneData *d = s->priv->d;
     if (c < 0 || c >= s->colliderCount) return 0.0f;
-    const MS_TurnedBox *t = c < d->boxCount ? TurnedOf(d, c) : NULL;
+    const MS_TurnedBox *t = ColliderTurn(d, c);
     float lo, hi;
     if (!t || !TurnedSpanY(t, box.min.x, box.max.x, box.min.z, box.max.z, &lo, &hi)) return s->colliders[c].min.y;
     return lo;
@@ -13341,6 +13603,7 @@ const MS_Ref *MS_ObjectRef(const MS_Scene *s, MS_ObjRef obj)
     if (obj.kind == MS_OBJ_BOX && obj.index >= 0 && obj.index < s->boxCount) return &s->boxRefs[obj.index];
     if (obj.kind == MS_OBJ_MODEL && obj.index >= 0 && obj.index < s->modelCount) return &s->models[obj.index].ref;
     if (obj.kind == MS_OBJ_LIGHT && obj.index >= 0 && obj.index < s->lightCount) return &s->lights[obj.index].ref;
+    if (obj.kind == MS_OBJ_BARRIER && obj.index >= 0 && obj.index < s->barrierCount) return &s->barriers[obj.index].ref;
     return NULL;
 }
 
@@ -13350,6 +13613,7 @@ BoundingBox MS_ObjectBounds(const MS_Scene *s, MS_ObjRef obj)
     if (obj.kind == MS_OBJ_MODEL && obj.index >= 0 && obj.index < s->modelCount) return s->models[obj.index].bounds;
     if (obj.kind == MS_OBJ_LIGHT && obj.index >= 0 && obj.index < s->lightCount)
         return (BoundingBox){ s->lights[obj.index].light.position, s->lights[obj.index].light.position };
+    if (obj.kind == MS_OBJ_BARRIER && obj.index >= 0 && obj.index < s->barrierCount) return s->barriers[obj.index].box;
     return (BoundingBox){ 0 };
 }
 
@@ -13358,6 +13622,7 @@ int MS_ObjectEntity(const MS_Scene *s, MS_ObjRef obj)
     if (obj.kind == MS_OBJ_BOX && obj.index >= 0 && obj.index < s->boxCount) return s->boxEntities[obj.index];
     if (obj.kind == MS_OBJ_MODEL && obj.index >= 0 && obj.index < s->modelCount) return s->modelEntities[obj.index];
     if (obj.kind == MS_OBJ_LIGHT && obj.index >= 0 && obj.index < s->lightCount) return s->lightEntities[obj.index];
+    if (obj.kind == MS_OBJ_BARRIER && obj.index >= 0 && obj.index < s->barrierCount) return s->barrierEntities[obj.index];
     return -1;
 }
 

@@ -63,7 +63,7 @@ Under the coordinator no other request edits your map package while you work, an
 
 Work through these sources in this order:
 
-1. **Crosshair hit and selection.** Together they are the strongest signal. "This", "it" and "here" usually mean the hit object or the hit point. When objects are selected, "these" or "this" means the selection. Many requests are about a **spot** rather than an object ("put a door here", "plant a tree here", "open a slit above this"): use the hit point and the face normal. The new content goes on that face, on the side the normal points to.
+1. **Crosshair hit and selection.** Together they are the strongest signal. "This", "it" and "here" usually mean the hit object or the hit point. When objects are selected, "these" or "this" means the selection. Many requests are about a **spot** rather than an object ("put a door here", "plant a tree here", "open a slit above this"): use the hit point and the face normal. The new content goes on that face, on the side the normal points to. A hit or selected object of kind `barrier` is an invisible wall the developer saw in the editor's red overlay (**O**): its `barrier` line is edited like a `box` line. A request to **stop the player** somewhere ("don't let them walk off this ledge", "keep them inside the map", "block this gap") is one `barrier` line, not visible geometry, unless it asks for something to be seen (`map-editing` §2, *Invisible limits*).
 2. **Directions relative to the camera.** With yaw *y* and pitch *p*:
    - forward = `(cos p · sin y, sin p, cos p · cos y)`. Yaw 0 looks toward +Z, yaw 90 toward +X, yaw 180 toward −Z.
    - camera right = `(−cos y, 0, sin y)` and up = +Y.

@@ -130,7 +130,7 @@ static bool ActiveAxes(const MS_ObjRef *objs, const unsigned char *cls, int n, V
     for (int a = 0; a < 3; a++) axes[a] = Unit(a);
     for (int i = 0; i < n; i++) {
         int c = cls[i], e = MS_ObjectEntity(scene, objs[i]);
-        if ((c != EDIT_CLASS_BOX && c != EDIT_CLASS_BLOCK && c != EDIT_CLASS_MODEL) || e < 0) continue;
+        if ((!EditClassBoxLike(c) && c != EDIT_CLASS_MODEL) || e < 0) continue;
         Vector3 r = scene->entityTransforms[e].rotationDeg;
         Quaternion q = QuaternionMultiply(QuaternionMultiply(QuaternionFromAxisAngle((Vector3){ 0, 1, 0 }, r.x * DEG2RAD),
                                                              QuaternionFromAxisAngle((Vector3){ 1, 0, 0 }, r.y * DEG2RAD)),
@@ -141,7 +141,7 @@ static bool ActiveAxes(const MS_ObjRef *objs, const unsigned char *cls, int n, V
     return false;
 }
 
-static bool CanTurn(int c) { return c == EDIT_CLASS_BOX || c == EDIT_CLASS_BLOCK || c == EDIT_CLASS_MODEL; }
+static bool CanTurn(int c) { return EditClassBoxLike(c) || c == EDIT_CLASS_MODEL; }
 
 // The designer's selection classified (cached until the selection or the scene changes): true
 // when it has a box, block or model (the gizmo shows)
@@ -549,7 +549,7 @@ static void NoChangeNote(TransformModal *t)
 {
     int box = -1, boxes = 0;
     for (int i = 0; i < t->count; i++)
-        if (t->follows[i] && (t->cls[i] == EDIT_CLASS_BOX || t->cls[i] == EDIT_CLASS_BLOCK)) { boxes++; if (box < 0) box = i; }
+        if (t->follows[i] && EditClassBoxLike(t->cls[i])) { boxes++; if (box < 0) box = i; }
     if (t->kind == TRANSFORM_ROTATE && boxes == 1 && t->commitCount == 1) {
         Vector3 sz = t->start[box].scale;
         t->refusalParts.note = 1;
@@ -587,7 +587,7 @@ static void Compute(TransformModal *t, Designer *d, Camera3D cam, bool ctrl)
             if (MapEditPreviewTransform(&op, t->cls[i], &t->start[i], &tr)) t->commit[t->commitCount++] = t->objs[i];
             else {
                 t->follows[i] = 0;
-                refusedTurn += t->kind == TRANSFORM_ROTATE && (t->cls[i] == EDIT_CLASS_BOX || t->cls[i] == EDIT_CLASS_BLOCK);
+                refusedTurn += t->kind == TRANSFORM_ROTATE && EditClassBoxLike(t->cls[i]);
             }
         }
         if (memcmp(&tr, &t->now[i], sizeof(tr)) != 0) changed = true;

@@ -362,6 +362,14 @@ No GL error in any run (after `InitWindow`, after `R3D_Init`, after the first fr
 - **Not this round:** the ~8 fps (79 frames in 10 s) and 2.7–3.5 s first frame on Gen11 (`.claude/TODOs`).
 - **Confirmed:** the friend ran the fixed export (single-sampled by default) and the window no longer went black (2026-11-21). The `--msaa` control run's result wasn't reported separately.
 
+## Barriers: invisible walls as their own statement (2026-11-27)
+
+Maps needed invisible limits (map edges, a ledge nobody should walk off, a gap a player could slip through) without geometry that changes the look; the format only had the reverse, `collide off` (drawn, not blocking). Two designs were weighed: a material key (`draw off`) on ordinary boxes, which would have reused boxes, `repeat`, the gizmos and the edit language for free, or a `barrier` statement with its own object kind. **The developer chose the statement.** The material key would have put invisible boxes into `boxes[]`, the draw ranges, `--dump-boxes` and every cache (shadow tiles, AO volume, fog cache, the depth pre-pass), all of which would then have had to skip them, and a mistake in any one of them changes how a map looks; the statement keeps them out of everything that draws.
+- **Colliders last:** `colliders[] = boxes, model colliders, barriers`, so box indices and `src/player.c`'s `colliders[hit]` don't move; `barrierColliderFirst` names where they start. `MS_Raycast` passes through them (pointing, painting and a game's line of sight hit what is visible); `MS_RaycastBarriers` exists for the editor's overlay.
+- **Edited as box lines:** a `barrier` line is laid out like `box` (`MS_PrimitiveArgs`), so the edit language, the gizmos and the transform modal needed only a class (`EDIT_CLASS_BARRIER`) and the corner-line check; `EDIT_BARRIER_ADD` / `barrier-add` writes new ones.
+- **Keys:** the task proposed Shift+B (edit mode) and B (volume mode), but B already opens draw mode from any spectator mode, Shift held or not; free keys were taken instead: **H** places a barrier (edit mode) or turns the active volume into one (volume mode), **O** toggles the overlay (on by default, saved as `barrier_overlay`; never in walk mode, in shots only with `--show-barriers`). The hand placement reuses the volume mode's three clicks (`designer.barrierPlace`) rather than a copy of them.
+- **Not done:** a `block`-style form of `barrier` (corners only until requests need one), blocking the spectator camera (it flies through everything, as before), barriers in any map of `maps/` (a request for later).
+
 ## The instruction files
 
 Superseded layouts, for reading old bundles, commits and notes; the current layout is `CLAUDE.md` + `.claude/skills/` + `docs/`.

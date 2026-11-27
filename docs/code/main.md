@@ -75,6 +75,7 @@ The launcher (`launcher.c`) is not in that build.
 | LEFT/RIGHT | fly to previous/next viewpoint |
 | P | print + copy current view as `--pos`/`--look` arguments (`--pos` = feet) |
 | G | move the player here |
+| O | the barrier overlay on / off (the map's invisible walls as red boxes; saved as `barrier_overlay`; never in walk mode) |
 
 ## Map designer
 
@@ -119,7 +120,11 @@ World-space boxes (the camera keeps flying).
 
 Volumes stay (through map reloads and submits too) until removed; they are never written to the map. The bundle lists what each volume holds (`designer.c`, `volumes[]`).
 
-SHIFT+V makes a volume from the selection's bounds (or the crosshair object's).
+SHIFT+V makes a volume from the selection's bounds (or the crosshair object's). H turns the active volume into a `barrier` line (EDIT_BARRIER_ADD through the edit mode's `BarrierAdd`; the volume stays).
+
+### Barriers (O, H)
+
+The barrier overlay (`DesignerDrawBarriers`, drawn after the scene and before every other overlay): in spectator mode while `gfx.barrierOverlay` is on (O toggles it and saves the settings file at once; default on), never in walk mode, in a `--shot` only with `--show-barriers` (then `DrawScene` keeps its depth for it). While it is on the designer's pick (`PickShown`) takes the nearest barrier in front of the visible hit (`MS_RaycastBarriers`), so barriers are pointed at, selected and edited like boxes; when it is off the pick passes through them as `MS_Raycast` does. H in edit mode starts the volume mode's three clicks with a barrier as the target (`designer.barrierPlace`: the edit mode stays on, the draft is drawn in the overlay's colour, RMB / ESC cancel back to the edit mode); the finished box waits in `designer.barrierBox` and the edit mode's next update writes it (`EDIT_BARRIER_ADD`, one undo step) and selects the new barrier.
 
 ### Edit mode (M)
 
@@ -228,6 +233,7 @@ An unknown flag, a missing or unparsable value, a value that is itself a `--flag
 |---|---|
 | `--shot <file>` | render 30 frames offscreen (1600x900) in a hidden window (never mapped, so the window manager doesn't show it), save the image to `<file>` and exit. No hot reload or request polling during shots |
 | `--shot-size <w> <h>` | size of the `--shot` image (default 1600 900); request bundles pass their window size so the reproduction matches `view.png` exactly |
+| `--show-barriers` | with `--shot`: the barrier overlay in the shot (and barriers pickable); without it no shot shows barriers |
 
 ### Graphics settings
 
@@ -291,7 +297,7 @@ Only the interactive editor reads the default settings file: `--shot`, `--bench`
 | `--dump-boxes <file>` | load the map, write every box as hex floats (`%a`) to `<file>` and exit without opening a window (see below) |
 | `--dump-scene <file>` | like `--dump-boxes`, plus model files, model instances (transform and world bounds as hex floats), model colliders, materials and lights (format: `src/dumpscene.c`). Maps with models load them in a hidden window |
 | `--dump-scene-diff <file>` | the same without object indices and map lines, references by name (group, material, model file): diff two of these to see only the objects an edit changed, even after inserted lines (`src/dumpscene.c`) |
-| `--dump-entities <file>` | load the map (no window), write every entity (box, model, light) with its stable id, source line, copy and transform (`src/dumpscene.c`) and exit |
+| `--dump-entities <file>` | load the map (no window), write every entity (box, model, light, barrier) with its stable id, source line, copy and transform (`src/dumpscene.c`) and exit |
 | `--tri-report <file>` | the map's triangles as the runtime draws them (hidden faces left out), per viewpoint what the detail distance leaves out, then per group, material, map line and draw range (format: `src/trireport.c`); loads in a hidden window |
 | `--inspect-model <file>` | print what a model file contains and exit, without a window (see below) |
 | `--new-map <name\|path>` | create a map package and exit without opening a window (see below) |
@@ -324,7 +330,7 @@ The material's shader gets `#define MS_BAKE 1`, `MS_BAKE_FACE`, `MS_BAKE_LEVEL`,
 
 | Flag | Meaning |
 |---|---|
-| `--apply-edits <script>` | run an edit script (select / also / move / turn / rotation / scale / size / remove / duplicate / add / id / paint-add / paint-set / paint-remove / material-set / undo / redo / print; format: [mapedit.md](mapedit.md#edit-script)) against the map file of `--map`, which is required (the script rewrites that file), and exit without a window; exit 1 at the first failing command |
+| `--apply-edits <script>` | run an edit script (select / also / move / turn / rotation / scale / size / remove / duplicate / add / barrier-add / id / paint-add / paint-set / paint-remove / material-set / undo / redo / print; format: [mapedit.md](mapedit.md#edit-script)) against the map file of `--map`, which is required (the script rewrites that file), and exit without a window; exit 1 at the first failing command |
 | `--edit-script <script>` | the same language applied live, as the edit mode does (see below) |
 | `--edit-save <manual\|auto>` | the edit save mode for this run (settings: `edit_save`) |
 | `--paint-script <script>` | strokes of the draw mode (see below) |

@@ -62,6 +62,9 @@ static void Rebuild(IdPanel *p)
                 snprintf(it->kind, sizeof(it->kind), "model");
                 int f = scene->models[o.index].file;
                 it->what = f >= 0 && f < scene->modelFileCount ? scene->modelFiles[f].path : NULL;
+            } else if (o.kind == MS_OBJ_BARRIER) {
+                snprintf(it->kind, sizeof(it->kind), "barrier");
+                it->what = "invisible wall";
             } else if (o.kind == MS_OBJ_LIGHT) {
                 snprintf(it->kind, sizeof(it->kind), "light");
                 R3D_LightType t = scene->lights[o.index].light.type;

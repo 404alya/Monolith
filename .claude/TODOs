@@ -20,3 +20,4 @@
 15032994480672881141 - task: ~8 fps on Intel Gen11 (hysteria export, 1600x900) friend's log 2026-11-21: 79 frames in 10 s; project-history 'Single-sampled windows everywhere'
 5235118968212164719 - bug: face groups on a grid log a spurious inactive warning ActFaces sets faces before growing the rect (drawmode.c ~3201/3208); docs/painting.md pixel-bugs notes, bug 5
 5351605393565052477 - bug: brush outline has a notch on ±y faces mid-edge seen in draw-mode --shot-hud on a floating box's ±y face, old and new builds; DrawModeDrawCursor (drawmode.c)
+15041885522538042851 - bug: monolith MAP.md reference pick is stale Engine verification: --view 2 --pick now hits box 62 line 264, not box 46 line 193 (before and after barriers)

@@ -167,7 +167,7 @@ static EditModeResult Done(EditMode *m, Designer *d, unsigned char r, MS_EntityI
 
 static EditModeResult ApplyTo(EditMode *m, Designer *d, int key, const MS_ObjRef *sel, int selCount, const EditOp *op)
 {
-    if (op->kind != EDIT_ADD && selCount == 0) {
+    if (op->kind != EDIT_ADD && op->kind != EDIT_BARRIER_ADD && selCount == 0) {
         SayStatic(m, true, "nothing selected (LMB selects, SHIFT+LMB adds, CTRL+LMB a group)");
         return EDITMODE_NONE;
     }
@@ -265,6 +265,22 @@ EditModeResult EditModeAddModel(EditMode *m, Designer *d, const char *modelPath)
     EditOp op = { .kind = EDIT_ADD, .modelPath = modelPath, .anchor = d->hit.obj,
                   .pos = { round(p.x * 1e4) / 1e4, round(p.y * 1e4) / 1e4, round(p.z * 1e4) / 1e4 } };
     return Apply(m, d, KEY_ENTER, &op);
+}
+
+// A barrier made by hand (the designer's three clicks after H, or volume mode's H on a volume): one
+// `barrier` line (EDIT_BARRIER_ADD, corners rounded to 0.1 mm like a placed model), after the first
+// selected object's line, else in the main file's `# barriers` block; the new barrier is selected
+static EditModeResult BarrierAdd(EditMode *m, Designer *d, BoundingBox b)
+{
+    EditOp op = { .kind = EDIT_BARRIER_ADD, .anchor = d->selectedCount > 0 ? d->selected[0] : (MS_ObjRef){ MS_OBJ_NONE, -1 } };
+    const float c[6] = { b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z };
+    for (int i = 0; i < 6; i++) op.corners[i] = round(c[i] * 1e4) / 1e4;
+    for (int a = 0; a < 3; a++)     // (rounding never makes it flat)
+        if (op.corners[a + 3] <= op.corners[a]) op.corners[a + 3] = op.corners[a] + 1e-4;
+    EditModeResult r = Apply(m, d, KEY_ENTER, &op);
+    if (r == EDITMODE_RELOADED && !d->showBarriers)
+        Sayf(m, false, "%s (barriers are hidden: O shows them)", MapEditNote(&m->ed));
+    return r;
 }
 
 // CTRL+I: the panel for one line; several lines get the next free ids at once
@@ -554,9 +570,14 @@ EditModeResult EditModeUpdate(EditMode *m, Designer *d, Camera3D cam, float dt)
     if (m->warnTime > 0.0f) m->warnTime -= dt;
     if (m->leaveWarnTime > 0.0f) m->leaveWarnTime -= dt;
     if (TransformRunning(&m->modal)) return ModalUpdate(m, d, cam);     // (it takes every key)
-    if (m->active && (d->volumeMode || d->snipping)) m->active = false;    // V / C took over
+    if (m->active && ((d->volumeMode && !d->barrierPlace) || d->snipping)) m->active = false;    // V / C took over
     if (!m->active) m->idOpen = false;
     if (m->idOpen) return IdPanel(m, d);
+    // A barrier made by hand is written here (also from volume mode: the edit itself needs no open mode);
+    // while one is being made the three clicks own the keys
+    BoundingBox barrier;
+    if (MONOLITH_EDITING && DesignerTakeBarrier(d, &barrier)) return BarrierAdd(m, d, barrier);
+    if (d->barrierPlace) return EDITMODE_NONE;
 
     bool ctrl = Ctrl(), shift = Shift();
     // The view-only build (common.h): the mode never opens and nothing is edited, saved or undone
@@ -615,6 +636,11 @@ EditModeResult EditModeUpdate(EditMode *m, Designer *d, Camera3D cam, float dt)
         return StepTurn(m, d, KEY_R, shift ? -STEP_TURN_DEG : STEP_TURN_DEG);
     }
     if (!flying && !ctrl && !Alt()) {
+        if (IsKeyPressed(KEY_H)) {      // a barrier: the volume mode's three clicks (designer.c)
+            DesignerBarrierPlaceBegin(d);
+            SayStatic(m, false, "barrier: LMB first corner on a surface, LMB opposite corner, mouse / wheel height, LMB / ENTER");
+            return EDITMODE_NONE;
+        }
         if (IsKeyPressed(KEY_G)) return ModalStart(m, d, TRANSFORM_GRAB);
         if (IsKeyPressed(KEY_S)) return ModalStart(m, d, TRANSFORM_SCALE);
         if (IsKeyPressed(KEY_L)) {
@@ -657,7 +683,8 @@ int EditModeDrawHud(const EditMode *m, const Designer *d, int x, int y)
             char where[128];
             MapEditDescribe(d->selected[0], where, sizeof(where));
             snprintf(sel, sizeof(sel), "%d selected, first: %s %s", d->selectedCount,
-                     d->selected[0].kind == MS_OBJ_MODEL ? "model" : d->selected[0].kind == MS_OBJ_LIGHT ? "light" : "box", where);
+                     d->selected[0].kind == MS_OBJ_MODEL ? "model" : d->selected[0].kind == MS_OBJ_LIGHT ? "light"
+                     : d->selected[0].kind == MS_OBJ_BARRIER ? "barrier" : "box", where);
         }
         HudText(TextFormat("%s  |  undo %d, redo %d  |  %s", sel,
                            m->ed.undoCount, m->ed.redoCount, m->ed.autoSave ? "auto save" : "manual save"), x, y, dim);

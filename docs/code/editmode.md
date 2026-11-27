@@ -24,8 +24,9 @@ When the file changes on disk meanwhile (a request finished, another editor), th
 | DELETE | remove |
 | CTRL+D | duplicate, the copies one footprint further along the view's right |
 | I | the model picker (`modelpicker.c`, [modelpicker.md](modelpicker.md), opened by `main.c`): the package's `models/` files listed in `ASSETS.md`; ENTER adds the chosen one at the point under the cursor (origin bottom, `EditModeAddModel`), after the line of the object there, in its group |
+| H | a barrier (an invisible wall) by hand: `DesignerBarrierPlaceBegin` starts the volume mode's three clicks with a barrier as the target (the mode stays on; the clicks own the keys meanwhile; RMB / ESC cancel); the finished box (`DesignerTakeBarrier`, also volume mode's H on the active volume) is written by `BarrierAdd`: `EDIT_BARRIER_ADD` with the corners rounded to 0.1 mm, after the first selected object's line or in the main file's `# barriers` block; the new barrier becomes the selection |
 | CTRL+I | give the selection's line an id (see below) |
-| M / ESC | leave the mode (V and C leave it too); with unsaved edits the first press only says so (again within 3 s leaves; the edits stay live) |
+| M / ESC | leave the mode (V and C leave it too; H's barrier placement, which uses the volume mode's clicks, does not); with unsaved edits the first press only says so (again within 3 s leaves; the edits stay live) |
 
 **CTRL+I:** with objects of one line selected, the id panel (its title names the line, `parts/lake.map:41` in a part; a number field, prefilled with the line's id or the next free one; digits, BACKSPACE, ENTER sets it, ESC cancels; empty = the next free id). With objects of several lines, each line without an id gets the next free one at once. Only the `id n` prefix changes (`mapedit.c`).
 
