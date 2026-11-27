@@ -2,7 +2,7 @@ build/
 build-linux/
 build-linux-profile/
 build-mingw/
-screenshot*.png
+screenshots/
 
 # Benchmark reports written by --bench (local results)
 benchmark/

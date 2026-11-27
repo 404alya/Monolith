@@ -19,7 +19,7 @@ The HUD at the top shows what is going on (the mode, the effects, the selection,
 | F3 / Shift+F3 / F4 | render inspector (spectator mode): outlines, its panel, buffer views (*Render inspector* below) |
 | F5 | id panel (spectator mode): every line with an `id` (*Id panel* below) |
 | F9 | export the open map to `export/<map>-<stamp>/` ([export.md](export.md)) |
-| F12 | save `screenshot.png` |
+| F12 | save a screenshot in `screenshots/` (named by date and time) |
 | Esc | close the prompt box, leave snip or volume mode or close the panel (it does not quit: close the window). With nothing to close it shows a **See keybindings** button: Enter or a click opens the keybindings panel, every key of the editor in one section per mode (←/→ or a click on a tab changes the section, typing searches all of them, Esc closes) |
 
 In **spectator mode** you fly freely: WASD + mouse, E / Q (or Space) up and down, the mouse wheel sets the base speed (1–400 m/s), Shift ×4 and Alt ×0.25. ← / → fly to the previous / next viewpoint of the map. **P** prints the current view as `--pos … --look …` (the feet position) and copies it, handy for a `viewpoint` line or a command line. **G** moves the walking player to the camera.

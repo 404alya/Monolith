@@ -45,7 +45,7 @@ The launcher (`launcher.c`) is not in that build.
 | SHIFT+F3 | the inspector panel (see below) |
 | F4 / SHIFT+F4 | R3D buffer view: scene, albedo, normal, orm, radiance, specular, ssao, ssil, ssgi, ssr, bloom, dof (named in the HUD) |
 | F5 | the id panel (see below) |
-| F12 | screenshot |
+| F12 | screenshot into `screenshots/<date>_<time>.png` (`SCREENSHOTS_PATH`, else next to the executable) |
 | TAB | toggle spectator camera |
 | F9 | export the open map as a self-contained folder (package, scene runtime, R3D, `build.sh`, README) into `export/<map>-<YYYY-MM-DD_HHMMSS>/` next to `requests/` (`export.c`, like `--export`) |
 | ESC | closes the prompt box / leaves snip or volume mode / closes the panel (no quit: close the window); with nothing to close: the menu (see below) |

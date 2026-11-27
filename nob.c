@@ -1698,11 +1698,15 @@ static int BuildWindows(int argc, char **argv)
     // submodules/r3d, never system packages; ASSIMP_BUILD_ZLIB: assimp's bundled zlib, linked in too;
     // R3D_BUILD_EXAMPLES=OFF: R3D's own examples aren't needed; R3D_GPU_PROFILER: per-pass GPU timer queries,
     // off at runtime unless --bench or the F2 panel turns them on (submodules/r3d/patches.md).
+    // CUSTOMIZE_BUILD=ON (R3D's CMakeLists forces it too): raylib takes SUPPORT_* options from the command line,
+    // every other one keeps its default from raylib's config.h; SUPPORT_SCREEN_CAPTURE=OFF: raylib no longer
+    // saves its own screenshot000.png on F12 or records a GIF on Ctrl+F12 (monolith's F12 writes to screenshots/).
     Nob_Cmd cfg = {0};
     nob_cmd_append(&cfg, nob_temp_sprintf("-DCMAKE_TOOLCHAIN_FILE=%s/cmake/mingw-w64-x86_64.cmake", gRoot),
                    "-DCMAKE_BUILD_TYPE=Release", "-DBUILD_SHARED_LIBS=OFF",
                    "-DR3D_RAYLIB_VENDORED=ON", "-DR3D_ASSIMP_VENDORED=ON", "-DASSIMP_BUILD_ZLIB=ON",
-                   "-DR3D_BUILD_EXAMPLES=OFF", "-DR3D_GPU_PROFILER=ON");
+                   "-DR3D_BUILD_EXAMPLES=OFF", "-DR3D_GPU_PROFILER=ON",
+                   "-DCUSTOMIZE_BUILD=ON", "-DSUPPORT_SCREEN_CAPTURE=OFF");
     BuildR3D(r3dWin, "Windows", &cfg);
 
     // mkdir -p build/win
@@ -1802,7 +1806,10 @@ static int BuildLinux(int argc, char **argv)
     // #include <unzip.h> looks, so the build fails. R3D_BUILD_EXAMPLES=OFF: R3D's own examples aren't needed.
     // R3D_GPU_PROFILER: per-pass GPU timer queries, off at runtime unless --bench or the F2 panel turns them on
     // (see submodules/r3d/patches.md). CMAKE_EXPORT_COMPILE_COMMANDS: R3D's and raylib's entries for our
-    // compile_commands.json (no change to how anything compiles).
+    // compile_commands.json (no change to how anything compiles). CUSTOMIZE_BUILD=ON (R3D's CMakeLists forces it
+    // too): raylib takes SUPPORT_* options from the command line, every other one keeps its default from raylib's
+    // config.h; SUPPORT_SCREEN_CAPTURE=OFF: raylib no longer saves its own screenshot000.png on F12 or records a
+    // GIF on Ctrl+F12 (monolith's F12 writes to screenshots/).
     // The profile build has its own R3D dir: RelWithDebInfo (-O2 -g) with frame pointers
     // (-fno-omit-frame-pointer, and -mno-omit-leaf-frame-pointer for leaf functions too), so
     // perf --call-graph fp unwinds through R3D, raylib and assimp (tools/profile.c).
@@ -1821,7 +1828,8 @@ static int BuildLinux(int argc, char **argv)
     nob_da_append_many(&cfg, extra.items, extra.count);
     nob_cmd_append(&cfg, "-DBUILD_SHARED_LIBS=OFF", "-DR3D_RAYLIB_VENDORED=ON", "-DR3D_ASSIMP_VENDORED=ON",
                    "-DASSIMP_BUILD_ZLIB=ON", "-DASSIMP_BUILD_MINIZIP=ON", "-DR3D_BUILD_EXAMPLES=OFF",
-                   "-DR3D_GPU_PROFILER=ON", "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON");
+                   "-DR3D_GPU_PROFILER=ON", "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+                   "-DCUSTOMIZE_BUILD=ON", "-DSUPPORT_SCREEN_CAPTURE=OFF");
     BuildR3D(r3dLinux, nob_temp_sprintf("Linux (%s)", buildType), &cfg);
 
     const char *out = nob_temp_sprintf("%s/build/linux", gRoot);
@@ -1886,14 +1894,16 @@ static int BuildLinux(int argc, char **argv)
     Xatlas(cxx, xatlasObj, &xatlasFlags);
 
     // Path defines baked into the binary (they are only used while those paths exist, see InitDataPaths in
-    // src/main.c): where bench reports go, the maps, the repo (requests, the coordinator) and R3D's sources;
-    // the R3D build type for bench reports. Their values keep their double quotes: C string literals.
+    // src/main.c): where bench reports go, the maps, F12's screenshots, the repo (requests, the coordinator)
+    // and R3D's sources; the R3D build type for bench reports. Their values keep their double quotes: C string
+    // literals.
     // -I runtime: the scene runtime's header; MS_PATCHED_R3D: the runtime may use monolith's R3D patches;
     // MONOLITH_EDITOR: the editor build of the runtime.
     Nob_Cmd defines = {0};
     nob_cmd_append(&defines,
                    nob_temp_sprintf("-DBENCHMARK_PATH=\"%s/benchmark/\"", gRoot),
                    nob_temp_sprintf("-DMAPS_PATH=\"%s/maps/\"", gRoot),
+                   nob_temp_sprintf("-DSCREENSHOTS_PATH=\"%s/screenshots/\"", gRoot),
                    nob_temp_sprintf("-DPROJECT_PATH=\"%s/\"", gRoot),
                    nob_temp_sprintf("-DR3D_SOURCE_PATH=\"%s/\"", gR3dDir),
                    nob_temp_sprintf("-DR3D_BUILD_TYPE_NAME=\"%s\"", buildType),

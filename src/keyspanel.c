@@ -33,7 +33,7 @@ static const KeyRow ROWS[] = {
     { 0, "1 .. 6", "toggle volumetric fog, distance fog, SSAO, SSIL, bloom, sun (relative to the map)" },
     { 0, "F1", "hide / show the HUD" },
     { 0, "F9", "export the open map to export/<map>-<stamp>/", EDITING },
-    { 0, "F12", "save screenshot.png" },
+    { 0, "F12", "save a screenshot in screenshots/" },
     { 0, "ESC", "this menu (when there is nothing else to close)" },
 
     { 1, "WASD + mouse", "fly and look" },

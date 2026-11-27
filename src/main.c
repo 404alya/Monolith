@@ -35,6 +35,7 @@
 #include <errno.h>
 #include <limits.h>
 #include <math.h>
+#include <time.h>
 
 // Only needed for glFinish() for --headless (depth clamp: MS_InitRenderer). Declared by hand
 // rather than via <GL/gl.h> / <windows.h> (which clashes with raylib). On Windows x64 there
@@ -50,6 +51,12 @@ extern unsigned int glGetError(void);
 #ifndef MAPS_PATH
 #   define MAPS_PATH "./maps/"
 #endif
+#ifndef SCREENSHOTS_PATH
+#   define SCREENSHOTS_PATH "./screenshots/"
+#endif
+#ifndef PROJECT_PATH
+#   define PROJECT_PATH ""
+#endif
 
 // Data directories, with a trailing slash. Both builds are meant to be copied to other
 // computers as a folder (build/linux/, build/win/), so they look next to the executable.
@@ -59,6 +66,7 @@ extern unsigned int glGetError(void);
 // Windows paths aren't baked in (wine would see Z:\...).
 char benchmarkDir[1024];
 static char mapsDir[1024];  // only main() needs it (default map, --new-map)
+static char screenshotsDir[1024];   // F12's screenshots (created on the first one)
 MS_Scene *scene;
 
 static void InitDataPaths(void)
@@ -67,12 +75,38 @@ static void InitDataPaths(void)
 #ifdef _WIN32
     snprintf(benchmarkDir, sizeof(benchmarkDir), "%sbenchmark/", exeDir);
     snprintf(mapsDir, sizeof(mapsDir), "%smaps/", exeDir);
+    snprintf(screenshotsDir, sizeof(screenshotsDir), "%sscreenshots/", exeDir);
 #else
     if (DirectoryExists(BENCHMARK_PATH)) snprintf(benchmarkDir, sizeof(benchmarkDir), "%s", BENCHMARK_PATH);
     else snprintf(benchmarkDir, sizeof(benchmarkDir), "%sbenchmark/", exeDir);
     if (DirectoryExists(MAPS_PATH)) snprintf(mapsDir, sizeof(mapsDir), "%s", MAPS_PATH);
     else snprintf(mapsDir, sizeof(mapsDir), "%smaps/", exeDir);
+    // (screenshots/ appears on the first F12: the repo root existing is enough)
+    if (DirectoryExists(SCREENSHOTS_PATH) || (PROJECT_PATH[0] && DirectoryExists(PROJECT_PATH)))
+        snprintf(screenshotsDir, sizeof(screenshotsDir), "%s", SCREENSHOTS_PATH);
+    else snprintf(screenshotsDir, sizeof(screenshotsDir), "%sscreenshots/", exeDir);
 #endif
+}
+
+// F12: the last frame on screen as screenshots/<date>_<time>.png. raylib's TakeScreenshot
+// drops any folder from the name and writes to the working directory, so the frame is read
+// and written here. path receives the file written. Returns false (path empty) on failure.
+static bool SaveScreenshot(char *path, size_t size)
+{
+    path[0] = '\0';
+    if (!DirectoryExists(screenshotsDir) && MakeDirectory(screenshotsDir) != 0) return false;
+    char stamp[32] = "screenshot";
+    time_t now = time(NULL);
+    const struct tm *tm = localtime(&now);
+    if (tm) strftime(stamp, sizeof(stamp), "%Y-%m-%d_%H-%M-%S", tm);
+    snprintf(path, size, "%s%s.png", screenshotsDir, stamp);
+    for (int n = 2; FileExists(path); n++)     // (two in the same second)
+        snprintf(path, size, "%s%s_%d.png", screenshotsDir, stamp, n);
+    Image img = LoadImageFromScreen();
+    bool ok = img.data && PngWrite(img, path);
+    UnloadImage(img);
+    if (!ok) path[0] = '\0';
+    return ok;
 }
 
 static bool DumpBoxes(const MS_Scene *s, const char *path)
@@ -1797,7 +1831,18 @@ static int Run(int argc, char **argv)
         offApplied = true;
         R3D_Environment *env = R3D_GetEnvironment();
         if (!typing && IsKeyPressed(KEY_F1))    hud = !hud;
-        if (!typing && IsKeyPressed(KEY_F12))   TakeScreenshot("screenshot.png");
+        if (!typing && IsKeyPressed(KEY_F12)) {
+            char shot[1100];
+            if (SaveScreenshot(shot, sizeof(shot))) {
+                TraceLog(LOG_INFO, "monolith: screenshot saved to %s", shot);
+                MsgSetf(&mapMessage, "screenshot saved: %s", shot);
+            } else {
+                TraceLog(LOG_WARNING, "monolith: screenshot: could not write into %s", screenshotsDir);
+                MsgSetf(&mapMessage, "screenshot: could not write into %s", screenshotsDir);
+            }
+            mapMessageError = false;
+            mapMessageTime = 6.0f;
+        }
         // (not while the package on disk is broken: the export copies the files on disk)
         if (!MONOLITH_EDITING && !typing && liveKeys && !bench && IsKeyPressed(KEY_F9)) {
             MsgSetStatic(&mapMessage, MSG_VIEW_ONLY);   // (where the export's result would show)
