@@ -58,6 +58,7 @@ typedef struct {
     float shadowSlopeBias;      // Slope-scaled depth bias
     float shadowFar;            // Far plane for shadow projection
     int shadowLayer;            // Shadow map layer index, -1 if no shadow
+    int shadowTier;             // Omni: size tier of the cube array the layer is in (local patch 34)
     R3D_LightType type;
     Vector3 clipMin, clipMax;   // World-space clip box, +-R3D_LIGHT_NO_CLIP without one (local patch 16)
     BoundingBox bounds;         // Volume inside the clip box, if hasBounds (local patch 22)
@@ -75,6 +76,7 @@ typedef struct {
     R3D_Layer     cullMask;
     R3D_LightType type;
     int           shadowLayer;
+    int           shadowTier;   // omni size tier (local patch 34), 0 otherwise
     int           layerFace;
 } r3d_light_shadow_job_t;
 
@@ -125,12 +127,23 @@ typedef struct {
     r3d_light_fog_sunvol_request_t request;
 } r3d_light_fog_sunvol_t;
 
+// Local patch 34: omni shadow cubes come in size tiers, one cube array per tier. Tier t
+// holds cubes of R3D_HINT_SHADOW_OMNI_SIZE >> t px; tier 0 is shadowArrays[R3D_LIGHT_OMNI]
+// (the only one before the patch), tiers 1.. are omniTiers[t - 1].
+#define R3D_SHADOW_OMNI_TIERS 4
+
+// A shadow map handle is 1 + layer, with the omni tier in the bits above (local patch 34;
+// tier 0 keeps the old handle values)
+#define R3D_SHADOW_HANDLE_LAYER(h)  ((int)((h) & 0xFFFFu) - 1)
+#define R3D_SHADOW_HANDLE_TIER(h)   ((int)((h) >> 16))
+
 // ========================================
 // MODULE STATE
 // ========================================
 
 extern struct r3d_light {
     r3d_light_shadow_array_t shadowArrays[R3D_LIGHT_TYPE_COUNT];
+    r3d_light_shadow_array_t omniTiers[R3D_SHADOW_OMNI_TIERS - 1];  // local patch 34
     r3d_list_t* listShadowJobs;
     r3d_list_t* listLightData;
     r3d_light_fog_sunvol_t fogSunVol;   // local patch, see patches.md
@@ -163,16 +176,16 @@ r3d_rect_t r3d_light_screen_rect(const r3d_light_data_t* light, int w, int h);
 const char* r3d_light_type_name(R3D_LightType type);
 
 /**/
-int r3d_light_acquire_shadow_layer(R3D_LightType type);
+int r3d_light_acquire_shadow_layer(R3D_LightType type, int tier);
 
 /**/
-void r3d_light_release_shadow_layer(R3D_LightType type, int layer);
+void r3d_light_release_shadow_layer(R3D_LightType type, int tier, int layer);
 
 /* Bind shadow framebuffer for a light type */
-void r3d_light_bind_shadow_fbo(R3D_LightType type, int layer, int face);
+void r3d_light_bind_shadow_fbo(R3D_LightType type, int tier, int layer, int face);
 
 /* Returns if the shadow map layer is valid */
-bool r3d_light_shadow_layer_is_valid(R3D_LightType type, int layer);
+bool r3d_light_shadow_layer_is_valid(R3D_LightType type, int tier, int layer);
 
 /* Get the shadow map dimensions */
 int r3d_light_shadow_map_size(R3D_LightType type);
@@ -194,7 +207,12 @@ GLuint r3d_light_shadow_minmax_mid_map(void);
 bool r3d_light_shadow_minmax_take_stale(void);
 
 /**/
-r3d_light_shadow_cache_t* r3d_light_shadow_cache(R3D_LightType type, int layer);
+r3d_light_shadow_cache_t* r3d_light_shadow_cache(R3D_LightType type, int tier, int layer);
+
+/* Local patch 34: the omni size tier whose cubes are closest to 'size' px, and its size and texture */
+int r3d_light_omni_tier_for_size(int size);
+int r3d_light_omni_tier_size(int tier);
+GLuint r3d_light_omni_tier_map(int tier);
 
 /*
  * Sun-visibility volume of the volumetric fog (local patch, see patches.md).

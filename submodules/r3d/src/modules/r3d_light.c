@@ -8,24 +8,25 @@
 
 #include "./r3d_light.h"
 
+#include <float.h>
 #include <r3d/r3d_frustum.h>
 #include <r3d_config.h>
 #include <raymath.h>
 #include <stdint.h>
 #include <string.h>
-#include <float.h>
 
 #include "../common/r3d_helper.h"
-#include "./r3d_driver.h"
 #include "../r3d_core_state.h"
+#include "./r3d_driver.h"
 
 // ========================================
 // CONSTANTS
 // ========================================
 
-#define SHADOW_DIR_LAYER_GROWTH     2
-#define SHADOW_SPOT_LAYER_GROWTH    4
-#define SHADOW_OMNI_LAYER_GROWTH    1   // local patch: one cube layer is 6 faces (48 MiB at 2048), so grow by one
+#define SHADOW_DIR_LAYER_GROWTH 2
+#define SHADOW_SPOT_LAYER_GROWTH 4
+#define SHADOW_OMNI_LAYER_GROWTH                                               \
+  1 // local patch: one cube layer is 6 faces (48 MiB at 2048), so grow by one
 
 // ========================================
 // MODULE STATE
@@ -33,965 +34,1017 @@
 
 struct r3d_light R3D_MOD_LIGHT;
 
+static r3d_light_shadow_array_t *light_array(R3D_LightType type, int tier) {
+  if (type == R3D_LIGHT_OMNI && tier > 0)
+    return &R3D_MOD_LIGHT.omniTiers[tier - 1];
+  return &R3D_MOD_LIGHT.shadowArrays[type];
+}
+
 // ========================================
 // SHADOW ARRAY FUNCTIONS
 // ========================================
 
-static void shadow_array_allocate_texture(GLuint texture, GLenum target, int size, uint32_t layers)
-{
-    int actualLayers = (target == GL_TEXTURE_CUBE_MAP_ARRAY) ? (int)layers * 6 : (int)layers;
+static void shadow_array_allocate_texture(GLuint texture, GLenum target,
+                                          int size, uint32_t layers) {
+  int actualLayers =
+      (target == GL_TEXTURE_CUBE_MAP_ARRAY) ? (int)layers * 6 : (int)layers;
 
-    glBindTexture(target, texture);
-    glTexImage3D(
-        target, 0, GL_DEPTH_COMPONENT16, size, size, actualLayers,
-        0, GL_DEPTH_COMPONENT, GL_UNSIGNED_SHORT, NULL
-    );
+  glBindTexture(target, texture);
+  glTexImage3D(target, 0, GL_DEPTH_COMPONENT16, size, size, actualLayers, 0,
+               GL_DEPTH_COMPONENT, GL_UNSIGNED_SHORT, NULL);
 
-    glTexParameteri(target, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(target, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(target, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(target, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+  glTexParameteri(target, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  glTexParameteri(target, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  glTexParameteri(target, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+  glTexParameteri(target, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-    if (target == GL_TEXTURE_CUBE_MAP_ARRAY)
-    {
-        glTexParameteri(target, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
-    }
+  if (target == GL_TEXTURE_CUBE_MAP_ARRAY) {
+    glTexParameteri(target, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+  }
 
-    glTexParameteri(target, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE);
-    glTexParameteri(target, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL);
+  glTexParameteri(target, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE);
+  glTexParameteri(target, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL);
 
-    glBindTexture(target, 0);
+  glBindTexture(target, 0);
 }
 
-static r3d_light_shadow_array_t shadow_array_create(GLenum target, int size, int growth)
-{
-    r3d_light_shadow_array_t arr = {0};
+static r3d_light_shadow_array_t shadow_array_create(GLenum target, int size,
+                                                    int growth) {
+  r3d_light_shadow_array_t arr = {0};
 
-    arr.target   = target;
-    arr.size     = size;
-    arr.growth   = growth;
-    arr.freeList = R3D_LIST_CREATE(int, 16);
-    arr.cache    = R3D_LIST_CREATE(r3d_light_shadow_cache_t, 16);
+  arr.target = target;
+  arr.size = size;
+  arr.growth = growth;
+  arr.freeList = R3D_LIST_CREATE(int, 16);
+  arr.cache = R3D_LIST_CREATE(r3d_light_shadow_cache_t, 16);
 
-    glGenFramebuffers(1, &arr.framebuffer);
+  glGenFramebuffers(1, &arr.framebuffer);
 
-    return arr;
+  return arr;
 }
 
-static void shadow_array_destroy(r3d_light_shadow_array_t* arr)
-{
-    if (arr->texture != 0)     glDeleteTextures(1, &arr->texture);
-    if (arr->framebuffer != 0) glDeleteFramebuffers(1, &arr->framebuffer);
-    if (arr->minMaxTexture != 0)     glDeleteTextures(1, &arr->minMaxTexture);
-    if (arr->minMaxFramebuffer != 0) glDeleteFramebuffers(1, &arr->minMaxFramebuffer);
-    if (arr->minMaxMidTexture != 0)  glDeleteTextures(1, &arr->minMaxMidTexture);
+static void shadow_array_destroy(r3d_light_shadow_array_t *arr) {
+  if (arr->texture != 0)
+    glDeleteTextures(1, &arr->texture);
+  if (arr->framebuffer != 0)
+    glDeleteFramebuffers(1, &arr->framebuffer);
+  if (arr->minMaxTexture != 0)
+    glDeleteTextures(1, &arr->minMaxTexture);
+  if (arr->minMaxFramebuffer != 0)
+    glDeleteFramebuffers(1, &arr->minMaxFramebuffer);
+  if (arr->minMaxMidTexture != 0)
+    glDeleteTextures(1, &arr->minMaxMidTexture);
 
-    R3D_LIST_DESTROY(arr->cache);
-    R3D_LIST_DESTROY(arr->freeList);
+  R3D_LIST_DESTROY(arr->cache);
+  R3D_LIST_DESTROY(arr->freeList);
 
-    *arr = (r3d_light_shadow_array_t){0};
+  *arr = (r3d_light_shadow_array_t){0};
 }
 
-static bool shadow_array_expand(r3d_light_shadow_array_t* arr, uint32_t growth)
-{
-    uint32_t newLayerCount = arr->layerCount + growth;
+static bool shadow_array_expand(r3d_light_shadow_array_t *arr,
+                                uint32_t growth) {
+  uint32_t newLayerCount = arr->layerCount + growth;
 
-    GLuint newTexture;
-    glGenTextures(1, &newTexture);
-    shadow_array_allocate_texture(newTexture, arr->target, arr->size, newLayerCount);
+  GLuint newTexture;
+  glGenTextures(1, &newTexture);
+  shadow_array_allocate_texture(newTexture, arr->target, arr->size,
+                                newLayerCount);
 
-    // Copy existing content into the new texture if any
-    if (arr->layerCount > 0 && arr->texture != 0)
-    {
-        glBindFramebuffer(GL_FRAMEBUFFER, arr->framebuffer);
+  // Copy existing content into the new texture if any
+  if (arr->layerCount > 0 && arr->texture != 0) {
+    glBindFramebuffer(GL_FRAMEBUFFER, arr->framebuffer);
 
-        int facesPerLayer = (arr->target == GL_TEXTURE_CUBE_MAP_ARRAY) ? 6 : 1;
-        for (uint32_t layer = 0; layer < arr->layerCount; layer++)
-        {
-            for (int face = 0; face < facesPerLayer; face++)
-            {
-                int layerFace = (int)layer * facesPerLayer + face;
-                glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, arr->texture, 0, layerFace);
-                glBindTexture(arr->target, newTexture);
-                glCopyTexSubImage3D(arr->target, 0, 0, 0, layerFace, 0, 0, arr->size, arr->size);
-            }
-        }
-
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
-        glBindTexture(arr->target, 0);
+    int facesPerLayer = (arr->target == GL_TEXTURE_CUBE_MAP_ARRAY) ? 6 : 1;
+    for (uint32_t layer = 0; layer < arr->layerCount; layer++) {
+      for (int face = 0; face < facesPerLayer; face++) {
+        int layerFace = (int)layer * facesPerLayer + face;
+        glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                                  arr->texture, 0, layerFace);
+        glBindTexture(arr->target, newTexture);
+        glCopyTexSubImage3D(arr->target, 0, 0, 0, layerFace, 0, 0, arr->size,
+                            arr->size);
+      }
     }
 
-    if (arr->texture != 0)
-    {
-        glDeleteTextures(1, &arr->texture);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glBindTexture(arr->target, 0);
+  }
+
+  if (arr->texture != 0) {
+    glDeleteTextures(1, &arr->texture);
+  }
+  arr->texture = newTexture;
+
+  // Min/max map (local patch): reallocate with the new layer count; its content
+  // is rebuilt from the copied shadow layers by the next frame's reduction pass
+  if (arr->hasMinMax) {
+    int mmSize =
+        (arr->size + R3D_SHADOW_MINMAX_TILE - 1) / R3D_SHADOW_MINMAX_TILE;
+    if (arr->minMaxTexture == 0)
+      glGenTextures(1, &arr->minMaxTexture);
+    if (arr->minMaxFramebuffer == 0)
+      glGenFramebuffers(1, &arr->minMaxFramebuffer);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, arr->minMaxTexture);
+    glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RG32F, mmSize, mmSize,
+                 (GLsizei)newLayerCount, 0, GL_RG, GL_FLOAT, NULL);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+    arr->minMaxStale = true;
+
+    if (arr->minMaxMidTexture == 0) {
+      int midSize = (arr->size + 7) / 8;
+      glGenTextures(1, &arr->minMaxMidTexture);
+      glBindTexture(GL_TEXTURE_2D, arr->minMaxMidTexture);
+      glTexImage2D(GL_TEXTURE_2D, 0, GL_RG32F, midSize, midSize, 0, GL_RG,
+                   GL_FLOAT, NULL);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+      glBindTexture(GL_TEXTURE_2D, 0);
     }
-    arr->texture = newTexture;
+  }
 
-    // Min/max map (local patch): reallocate with the new layer count; its content is
-    // rebuilt from the copied shadow layers by the next frame's reduction pass
-    if (arr->hasMinMax)
-    {
-        int mmSize = (arr->size + R3D_SHADOW_MINMAX_TILE - 1) / R3D_SHADOW_MINMAX_TILE;
-        if (arr->minMaxTexture == 0) glGenTextures(1, &arr->minMaxTexture);
-        if (arr->minMaxFramebuffer == 0) glGenFramebuffers(1, &arr->minMaxFramebuffer);
-        glBindTexture(GL_TEXTURE_2D_ARRAY, arr->minMaxTexture);
-        glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RG32F, mmSize, mmSize, (GLsizei)newLayerCount, 0, GL_RG, GL_FLOAT, NULL);
-        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
-        arr->minMaxStale = true;
+  // Resize the cache (new entries zero-initialized => valid = false)
+  R3D_LIST_RESIZE(arr->cache, newLayerCount);
 
-        if (arr->minMaxMidTexture == 0)
-        {
-            int midSize = (arr->size + 7) / 8;
-            glGenTextures(1, &arr->minMaxMidTexture);
-            glBindTexture(GL_TEXTURE_2D, arr->minMaxMidTexture);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RG32F, midSize, midSize, 0, GL_RG, GL_FLOAT, NULL);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-            glBindTexture(GL_TEXTURE_2D, 0);
-        }
-    }
+  // Newly allocated layers become available
+  for (uint32_t layer = arr->layerCount; layer < newLayerCount; layer++) {
+    int l = (int)layer;
+    R3D_LIST_PUSH(arr->freeList, l);
+  }
 
-    // Resize the cache (new entries zero-initialized => valid = false)
-    R3D_LIST_RESIZE(arr->cache, newLayerCount);
+  arr->layerCount = newLayerCount;
 
-    // Newly allocated layers become available
-    for (uint32_t layer = arr->layerCount; layer < newLayerCount; layer++)
-    {
-        int l = (int)layer;
-        R3D_LIST_PUSH(arr->freeList, l);
-    }
-
-    arr->layerCount = newLayerCount;
-
-    return true;
+  return true;
 }
 
-static int shadow_array_acquire_layer(r3d_light_shadow_array_t* arr)
-{
-    if (R3D_LIST_EMPTY(arr->freeList))
-    {
-        if (!shadow_array_expand(arr, (uint32_t)arr->growth))
-        {
-            return -1;
-        }
+static int shadow_array_acquire_layer(r3d_light_shadow_array_t *arr) {
+  if (R3D_LIST_EMPTY(arr->freeList)) {
+    if (!shadow_array_expand(arr, (uint32_t)arr->growth)) {
+      return -1;
     }
+  }
 
-    int layer = -1;
-    R3D_LIST_POP(arr->freeList, &layer);
+  int layer = -1;
+  R3D_LIST_POP(arr->freeList, &layer);
 
-    r3d_light_shadow_cache_t* cache = &R3D_LIST_GET(arr->cache, r3d_light_shadow_cache_t, layer);
-    cache->acquired = true;
-    cache->rendered = false;
+  r3d_light_shadow_cache_t *cache =
+      &R3D_LIST_GET(arr->cache, r3d_light_shadow_cache_t, layer);
+  cache->acquired = true;
+  cache->rendered = false;
 
-    return layer;
+  return layer;
 }
 
-static void shadow_array_release_layer(r3d_light_shadow_array_t* arr, int layer)
-{
-    r3d_light_shadow_cache_t* cache = &R3D_LIST_GET(arr->cache, r3d_light_shadow_cache_t, layer);
-    cache->acquired = false;
-    cache->rendered = false;
+static void shadow_array_release_layer(r3d_light_shadow_array_t *arr,
+                                       int layer) {
+  r3d_light_shadow_cache_t *cache =
+      &R3D_LIST_GET(arr->cache, r3d_light_shadow_cache_t, layer);
+  cache->acquired = false;
+  cache->rendered = false;
 
-    R3D_LIST_PUSH(arr->freeList, layer);
+  R3D_LIST_PUSH(arr->freeList, layer);
 }
 
 // ========================================
 // LIGHT FUNCTIONS
 // ========================================
 
-static Matrix light_dir_view_proj(Vector3 dir, float range, R3D_Camera camera, double aspect)
-{
-    float camNear   = range / 1000.0f;
-    float camFar    = range;
-    float camFovy   = (float)camera.fovy;
-    float camAspect = (float)aspect;
+static Matrix light_dir_view_proj(Vector3 dir, float range, R3D_Camera camera,
+                                  double aspect) {
+  float camNear = range / 1000.0f;
+  float camFar = range;
+  float camFovy = (float)camera.fovy;
+  float camAspect = (float)aspect;
 
-    float farH      = camFar * tanf(camFovy * (DEG2RAD * 0.5f));
-    float halfDepth = (camFar - camNear) * 0.5f;
-    float radius    = sqrtf(farH * farH * (1.0f + camAspect * camAspect) + halfDepth * halfDepth);
+  float farH = camFar * tanf(camFovy * (DEG2RAD * 0.5f));
+  float halfDepth = (camFar - camNear) * 0.5f;
+  float radius = sqrtf(farH * farH * (1.0f + camAspect * camAspect) +
+                       halfDepth * halfDepth);
 
-    Vector3 forward       = R3D_GetCameraForward(camera);
-    Vector3 frustumCenter = Vector3Add(camera.position, Vector3Scale(forward, (camNear + camFar) * 0.5f));
+  Vector3 forward = R3D_GetCameraForward(camera);
+  Vector3 frustumCenter = Vector3Add(
+      camera.position, Vector3Scale(forward, (camNear + camFar) * 0.5f));
 
-    float ax = fabsf(dir.x);
-    float ay = fabsf(dir.y);
-    float az = fabsf(dir.z);
+  float ax = fabsf(dir.x);
+  float ay = fabsf(dir.y);
+  float az = fabsf(dir.z);
 
-    Vector3 up         = (ax <= ay && ax <= az) ? (Vector3){1,0,0} : (ay <= az) ? (Vector3){0,1,0} : (Vector3){0,0,1};
-    Vector3 lightRight = Vector3Normalize(Vector3CrossProduct(up, dir));
-    Vector3 lightUp    = Vector3CrossProduct(dir, lightRight);
+  Vector3 up = (ax <= ay && ax <= az) ? (Vector3){1, 0, 0}
+               : (ay <= az)           ? (Vector3){0, 1, 0}
+                                      : (Vector3){0, 0, 1};
+  Vector3 lightRight = Vector3Normalize(Vector3CrossProduct(up, dir));
+  Vector3 lightUp = Vector3CrossProduct(dir, lightRight);
 
-    float texelSize = (radius * 2.0f) / (float)R3D_HINT(R3D_HINT_SHADOW_DIR_SIZE);
-    float cx = floorf(Vector3DotProduct(frustumCenter, lightRight) / texelSize) * texelSize;
-    float cy = floorf(Vector3DotProduct(frustumCenter, lightUp) / texelSize) * texelSize;
-    float cz = Vector3DotProduct(frustumCenter, dir);
+  float texelSize = (radius * 2.0f) / (float)R3D_HINT(R3D_HINT_SHADOW_DIR_SIZE);
+  float cx = floorf(Vector3DotProduct(frustumCenter, lightRight) / texelSize) *
+             texelSize;
+  float cy =
+      floorf(Vector3DotProduct(frustumCenter, lightUp) / texelSize) * texelSize;
+  float cz = Vector3DotProduct(frustumCenter, dir);
 
-    Vector3 snappedCenter = Vector3Add(
-        Vector3Add(
-            Vector3Scale(lightRight, cx),
-            Vector3Scale(lightUp, cy)
-        ),
-        Vector3Scale(dir, cz)
-    );
+  Vector3 snappedCenter = Vector3Add(
+      Vector3Add(Vector3Scale(lightRight, cx), Vector3Scale(lightUp, cy)),
+      Vector3Scale(dir, cz));
 
-    const float zExtension = 100.0f; // Extent to capture objects behind the camera
-    Vector3 eye = Vector3Subtract(snappedCenter, Vector3Scale(dir, radius + zExtension));
-    Matrix view = MatrixLookAt(eye, snappedCenter, lightUp);
+  const float zExtension =
+      100.0f; // Extent to capture objects behind the camera
+  Vector3 eye =
+      Vector3Subtract(snappedCenter, Vector3Scale(dir, radius + zExtension));
+  Matrix view = MatrixLookAt(eye, snappedCenter, lightUp);
 
-    float near = 0.0f;
-    float far  = zExtension + radius * 2.0f;
+  float near = 0.0f;
+  float far = zExtension + radius * 2.0f;
 
-    Matrix proj = MatrixOrtho(-radius, radius, -radius, radius, near, far);
+  Matrix proj = MatrixOrtho(-radius, radius, -radius, radius, near, far);
 
-    return MatrixMultiply(view, proj);
+  return MatrixMultiply(view, proj);
 }
 
-static Matrix light_spot_view_proj(Vector3 pos, Vector3 dir, float range)
-{
-    float near = 0.05f;
-    float far  = range;
+static Matrix light_spot_view_proj(Vector3 pos, Vector3 dir, float range) {
+  float near = 0.05f;
+  float far = range;
 
-    Vector3 up  = {0, 1, 0};
-    float upDot = fabsf(Vector3DotProduct(dir, up));
-    if (upDot > 0.99f) up = (Vector3){1, 0, 0};
+  Vector3 up = {0, 1, 0};
+  float upDot = fabsf(Vector3DotProduct(dir, up));
+  if (upDot > 0.99f)
+    up = (Vector3){1, 0, 0};
 
-    Matrix view = MatrixLookAt(pos, Vector3Add(pos, dir), up);
-    Matrix proj = MatrixPerspective(90 * DEG2RAD, 1.0, near, far);
+  Matrix view = MatrixLookAt(pos, Vector3Add(pos, dir), up);
+  Matrix proj = MatrixPerspective(90 * DEG2RAD, 1.0, near, far);
 
-    return MatrixMultiply(view, proj);
+  return MatrixMultiply(view, proj);
 }
 
-static void light_omni_view_proj(Vector3 pos, float range, Matrix* outMatrices, float* outFar)
-{
-    static const Vector3 DIRS[6] = {
-        {  1.0,  0.0,  0.0 }, { -1.0,  0.0,  0.0 },
-        {  0.0,  1.0,  0.0 }, {  0.0, -1.0,  0.0 },
-        {  0.0,  0.0,  1.0 }, {  0.0,  0.0, -1.0 }
-    };
+static void light_omni_view_proj(Vector3 pos, float range, Matrix *outMatrices,
+                                 float *outFar) {
+  static const Vector3 DIRS[6] = {{1.0, 0.0, 0.0}, {-1.0, 0.0, 0.0},
+                                  {0.0, 1.0, 0.0}, {0.0, -1.0, 0.0},
+                                  {0.0, 0.0, 1.0}, {0.0, 0.0, -1.0}};
 
-    static const Vector3 UPS[6] = {
-        {  0.0, -1.0,  0.0 }, {  0.0, -1.0,  0.0 },
-        {  0.0,  0.0,  1.0 }, {  0.0,  0.0, -1.0 },
-        {  0.0, -1.0,  0.0 }, {  0.0, -1.0,  0.0 }
-    };
+  static const Vector3 UPS[6] = {{0.0, -1.0, 0.0}, {0.0, -1.0, 0.0},
+                                 {0.0, 0.0, 1.0},  {0.0, 0.0, -1.0},
+                                 {0.0, -1.0, 0.0}, {0.0, -1.0, 0.0}};
 
-    float near = 0.05f;
-    float far  = range;
+  float near = 0.05f;
+  float far = range;
 
-    Matrix proj = MatrixPerspective(90 * DEG2RAD, 1.0, near, far);
+  Matrix proj = MatrixPerspective(90 * DEG2RAD, 1.0, near, far);
 
-    for (int face = 0; face < 6; face++)
-    {
-        Vector3 target = Vector3Add(pos, DIRS[face]);
-        Matrix view = MatrixLookAt(pos, target, UPS[face]);
-        outMatrices[face] = MatrixMultiply(view, proj);
-    }
+  for (int face = 0; face < 6; face++) {
+    Vector3 target = Vector3Add(pos, DIRS[face]);
+    Matrix view = MatrixLookAt(pos, target, UPS[face]);
+    outMatrices[face] = MatrixMultiply(view, proj);
+  }
 
-    *outFar = far;
+  *outFar = far;
 }
 
-static r3d_light_volume_t light_spot_volume(Vector3 pos, Vector3 dir, float range, float outerCos)
-{
-    r3d_light_volume_t volume = {0};
+static r3d_light_volume_t light_spot_volume(Vector3 pos, Vector3 dir,
+                                            float range, float outerCos) {
+  r3d_light_volume_t volume = {0};
 
-    float tanTheta2 = (1.0f - outerCos * outerCos) / (outerCos * outerCos);
+  float tanTheta2 = (1.0f - outerCos * outerCos) / (outerCos * outerCos);
 
-    if (outerCos >= 0.70710678f)
-    {
-        volume.radius = range * (1.0f + tanTheta2) * 0.5f;
-        volume.center = Vector3Add(pos, Vector3Scale(dir, volume.radius));
-    }
-    else
-    {
-        volume.radius = range * sqrtf(tanTheta2);
-        volume.center = Vector3Add(pos, Vector3Scale(dir, range));
-    }
+  if (outerCos >= 0.70710678f) {
+    volume.radius = range * (1.0f + tanTheta2) * 0.5f;
+    volume.center = Vector3Add(pos, Vector3Scale(dir, volume.radius));
+  } else {
+    volume.radius = range * sqrtf(tanTheta2);
+    volume.center = Vector3Add(pos, Vector3Scale(dir, range));
+  }
 
-    return volume;
+  return volume;
 }
 
-static void light_volume_sphere_axis_extent(float centerAxis, float f, float radius, float projTerm, float* ndcMin, float* ndcMax)
-{
-    float L2 = centerAxis * centerAxis + f * f;
-    float r2 = radius * radius;
+static void light_volume_sphere_axis_extent(float centerAxis, float f,
+                                            float radius, float projTerm,
+                                            float *ndcMin, float *ndcMax) {
+  float L2 = centerAxis * centerAxis + f * f;
+  float r2 = radius * radius;
 
-    // Origin inside the circle -> spans the full angular range on this axis
-    if (L2 <= r2)
-    {
-        *ndcMin = -1.0f;
-        *ndcMax = +1.0f;
-        return;
-    }
+  // Origin inside the circle -> spans the full angular range on this axis
+  if (L2 <= r2) {
+    *ndcMin = -1.0f;
+    *ndcMax = +1.0f;
+    return;
+  }
 
-    // Tangent length from origin to the circle
-    float D = sqrtf(L2 - r2);
+  // Tangent length from origin to the circle
+  float D = sqrtf(L2 - r2);
 
-    // tan(theta +- alpha) via angle-sum identity, trig-free.
-    // Denominator sign = forward/backward side; if non-positive, the tangent
-    // points sideways/behind -> snap to the edge matching the numerator's sign.
-    float numMin = centerAxis * D - f * radius;
-    float denMin = f * D + centerAxis * radius;
-    *ndcMin = (denMin > 0.0f)
-        ? R3D_MAX(projTerm * (numMin / denMin), -1.0f)
-        : ((numMin > 0.0f) ? +1.0f : -1.0f);
+  // tan(theta +- alpha) via angle-sum identity, trig-free.
+  // Denominator sign = forward/backward side; if non-positive, the tangent
+  // points sideways/behind -> snap to the edge matching the numerator's sign.
+  float numMin = centerAxis * D - f * radius;
+  float denMin = f * D + centerAxis * radius;
+  *ndcMin = (denMin > 0.0f) ? R3D_MAX(projTerm * (numMin / denMin), -1.0f)
+                            : ((numMin > 0.0f) ? +1.0f : -1.0f);
 
-    float numMax = centerAxis * D + f * radius;
-    float denMax = f * D - centerAxis * radius;
-    *ndcMax = (denMax > 0.0f)
-        ? R3D_MIN(projTerm * (numMax / denMax), +1.0f)
-        : ((numMax > 0.0f) ? +1.0f : -1.0f);
+  float numMax = centerAxis * D + f * radius;
+  float denMax = f * D - centerAxis * radius;
+  *ndcMax = (denMax > 0.0f) ? R3D_MIN(projTerm * (numMax / denMax), +1.0f)
+                            : ((numMax > 0.0f) ? +1.0f : -1.0f);
 }
 
-static bool light_volume_screen_ndc(const r3d_light_volume_t* volume, Vector2* minNdc, Vector2* maxNdc)
-{
-    Vector3 camPos = R3D.viewState.camera.position;
-    Vector3 center = volume->center;
-    float radius = volume->radius;
+static bool light_volume_screen_ndc(const r3d_light_volume_t *volume,
+                                    Vector2 *minNdc, Vector2 *maxNdc) {
+  Vector3 camPos = R3D.viewState.camera.position;
+  Vector3 center = volume->center;
+  float radius = volume->radius;
 
-    // Camera inside sphere -> covers the whole screen
-    float distSq = Vector3DistanceSqr(camPos, center);
-    if (distSq <= radius * radius)
-    {
-        *minNdc = (Vector2){-1, -1};
-        *maxNdc = (Vector2){+1, +1};
-        return true;
-    }
-
-    // Light volume center in view space
-    Vector3 vsCenter = r3d_vector3_transform(center, &R3D.viewState.view);
-    vsCenter.z = -vsCenter.z; // positive distance in front of camera
-
-    // Sphere entirely behind the camera -> not visible
-    if (vsCenter.z + radius <= 0.0f)
-    {
-        return false;
-    }
-
-    float P00 = R3D.viewState.proj.m0;
-    float P11 = R3D.viewState.proj.m5;
-
-    float minX, maxX, minY, maxY;
-    light_volume_sphere_axis_extent(vsCenter.x, vsCenter.z, radius, P00, &minX, &maxX);
-    light_volume_sphere_axis_extent(vsCenter.y, vsCenter.z, radius, P11, &minY, &maxY);
-
-    // Fully off-screen on at least one axis
-    if (minX > 1.0f || maxX < -1.0f || minY > 1.0f || maxY < -1.0f)
-    {
-        return false;
-    }
-
-    minNdc->x = minX;
-    minNdc->y = minY;
-    maxNdc->x = maxX;
-    maxNdc->y = maxY;
-
+  // Camera inside sphere -> covers the whole screen
+  float distSq = Vector3DistanceSqr(camPos, center);
+  if (distSq <= radius * radius) {
+    *minNdc = (Vector2){-1, -1};
+    *maxNdc = (Vector2){+1, +1};
     return true;
+  }
+
+  // Light volume center in view space
+  Vector3 vsCenter = r3d_vector3_transform(center, &R3D.viewState.view);
+  vsCenter.z = -vsCenter.z; // positive distance in front of camera
+
+  // Sphere entirely behind the camera -> not visible
+  if (vsCenter.z + radius <= 0.0f) {
+    return false;
+  }
+
+  float P00 = R3D.viewState.proj.m0;
+  float P11 = R3D.viewState.proj.m5;
+
+  float minX, maxX, minY, maxY;
+  light_volume_sphere_axis_extent(vsCenter.x, vsCenter.z, radius, P00, &minX,
+                                  &maxX);
+  light_volume_sphere_axis_extent(vsCenter.y, vsCenter.z, radius, P11, &minY,
+                                  &maxY);
+
+  // Fully off-screen on at least one axis
+  if (minX > 1.0f || maxX < -1.0f || minY > 1.0f || maxY < -1.0f) {
+    return false;
+  }
+
+  minNdc->x = minX;
+  minNdc->y = minY;
+  maxNdc->x = maxX;
+  maxNdc->y = maxY;
+
+  return true;
 }
 
-static void light_dir_push(const R3D_Light* light, const R3D_ShadowMap* map, R3D_Camera camera, double aspect, bool updateShadow,
-                           const Matrix* fixedViewProj)
-{
-    r3d_light_data_t data = {
-        .volume      = {.center = {0}, .radius = FLT_MAX},
-        .minNdc      = {-1, -1},
-        .maxNdc      = {+1, +1},
-        .color       = r3d_color_srgb_to_linear_vec3(light->color),
-        .direction   = Vector3Normalize(light->direction),
-        .energy      = light->energy,
-        .specular    = light->specular,
-        .range       = light->range,
-        .fogEnergy   = light->fogEnergy,
-        .type        = light->type,
+static void light_dir_push(const R3D_Light *light, const R3D_ShadowMap *map,
+                           R3D_Camera camera, double aspect, bool updateShadow,
+                           const Matrix *fixedViewProj) {
+  r3d_light_data_t data = {
+      .volume = {.center = {0}, .radius = FLT_MAX},
+      .minNdc = {-1, -1},
+      .maxNdc = {+1, +1},
+      .color = r3d_color_srgb_to_linear_vec3(light->color),
+      .direction = Vector3Normalize(light->direction),
+      .energy = light->energy,
+      .specular = light->specular,
+      .range = light->range,
+      .fogEnergy = light->fogEnergy,
+      .type = light->type,
+  };
+
+  if (map && light->range > 0.0f) {
+    int mapLayer = (int)map->handle - 1;
+
+    r3d_light_shadow_cache_t *cache =
+        r3d_light_shadow_cache(map->type, 0, mapLayer);
+
+    if (!cache->rendered || updateShadow) {
+      // Caller-fitted map (local patch, see patches.md): render with the given
+      // matrix
+      cache->viewProj =
+          fixedViewProj
+              ? *fixedViewProj
+              : light_dir_view_proj(data.direction, data.range, camera, aspect);
+      cache->rendered = true; // Assume it will be rendered in advance
+
+      r3d_light_shadow_job_t job = {
+          .frustum = R3D_ComputeFrustum(cache->viewProj),
+          .viewProj = cache->viewProj,
+          .cullMask = map->cullMask,
+          .type = light->type,
+          .shadowLayer = mapLayer,
+      };
+
+      R3D_LIST_PUSH(R3D_MOD_LIGHT.listShadowJobs, job);
+    }
+
+    data.viewProj = cache->viewProj;
+    data.shadowSoftness =
+        map->softness / (float)R3D_HINT(R3D_HINT_SHADOW_DIR_SIZE);
+    data.shadowOpacity = map->opacity;
+    data.shadowDepthBias = map->depthBias;
+    data.shadowSlopeBias = map->slopeBias;
+    data.shadowFar = cache->far;
+    data.shadowLayer = mapLayer;
+  } else {
+    data.shadowLayer = -1;
+  }
+
+  R3D_LIST_PUSH(R3D_MOD_LIGHT.listLightData, data);
+}
+
+static void light_spot_push(const R3D_Light *light, const R3D_ShadowMap *map,
+                            const R3D_Frustum *frustum, bool updateShadow) {
+  float range = light->range;
+  if (range <= 0.0f)
+    return;
+
+  Vector3 position = light->position;
+  Vector3 direction = Vector3Normalize(light->direction);
+  float outerCutOff = cosf(light->outerCutOff * DEG2RAD);
+  r3d_light_volume_t volume =
+      light_spot_volume(position, direction, range, outerCutOff);
+
+  r3d_light_shadow_cache_t *cache = NULL;
+  bool mustRenderShadow = false;
+  int mapLayer = -1;
+
+  if (map) {
+    mapLayer = (int)map->handle - 1;
+    cache = r3d_light_shadow_cache(map->type, 0, mapLayer);
+    mustRenderShadow = !cache->rendered || updateShadow;
+  }
+
+  if (mustRenderShadow) {
+    cache->viewProj = light_spot_view_proj(position, direction, range);
+    cache->rendered = true; // Assume it will be rendered in advance
+
+    r3d_light_shadow_job_t job = {
+        .frustum = R3D_ComputeFrustum(cache->viewProj),
+        .viewProj = cache->viewProj,
+        .cullMask = map->cullMask,
+        .type = light->type,
+        .shadowLayer = mapLayer,
     };
 
-    if (map && light->range > 0.0f)
-    {
-        int mapLayer = (int)map->handle - 1;
+    R3D_LIST_PUSH(R3D_MOD_LIGHT.listShadowJobs, job);
+  }
 
-        r3d_light_shadow_cache_t* cache = r3d_light_shadow_cache(map->type, mapLayer);
+  if (R3D_FrustumIntersectsSphere(frustum, volume.center, volume.radius)) {
+    Vector2 minNdc, maxNdc;
 
-        if (!cache->rendered || updateShadow)
-        {
-            // Caller-fitted map (local patch, see patches.md): render with the given matrix
-            cache->viewProj = fixedViewProj ? *fixedViewProj : light_dir_view_proj(data.direction, data.range, camera, aspect);
-            cache->rendered = true; // Assume it will be rendered in advance
+    if (light_volume_screen_ndc(&volume, &minNdc, &maxNdc)) {
+      r3d_light_data_t data = {
+          .volume = volume,
+          .minNdc = minNdc,
+          .maxNdc = maxNdc,
+          .color = r3d_color_srgb_to_linear_vec3(light->color),
+          .position = position,
+          .direction = direction,
+          .energy = light->energy,
+          .specular = light->specular,
+          .range = range,
+          .falloff = R3D_MAX(light->falloff, 1e-4f),
+          .innerCutOff = cosf(light->innerCutOff * DEG2RAD),
+          .outerCutOff = outerCutOff,
+          .fogEnergy = light->fogEnergy,
+          .type = light->type,
+      };
 
-            r3d_light_shadow_job_t job = {
-                .frustum     = R3D_ComputeFrustum(cache->viewProj),
-                .viewProj    = cache->viewProj,
-                .cullMask    = map->cullMask,
-                .type        = light->type,
-                .shadowLayer = mapLayer,
-            };
-
-            R3D_LIST_PUSH(R3D_MOD_LIGHT.listShadowJobs, job);
-        }
-
-        data.viewProj        = cache->viewProj;
-        data.shadowSoftness  = map->softness / (float)R3D_HINT(R3D_HINT_SHADOW_DIR_SIZE);
-        data.shadowOpacity   = map->opacity;
+      if (map) {
+        data.viewProj = cache->viewProj;
+        data.shadowSoftness =
+            map->softness / (float)R3D_HINT(R3D_HINT_SHADOW_SPOT_SIZE);
+        data.shadowOpacity = map->opacity;
         data.shadowDepthBias = map->depthBias;
         data.shadowSlopeBias = map->slopeBias;
-        data.shadowFar       = cache->far;
-        data.shadowLayer     = mapLayer;
-    }
-    else
-    {
+        data.shadowFar = cache->far;
+        data.shadowLayer = mapLayer;
+      } else {
         data.shadowLayer = -1;
-    }
+      }
 
-    R3D_LIST_PUSH(R3D_MOD_LIGHT.listLightData, data);
+      R3D_LIST_PUSH(R3D_MOD_LIGHT.listLightData, data);
+    }
+  }
 }
 
-static void light_spot_push(const R3D_Light* light, const R3D_ShadowMap* map, const R3D_Frustum* frustum, bool updateShadow)
-{
-    float range = light->range;
-    if (range <= 0.0f) return;
+static void light_omni_push(const R3D_Light *light, const R3D_ShadowMap *map,
+                            const R3D_Frustum *frustum, bool updateShadow) {
+  if (light->range <= 0.0f)
+    return;
 
-    Vector3 position  = light->position;
-    Vector3 direction = Vector3Normalize(light->direction);
-    float outerCutOff = cosf(light->outerCutOff * DEG2RAD);
-    r3d_light_volume_t volume = light_spot_volume(position, direction, range, outerCutOff);
+  r3d_light_shadow_cache_t *cache = NULL;
+  bool mustRenderShadow = false;
+  int mapLayer = -1;
+  int mapTier = 0;
 
-    r3d_light_shadow_cache_t* cache = NULL;
-    bool mustRenderShadow = false;
-    int  mapLayer = -1;
+  if (map) {
+    mapLayer = R3D_SHADOW_HANDLE_LAYER(map->handle);
+    mapTier = R3D_SHADOW_HANDLE_TIER(map->handle);
+    cache = r3d_light_shadow_cache(map->type, mapTier, mapLayer);
+    mustRenderShadow = !cache->rendered || updateShadow;
+  }
 
-    if (map)
-    {
-        mapLayer = (int)map->handle - 1;
-        cache = r3d_light_shadow_cache(map->type, mapLayer);
-        mustRenderShadow = !cache->rendered || updateShadow;
+  if (mustRenderShadow) {
+    cache->rendered = true; // Assume it will be rendered in advance
+
+    Matrix viewProjs[6];
+    light_omni_view_proj(light->position, light->range, viewProjs, &cache->far);
+
+    for (int i = 0; i < 6; i++) {
+      r3d_light_shadow_job_t job = {
+          .frustum = R3D_ComputeFrustum(viewProjs[i]),
+          .viewProj = viewProjs[i],
+          .position = light->position,
+          .far = cache->far,
+          .cullMask = map->cullMask,
+          .type = light->type,
+          .shadowLayer = mapLayer,
+          .shadowTier = mapTier,
+          .layerFace = i,
+      };
+
+      R3D_LIST_PUSH(R3D_MOD_LIGHT.listShadowJobs, job);
     }
+  }
 
-    if (mustRenderShadow)
-    {
-        cache->viewProj = light_spot_view_proj(position, direction, range);
-        cache->rendered = true; // Assume it will be rendered in advance
+  if (R3D_FrustumIntersectsSphere(frustum, light->position, light->range)) {
+    r3d_light_volume_t volume = {
+        .center = light->position,
+        .radius = light->range,
+    };
 
-        r3d_light_shadow_job_t job = {
-            .frustum     = R3D_ComputeFrustum(cache->viewProj),
-            .viewProj    = cache->viewProj,
-            .cullMask    = map->cullMask,
-            .type        = light->type,
-            .shadowLayer = mapLayer,
-        };
+    Vector2 minNdc, maxNdc;
 
-        R3D_LIST_PUSH(R3D_MOD_LIGHT.listShadowJobs, job);
+    if (light_volume_screen_ndc(&volume, &minNdc, &maxNdc)) {
+      r3d_light_data_t data = {
+          .volume = volume,
+          .minNdc = minNdc,
+          .maxNdc = maxNdc,
+          .color = r3d_color_srgb_to_linear_vec3(light->color),
+          .position = light->position,
+          .energy = light->energy,
+          .specular = light->specular,
+          .range = light->range,
+          .falloff = R3D_MAX(light->falloff, 1e-4f),
+          .fogEnergy = light->fogEnergy,
+          .type = light->type,
+      };
+
+      if (map) {
+        data.shadowSoftness =
+            map->softness / (float)light_array(R3D_LIGHT_OMNI, mapTier)->size;
+        data.shadowOpacity = map->opacity;
+        data.shadowDepthBias = map->depthBias;
+        data.shadowSlopeBias = map->slopeBias;
+        data.shadowFar = cache->far;
+        data.shadowLayer = mapLayer;
+        data.shadowTier = mapTier;
+      } else {
+        data.shadowLayer = -1;
+      }
+
+      R3D_LIST_PUSH(R3D_MOD_LIGHT.listLightData, data);
     }
-
-    if (R3D_FrustumIntersectsSphere(frustum, volume.center, volume.radius))
-    {
-        Vector2 minNdc, maxNdc;
-
-        if (light_volume_screen_ndc(&volume, &minNdc, &maxNdc))
-        {
-            r3d_light_data_t data = {
-                .volume      = volume,
-                .minNdc      = minNdc,
-                .maxNdc      = maxNdc,
-                .color       = r3d_color_srgb_to_linear_vec3(light->color),
-                .position    = position,
-                .direction   = direction,
-                .energy      = light->energy,
-                .specular    = light->specular,
-                .range       = range,
-                .falloff     = R3D_MAX(light->falloff, 1e-4f),
-                .innerCutOff = cosf(light->innerCutOff * DEG2RAD),
-                .outerCutOff = outerCutOff,
-                .fogEnergy   = light->fogEnergy,
-                .type        = light->type,
-            };
-
-            if (map)
-            {
-                data.viewProj        = cache->viewProj;
-                data.shadowSoftness  = map->softness / (float)R3D_HINT(R3D_HINT_SHADOW_SPOT_SIZE);
-                data.shadowOpacity   = map->opacity;
-                data.shadowDepthBias = map->depthBias;
-                data.shadowSlopeBias = map->slopeBias;
-                data.shadowFar       = cache->far;
-                data.shadowLayer     = mapLayer;
-            }
-            else
-            {
-                data.shadowLayer = -1;
-            }
-
-            R3D_LIST_PUSH(R3D_MOD_LIGHT.listLightData, data);
-        }
-    }
+  }
 }
 
-static void light_omni_push(const R3D_Light* light, const R3D_ShadowMap* map, const R3D_Frustum* frustum, bool updateShadow)
-{
-    if (light->range <= 0.0f) return;
+static bool light_check_shadow_validity(const R3D_Light *light,
+                                        const R3D_ShadowMap *map) {
+  bool valid = true;
 
-    r3d_light_shadow_cache_t* cache = NULL;
-    bool mustRenderShadow = false;
-    int  mapLayer = -1;
+  if (!r3d_light_shadow_layer_is_valid(map->type,
+                                       R3D_SHADOW_HANDLE_TIER(map->handle),
+                                       R3D_SHADOW_HANDLE_LAYER(map->handle))) {
+    const char *mType = r3d_light_type_name(map->type);
+    R3D_TRACELOG(LOG_WARNING,
+                 "Invalid pushed shadow map (type: %s | handle: %d)", mType,
+                 map->handle);
 
-    if (map)
-    {
-        mapLayer = (int)map->handle - 1;
-        cache = r3d_light_shadow_cache(map->type, mapLayer);
-        mustRenderShadow = !cache->rendered || updateShadow;
-    }
+    valid = false;
+  } else if (map->type != light->type) {
+    const char *mType = r3d_light_type_name(map->type);
+    const char *lType = r3d_light_type_name(light->type);
+    R3D_TRACELOG(
+        LOG_WARNING,
+        "Incompatible pushed shadow map (type: %s) with given light (type: %s)",
+        mType, lType);
 
-    if (mustRenderShadow)
-    {
-        cache->rendered = true; // Assume it will be rendered in advance
+    valid = false;
+  }
 
-        Matrix viewProjs[6];
-        light_omni_view_proj(light->position, light->range, viewProjs, &cache->far);
-
-        for (int i = 0; i < 6; i++)
-        {
-            r3d_light_shadow_job_t job = {
-                .frustum     = R3D_ComputeFrustum(viewProjs[i]),
-                .viewProj    = viewProjs[i],
-                .position    = light->position,
-                .far         = cache->far,
-                .cullMask    = map->cullMask,
-                .type        = light->type,
-                .shadowLayer = mapLayer,
-                .layerFace   = i,
-            };
-
-            R3D_LIST_PUSH(R3D_MOD_LIGHT.listShadowJobs, job);
-        }
-    }
-
-    if (R3D_FrustumIntersectsSphere(frustum, light->position, light->range))
-    {
-        r3d_light_volume_t volume = {
-            .center = light->position,
-            .radius = light->range,
-        };
-
-        Vector2 minNdc, maxNdc;
-
-        if (light_volume_screen_ndc(&volume, &minNdc, &maxNdc))
-        {
-            r3d_light_data_t data = {
-                .volume      = volume,
-                .minNdc      = minNdc,
-                .maxNdc      = maxNdc,
-                .color       = r3d_color_srgb_to_linear_vec3(light->color),
-                .position    = light->position,
-                .energy      = light->energy,
-                .specular    = light->specular,
-                .range       = light->range,
-                .falloff     = R3D_MAX(light->falloff, 1e-4f),
-                .fogEnergy   = light->fogEnergy,
-                .type        = light->type,
-            };
-
-            if (map)
-            {
-                data.shadowSoftness  = map->softness / (float)R3D_HINT(R3D_HINT_SHADOW_OMNI_SIZE);
-                data.shadowOpacity   = map->opacity;
-                data.shadowDepthBias = map->depthBias;
-                data.shadowSlopeBias = map->slopeBias;
-                data.shadowFar       = cache->far;
-                data.shadowLayer     = mapLayer;
-            }
-            else
-            {
-                data.shadowLayer = -1;
-            }
-
-            R3D_LIST_PUSH(R3D_MOD_LIGHT.listLightData, data);
-        }
-    }
-}
-
-static bool light_check_shadow_validity(const R3D_Light* light, const R3D_ShadowMap* map)
-{
-    bool valid = true;
-
-    if (!r3d_light_shadow_layer_is_valid(map->type, (int)map->handle - 1))
-    {
-        const char* mType = r3d_light_type_name(map->type);
-        R3D_TRACELOG(LOG_WARNING, "Invalid pushed shadow map (type: %s | handle: %d)", mType, map->handle);
-
-        valid = false;
-    }
-    else if (map->type != light->type)
-    {
-        const char* mType = r3d_light_type_name(map->type);
-        const char* lType = r3d_light_type_name(light->type);
-        R3D_TRACELOG(LOG_WARNING, "Incompatible pushed shadow map (type: %s) with given light (type: %s)", mType, lType);
-
-        valid = false;
-    }
-
-    return valid;
+  return valid;
 }
 
 // ========================================
 // MODULE FUNCTIONS
 // ========================================
 
-bool r3d_light_init(void)
-{
-    memset(&R3D_MOD_LIGHT, 0, sizeof(R3D_MOD_LIGHT));
+bool r3d_light_init(void) {
+  memset(&R3D_MOD_LIGHT, 0, sizeof(R3D_MOD_LIGHT));
 
-    R3D_MOD_LIGHT.shadowArrays[R3D_LIGHT_DIR]  = shadow_array_create(GL_TEXTURE_2D_ARRAY, R3D_HINT(R3D_HINT_SHADOW_DIR_SIZE), SHADOW_DIR_LAYER_GROWTH);
-    R3D_MOD_LIGHT.shadowArrays[R3D_LIGHT_DIR].hasMinMax = true;
-    R3D_MOD_LIGHT.shadowArrays[R3D_LIGHT_SPOT] = shadow_array_create(GL_TEXTURE_2D_ARRAY, R3D_HINT(R3D_HINT_SHADOW_SPOT_SIZE), SHADOW_SPOT_LAYER_GROWTH);
-    R3D_MOD_LIGHT.shadowArrays[R3D_LIGHT_OMNI] = shadow_array_create(GL_TEXTURE_CUBE_MAP_ARRAY, R3D_HINT(R3D_HINT_SHADOW_OMNI_SIZE), SHADOW_OMNI_LAYER_GROWTH);
+  R3D_MOD_LIGHT.shadowArrays[R3D_LIGHT_DIR] = shadow_array_create(
+      GL_TEXTURE_2D_ARRAY, R3D_HINT(R3D_HINT_SHADOW_DIR_SIZE),
+      SHADOW_DIR_LAYER_GROWTH);
+  R3D_MOD_LIGHT.shadowArrays[R3D_LIGHT_DIR].hasMinMax = true;
+  R3D_MOD_LIGHT.shadowArrays[R3D_LIGHT_SPOT] = shadow_array_create(
+      GL_TEXTURE_2D_ARRAY, R3D_HINT(R3D_HINT_SHADOW_SPOT_SIZE),
+      SHADOW_SPOT_LAYER_GROWTH);
+  R3D_MOD_LIGHT.shadowArrays[R3D_LIGHT_OMNI] = shadow_array_create(
+      GL_TEXTURE_CUBE_MAP_ARRAY, R3D_HINT(R3D_HINT_SHADOW_OMNI_SIZE),
+      SHADOW_OMNI_LAYER_GROWTH);
 
-    R3D_MOD_LIGHT.listShadowJobs = R3D_LIST_CREATE(r3d_light_shadow_job_t, 32);
-    R3D_MOD_LIGHT.listLightData  = R3D_LIST_CREATE(r3d_light_data_t, 256);
+  // Local patch 34: smaller omni cube tiers (hint >> 1, >> 2, >> 3), empty
+  // until a light asks for one
+  for (int t = 1; t < R3D_SHADOW_OMNI_TIERS; t++) {
+    int size = R3D_MAX(R3D_HINT(R3D_HINT_SHADOW_OMNI_SIZE) >> t, 1);
+    R3D_MOD_LIGHT.omniTiers[t - 1] = shadow_array_create(
+        GL_TEXTURE_CUBE_MAP_ARRAY, size, SHADOW_OMNI_LAYER_GROWTH);
+  }
 
-    return true;
+  R3D_MOD_LIGHT.listShadowJobs = R3D_LIST_CREATE(r3d_light_shadow_job_t, 32);
+  R3D_MOD_LIGHT.listLightData = R3D_LIST_CREATE(r3d_light_data_t, 256);
+
+  return true;
 }
 
-void r3d_light_quit(void)
-{
-    for (int i = 0; i < R3D_LIGHT_TYPE_COUNT; i++)
-    {
-        shadow_array_destroy(&R3D_MOD_LIGHT.shadowArrays[i]);
-    }
+void r3d_light_quit(void) {
+  for (int i = 0; i < R3D_LIGHT_TYPE_COUNT; i++) {
+    shadow_array_destroy(&R3D_MOD_LIGHT.shadowArrays[i]);
+  }
+  for (int t = 0; t < R3D_SHADOW_OMNI_TIERS - 1; t++) {
+    shadow_array_destroy(&R3D_MOD_LIGHT.omniTiers[t]);
+  }
 
-    r3d_light_fog_sunvol_t* vol = &R3D_MOD_LIGHT.fogSunVol;
-    if (vol->texture != 0)     glDeleteTextures(1, &vol->texture);
-    if (vol->framebuffer != 0) glDeleteFramebuffers(1, &vol->framebuffer);
+  r3d_light_fog_sunvol_t *vol = &R3D_MOD_LIGHT.fogSunVol;
+  if (vol->texture != 0)
+    glDeleteTextures(1, &vol->texture);
+  if (vol->framebuffer != 0)
+    glDeleteFramebuffers(1, &vol->framebuffer);
 
-    R3D_LIST_DESTROY(R3D_MOD_LIGHT.listShadowJobs);
-    R3D_LIST_DESTROY(R3D_MOD_LIGHT.listLightData);
+  R3D_LIST_DESTROY(R3D_MOD_LIGHT.listShadowJobs);
+  R3D_LIST_DESTROY(R3D_MOD_LIGHT.listLightData);
 }
 
-// Local patch 22: a point or spot light lights nothing outside its clip box or its volume
-// (lighting.frag, forward.frag and the fog march all return 0 there), so cull the light by
-// the part of its volume inside the box and shrink its scissor rect to that part's projection.
-// False when none of it is in view. The rect stays the sphere's when a corner is behind the
-// camera; it is padded so pixels at the box's edges stay inside the truncated scissor.
-static bool light_clip_bounds(r3d_light_data_t* data)
-{
-    Vector3 c = data->volume.center;
-    float r = data->volume.radius;
-    BoundingBox box = {
-        Vector3Max((Vector3){ c.x - r, c.y - r, c.z - r }, data->clipMin),
-        Vector3Min((Vector3){ c.x + r, c.y + r, c.z + r }, data->clipMax),
+// Local patch 22: a point or spot light lights nothing outside its clip box or
+// its volume (lighting.frag, forward.frag and the fog march all return 0
+// there), so cull the light by the part of its volume inside the box and shrink
+// its scissor rect to that part's projection. False when none of it is in view.
+// The rect stays the sphere's when a corner is behind the camera; it is padded
+// so pixels at the box's edges stay inside the truncated scissor.
+static bool light_clip_bounds(r3d_light_data_t *data) {
+  Vector3 c = data->volume.center;
+  float r = data->volume.radius;
+  BoundingBox box = {
+      Vector3Max((Vector3){c.x - r, c.y - r, c.z - r}, data->clipMin),
+      Vector3Min((Vector3){c.x + r, c.y + r, c.z + r}, data->clipMax),
+  };
+  if (box.min.x >= box.max.x || box.min.y >= box.max.y ||
+      box.min.z >= box.max.z)
+    return false;
+  if (!R3D_FrustumIntersectsBoundingBox(&R3D.viewState.frustum, box))
+    return false;
+  data->bounds = box;
+  data->hasBounds = true;
+
+  Vector2 lo = {FLT_MAX, FLT_MAX}, hi = {-FLT_MAX, -FLT_MAX};
+  for (int i = 0; i < 8; i++) {
+    Vector4 p = {
+        (i & 1) ? box.max.x : box.min.x,
+        (i & 2) ? box.max.y : box.min.y,
+        (i & 4) ? box.max.z : box.min.z,
+        1.0f,
     };
-    if (box.min.x >= box.max.x || box.min.y >= box.max.y || box.min.z >= box.max.z) return false;
-    if (!R3D_FrustumIntersectsBoundingBox(&R3D.viewState.frustum, box)) return false;
-    data->bounds = box;
-    data->hasBounds = true;
+    Vector4 q = r3d_vector4_transform(p, &R3D.viewState.viewProj);
+    if (q.w <= 1e-4f)
+      return true;
+    lo.x = fminf(lo.x, q.x / q.w);
+    lo.y = fminf(lo.y, q.y / q.w);
+    hi.x = fmaxf(hi.x, q.x / q.w);
+    hi.y = fmaxf(hi.y, q.y / q.w);
+  }
 
-    Vector2 lo = { FLT_MAX, FLT_MAX }, hi = { -FLT_MAX, -FLT_MAX };
-    for (int i = 0; i < 8; i++)
-    {
-        Vector4 p = {
-            (i & 1) ? box.max.x : box.min.x,
-            (i & 2) ? box.max.y : box.min.y,
-            (i & 4) ? box.max.z : box.min.z,
-            1.0f,
-        };
-        Vector4 q = r3d_vector4_transform(p, &R3D.viewState.viewProj);
-        if (q.w <= 1e-4f) return true;
-        lo.x = fminf(lo.x, q.x / q.w); lo.y = fminf(lo.y, q.y / q.w);
-        hi.x = fmaxf(hi.x, q.x / q.w); hi.y = fmaxf(hi.y, q.y / q.w);
+  const float pad = 0.01f; // NDC: ~10 px at 1920
+  data->minNdc.x = fmaxf(data->minNdc.x, lo.x - pad);
+  data->minNdc.y = fmaxf(data->minNdc.y, lo.y - pad);
+  data->maxNdc.x = fminf(data->maxNdc.x, hi.x + pad);
+  data->maxNdc.y = fminf(data->maxNdc.y, hi.y + pad);
+  return data->minNdc.x < data->maxNdc.x && data->minNdc.y < data->maxNdc.y;
+}
+
+void r3d_light_push(const R3D_Light *light, const R3D_ShadowMap *map,
+                    bool updateShadow, const Matrix *fixedViewProj) {
+  if (map && !light_check_shadow_validity(light, map)) {
+    map = NULL;
+  }
+
+  // Clip box (local patch 16): set on the entry the type's push adds (none when
+  // culled)
+  size_t before = R3D_MOD_LIGHT.listLightData->elemCount;
+
+  switch (light->type) {
+  case R3D_LIGHT_DIR:
+    light_dir_push(light, map, R3D.viewState.camera, R3D.viewState.aspect,
+                   updateShadow, fixedViewProj);
+    break;
+
+  case R3D_LIGHT_SPOT:
+    light_spot_push(light, map, &R3D.viewState.frustum, updateShadow);
+    break;
+
+  case R3D_LIGHT_OMNI:
+    light_omni_push(light, map, &R3D.viewState.frustum, updateShadow);
+    break;
+
+  default:
+    break;
+  }
+
+  if (R3D_MOD_LIGHT.listLightData->elemCount > before) {
+    r3d_light_data_t *data = r3d_light_get((int)before);
+    bool clip = light->clip;
+    data->clipMin = clip ? light->clipMin
+                         : (Vector3){-R3D_LIGHT_NO_CLIP, -R3D_LIGHT_NO_CLIP,
+                                     -R3D_LIGHT_NO_CLIP};
+    data->clipMax = clip ? light->clipMax
+                         : (Vector3){R3D_LIGHT_NO_CLIP, R3D_LIGHT_NO_CLIP,
+                                     R3D_LIGHT_NO_CLIP};
+
+    if (clip && light->type != R3D_LIGHT_DIR && !light_clip_bounds(data)) {
+      r3d_light_data_t culled;
+      R3D_LIST_POP(R3D_MOD_LIGHT.listLightData, &culled);
     }
-
-    const float pad = 0.01f;    // NDC: ~10 px at 1920
-    data->minNdc.x = fmaxf(data->minNdc.x, lo.x - pad);
-    data->minNdc.y = fmaxf(data->minNdc.y, lo.y - pad);
-    data->maxNdc.x = fminf(data->maxNdc.x, hi.x + pad);
-    data->maxNdc.y = fminf(data->maxNdc.y, hi.y + pad);
-    return data->minNdc.x < data->maxNdc.x && data->minNdc.y < data->maxNdc.y;
+  }
 }
 
-void r3d_light_push(const R3D_Light* light, const R3D_ShadowMap* map, bool updateShadow, const Matrix* fixedViewProj)
-{
-    if (map && !light_check_shadow_validity(light, map))
-    {
-        map = NULL;
-    }
-
-    // Clip box (local patch 16): set on the entry the type's push adds (none when culled)
-    size_t before = R3D_MOD_LIGHT.listLightData->elemCount;
-
-    switch (light->type)
-    {
-    case R3D_LIGHT_DIR:
-        light_dir_push(light, map, R3D.viewState.camera, R3D.viewState.aspect, updateShadow, fixedViewProj);
-        break;
-
-    case R3D_LIGHT_SPOT:
-        light_spot_push(light, map, &R3D.viewState.frustum, updateShadow);
-        break;
-
-    case R3D_LIGHT_OMNI:
-        light_omni_push(light, map, &R3D.viewState.frustum, updateShadow);
-        break;
-
-    default:
-        break;
-    }
-
-    if (R3D_MOD_LIGHT.listLightData->elemCount > before)
-    {
-        r3d_light_data_t* data = r3d_light_get((int)before);
-        bool clip = light->clip;
-        data->clipMin = clip ? light->clipMin : (Vector3){ -R3D_LIGHT_NO_CLIP, -R3D_LIGHT_NO_CLIP, -R3D_LIGHT_NO_CLIP };
-        data->clipMax = clip ? light->clipMax : (Vector3){ R3D_LIGHT_NO_CLIP, R3D_LIGHT_NO_CLIP, R3D_LIGHT_NO_CLIP };
-
-        if (clip && light->type != R3D_LIGHT_DIR && !light_clip_bounds(data))
-        {
-            r3d_light_data_t culled;
-            R3D_LIST_POP(R3D_MOD_LIGHT.listLightData, &culled);
-        }
-    }
+r3d_light_data_t *r3d_light_get(int lightIndex) {
+  return &R3D_LIST_GET(R3D_MOD_LIGHT.listLightData, r3d_light_data_t,
+                       lightIndex);
 }
 
-r3d_light_data_t* r3d_light_get(int lightIndex)
-{
-    return &R3D_LIST_GET(R3D_MOD_LIGHT.listLightData, r3d_light_data_t, lightIndex);
+void r3d_light_clear(void) {
+  R3D_LIST_CLEAR(R3D_MOD_LIGHT.listShadowJobs);
+  R3D_LIST_CLEAR(R3D_MOD_LIGHT.listLightData);
 }
 
-void r3d_light_clear(void)
-{
-    R3D_LIST_CLEAR(R3D_MOD_LIGHT.listShadowJobs);
-    R3D_LIST_CLEAR(R3D_MOD_LIGHT.listLightData);
+r3d_rect_t r3d_light_screen_rect(const r3d_light_data_t *light, int w, int h) {
+  int rectX = (int)((light->minNdc.x * 0.5f + 0.5f) * w);
+  int rectY = (int)((light->minNdc.y * 0.5f + 0.5f) * h);
+  int rectW = (int)((light->maxNdc.x * 0.5f + 0.5f) * w) - rectX;
+  int rectH = (int)((light->maxNdc.y * 0.5f + 0.5f) * h) - rectY;
+
+  return (r3d_rect_t){rectX, rectY, rectW, rectH};
 }
 
-r3d_rect_t r3d_light_screen_rect(const r3d_light_data_t* light, int w, int h)
-{
-    int rectX = (int)((light->minNdc.x * 0.5f + 0.5f) * w);
-    int rectY = (int)((light->minNdc.y * 0.5f + 0.5f) * h);
-    int rectW = (int)((light->maxNdc.x * 0.5f + 0.5f) * w) - rectX;
-    int rectH = (int)((light->maxNdc.y * 0.5f + 0.5f) * h) - rectY;
-
-    return (r3d_rect_t) {rectX, rectY, rectW, rectH};
+const char *r3d_light_type_name(R3D_LightType type) {
+  switch (type) {
+  case R3D_LIGHT_DIR:
+    return "Directional";
+  case R3D_LIGHT_SPOT:
+    return "Spot";
+  case R3D_LIGHT_OMNI:
+    return "Omni";
+  default:
+    break;
+  }
+  return NULL;
 }
 
-const char* r3d_light_type_name(R3D_LightType type)
-{
-    switch (type)
-    {
-    case R3D_LIGHT_DIR:  return "Directional";
-    case R3D_LIGHT_SPOT: return "Spot";
-    case R3D_LIGHT_OMNI: return "Omni";
-    default: break;
-    }
-    return NULL;
+int r3d_light_acquire_shadow_layer(R3D_LightType type, int tier) {
+  return shadow_array_acquire_layer(light_array(type, tier));
 }
 
-int r3d_light_acquire_shadow_layer(R3D_LightType type)
-{
-    return shadow_array_acquire_layer(&R3D_MOD_LIGHT.shadowArrays[type]);
+void r3d_light_release_shadow_layer(R3D_LightType type, int tier, int layer) {
+  if (r3d_light_shadow_layer_is_valid(type, tier, layer)) {
+    shadow_array_release_layer(light_array(type, tier), layer);
+  }
 }
 
-void r3d_light_release_shadow_layer(R3D_LightType type, int layer)
-{
-    if (r3d_light_shadow_layer_is_valid(type, layer))
-    {
-        shadow_array_release_layer(&R3D_MOD_LIGHT.shadowArrays[type], layer);
-    }
+void r3d_light_bind_shadow_fbo(R3D_LightType type, int tier, int layer,
+                               int face) {
+  R3D_ASSERT((type == R3D_LIGHT_OMNI && face >= 0 && face < 6) ||
+             (type != R3D_LIGHT_OMNI && face == 0));
+
+  r3d_light_shadow_array_t *arr = light_array(type, tier);
+  int stride = (type == R3D_LIGHT_OMNI) ? 6 : 1;
+
+  glBindFramebuffer(GL_FRAMEBUFFER, arr->framebuffer);
+  glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, arr->texture,
+                            0, layer * stride + face);
+  glViewport(0, 0, arr->size, arr->size);
 }
 
-void r3d_light_bind_shadow_fbo(R3D_LightType type, int layer, int face)
-{
-    R3D_ASSERT((type == R3D_LIGHT_OMNI && face >= 0 && face < 6) || (type != R3D_LIGHT_OMNI && face == 0));
+bool r3d_light_shadow_layer_is_valid(R3D_LightType type, int tier, int layer) {
+  if (tier < 0 || tier >= R3D_SHADOW_OMNI_TIERS ||
+      (tier > 0 && type != R3D_LIGHT_OMNI)) {
+    return false;
+  }
 
-    r3d_light_shadow_array_t* arr = &R3D_MOD_LIGHT.shadowArrays[type];
-    int stride = (type == R3D_LIGHT_OMNI) ? 6 : 1;
+  r3d_light_shadow_array_t *arr = light_array(type, tier);
 
-    glBindFramebuffer(GL_FRAMEBUFFER, arr->framebuffer);
-    glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, arr->texture, 0, layer * stride + face);
-    glViewport(0, 0, arr->size, arr->size);
+  if (layer < 0 || (uint32_t)layer >= arr->layerCount) {
+    return false;
+  }
+
+  r3d_light_shadow_cache_t *cache =
+      &R3D_LIST_GET(arr->cache, r3d_light_shadow_cache_t, layer);
+  return cache->acquired;
 }
 
-bool r3d_light_shadow_layer_is_valid(R3D_LightType type, int layer)
-{
-    r3d_light_shadow_array_t* arr = &R3D_MOD_LIGHT.shadowArrays[type];
-
-    if (layer < 0 || (uint32_t)layer >= arr->layerCount)
-    {
-        return false;
-    }
-
-    r3d_light_shadow_cache_t* cache = &R3D_LIST_GET(arr->cache, r3d_light_shadow_cache_t, layer);
-    return cache->acquired;
+int r3d_light_shadow_map_size(R3D_LightType type) {
+  return R3D_MOD_LIGHT.shadowArrays[type].size;
 }
 
-int r3d_light_shadow_map_size(R3D_LightType type)
-{
-    return R3D_MOD_LIGHT.shadowArrays[type].size;
+GLuint r3d_light_shadow_map(R3D_LightType type) {
+  return R3D_MOD_LIGHT.shadowArrays[type].texture;
 }
 
-GLuint r3d_light_shadow_map(R3D_LightType type)
-{
-    return R3D_MOD_LIGHT.shadowArrays[type].texture;
+GLuint r3d_light_shadow_minmax_map(void) {
+  return R3D_MOD_LIGHT.shadowArrays[R3D_LIGHT_DIR].minMaxTexture;
 }
 
-GLuint r3d_light_shadow_minmax_map(void)
-{
-    return R3D_MOD_LIGHT.shadowArrays[R3D_LIGHT_DIR].minMaxTexture;
+int r3d_light_shadow_minmax_size(void) {
+  int size = R3D_MOD_LIGHT.shadowArrays[R3D_LIGHT_DIR].size;
+  return (size + R3D_SHADOW_MINMAX_TILE - 1) / R3D_SHADOW_MINMAX_TILE;
 }
 
-int r3d_light_shadow_minmax_size(void)
-{
-    int size = R3D_MOD_LIGHT.shadowArrays[R3D_LIGHT_DIR].size;
-    return (size + R3D_SHADOW_MINMAX_TILE - 1) / R3D_SHADOW_MINMAX_TILE;
+uint32_t r3d_light_shadow_layer_count(R3D_LightType type) {
+  return R3D_MOD_LIGHT.shadowArrays[type].layerCount;
 }
 
-uint32_t r3d_light_shadow_layer_count(R3D_LightType type)
-{
-    return R3D_MOD_LIGHT.shadowArrays[type].layerCount;
+void r3d_light_bind_shadow_minmax_fbo(int layer) {
+  r3d_light_shadow_array_t *arr = &R3D_MOD_LIGHT.shadowArrays[R3D_LIGHT_DIR];
+  int size = r3d_light_shadow_minmax_size();
+
+  glBindFramebuffer(GL_FRAMEBUFFER, arr->minMaxFramebuffer);
+  glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                            arr->minMaxTexture, 0, layer);
+  glViewport(0, 0, size, size);
 }
 
-void r3d_light_bind_shadow_minmax_fbo(int layer)
-{
-    r3d_light_shadow_array_t* arr = &R3D_MOD_LIGHT.shadowArrays[R3D_LIGHT_DIR];
-    int size = r3d_light_shadow_minmax_size();
+void r3d_light_bind_shadow_minmax_mid_fbo(void) {
+  r3d_light_shadow_array_t *arr = &R3D_MOD_LIGHT.shadowArrays[R3D_LIGHT_DIR];
+  int size = (arr->size + 7) / 8;
 
-    glBindFramebuffer(GL_FRAMEBUFFER, arr->minMaxFramebuffer);
-    glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, arr->minMaxTexture, 0, layer);
-    glViewport(0, 0, size, size);
+  glBindFramebuffer(GL_FRAMEBUFFER, arr->minMaxFramebuffer);
+  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                         arr->minMaxMidTexture, 0);
+  glViewport(0, 0, size, size);
 }
 
-void r3d_light_bind_shadow_minmax_mid_fbo(void)
-{
-    r3d_light_shadow_array_t* arr = &R3D_MOD_LIGHT.shadowArrays[R3D_LIGHT_DIR];
-    int size = (arr->size + 7) / 8;
-
-    glBindFramebuffer(GL_FRAMEBUFFER, arr->minMaxFramebuffer);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, arr->minMaxMidTexture, 0);
-    glViewport(0, 0, size, size);
+GLuint r3d_light_shadow_minmax_mid_map(void) {
+  return R3D_MOD_LIGHT.shadowArrays[R3D_LIGHT_DIR].minMaxMidTexture;
 }
 
-GLuint r3d_light_shadow_minmax_mid_map(void)
-{
-    return R3D_MOD_LIGHT.shadowArrays[R3D_LIGHT_DIR].minMaxMidTexture;
+bool r3d_light_shadow_minmax_take_stale(void) {
+  r3d_light_shadow_array_t *arr = &R3D_MOD_LIGHT.shadowArrays[R3D_LIGHT_DIR];
+  bool stale = arr->minMaxStale;
+  arr->minMaxStale = false;
+  return stale;
 }
 
-bool r3d_light_shadow_minmax_take_stale(void)
-{
-    r3d_light_shadow_array_t* arr = &R3D_MOD_LIGHT.shadowArrays[R3D_LIGHT_DIR];
-    bool stale = arr->minMaxStale;
-    arr->minMaxStale = false;
-    return stale;
+r3d_light_shadow_cache_t *r3d_light_shadow_cache(R3D_LightType type, int tier,
+                                                 int layer) {
+  R3D_ASSERT(layer >= 0);
+  return &R3D_LIST_GET(light_array(type, tier)->cache, r3d_light_shadow_cache_t,
+                       layer);
 }
 
-r3d_light_shadow_cache_t* r3d_light_shadow_cache(R3D_LightType type, int layer)
-{
-    R3D_ASSERT(layer >= 0);
-    return &R3D_LIST_GET(R3D_MOD_LIGHT.shadowArrays[type].cache, r3d_light_shadow_cache_t, layer);
+// Local patch 34: the omni tier whose cube size is nearest to `size` (tier 0 =
+// the hint's size, tier t = hint >> t), clamped to the tiers there are
+int r3d_light_omni_tier_for_size(int size) {
+  int full = R3D_HINT(R3D_HINT_SHADOW_OMNI_SIZE);
+  int tier = 0;
+  while (tier + 1 < R3D_SHADOW_OMNI_TIERS && size > 0 &&
+         size * 4 <= (full >> tier) * 3) {
+    tier++; // size is at most 3/4 of this tier's: nearer (in log2) to the next
+            // one down
+  }
+  return tier;
+}
+
+int r3d_light_omni_tier_size(int tier) {
+  return light_array(R3D_LIGHT_OMNI,
+                     R3D_CLAMP(tier, 0, R3D_SHADOW_OMNI_TIERS - 1))
+      ->size;
+}
+
+GLuint r3d_light_omni_tier_map(int tier) {
+  return light_array(R3D_LIGHT_OMNI,
+                     R3D_CLAMP(tier, 0, R3D_SHADOW_OMNI_TIERS - 1))
+      ->texture;
 }
 
 // ========================================
 // FOG SUN-VISIBILITY VOLUME (local patch, see patches.md)
 // ========================================
 
-bool r3d_light_request_fog_sunvol(const R3D_ShadowMap* map, Matrix viewProj, BoundingBox region, float voxelSize, int subsamples)
-{
-    if (map->type != R3D_LIGHT_DIR || !r3d_light_shadow_layer_is_valid(R3D_LIGHT_DIR, (int)map->handle - 1))
-    {
-        R3D_TRACELOG(LOG_WARNING, "Fog sun volume -> needs a valid directional shadow map");
-        return false;
+bool r3d_light_request_fog_sunvol(const R3D_ShadowMap *map, Matrix viewProj,
+                                  BoundingBox region, float voxelSize,
+                                  int subsamples) {
+  if (map->type != R3D_LIGHT_DIR ||
+      !r3d_light_shadow_layer_is_valid(R3D_LIGHT_DIR, 0,
+                                       (int)map->handle - 1)) {
+    R3D_TRACELOG(LOG_WARNING,
+                 "Fog sun volume -> needs a valid directional shadow map");
+    return false;
+  }
+
+  Vector3 size = Vector3Subtract(region.max, region.min);
+  if (voxelSize <= 0.0f || size.x <= 0.0f || size.y <= 0.0f || size.z <= 0.0f) {
+    R3D_TRACELOG(LOG_WARNING, "Fog sun volume -> invalid region or voxel size");
+    return false;
+  }
+
+  GLint max3D = 0;
+  glGetIntegerv(GL_MAX_3D_TEXTURE_SIZE, &max3D);
+
+  r3d_light_fog_sunvol_request_t req = {
+      .pending = true,
+      .layer = (int)map->handle - 1,
+      .viewProj = viewProj,
+      .min = region.min,
+      .sub = R3D_CLAMP(subsamples, 1, 8),
+      .bias = map->depthBias,
+  };
+  float axis[3] = {size.x, size.y, size.z};
+  for (int i = 0; i < 3; i++) {
+    req.dims[i] = (int)ceilf(axis[i] / voxelSize);
+    if (req.dims[i] < 2 || req.dims[i] > max3D) {
+      R3D_TRACELOG(LOG_WARNING,
+                   "Fog sun volume -> %d voxels on an axis (limit %d)",
+                   req.dims[i], max3D);
+      return false;
     }
+  }
+  req.voxel = (Vector3){size.x / req.dims[0], size.y / req.dims[1],
+                        size.z / req.dims[2]};
 
-    Vector3 size = Vector3Subtract(region.max, region.min);
-    if (voxelSize <= 0.0f || size.x <= 0.0f || size.y <= 0.0f || size.z <= 0.0f)
-    {
-        R3D_TRACELOG(LOG_WARNING, "Fog sun volume -> invalid region or voxel size");
-        return false;
-    }
+  // Render the layer with the bake's matrix this frame; it is then sampled
+  // consistently if the caller keeps pushing it without updates
+  r3d_light_shadow_cache_t *cache =
+      r3d_light_shadow_cache(R3D_LIGHT_DIR, 0, req.layer);
+  cache->viewProj = viewProj;
+  cache->rendered = true;
 
-    GLint max3D = 0;
-    glGetIntegerv(GL_MAX_3D_TEXTURE_SIZE, &max3D);
+  r3d_light_shadow_job_t job = {
+      .frustum = R3D_ComputeFrustum(viewProj),
+      .viewProj = viewProj,
+      .cullMask = map->cullMask,
+      .type = R3D_LIGHT_DIR,
+      .shadowLayer = req.layer,
+  };
+  R3D_LIST_PUSH(R3D_MOD_LIGHT.listShadowJobs, job);
 
-    r3d_light_fog_sunvol_request_t req = {
-        .pending  = true,
-        .layer    = (int)map->handle - 1,
-        .viewProj = viewProj,
-        .min      = region.min,
-        .sub      = R3D_CLAMP(subsamples, 1, 8),
-        .bias     = map->depthBias,
-    };
-    float axis[3] = { size.x, size.y, size.z };
-    for (int i = 0; i < 3; i++)
-    {
-        req.dims[i] = (int)ceilf(axis[i] / voxelSize);
-        if (req.dims[i] < 2 || req.dims[i] > max3D)
-        {
-            R3D_TRACELOG(LOG_WARNING, "Fog sun volume -> %d voxels on an axis (limit %d)", req.dims[i], max3D);
-            return false;
-        }
-    }
-    req.voxel = (Vector3){ size.x / req.dims[0], size.y / req.dims[1], size.z / req.dims[2] };
-
-    // Render the layer with the bake's matrix this frame; it is then sampled consistently
-    // if the caller keeps pushing it without updates
-    r3d_light_shadow_cache_t* cache = r3d_light_shadow_cache(R3D_LIGHT_DIR, req.layer);
-    cache->viewProj = viewProj;
-    cache->rendered = true;
-
-    r3d_light_shadow_job_t job = {
-        .frustum     = R3D_ComputeFrustum(viewProj),
-        .viewProj    = viewProj,
-        .cullMask    = map->cullMask,
-        .type        = R3D_LIGHT_DIR,
-        .shadowLayer = req.layer,
-    };
-    R3D_LIST_PUSH(R3D_MOD_LIGHT.listShadowJobs, job);
-
-    R3D_MOD_LIGHT.fogSunVol.request = req;
-    return true;
+  R3D_MOD_LIGHT.fogSunVol.request = req;
+  return true;
 }
 
-void r3d_light_clear_fog_sunvol(void)
-{
-    R3D_MOD_LIGHT.fogSunVol.valid = false;
-    R3D_MOD_LIGHT.fogSunVol.request.pending = false;
+void r3d_light_clear_fog_sunvol(void) {
+  R3D_MOD_LIGHT.fogSunVol.valid = false;
+  R3D_MOD_LIGHT.fogSunVol.request.pending = false;
 }
 
-bool r3d_light_prepare_fog_sunvol(void)
-{
-    r3d_light_fog_sunvol_t* vol = &R3D_MOD_LIGHT.fogSunVol;
-    const r3d_light_fog_sunvol_request_t* req = &vol->request;
+bool r3d_light_prepare_fog_sunvol(void) {
+  r3d_light_fog_sunvol_t *vol = &R3D_MOD_LIGHT.fogSunVol;
+  const r3d_light_fog_sunvol_request_t *req = &vol->request;
 
-    if (vol->texture == 0 || memcmp(vol->dims, req->dims, sizeof(vol->dims)) != 0)
-    {
-        if (vol->texture == 0) glGenTextures(1, &vol->texture);
-        if (vol->framebuffer == 0) glGenFramebuffers(1, &vol->framebuffer);
+  if (vol->texture == 0 ||
+      memcmp(vol->dims, req->dims, sizeof(vol->dims)) != 0) {
+    if (vol->texture == 0)
+      glGenTextures(1, &vol->texture);
+    if (vol->framebuffer == 0)
+      glGenFramebuffers(1, &vol->framebuffer);
 
-        glBindTexture(GL_TEXTURE_3D, vol->texture);
-        r3d_driver_clear_errors();
-        glTexImage3D(GL_TEXTURE_3D, 0, GL_R8, req->dims[0], req->dims[1], req->dims[2], 0, GL_RED, GL_UNSIGNED_BYTE, NULL);
-        if (r3d_driver_check_error("Fog sun volume -> texture allocation"))
-        {
-            glBindTexture(GL_TEXTURE_3D, 0);
-            memset(vol->dims, 0, sizeof(vol->dims));
-            vol->valid = false;
-            return false;
-        }
-        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
-        glBindTexture(GL_TEXTURE_3D, 0);
-        memcpy(vol->dims, req->dims, sizeof(vol->dims));
+    glBindTexture(GL_TEXTURE_3D, vol->texture);
+    r3d_driver_clear_errors();
+    glTexImage3D(GL_TEXTURE_3D, 0, GL_R8, req->dims[0], req->dims[1],
+                 req->dims[2], 0, GL_RED, GL_UNSIGNED_BYTE, NULL);
+    if (r3d_driver_check_error("Fog sun volume -> texture allocation")) {
+      glBindTexture(GL_TEXTURE_3D, 0);
+      memset(vol->dims, 0, sizeof(vol->dims));
+      vol->valid = false;
+      return false;
     }
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_3D, 0);
+    memcpy(vol->dims, req->dims, sizeof(vol->dims));
+  }
 
-    vol->min = req->min;
-    vol->extent = (Vector3){ req->voxel.x * req->dims[0], req->voxel.y * req->dims[1], req->voxel.z * req->dims[2] };
-    return true;
+  vol->min = req->min;
+  vol->extent =
+      (Vector3){req->voxel.x * req->dims[0], req->voxel.y * req->dims[1],
+                req->voxel.z * req->dims[2]};
+  return true;
 }
 
-void r3d_light_bind_fog_sunvol_slice(int slice)
-{
-    r3d_light_fog_sunvol_t* vol = &R3D_MOD_LIGHT.fogSunVol;
-    glBindFramebuffer(GL_FRAMEBUFFER, vol->framebuffer);
-    glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, vol->texture, 0, slice);
-    glViewport(0, 0, vol->dims[0], vol->dims[1]);
+void r3d_light_bind_fog_sunvol_slice(int slice) {
+  r3d_light_fog_sunvol_t *vol = &R3D_MOD_LIGHT.fogSunVol;
+  glBindFramebuffer(GL_FRAMEBUFFER, vol->framebuffer);
+  glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, vol->texture,
+                            0, slice);
+  glViewport(0, 0, vol->dims[0], vol->dims[1]);
 }

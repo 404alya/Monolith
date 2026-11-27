@@ -86,16 +86,24 @@ R3D_Light R3D_CreateOmniLight(Vector3 pos, float range, Color color, float energ
 
 R3D_ShadowMap R3D_LoadShadowMap(R3D_LightType type)
 {
+    return R3D_LoadShadowMapSized(type, 0);
+}
+
+// Local patch 34: an omni map can use a smaller cube (size > 0: the tier nearest to it, see
+// r3d_light_omni_tier_for_size); the handle keeps the tier in its high 16 bits
+R3D_ShadowMap R3D_LoadShadowMapSized(R3D_LightType type, int size)
+{
     R3D_ShadowMap shadowMap = {0};
 
-    int layer = r3d_light_acquire_shadow_layer(type);
-    if (!r3d_light_shadow_layer_is_valid(type, layer))
+    int tier = (type == R3D_LIGHT_OMNI && size > 0) ? r3d_light_omni_tier_for_size(size) : 0;
+    int layer = r3d_light_acquire_shadow_layer(type, tier);
+    if (!r3d_light_shadow_layer_is_valid(type, tier, layer))
     {
         R3D_TRACELOG(LOG_WARNING, "Failed to load shadow map (type: %s)", r3d_light_type_name(type));
         return shadowMap;
     }
 
-    shadowMap.handle   = (uint32_t)(1 + layer);
+    shadowMap.handle   = ((uint32_t)tier << 16) | (uint32_t)(1 + layer);
     shadowMap.softness = 1.0f;
     shadowMap.opacity  = 1.0f;
     shadowMap.cullMask = R3D_LAYER_ALL;
@@ -129,14 +137,21 @@ R3D_ShadowMap R3D_LoadShadowMap(R3D_LightType type)
 
 void R3D_UnloadShadowMap(R3D_ShadowMap shadowMap)
 {
-    r3d_light_release_shadow_layer(shadowMap.type, (int)shadowMap.handle - 1);
+    r3d_light_release_shadow_layer(shadowMap.type, R3D_SHADOW_HANDLE_TIER(shadowMap.handle), R3D_SHADOW_HANDLE_LAYER(shadowMap.handle));
 
     R3D_TRACELOG(LOG_INFO, "Shadow map unloaded successfully (type: %s)", r3d_light_type_name(shadowMap.type));
 }
 
 bool R3D_IsShadowMapValid(R3D_ShadowMap shadowMap)
 {
-    return r3d_light_shadow_layer_is_valid(shadowMap.type, (int)shadowMap.handle - 1);
+    return r3d_light_shadow_layer_is_valid(shadowMap.type, R3D_SHADOW_HANDLE_TIER(shadowMap.handle), R3D_SHADOW_HANDLE_LAYER(shadowMap.handle));
+}
+
+int R3D_GetShadowMapSize(R3D_ShadowMap shadowMap)
+{
+    if (!R3D_IsShadowMapValid(shadowMap)) return 0;
+    if (shadowMap.type == R3D_LIGHT_OMNI) return r3d_light_omni_tier_size(R3D_SHADOW_HANDLE_TIER(shadowMap.handle));
+    return r3d_light_shadow_map_size(shadowMap.type);
 }
 
 // ----------------------------------------

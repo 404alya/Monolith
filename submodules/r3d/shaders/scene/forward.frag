@@ -52,6 +52,9 @@ uniform sampler2D uOrmMap;
 uniform sampler2DArrayShadow uShadowDirTex;
 uniform sampler2DArrayShadow uShadowSpotTex;
 uniform samplerCubeArrayShadow uShadowOmniTex;
+uniform samplerCubeArrayShadow uShadowOmniTex1;     //< smaller cube tiers (local patch 34)
+uniform samplerCubeArrayShadow uShadowOmniTex2;
+uniform samplerCubeArrayShadow uShadowOmniTex3;
 
 uniform samplerCubeArray uIrradianceTex;
 uniform samplerCubeArray uPrefilterTex;

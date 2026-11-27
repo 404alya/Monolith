@@ -29,6 +29,7 @@ struct Light {
     float shadowFar;
     int shadowLayer;        //< less than zero if no shadows
     int type;
+    int shadowTier;         //< omni cube tier, 0 = full size (local patch 34)
     vec3 clipMin;           //< world-space clip box (local patch 16); +-1e30 without one
     vec3 clipMax;
 };

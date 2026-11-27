@@ -97,6 +97,21 @@ float L_SampleShadowSpot(Light light, vec3 Pws, float NoL, mat2 diskRot)
     return mix(1.0, shadow, light.shadowOpacity);
 }
 
+// Local patch 34: omni maps come in four cube sizes, one array each. The per-light passes
+// (lighting, fog) get the light's array bound to uShadowOmniTex; the forward pass loops
+// over its lights, so it picks the tier's sampler here
+#ifdef MAX_LIGHTS_FORWARD
+float L_ShadowOmniTap(int tier, vec4 coord, float compareDepth)
+{
+    if (tier == 1) return texture(uShadowOmniTex1, coord, compareDepth);
+    if (tier == 2) return texture(uShadowOmniTex2, coord, compareDepth);
+    if (tier == 3) return texture(uShadowOmniTex3, coord, compareDepth);
+    return texture(uShadowOmniTex, coord, compareDepth);
+}
+#else
+#define L_ShadowOmniTap(tier, coord, compareDepth) texture(uShadowOmniTex, coord, compareDepth)
+#endif
+
 float L_SampleShadowOmni(Light light, vec3 Pws, float NoL, mat2 diskRot)
 {
     vec3 lightToFrag = Pws - light.position;
@@ -111,7 +126,7 @@ float L_SampleShadowOmni(Light light, vec3 Pws, float NoL, mat2 diskRot)
     for (int i = 0; i < SHADOW_SAMPLES; ++i)
     {
         vec2 diskOffset = diskRot * VOGEL_DISK[i] * light.shadowSoftness;
-        shadow += texture(uShadowOmniTex, vec4(OBN * vec3(diskOffset.xy, 1.0), light.shadowLayer), compareDepth);
+        shadow += L_ShadowOmniTap(light.shadowTier, vec4(OBN * vec3(diskOffset.xy, 1.0), light.shadowLayer), compareDepth);
     }
     shadow /= float(SHADOW_SAMPLES);
 

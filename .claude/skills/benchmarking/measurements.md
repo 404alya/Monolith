@@ -9,7 +9,7 @@ Measurement history and the reasoning behind the engine's caches and trade-off k
 | Machine | Hardware | Sections |
 |---|---|---|
 | **A** | Laptop: NVIDIA GeForce RTX 4050 Laptop GPU, driver 615.71, AMD Ryzen 7 7435HS (CPU recorded 2026-10-24, same GPU and driver), CachyOS (Linux), picom compositor | everything up to 2026-10-13, editor UI font, CPU profile (2026-10-25), nsys geometry pass (2026-10-27), paint layer (2026-11-04) |
-| **B** | NVIDIA GeForce GTX 1660 Ti, Intel i5-10400F (desktop) | box culling, collider BVH (2026-10-20) |
+| **B** | NVIDIA GeForce GTX 1660 Ti, Intel i5-10400F (desktop) | box culling, collider BVH (2026-10-20), hysteria first test (2026-11-27) |
 | **C** | Laptop (plugged in): Intel HD Graphics 5500 (Broadwell GT2, integrated, unified memory), Mesa 25.0.7 (25.2.8 from 2026-11-05), Intel i5-5300U, Ubuntu 24.04 (Linux 6.8), 1366 × 768 display | integrated-GPU diagnosis (2026-10-26), GPU per program (2026-10-27), native resolution and volumetric fog (2026-11-05), voxel-test at low (2026-11-14) |
 
 When you add a section, start it with the machine: the bench report's *Setup* table (GPU, driver, CPU, system, resolution), or a new row in this table.
@@ -572,3 +572,14 @@ Patch 33 saves less than a model of the march predicted (−23 of 42 ms): the sk
 5. `build/tools/leakcheck` (OK on machine C).
 
 **Checked on this repo's editor machine (2026-11-27, applied onto main as patch 33):** items 1 and 5 done (`./build.sh --win` and the examples without warnings, `check_r3d_shaders.py deferred/vfog_radiance.frag` ok, leakcheck OK). Item 2 (base = the tree without these two changes): voxel-test as expected (viewpoints 1/2/3/4/6: 19 154 / 24 573 / 16 534 / 522 / 28 916 px, max 89/255; 5 unchanged), pine_forest as expected (yaws 180 / 240: 2 / 1 px, max 1), monolith on viewpoints 2–6 instead (15 / 76 / 385 / 24 / 2 px), tests/models, tests/rotated, tests/imports unchanged. **Finding: `maps/hysteria`**, not in the table above, changes on every viewpoint (11 / 2 342 / 561 / 6 px) and its yaw sweep (yaw 180: 28 413 px, 1 634 above 8/255, max 45/255): a thin band along the horizon (distant nearly coincident faces drawn in another order), awaiting the developer's look. Item 3: a copy of `maps/monolith` with its 162 spots at `fogEnergy 0.05`: patch 33 pixel-identical on every view tried (its only differences there are the pre-pass's).
+
+## hysteria first test: VRAM, passes, grass keys (2026-11-27, machine B)
+
+Machine B (GTX 1660 Ti 6 GB, driver 620.70.06, i5-10400F, Linux 7.3.4-1-cachyos), `--bench --headless`, 1920 × 1006, ultra, sun shadow 8192 / 100 m. **Screening runs only** (150 frames, 2 interleaved pairs), not full runs. Map: 177,957 boxes, 1,834,292 box triangles (grass 1,652,772 = 90 %), 127 materials, 66 lights (64 unshadowed house lamps, 1 shadowed point light, fire).
+
+- **Frame:** Start 4.19 ms, Overview 3.91, Reference 4.31, Lake 4.98 (all 4.34; GPU 3.50 of it, CPU until finish ~0.8). House viewpoints (scratch copy with extra viewpoints): at the door 2.87, inside 2.83, aerial over the houses 3.64; the 64 lamps cost 0.06–0.22 ms in the lights pass. Sun shadow re-rendered 0 / 600 frames.
+- **Passes (all four views):** geometry 1.34 ms, vfog radiance 0.79 (0.53 Start … 1.05 Lake; `length 80`, `stepSize 0.75`), ambient 0.24, fog compose 0.24, FXAA 0.20, lights 0.20, bloom 0.19.
+- **VRAM** (nvidia-smi total, peak minus idle, `--shot` 1600 × 900): ~742 MiB. 8192² sun shadow ~245 MiB (shadow_size 2048: 494 MiB total); grass ~145 MiB (copy without the grass parts: 595 MiB).
+- **64 shadowed room lamps** (scratch copy, `shadow on` on every house lamp, + the sun-ball light; `--shot` 1600 × 900, peak minus idle): old build +4.2–4.4 GiB; with R3D patch 34 (sized cubes, 312 MiB of them) +1.13–1.19 GiB, vs +0.74–0.75 GiB with no lamp shadows. Frame time not measured.
+- **Grass `prepass off`** (4 grass materials): geometry −0.40 / −0.46 ms (Start / Lake, −27 %), frame −0.45 ms (−11 %), both pairs agree; pixel-identical shot (view 1).
+- **Grass `instanced on`:** VRAM −195 MiB, load 876 → 361 ms, but geometry +0.30 / +0.33 ms and frame +0.3 … +1.3 ms (slower); 22 px differ of 1.44 M (normal quantisation). A VRAM-for-time trade, not a win on this GPU.

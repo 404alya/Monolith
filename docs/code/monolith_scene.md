@@ -69,7 +69,7 @@ Neither the runtime nor R3D checks GL errors per call, so a call that a stricter
 
 `MS_BeginGLDebugOutput(getProc)` (opt-in) sends the driver's `GL_KHR_debug` (else `GL_ARB_debug_output`) messages to `TraceLog`, synchronously, without notifications, each message id at most 3 times (`monolith_scene: GL debug: error, high, api, id 1282: …`); `getProc` is the window library's GL loader (`glfwGetProcAddress`), because the runtime loads no GL functions of its own. It returns 0 (KHR), 1 (ARB) or 2 (neither, logged). raylib opens a non-debug context, where a driver may report less. `MS_EndGLDebugOutput` unhooks it and frees the list of seen ids (before `CloseWindow`).
 
-What a clean run shows today: no GL errors, plus two `GL_INVALID_VALUE` from `glDeleteProgram` at `MS_Unload` with debug output on (R3D deletes a surface shader's program through every view of a union, `r3d_shader.c` `r3d_shader_custom_free`; harmless, in the AI's TODO list), and on NVIDIA performance notes and an "undefined behaviour" note about the spot / omni shadow samplers bound to texture 0 on maps without such lights.
+What a clean run shows today: no GL errors, plus two `GL_INVALID_VALUE` from `glDeleteProgram` at `MS_Unload` with debug output on (R3D deletes a surface shader's program through every view of a union, `r3d_shader.c` `r3d_shader_custom_free`; harmless, in the AI's TODO list), and on NVIDIA performance notes and an "undefined behaviour" note about the spot / omni shadow samplers bound to texture 0 on maps without such lights (also the smaller omni cube tiers of R3D patch 34 while no light uses them).
 
 ### Ownership
 

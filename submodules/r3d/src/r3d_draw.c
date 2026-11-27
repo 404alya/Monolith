@@ -336,6 +336,9 @@ void R3D_End(void)
     r3d_shader_bind_sampler(R3D_SHADER_SAMPLER_SHADOW_DIR, r3d_light_shadow_map(R3D_LIGHT_DIR));
     r3d_shader_bind_sampler(R3D_SHADER_SAMPLER_SHADOW_SPOT, r3d_light_shadow_map(R3D_LIGHT_SPOT));
     r3d_shader_bind_sampler(R3D_SHADER_SAMPLER_SHADOW_OMNI, r3d_light_shadow_map(R3D_LIGHT_OMNI));
+    r3d_shader_bind_sampler(R3D_SHADER_SAMPLER_SHADOW_OMNI_1, r3d_light_omni_tier_map(1));   // local patch 34
+    r3d_shader_bind_sampler(R3D_SHADER_SAMPLER_SHADOW_OMNI_2, r3d_light_omni_tier_map(2));
+    r3d_shader_bind_sampler(R3D_SHADER_SAMPLER_SHADOW_OMNI_3, r3d_light_omni_tier_map(3));
 
     /* --- Update all visible environment probes and render their cubemaps --- */
 
@@ -1072,6 +1075,7 @@ void upload_light_array_block_for_mesh(const r3d_render_call_t* call, bool shado
         data->shadowFar       = light->shadowFar;
         data->shadowLayer     = shadow ? light->shadowLayer : -1;
         data->type            = light->type;
+        data->shadowTier      = light->shadowTier;
         data->clipMin         = light->clipMin;
         data->clipMax         = light->clipMax;
 
@@ -2007,7 +2011,7 @@ void pass_scene_shadows(void)
 
     R3D_LIGHT_FOR_EACH_SHADOW_JOB(job)
     {
-        r3d_light_bind_shadow_fbo(job->type, job->shadowLayer, job->layerFace);
+        r3d_light_bind_shadow_fbo(job->type, job->shadowTier, job->shadowLayer, job->layerFace);
         glClear(GL_DEPTH_BUFFER_BIT);
 
         const R3D_Frustum* frustum = &job->frustum;
@@ -2703,10 +2707,25 @@ static void upload_light_block(const r3d_light_data_t* light)
         .shadowFar       = light->shadowFar,
         .shadowLayer     = light->shadowLayer,
         .type            = light->type,
+        .shadowTier      = light->shadowTier,
         .clipMin         = light->clipMin,
         .clipMax         = light->clipMax,
     };
     r3d_shader_set_uniform_block(R3D_SHADER_BLOCK_LIGHT, &data, true);
+
+    // Local patch 34: a shadowed omni light samples its tier's cube array; the binding is
+    // cached, so lights of the same tier don't rebind. upload_light_block_done() restores tier 0
+    if (light->type == R3D_LIGHT_OMNI && light->shadowLayer >= 0)
+    {
+        r3d_shader_bind_sampler(R3D_SHADER_SAMPLER_SHADOW_OMNI, r3d_light_omni_tier_map(light->shadowTier));
+    }
+}
+
+// Local patch 34: after a loop of upload_light_block(), the omni unit holds tier 0 again
+// (the forward pass and the probes expect it there)
+static void upload_light_block_done(void)
+{
+    r3d_shader_bind_sampler(R3D_SHADER_SAMPLER_SHADOW_OMNI, r3d_light_shadow_map(R3D_LIGHT_OMNI));
 }
 
 // Local patch 25: the light the ambient pass lights (the first visible directional light);
@@ -2774,6 +2793,7 @@ void pass_deferred_lights(void)
         }
         R3D_RENDER_SCREEN();
     }
+    upload_light_block_done();
 
     r3d_driver_disable(GL_STENCIL_TEST);
     if (stencilMaskKnown) r3d_driver_set_stencil_mask(stencilMask);
@@ -2949,6 +2969,7 @@ void pass_deferred_volumetric_fog(r3d_target_t sceneTarget)
 
         R3D_RENDER_SCREEN();
     }
+    upload_light_block_done();
 
     r3d_driver_set_scissor(0, 0, R3D_TARGET_SIZE_W, R3D_TARGET_SIZE_H);
     r3d_driver_disable(GL_SCISSOR_TEST);

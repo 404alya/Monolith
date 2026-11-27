@@ -1005,6 +1005,9 @@ bool r3d_shader_load_scene_forward(r3d_shader_custom_t* custom)
     SET_SAMPLER(forward, uShadowDirTex, R3D_SHADER_SAMPLER_SHADOW_DIR);
     SET_SAMPLER(forward, uShadowSpotTex, R3D_SHADER_SAMPLER_SHADOW_SPOT);
     SET_SAMPLER(forward, uShadowOmniTex, R3D_SHADER_SAMPLER_SHADOW_OMNI);
+    SET_SAMPLER(forward, uShadowOmniTex1, R3D_SHADER_SAMPLER_SHADOW_OMNI_1);   // local patch 34
+    SET_SAMPLER(forward, uShadowOmniTex2, R3D_SHADER_SAMPLER_SHADOW_OMNI_2);
+    SET_SAMPLER(forward, uShadowOmniTex3, R3D_SHADER_SAMPLER_SHADOW_OMNI_3);
     SET_SAMPLER(forward, uIrradianceTex, R3D_SHADER_SAMPLER_IBL_IRRADIANCE);
     SET_SAMPLER(forward, uPrefilterTex, R3D_SHADER_SAMPLER_IBL_PREFILTER);
     SET_SAMPLER(forward, uBrdfLutTex, R3D_SHADER_SAMPLER_IBL_BRDF_LUT);
@@ -1277,6 +1280,9 @@ bool r3d_shader_load_scene_probe_forward(r3d_shader_custom_t* custom)
     SET_SAMPLER(probeForward, uShadowDirTex, R3D_SHADER_SAMPLER_SHADOW_DIR);
     SET_SAMPLER(probeForward, uShadowSpotTex, R3D_SHADER_SAMPLER_SHADOW_SPOT);
     SET_SAMPLER(probeForward, uShadowOmniTex, R3D_SHADER_SAMPLER_SHADOW_OMNI);
+    SET_SAMPLER(probeForward, uShadowOmniTex1, R3D_SHADER_SAMPLER_SHADOW_OMNI_1);   // local patch 34
+    SET_SAMPLER(probeForward, uShadowOmniTex2, R3D_SHADER_SAMPLER_SHADOW_OMNI_2);
+    SET_SAMPLER(probeForward, uShadowOmniTex3, R3D_SHADER_SAMPLER_SHADOW_OMNI_3);
     SET_SAMPLER(probeForward, uIrradianceTex, R3D_SHADER_SAMPLER_IBL_IRRADIANCE);
     SET_SAMPLER(probeForward, uPrefilterTex, R3D_SHADER_SAMPLER_IBL_PREFILTER);
     SET_SAMPLER(probeForward, uBrdfLutTex, R3D_SHADER_SAMPLER_IBL_BRDF_LUT);

@@ -116,6 +116,20 @@ R3DAPI R3D_Light R3D_CreateOmniLight(Vector3 pos, float range, Color color, floa
 R3DAPI R3D_ShadowMap R3D_LoadShadowMap(R3D_LightType type);
 
 /**
+ * @brief Allocates a shadow map layer of about `size` texels per side (local patch 34).
+ *
+ * Omni maps come in tiers: R3D_HINT_SHADOW_OMNI_SIZE and its 1/2, 1/4 and 1/8. The tier
+ * nearest to `size` is used (clamped); size <= 0, and every other light type, gives the
+ * hint's size, as R3D_LoadShadowMap() does. R3D_GetShadowMapSize() tells which one it got.
+ */
+R3DAPI R3D_ShadowMap R3D_LoadShadowMapSized(R3D_LightType type, int size);
+
+/**
+ * @brief The side in texels of the shadow map's layer (0 for an invalid map; local patch 34).
+ */
+R3DAPI int R3D_GetShadowMapSize(R3D_ShadowMap shadowMap);
+
+/**
  * @brief Releases a shadow map, freeing its layer for reuse.
  */
 R3DAPI void R3D_UnloadShadowMap(R3D_ShadowMap shadowMap);

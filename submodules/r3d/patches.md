@@ -5257,3 +5257,45 @@ Files: `shaders/deferred/vfog_radiance.frag`.
 ```
 
 **Verification.** Against the build before it, `--shot` 1600 × 900: every viewpoint (7) of the map with the fogged spots, its yaw sweep 0–300° from viewpoint 1, viewpoints 1/3/5/6 at `preset = low` and `medium` (fog step ×2, fog cache), a `--reload-test` and a `--paint-script` stroke: 0 pixels changed. The other maps' spot lights all have `fogEnergy 0` (skipped before the march, `r3d_draw.c`), so their fog runs no new code. Machine C, 4 viewpoints spinning, 100 frames, 2 interleaved pairs, together with the runtime's automatic depth pre-pass for plain materials (which doesn't touch the fog): vfog radiance 66.8 → 57.9 ms (−8.9 ms, −13 %; Start −17, Garage −16, Kop end ≈ 0, where most steps are inside a cone, Road −4). `./build.sh` and `./build.sh examples` (and `test`) without warnings; `./build.sh --win` not run (no mingw-w64 on machine C); `glslangValidator` not installed there (Mesa compiles the shader at load).
+
+## Patch 34: every shadowed point light takes a 2048 px cube (2026-11-27)
+
+**Symptom.** A map with many shadowed point lights runs out of VRAM: each takes a full 6 × 2048² DEPTH16 cube, 48 MiB, whatever its range. A request asking for `shadow on` on the 64 room lamps of `maps/hysteria` (four houses, each lamp clipped to its room, reach ~3–8 m) would have needed ~3 GiB; measured on machine B (GTX 1660 Ti 6 GB, driver 620.70.06) with all 64 plus the existing shadowed light: +4.3 GiB of VRAM for a `--shot` (+0.75 GiB without them).
+
+**Cause.** R3D has one omni cube array, sized by `R3D_HINT_SHADOW_OMNI_SIZE` for every light; a 5 m room lamp gets the texel density a 170 m light needs.
+
+**Change.** Four omni cube arrays (size tiers): tier 0 is the existing array (the hint's size), tiers 1–3 are the hint >> 1, >> 2, >> 3, created empty (texture 0) and grown only when a layer is acquired, like tier 0 (growth 1, patch 21).
+- API: `R3D_LoadShadowMapSized(type, size)` picks the omni tier nearest to `size` (in log2; clamped), `R3D_LoadShadowMap` is `…Sized(type, 0)` (tier 0, as before), `R3D_GetShadowMapSize(map)`. The handle keeps the tier in its high 16 bits (`R3D_SHADOW_HANDLE_TIER` / `_LAYER`), so tier 0 handles are the old values.
+- Module: `r3d_light_acquire / release / bind_shadow_fbo / shadow_layer_is_valid / shadow_cache` take the tier (`light_array(type, tier)`; every non-omni caller passes 0); the omni push carries the tier in its shadow jobs and light data, and divides the softness by the tier's size (the softness is in texels).
+- Shaders: `Light` gets `int shadowTier` after `type` (std140: fills the padding before `clipMin`; the C block `r3d_shader_block_light_t` matches). The per-light passes (lighting, volumetric fog radiance) keep sampling `uShadowOmniTex`: `upload_light_block` binds the light's tier to unit 12 for a shadowed omni light (the sampler binding is cached, so lights of one tier don't rebind) and `upload_light_block_done()` puts tier 0 back after each loop. The forward shaders (forward, probe forward) loop over their lights in one draw, so they get `uShadowOmniTex1..3` on the free units 5–7 (`R3D_SHADER_SAMPLER_SHADOW_OMNI_1..3`, bound with the other shadow maps each frame) and `L_ShadowOmniTap` picks the sampler by `light.shadowTier` (`wrap/light.glsl`, only under `MAX_LIGHTS_FORWARD`; elsewhere a macro for the old `texture()` call).
+
+Files: `include/r3d/r3d_lighting.h`, `src/r3d_lighting.c`, `src/modules/r3d_light.h`, `src/modules/r3d_light.c`, `src/modules/r3d_shader.h`, `src/modules/r3d_shader.c`, `src/r3d_draw.c`, `shaders/include/ubo/light.glsl`, `shaders/include/wrap/light.glsl`, `shaders/scene/forward.frag`.
+
+```diff
+--- src/modules/r3d_light.h
++#define R3D_SHADOW_OMNI_TIERS 4
++#define R3D_SHADOW_HANDLE_LAYER(h)  ((int)((h) & 0xFFFFu) - 1)
++#define R3D_SHADOW_HANDLE_TIER(h)   ((int)((h) >> 16))
+     r3d_light_shadow_array_t shadowArrays[R3D_LIGHT_TYPE_COUNT];
++    r3d_light_shadow_array_t omniTiers[R3D_SHADOW_OMNI_TIERS - 1];
+-int r3d_light_acquire_shadow_layer(R3D_LightType type);
++int r3d_light_acquire_shadow_layer(R3D_LightType type, int tier);
+     (likewise release / bind_shadow_fbo / shadow_layer_is_valid / shadow_cache)
++int r3d_light_omni_tier_for_size(int size);
++int r3d_light_omni_tier_size(int tier);
++GLuint r3d_light_omni_tier_map(int tier);
+--- src/r3d_lighting.c
++R3D_ShadowMap R3D_LoadShadowMapSized(R3D_LightType type, int size)
++    int tier = (type == R3D_LIGHT_OMNI && size > 0) ? r3d_light_omni_tier_for_size(size) : 0;
++    shadowMap.handle = ((uint32_t)tier << 16) | (uint32_t)(1 + layer);
+--- src/r3d_draw.c   upload_light_block
++    if (light->type == R3D_LIGHT_OMNI && light->shadowLayer >= 0)
++        r3d_shader_bind_sampler(R3D_SHADER_SAMPLER_SHADOW_OMNI, r3d_light_omni_tier_map(light->shadowTier));
+--- shaders/include/wrap/light.glsl   L_SampleShadowOmni
+-        shadow += texture(uShadowOmniTex, vec4(OBN * vec3(diskOffset.xy, 1.0), light.shadowLayer), compareDepth);
++        shadow += L_ShadowOmniTap(light.shadowTier, vec4(OBN * vec3(diskOffset.xy, 1.0), light.shadowLayer), compareDepth);
+```
+
+The runtime chooses the sizes (`OmniShadowSizes` in `runtime/monolith_scene.c`, under `MS_PATCHED_R3D`): full size while every shadowed point light's full cube fits in 512 MiB, else ~2 cm per texel at the light's reach (range, or the clip box's farthest corner), halving the largest while over the budget; a live edit keeps a light's map only when its size is unchanged.
+
+**Verification.** Against the build before it (machine B, `--shot` 1600 × 900): every viewpoint of every map in `maps/` (22 shots; the maps have at most 2 shadowed point lights, so all stay full size) and a `--reload-test` of the two maps with shadowed point lights: 0 pixels changed; `--dump-boxes` identical for all 4 maps. A scratch copy of `maps/hysteria` with `shadow on` on its 64 room lamps: 65 lights sized into 312 MiB; VRAM +1.15 GiB instead of +4.3 GiB with the old build; the house-door and house-inside shots differ from the old build's full-size cubes by 1–2 pixels (`compare -fuzz 2%`). `check_r3d_shaders.py` on forward, lighting, vfog_radiance and ambient: ok. `./build.sh` and `./build.sh examples` without warnings; the runtime without `MS_PATCHED_R3D` and without `MONOLITH_EDITOR` compiles without warnings; leakcheck OK. Not verified: `./build.sh --win` (no mingw-w64 on machine B); the forward pass's tier samplers with a blended material lit by a smaller-tier light (no map has one; the shader compiles and the binding path is the same as tier 0's). Known limit, unchanged: the arrays never shrink, and a hot reload holds old and new layers (new before old).

@@ -10131,12 +10131,95 @@ static void MaterialDrawMode(SceneData *d, int i)
 // the instance-buffer note in LoadBytes). On failure everything created so far is freed.
 // A shadowed light's shadow map, with the light's `depthBias` / `slopeBias` where the map sets them
 // (R3D's defaults for the type otherwise)
-static R3D_ShadowMap LoadLightShadow(const MS_LightDef *L)
+// `size`: a point light's cube side from OmniShadowSizes (0: R3D's own size)
+static R3D_ShadowMap LoadLightShadow(const MS_LightDef *L, int size)
 {
+#ifdef MS_PATCHED_R3D
+    R3D_ShadowMap m = R3D_LoadShadowMapSized(L->light.type, size);
+#else
+    (void)size;
     R3D_ShadowMap m = R3D_LoadShadowMap(L->light.type);
+#endif
     if (L->depthBias >= 0.0f) m.depthBias = L->depthBias;
     if (L->slopeBias >= 0.0f) m.slopeBias = L->slopeBias;
     return m;
+}
+
+// Point-light shadow cubes (R3D patch 34: four sizes, R3D_HINT_SHADOW_OMNI_SIZE and its 1/2,
+// 1/4 and 1/8). While every shadowed point light's full-size cube fits in OMNI_SHADOW_BUDGET,
+// each gets the full size (48 MiB at 2048). Past it, each gets the size that gives
+// OMNI_SHADOW_TEXEL metres per texel at the farthest point it lights (its range, or its clip
+// box's farthest corner when nearer), and while that is still over the budget the largest
+// cubes are halved, down to the smallest size; what still doesn't fit is logged once per load.
+// The map maker only writes `shadow on`. One size per light, 0 for every other light;
+// a heap array (NULL when out of memory: every light then gets R3D's size).
+#ifdef MS_PATCHED_R3D
+#define OMNI_SHADOW_BUDGET ((size_t)512 << 20)
+#define OMNI_SHADOW_TEXEL 0.02f
+#define OMNI_SHADOW_TIERS 4
+
+static size_t OmniCubeBytes(int size) { return (size_t)6 * (size_t)size * (size_t)size * 2; }   // DEPTH16
+
+static int OmniTierSize(int full, int want)     // R3D's choice: the tier nearest to want
+{
+    int tier = 0;
+    while (tier + 1 < OMNI_SHADOW_TIERS && want > 0 && want * 4 <= (full >> tier) * 3) tier++;
+    return full >> tier;
+}
+#endif
+
+static int *OmniShadowSizes(const SceneData *d)
+{
+    int *sizes = calloc(d->lightCount > 0 ? (size_t)d->lightCount : 1, sizeof(int));
+    if (!sizes) return NULL;
+#ifdef MS_PATCHED_R3D
+    int full = R3D_GetHint(R3D_HINT_SHADOW_OMNI_SIZE);
+    int smallest = full >> (OMNI_SHADOW_TIERS - 1);
+    size_t total = 0;
+    int count = 0;
+    for (int i = 0; i < d->lightCount; i++) {
+        const MS_LightDef *L = &d->lights[i];
+        if (!L->shadow || L->light.type != R3D_LIGHT_OMNI) continue;
+        sizes[i] = full;
+        total += OmniCubeBytes(full);
+        count++;
+    }
+    if (total <= OMNI_SHADOW_BUDGET) return sizes;
+
+    total = 0;
+    for (int i = 0; i < d->lightCount; i++) {
+        if (!sizes[i]) continue;
+        const MS_LightDef *L = &d->lights[i];
+        float reach = L->light.range;
+        if (L->clip) {      // the clip box's farthest corner from the light
+            Vector3 p = L->light.position, lo = L->clipBox.min, hi = L->clipBox.max;
+            float dx = fmaxf(fabsf(p.x - lo.x), fabsf(p.x - hi.x));
+            float dy = fmaxf(fabsf(p.y - lo.y), fabsf(p.y - hi.y));
+            float dz = fmaxf(fabsf(p.z - lo.z), fabsf(p.z - hi.z));
+            reach = fminf(reach, sqrtf(dx * dx + dy * dy + dz * dz));
+        }
+        // A cube face spans 90 degrees: 2 * reach metres across at the distance reach
+        float want = 2.0f * reach / OMNI_SHADOW_TEXEL;
+        sizes[i] = OmniTierSize(full, want >= (float)full ? full : (int)want);
+        total += OmniCubeBytes(sizes[i]);
+    }
+    while (total > OMNI_SHADOW_BUDGET) {        // halve the largest cube (the first of them)
+        int big = -1;
+        for (int i = 0; i < d->lightCount; i++)
+            if (sizes[i] > smallest && (big < 0 || sizes[i] > sizes[big])) big = i;
+        if (big < 0) break;
+        total -= OmniCubeBytes(sizes[big]) - OmniCubeBytes(sizes[big] / 2);
+        sizes[big] /= 2;
+    }
+    if (total > OMNI_SHADOW_BUDGET)
+        TraceLog(LOG_WARNING, "monolith_scene: %s: %d shadowed point lights need %d MiB of shadow cubes at the "
+                 "smallest size (%d px), over the %d MiB budget", d->path, count, (int)(total >> 20), smallest,
+                 (int)(OMNI_SHADOW_BUDGET >> 20));
+    else
+        TraceLog(LOG_INFO, "monolith_scene: %s: %d shadowed point lights sized to fit %d MiB of shadow cubes (%d MiB)",
+                 d->path, count, (int)(OMNI_SHADOW_BUDGET >> 20), (int)(total >> 20));
+#endif
+    return sizes;
 }
 
 static bool UploadGpu(SceneData *d)
@@ -10206,10 +10289,12 @@ static bool UploadGpu(SceneData *d)
         d->ambientMap = R3D_GenAmbientMap(d->sky, R3D_AMBIENT_ILLUMINATION | R3D_AMBIENT_REFLECTION);
     }
 
+    int *shadowSizes = OmniShadowSizes(d);
     for (int i = 0; i < d->lightCount; i++) {
         d->lightShadowDrawn[i] = false;
-        if (d->lights[i].shadow) d->lightShadow[i] = LoadLightShadow(&d->lights[i]);
+        if (d->lights[i].shadow) d->lightShadow[i] = LoadLightShadow(&d->lights[i], shadowSizes ? shadowSizes[i] : 0);
     }
+    free(shadowSizes);
     for (int f = 0; d->filePaint && f < d->modelFileCount; f++)
         if (d->filePaint[f].painted && !BuildPaintMeshes(d, f)) {
             ErrSet("%s: out of memory (paint meshes)", d->path);
@@ -12148,19 +12233,26 @@ MS_ReloadResult MS_EditSetText(MS_Scene *s, const MS_MapFileText *files, int cou
             if (ok && d->anyPaint && !tookTable) st.paintTables++;
             if (ok) ok = UploadBoxesLive(p, old, d, boxFrom, dirtyBoxes, &B, matRebuild, &st);
         }
-        // Lights: an identical light keeps its shadow map (drawn again below if a change reaches it)
+        // Lights: an identical light keeps its shadow map (drawn again below if a change reaches it),
+        // unless the new light count gives it another cube size (OmniShadowSizes)
+        int *shadowSizes = ok ? OmniShadowSizes(d) : NULL;
         for (int j = 0; ok && j < d->lightCount; j++) {
             int i = B.lightFrom[j];
+            int size = shadowSizes ? shadowSizes[j] : 0;
             d->lightShadowDrawn[j] = false;
             if (i >= 0 && (!old->lights[i].shadow || !old->lightShadow[i].handle)) i = B.lightFrom[j] = -1;
+#ifdef MS_PATCHED_R3D
+            if (i >= 0 && size > 0 && R3D_GetShadowMapSize(old->lightShadow[i]) != size) i = B.lightFrom[j] = -1;
+#endif
             if (i >= 0) {
                 d->lightShadow[j] = old->lightShadow[i];
                 d->lightShadowDrawn[j] = old->lightShadowDrawn[i];
             } else if (d->lights[j].shadow) {
-                d->lightShadow[j] = LoadLightShadow(&d->lights[j]);
+                d->lightShadow[j] = LoadLightShadow(&d->lights[j], size);
                 st.lightShadowsDirty++;
             }
         }
+        free(shadowSizes);
         // Paint meshes of the painted model files: old's when built from the same unwrap
         if (ok) ok = PaintMeshesLive(old, d, &B, &st);
         if (ok) ok = BuildModelGroups(d);
